@@ -6,10 +6,13 @@
     "dev": "next dev --turbopack -p 3000",
     "build": "next build",
     "start": "next start",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
+    "@tailwindcss/postcss": "^4.1.17",
     "@tanstack/react-query": "^5.90.12",
     "@tauri-apps/api": "^2.9.1",
     "@tauri-apps/plugin-http": "^2.5.4",
@@ -18,10 +21,13 @@
     "@tauri-apps/plugin-store": "^2.4.1",
     "@tauri-apps/plugin-updater": "^2.9.0",
     "antd": "^6.0.1",
-    "aws4fetch": "^1.0.20",
+    "@aws-sdk/client-s3": "^3.946.0",
+    "@aws-sdk/s3-request-presigner": "^3.946.0",
     "next": "^16.0.7",
+    "postcss": "^8.5.6",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
+    "tailwindcss": "^4.1.17",
     "zustand": "^5.0.9"
   },
   "devDependencies": {
@@ -30,6 +36,8 @@
     "@types/react-dom": "^19.2.3",
     "@types/node": "^24.10.1",
     "typescript": "~5.9.3",
-    "@tauri-apps/cli": "^2.9.5"
+    "@tauri-apps/cli": "^2.9.5",
+    "prettier": "^3.4.2",
+    "prettier-plugin-tailwindcss": "^0.6.9"
   }
 }

@@ -1,7 +1,7 @@
-import { create } from "zustand";
-import { calculateFolderSize } from "../lib/indexeddb";
+import { create } from 'zustand';
+import { calculateFolderSize } from '../lib/indexeddb';
 
-type FolderSizeState = number | "loading" | "error";
+type FolderSizeState = number | 'loading' | 'error';
 
 interface FolderSizeStore {
   sizes: Record<string, FolderSizeState>;
@@ -22,18 +22,18 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
 
   calculateSize: async (folderKey) => {
     const { sizes, setSize } = get();
-    
+
     // Skip if already calculated
-    if (typeof sizes[folderKey] === "number") return;
-    
-    setSize(folderKey, "loading");
-    
+    if (typeof sizes[folderKey] === 'number') return;
+
+    setSize(folderKey, 'loading');
+
     try {
       const size = await calculateFolderSize(folderKey);
       setSize(folderKey, size);
     } catch (err) {
       console.error(`Failed to calculate size for ${folderKey}:`, err);
-      setSize(folderKey, "error");
+      setSize(folderKey, 'error');
     }
   },
 

@@ -1,8 +1,8 @@
-"use client";
+'use client';
 
-import { useEffect, useState } from "react";
-import { PlaySquareOutlined, LoadingOutlined } from "@ant-design/icons";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useState } from 'react';
+import { PlaySquareOutlined, LoadingOutlined } from '@ant-design/icons';
+import { invoke } from '@tauri-apps/api/core';
 
 interface VideoThumbnailProps {
   src: string;
@@ -21,7 +21,7 @@ export default function VideoThumbnail({ src, alt }: VideoThumbnailProps) {
       try {
         // Use Rust + ffmpeg to generate thumbnail (bypasses CORS, efficient)
         const encodedUrl = new URL(src).href;
-        const dataUrl = await invoke<string>("get_video_thumbnail", {
+        const dataUrl = await invoke<string>('get_video_thumbnail', {
           url: encodedUrl,
         });
 
@@ -30,7 +30,7 @@ export default function VideoThumbnail({ src, alt }: VideoThumbnailProps) {
           setLoading(false);
         }
       } catch (e) {
-        console.error("Failed to generate thumbnail:", e);
+        console.error('Failed to generate thumbnail:', e);
         if (!cancelled) {
           setError(true);
           setLoading(false);
@@ -56,11 +56,7 @@ export default function VideoThumbnail({ src, alt }: VideoThumbnailProps) {
   return (
     <div className="video-thumbnail">
       {thumbnailSrc && (
-        <img
-          src={thumbnailSrc}
-          alt={alt}
-          style={{ display: loading ? "none" : "block" }}
-        />
+        <img src={thumbnailSrc} alt={alt} style={{ display: loading ? 'none' : 'block' }} />
       )}
       {loading && (
         <div className="video-thumbnail-loading">

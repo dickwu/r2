@@ -1,6 +1,6 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { listAllR2Objects, R2Object } from "../lib/r2api";
-import { R2Config } from "../components/ConfigModal";
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { listAllR2Objects, R2Object } from '../lib/r2api';
+import { R2Config } from '../components/ConfigModal';
 
 export interface FileItem {
   name: string;
@@ -12,7 +12,7 @@ export interface FileItem {
 
 function extractName(key: string, prefix: string): string {
   const relativePath = prefix ? key.slice(prefix.length) : key;
-  return relativePath.replace(/\/$/, "");
+  return relativePath.replace(/\/$/, '');
 }
 
 function buildFileItems(objects: R2Object[], folders: string[], prefix: string): FileItem[] {
@@ -29,7 +29,7 @@ function buildFileItems(objects: R2Object[], folders: string[], prefix: string):
 
   // Add files
   for (const obj of objects) {
-    if (obj.key === prefix || obj.key.endsWith("/")) continue;
+    if (obj.key === prefix || obj.key.endsWith('/')) continue;
     items.push({
       name: extractName(obj.key, prefix),
       key: obj.key,
@@ -46,19 +46,22 @@ function buildFileItems(objects: R2Object[], folders: string[], prefix: string):
   });
 }
 
-export function useR2Files(config: R2Config | null, prefix: string = "") {
+export function useR2Files(config: R2Config | null, prefix: string = '') {
   const queryClient = useQueryClient();
-  const queryKey = ["r2-files", config?.bucket, prefix];
+  const queryKey = ['r2-files', config?.bucket, prefix];
 
   const query = useQuery({
     queryKey,
     queryFn: async (): Promise<FileItem[]> => {
       if (!config) return [];
-      console.log("Fetching R2 files:", { bucket: config.bucket, prefix });
-      
+      console.log('Fetching R2 files:', { bucket: config.bucket, prefix });
+
       const result = await listAllR2Objects(config, prefix);
-      console.log("R2 API result:", { objects: result.objects.length, folders: result.folders.length });
-      
+      console.log('R2 API result:', {
+        objects: result.objects.length,
+        folders: result.folders.length,
+      });
+
       return buildFileItems(result.objects, result.folders, prefix);
     },
     enabled: !!config?.token && !!config?.bucket && !!config?.accountId,

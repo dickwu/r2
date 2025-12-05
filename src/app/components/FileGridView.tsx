@@ -1,26 +1,27 @@
-import { Masonry, Card } from "antd";
+import { Masonry, Card, Popconfirm, Button } from 'antd';
 import {
   FolderOutlined,
   FileOutlined,
   FileImageOutlined,
   PlaySquareOutlined,
-} from "@ant-design/icons";
-import { FileItem } from "../hooks/useR2Files";
-import VideoThumbnail from "./VideoThumbnail";
+  DeleteOutlined,
+} from '@ant-design/icons';
+import { FileItem } from '../hooks/useR2Files';
+import VideoThumbnail from './VideoThumbnail';
 
-const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico"];
-const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg", "mov", "m4v"];
+const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
+const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'mov', 'm4v'];
 
 function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
+  if (bytes === 0) return '0 B';
   const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB"];
+  const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
 function getFileExtension(filename: string): string {
-  return filename.split(".").pop()?.toLowerCase() || "";
+  return filename.split('.').pop()?.toLowerCase() || '';
 }
 
 function isImageFile(filename: string): boolean {
@@ -33,14 +34,15 @@ function isVideoFile(filename: string): boolean {
 
 function getFileUrl(key: string, publicDomain?: string): string | null {
   if (!publicDomain) return null;
-  return `${publicDomain.replace(/\/$/, "")}/${key}`;
+  return `${publicDomain.replace(/\/$/, '')}/${key}`;
 }
 
-type FolderSizeState = number | "loading" | "error";
+type FolderSizeState = number | 'loading' | 'error';
 
 interface FileGridViewProps {
   items: FileItem[];
   onItemClick: (item: FileItem) => void;
+  onDelete: (item: FileItem) => void;
   publicDomain?: string;
   folderSizes?: Record<string, FolderSizeState>;
 }
@@ -49,11 +51,13 @@ function FileCard({
   item,
   publicDomain,
   onClick,
+  onDelete,
   folderSize,
 }: {
   item: FileItem;
   publicDomain?: string;
   onClick: () => void;
+  onDelete: () => void;
   folderSize?: FolderSizeState;
 }) {
   const isImage = !item.isFolder && isImageFile(item.name);
@@ -64,7 +68,7 @@ function FileCard({
   return (
     <Card
       hoverable
-      className={`grid-card ${item.isFolder ? "folder" : "file"} ${hasPreview ? "has-preview" : ""}`}
+      className={`grid-card ${item.isFolder ? 'folder' : 'file'} ${hasPreview ? 'has-preview' : ''}`}
       onClick={onClick}
       cover={
         hasPreview ? (
@@ -98,13 +102,27 @@ function FileCard({
       </div>
       <div className="grid-card-meta">
         {item.isFolder
-          ? folderSize === "loading"
-            ? "..."
-            : typeof folderSize === "number"
-            ? formatBytes(folderSize)
-            : "Folder"
+          ? folderSize === 'loading'
+            ? '...'
+            : typeof folderSize === 'number'
+              ? formatBytes(folderSize)
+              : 'Folder'
           : formatBytes(item.size || 0)}
       </div>
+      {!item.isFolder && (
+        <div className="grid-card-actions" onClick={(e) => e.stopPropagation()}>
+          <Popconfirm
+            title="Delete file"
+            description={`Are you sure you want to delete "${item.name}"?`}
+            onConfirm={onDelete}
+            okText="Delete"
+            cancelText="Cancel"
+            okButtonProps={{ danger: true }}
+          >
+            <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+          </Popconfirm>
+        </div>
+      )}
     </Card>
   );
 }
@@ -112,6 +130,7 @@ function FileCard({
 export default function FileGridView({
   items,
   onItemClick,
+  onDelete,
   publicDomain,
   folderSizes,
 }: FileGridViewProps) {
@@ -128,6 +147,7 @@ export default function FileGridView({
               item={item}
               publicDomain={publicDomain}
               onClick={() => onItemClick(item)}
+              onDelete={() => onDelete(item)}
               folderSize={item.isFolder ? folderSizes?.[item.key] : undefined}
             />
           ),

@@ -1,0 +1,10 @@
+node_modules
+.next
+out
+dist
+build
+bun.lock
+package-lock.json
+*.min.js
+*.min.css
+src-tauri/target

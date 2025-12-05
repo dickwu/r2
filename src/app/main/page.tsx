@@ -1,10 +1,10 @@
-"use client";
+'use client';
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { Store } from "@tauri-apps/plugin-store";
-import { Button, Card, Typography, Upload, Space, App } from "antd";
-import { InboxOutlined, SettingOutlined } from "@ant-design/icons";
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { Store } from '@tauri-apps/plugin-store';
+import { Button, Card, Typography, Upload, Space, App } from 'antd';
+import { InboxOutlined, SettingOutlined } from '@ant-design/icons';
 
 const { Title, Text } = Typography;
 const { Dragger } = Upload;
@@ -28,18 +28,18 @@ export default function Main() {
 
   async function loadConfig() {
     try {
-      const store = await Store.load("r2-config.json");
-      const savedConfig = await store.get<R2Config>("config");
+      const store = await Store.load('r2-config.json');
+      const savedConfig = await store.get<R2Config>('config');
 
       if (!savedConfig || !savedConfig.accountId || !savedConfig.token || !savedConfig.bucket) {
-        router.replace("/");
+        router.replace('/');
         return;
       }
 
       setConfig(savedConfig);
     } catch (e) {
-      console.error("Failed to load config:", e);
-      router.replace("/");
+      console.error('Failed to load config:', e);
+      router.replace('/');
     } finally {
       setLoading(false);
     }
@@ -47,13 +47,13 @@ export default function Main() {
 
   async function handleLogout() {
     try {
-      const store = await Store.load("r2-config.json");
-      await store.delete("config");
+      const store = await Store.load('r2-config.json');
+      await store.delete('config');
       await store.save();
-      router.replace("/");
+      router.replace('/');
     } catch (e) {
-      console.error("Failed to clear config:", e);
-      message.error("Failed to clear configuration");
+      console.error('Failed to clear config:', e);
+      message.error('Failed to clear configuration');
     }
   }
 
@@ -71,10 +71,7 @@ export default function Main() {
         <Title level={4} style={{ margin: 0 }}>
           R2 Uploader
         </Title>
-        <Button
-          icon={<SettingOutlined />}
-          onClick={handleLogout}
-        >
+        <Button icon={<SettingOutlined />} onClick={handleLogout}>
           Settings
         </Button>
       </div>
@@ -95,19 +92,17 @@ export default function Main() {
       <Dragger
         multiple
         showUploadList
-        style={{ padding: "20px 0" }}
+        style={{ padding: '20px 0' }}
         beforeUpload={() => {
-          message.info("Upload functionality coming soon");
+          message.info('Upload functionality coming soon');
           return false;
         }}
       >
         <p className="ant-upload-drag-icon">
-          <InboxOutlined style={{ color: "#f6821f" }} />
+          <InboxOutlined style={{ color: '#f6821f' }} />
         </p>
         <p className="ant-upload-text">Click or drag files to upload</p>
-        <p className="ant-upload-hint">
-          Files will be uploaded to your R2 bucket
-        </p>
+        <p className="ant-upload-hint">Files will be uploaded to your R2 bucket</p>
       </Dragger>
     </div>
   );
