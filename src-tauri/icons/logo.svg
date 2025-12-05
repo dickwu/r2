@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Rounded square background -->
+  <rect x="16" y="16" width="480" height="480" rx="100" ry="100" fill="#F6821F"/>
+  
+  <!-- Cloud with arrow cutout -->
+  <g transform="translate(256, 265)">
+    <!-- Cloud shape -->
+    <!-- Right big bump -->
+    <circle cx="65" cy="-50" r="100" fill="#FFFFFF"/>
+    <!-- Left bump -->
+    <circle cx="-80" cy="5" r="72" fill="#FFFFFF"/>
+    <!-- Center connector -->
+    <circle cx="-15" cy="-15" r="65" fill="#FFFFFF"/>
+    <!-- Main body ellipse covering bottom -->
+    <ellipse cx="0" cy="60" rx="145" ry="65" fill="#FFFFFF"/>
+    <!-- Right side connector -->
+    <ellipse cx="85" cy="20" rx="60" ry="50" fill="#FFFFFF"/>
+    
+    <!-- Arrow cutout -->
+    <path d="M0,-80 L-58,-10 C-65,0 -57,10 -45,10 L-25,10 L-25,115 C-25,125 -17,130 -7,130 L7,130 C17,130 25,125 25,115 L25,10 L45,10 C57,10 65,0 58,-10 Z" fill="#F6821F"/>
+  </g>
+</svg>
