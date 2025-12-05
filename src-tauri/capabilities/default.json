@@ -1,0 +1,21 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "store:default",
+    "http:default",
+    "updater:default",
+    "process:allow-restart",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://api.cloudflare.com/*" },
+        { "url": "https://*" }
+      ]
+    }
+  ]
+}

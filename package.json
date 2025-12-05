@@ -1,0 +1,35 @@
+{
+  "name": "Cloudflare R2 Client",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "next dev --turbopack -p 3000",
+    "build": "next build",
+    "start": "next start",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^6.1.0",
+    "@tanstack/react-query": "^5.90.12",
+    "@tauri-apps/api": "^2.9.1",
+    "@tauri-apps/plugin-http": "^2.5.4",
+    "@tauri-apps/plugin-opener": "^2.5.2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-store": "^2.4.1",
+    "@tauri-apps/plugin-updater": "^2.9.0",
+    "antd": "^6.0.1",
+    "aws4fetch": "^1.0.20",
+    "next": "^16.0.7",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "zustand": "^5.0.9"
+  },
+  "devDependencies": {
+    "@tanstack/react-query-devtools": "^5.91.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@types/node": "^24.10.1",
+    "typescript": "~5.9.3",
+    "@tauri-apps/cli": "^2.9.5"
+  }
+}
