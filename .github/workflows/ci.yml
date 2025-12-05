@@ -57,10 +57,15 @@ jobs:
       - name: Build frontend
         run: bun run build
 
+      - name: Debug - Check signing key
+        run: echo "TAURI_SIGNING_PRIVATE_KEY length is ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && 'SET' || 'EMPTY' }}"
+
       - name: Build Tauri app
         run: bun tauri build ${{ matrix.args }}
         env:
           CI: true
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload artifacts (macOS)
         if: matrix.platform == 'macos-latest'
