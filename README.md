@@ -33,6 +33,19 @@ sudo apt install ffmpeg
 choco install ffmpeg
 ```
 
+## macOS Installation
+
+On macOS, you need to manually allow the app to run:
+
+1. Open **System Preferences** → **Privacy & Security**
+2. Click **"Open Anyway"** next to the blocked app message
+
+If the app doesn't appear in Privacy & Security settings, run:
+
+```bash
+sudo xattr -d com.apple.quarantine /Applications/r2.app/
+```
+
 ## Development
 
 ```bash
