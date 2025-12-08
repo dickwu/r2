@@ -84,3 +84,4 @@ echo -e "${GREEN}✓ Pushed to remote${NC}"
 echo ""
 echo -e "${GREEN}Successfully published v$NEW_VERSION${NC}"
 echo -e "GitHub Actions will now build and create the release."
+

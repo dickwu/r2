@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { PlaySquareOutlined, LoadingOutlined } from '@ant-design/icons';
-import { invoke } from '@tauri-apps/api/core';
+import { generateThumbnail } from 'tauri-plugin-video-thumbnail';
 
 interface VideoThumbnailProps {
   src: string;
@@ -17,16 +17,15 @@ export default function VideoThumbnail({ src, alt }: VideoThumbnailProps) {
   useEffect(() => {
     let cancelled = false;
 
-    const generateThumbnail = async () => {
+    const loadThumbnail = async () => {
       try {
-        // Use Rust + ffmpeg to generate thumbnail (bypasses CORS, efficient)
-        const encodedUrl = new URL(src).href;
-        const dataUrl = await invoke<string>('get_video_thumbnail', {
-          url: encodedUrl,
+        const result = await generateThumbnail({
+          source: src,
+          size: 'large',
         });
 
-        if (!cancelled) {
-          setThumbnailSrc(dataUrl);
+        if (!cancelled && result.base64) {
+          setThumbnailSrc(`data:image/png;base64,${result.base64}`);
           setLoading(false);
         }
       } catch (e) {
@@ -38,7 +37,7 @@ export default function VideoThumbnail({ src, alt }: VideoThumbnailProps) {
       }
     };
 
-    generateThumbnail();
+    loadThumbnail();
 
     return () => {
       cancelled = true;

@@ -8,3 +8,4 @@ package-lock.json
 *.min.js
 *.min.css
 src-tauri/target
+

@@ -12,6 +12,7 @@
     "process:allow-restart",
     "dialog:default",
     "dialog:allow-open",
+    "video-thumbnail:default",
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-unlisten",

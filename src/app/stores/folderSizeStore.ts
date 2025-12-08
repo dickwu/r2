@@ -48,3 +48,4 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
     set({ sizes: {} });
   },
 }));
+
