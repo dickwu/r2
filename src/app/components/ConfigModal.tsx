@@ -9,8 +9,10 @@ import {
   PlusOutlined,
   DeleteOutlined,
   CheckOutlined,
+  KeyOutlined,
 } from '@ant-design/icons';
 import { listR2Objects, listR2Buckets } from '../lib/r2api';
+import AccessKeyModal from './AccessKeyModal';
 
 export interface BucketConfig {
   name: string;
@@ -40,6 +42,7 @@ export default function ConfigModal({ open, onClose, onSave, initialConfig }: Co
   const [buckets, setBuckets] = useState<BucketConfig[]>([]);
   const [addingBucket, setAddingBucket] = useState(false);
   const [newBucketName, setNewBucketName] = useState('');
+  const [accessKeyModalOpen, setAccessKeyModalOpen] = useState(false);
   const [form] = Form.useForm<R2Config>();
   const selectedBucket = Form.useWatch('bucket', form);
   const { message } = App.useApp();
@@ -293,11 +296,31 @@ export default function ConfigModal({ open, onClose, onSave, initialConfig }: Co
         </div>
 
         <Form.Item style={{ marginBottom: 0 }}>
-          <Button type="primary" htmlType="submit" loading={saving} block>
-            Save
-          </Button>
+          <Space orientation="vertical" style={{ width: '100%' }}>
+            <Button type="primary" htmlType="submit" loading={saving} block>
+              Save
+            </Button>
+            <Button
+              type="default"
+              icon={<KeyOutlined />}
+              onClick={() => setAccessKeyModalOpen(true)}
+              block
+            >
+              S3 Access Config
+            </Button>
+          </Space>
         </Form.Item>
       </Form>
+
+      <AccessKeyModal
+        open={accessKeyModalOpen}
+        onClose={() => setAccessKeyModalOpen(false)}
+        onSave={(accessKeyId, secretAccessKey) => {
+          form.setFieldsValue({ accessKeyId, secretAccessKey });
+        }}
+        initialAccessKeyId={form.getFieldValue('accessKeyId')}
+        initialSecretAccessKey={form.getFieldValue('secretAccessKey')}
+      />
     </Modal>
   );
 }
