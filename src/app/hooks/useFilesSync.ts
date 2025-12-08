@@ -39,4 +39,3 @@ export function useFilesSync(config: R2Config | null) {
     refresh,
   };
 }
-

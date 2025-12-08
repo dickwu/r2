@@ -77,7 +77,7 @@ export default function Main() {
       </div>
 
       <Card size="small" style={{ marginBottom: 16 }}>
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           <Text>
             <Text strong>Bucket:</Text> {config?.bucket}
           </Text>
@@ -107,4 +107,3 @@ export default function Main() {
     </div>
   );
 }
-
