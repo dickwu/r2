@@ -219,13 +219,17 @@ export default function ConfigModal({ open, onClose, onSave, initialConfig }: Co
                   padding: '8px 12px',
                   marginBottom: 4,
                   borderRadius: 6,
-                  border: isSelected ? '1px solid #1677ff' : '1px solid #d9d9d9',
-                  background: isSelected ? '#e6f4ff' : undefined,
+                  border: isSelected
+                    ? '1px solid var(--ant-color-primary)'
+                    : '1px solid var(--ant-color-border)',
+                  background: isSelected ? 'var(--ant-color-primary-bg)' : undefined,
                   cursor: 'pointer',
                 }}
                 onClick={() => form.setFieldValue('bucket', bucket.name)}
               >
-                {isSelected && <CheckOutlined style={{ color: '#1677ff', flexShrink: 0 }} />}
+                {isSelected && (
+                  <CheckOutlined style={{ color: 'var(--ant-color-primary)', flexShrink: 0 }} />
+                )}
                 <span
                   style={{
                     fontWeight: isSelected ? 500 : 400,
@@ -242,7 +246,8 @@ export default function ConfigModal({ open, onClose, onSave, initialConfig }: Co
                 </span>
                 <Input
                   size="small"
-                  placeholder="Public domain (optional)"
+                  addonBefore="https://"
+                  placeholder="domain.com"
                   value={bucket.publicDomain || ''}
                   onChange={(e) => handleDomainChange(bucket.name, e.target.value)}
                   onClick={(e) => e.stopPropagation()}

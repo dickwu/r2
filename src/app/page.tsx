@@ -478,6 +478,15 @@ export default function Home() {
         open={uploadModalOpen}
         onClose={() => setUploadModalOpen(false)}
         currentPath={currentPath}
+        config={config}
+        onUploadComplete={() => {
+          Promise.all([refresh(), refreshSync()]);
+        }}
+        onCredentialsUpdate={(accessKeyId, secretAccessKey) => {
+          if (config) {
+            setConfig({ ...config, accessKeyId, secretAccessKey });
+          }
+        }}
       />
 
       <FilePreviewModal

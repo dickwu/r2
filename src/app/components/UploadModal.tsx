@@ -1,51 +1,232 @@
 'use client';
 
-import { Modal, Upload, Typography, App } from 'antd';
-import { InboxOutlined } from '@ant-design/icons';
+import { useEffect, useState, useCallback } from 'react';
+import { Modal, Typography, Button, Input, Space } from 'antd';
+import { InboxOutlined, KeyOutlined, FolderOutlined, FileAddOutlined } from '@ant-design/icons';
+import { open } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
+import { useUploadStore, selectHasActiveUploads } from '../stores/uploadStore';
+import type { R2Config } from './ConfigModal';
+import AccessKeyModal from './AccessKeyModal';
+import UploadTaskList from './UploadTaskList';
 
-const { Dragger } = Upload;
 const { Text } = Typography;
+
+// Get content type from file extension
+function getContentType(fileName: string): string {
+  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+  const mimeTypes: Record<string, string> = {
+    // Images
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    svg: 'image/svg+xml',
+    ico: 'image/x-icon',
+    // Video
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+    mov: 'video/quicktime',
+    avi: 'video/x-msvideo',
+    mkv: 'video/x-matroska',
+    // Audio
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    ogg: 'audio/ogg',
+    m4a: 'audio/mp4',
+    // Documents
+    pdf: 'application/pdf',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    // Text
+    txt: 'text/plain',
+    html: 'text/html',
+    css: 'text/css',
+    js: 'text/javascript',
+    json: 'application/json',
+    xml: 'application/xml',
+    csv: 'text/csv',
+    md: 'text/markdown',
+    // Archives
+    zip: 'application/zip',
+    tar: 'application/x-tar',
+    gz: 'application/gzip',
+    rar: 'application/vnd.rar',
+    '7z': 'application/x-7z-compressed',
+  };
+  return mimeTypes[ext] || 'application/octet-stream';
+}
 
 interface UploadModalProps {
   open: boolean;
   onClose: () => void;
   currentPath: string;
+  config: R2Config | null;
+  onUploadComplete: () => void;
+  onCredentialsUpdate: (accessKeyId: string, secretAccessKey: string) => void;
 }
 
-export default function UploadModal({ open, onClose, currentPath }: UploadModalProps) {
-  const { message } = App.useApp();
+export default function UploadModal({
+  open: isOpen,
+  onClose,
+  currentPath,
+  config,
+  onUploadComplete,
+  onCredentialsUpdate,
+}: UploadModalProps) {
+  const [accessKeyModalOpen, setAccessKeyModalOpen] = useState(false);
+
+  const uploadPath = useUploadStore((s) => s.uploadPath);
+  const setUploadPath = useUploadStore((s) => s.setUploadPath);
+  const setConfig = useUploadStore((s) => s.setConfig);
+  const addTasks = useUploadStore((s) => s.addTasks);
+  const clearAll = useUploadStore((s) => s.clearAll);
+  const hasActiveUploads = useUploadStore(selectHasActiveUploads);
+
+  const hasS3Credentials = config?.accessKeyId && config?.secretAccessKey;
+
+  // Sync config to store
+  useEffect(() => {
+    setConfig(config);
+  }, [config, setConfig]);
+
+  // Reset upload path when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      setUploadPath(currentPath);
+    }
+  }, [isOpen, currentPath, setUploadPath]);
+
+  const handleSelectFiles = useCallback(async () => {
+    if (!hasS3Credentials) {
+      setAccessKeyModalOpen(true);
+      return;
+    }
+
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+      });
+
+      if (selected && selected.length > 0) {
+        // Get file info for each selected file
+        const tasks = await Promise.all(
+          selected.map(async (filePath) => {
+            const [fileSize, fileName] = await invoke<[number, string]>('get_file_info', {
+              filePath,
+            });
+            return {
+              filePath,
+              fileName,
+              fileSize,
+              contentType: getContentType(fileName),
+            };
+          })
+        );
+        addTasks(tasks);
+      }
+    } catch (e) {
+      console.error('Failed to select files:', e);
+    }
+  }, [hasS3Credentials, addTasks]);
+
+  function handleClose() {
+    if (!hasActiveUploads) {
+      clearAll();
+      onClose();
+      onUploadComplete();
+    }
+  }
 
   return (
     <Modal
-      open={open}
-      onCancel={onClose}
+      open={isOpen}
+      onCancel={handleClose}
       footer={null}
       title="Upload Files"
-      width={500}
+      width={520}
       centered
       destroyOnHidden
+      maskClosable={!hasActiveUploads}
+      closable={!hasActiveUploads}
     >
       <div style={{ marginBottom: 16 }}>
-        <Text type="secondary">
-          Upload to: <Text code>{currentPath || '/'}</Text>
+        <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
+          Upload to:
         </Text>
+        <Input
+          prefix={<FolderOutlined style={{ color: '#999' }} />}
+          value={uploadPath}
+          onChange={(e) => setUploadPath(e.target.value)}
+          placeholder="/"
+          disabled={hasActiveUploads}
+        />
       </div>
 
-      <Dragger
-        multiple
-        showUploadList
-        style={{ padding: '20px 0' }}
-        beforeUpload={() => {
-          message.info('Upload functionality coming soon');
-          return false;
+      {!hasS3Credentials && (
+        <div
+          style={{
+            marginBottom: 16,
+            padding: '12px',
+            background: '#fff7e6',
+            borderRadius: 6,
+            border: '1px solid #ffd591',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
+          <Text type="warning">S3 credentials required for uploads</Text>
+          <Button size="small" icon={<KeyOutlined />} onClick={() => setAccessKeyModalOpen(true)}>
+            Configure
+          </Button>
+        </div>
+      )}
+
+      <div
+        onClick={hasActiveUploads ? undefined : handleSelectFiles}
+        style={{
+          border: '2px dashed #d9d9d9',
+          borderRadius: 8,
+          padding: '40px 20px',
+          textAlign: 'center',
+          cursor: hasActiveUploads ? 'not-allowed' : 'pointer',
+          opacity: hasActiveUploads ? 0.5 : 1,
+          transition: 'border-color 0.3s',
+        }}
+        onMouseEnter={(e) => {
+          if (!hasActiveUploads) {
+            e.currentTarget.style.borderColor = '#f6821f';
+          }
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.borderColor = '#d9d9d9';
         }}
       >
-        <p className="ant-upload-drag-icon">
+        <p style={{ marginBottom: 8 }}>
           <InboxOutlined style={{ color: '#f6821f', fontSize: 48 }} />
         </p>
-        <p className="ant-upload-text">Click or drag files to upload</p>
-        <p className="ant-upload-hint">Support single or multiple file upload</p>
-      </Dragger>
+        <p style={{ fontSize: 16, marginBottom: 4 }}>Click to select files</p>
+        <p style={{ color: '#999', fontSize: 14 }}>Support single or multiple file upload</p>
+      </div>
+
+      <UploadTaskList />
+
+      <AccessKeyModal
+        open={accessKeyModalOpen}
+        onClose={() => setAccessKeyModalOpen(false)}
+        onSave={(accessKeyId, secretAccessKey) => {
+          onCredentialsUpdate(accessKeyId, secretAccessKey);
+        }}
+        initialAccessKeyId={config?.accessKeyId}
+        initialSecretAccessKey={config?.secretAccessKey}
+      />
     </Modal>
   );
 }

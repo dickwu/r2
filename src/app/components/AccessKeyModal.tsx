@@ -33,10 +33,26 @@ export default function AccessKeyModal({
 
   useEffect(() => {
     if (open) {
-      form.setFieldsValue({
-        accessKeyId: initialAccessKeyId || '',
-        secretAccessKey: initialSecretAccessKey || '',
-      });
+      // If initial values provided, use them; otherwise load from store
+      if (initialAccessKeyId || initialSecretAccessKey) {
+        form.setFieldsValue({
+          accessKeyId: initialAccessKeyId || '',
+          secretAccessKey: initialSecretAccessKey || '',
+        });
+      } else {
+        // Load from store
+        Store.load('r2-config.json')
+          .then((store) => store.get<R2Config>('config'))
+          .then((config) => {
+            if (config) {
+              form.setFieldsValue({
+                accessKeyId: config.accessKeyId || '',
+                secretAccessKey: config.secretAccessKey || '',
+              });
+            }
+          })
+          .catch(console.error);
+      }
     }
   }, [open, initialAccessKeyId, initialSecretAccessKey, form]);
 
@@ -46,15 +62,13 @@ export default function AccessKeyModal({
       const store = await Store.load('r2-config.json');
       const currentConfig = await store.get<R2Config>('config');
 
-      if (currentConfig) {
-        const updatedConfig = {
-          ...currentConfig,
-          accessKeyId: values.accessKeyId,
-          secretAccessKey: values.secretAccessKey,
-        };
-        await store.set('config', updatedConfig);
-        await store.save();
-      }
+      const updatedConfig = {
+        ...currentConfig,
+        accessKeyId: values.accessKeyId,
+        secretAccessKey: values.secretAccessKey,
+      };
+      await store.set('config', updatedConfig);
+      await store.save();
 
       message.success('S3 credentials saved');
       onSave(values.accessKeyId, values.secretAccessKey);

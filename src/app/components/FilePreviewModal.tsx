@@ -79,7 +79,8 @@ export default function FilePreviewModal({
 
     // If public domain is set, use it directly
     if (publicDomain) {
-      setSignedUrl(`${publicDomain.replace(/\/$/, '')}/${file.key}`);
+      const domain = publicDomain.replace(/\/$/, '');
+      setSignedUrl(`https://${domain}/${file.key}`);
       return;
     }
 

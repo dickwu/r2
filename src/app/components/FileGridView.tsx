@@ -34,7 +34,8 @@ function isVideoFile(filename: string): boolean {
 
 function getFileUrl(key: string, publicDomain?: string): string | null {
   if (!publicDomain) return null;
-  return `${publicDomain.replace(/\/$/, '')}/${key}`;
+  const domain = publicDomain.replace(/\/$/, '');
+  return `https://${domain}/${key}`;
 }
 
 type FolderSizeState = number | 'loading' | 'error';

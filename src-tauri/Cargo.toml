@@ -24,8 +24,21 @@ tauri-plugin-store = "2"
 tauri-plugin-http = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 tempfile = "3"
+# Upload dependencies
+reqwest = { version = "0.12", features = ["stream", "multipart"] }
+tokio = { version = "1", features = ["fs", "io-util", "sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+chrono = "0.4"
+urlencoding = "2"
+lazy_static = "1.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+log = "0.4"
 
