@@ -205,16 +205,16 @@ export default function Home() {
     }
   }
 
-  function handleItemClick(item: FileItem) {
+  const handleItemClick = useCallback((item: FileItem) => {
     if (item.isFolder) {
       setCurrentPath(item.key);
       setSearchQuery('');
     } else {
       setPreviewFile(item);
     }
-  }
+  }, []);
 
-  function handleRefresh() {
+  const handleRefresh = useCallback(() => {
     Promise.all([refresh(), refreshSync()])
       .then(() => {
         message.success('Files refreshed');
@@ -222,20 +222,23 @@ export default function Home() {
       .catch(() => {
         message.error('Failed to refresh files');
       });
-  }
+  }, [refresh, refreshSync, message]);
 
-  async function handleDelete(item: FileItem) {
-    if (!config) return;
-    try {
-      await deleteR2Object(config, item.key);
-      message.success(`Deleted "${item.name}"`);
-      // Refresh file list after deletion
-      await Promise.all([refresh(), refreshSync()]);
-    } catch (e) {
-      console.error('Delete error:', e);
-      message.error(`Failed to delete: ${e instanceof Error ? e.message : 'Unknown error'}`);
-    }
-  }
+  const handleDelete = useCallback(
+    async (item: FileItem) => {
+      if (!config) return;
+      try {
+        await deleteR2Object(config, item.key);
+        message.success(`Deleted "${item.name}"`);
+        // Refresh file list after deletion
+        await Promise.all([refresh(), refreshSync()]);
+      } catch (e) {
+        console.error('Delete error:', e);
+        message.error(`Failed to delete: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      }
+    },
+    [config, message, refresh, refreshSync]
+  );
 
   function navigateToPath(path: string) {
     setCurrentPath(path);

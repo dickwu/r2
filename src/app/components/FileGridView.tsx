@@ -1,3 +1,4 @@
+import { memo, useCallback } from 'react';
 import { Masonry, Card, Popconfirm, Button } from 'antd';
 import {
   FolderOutlined,
@@ -48,17 +49,17 @@ interface FileGridViewProps {
   folderSizes?: Record<string, FolderSizeState>;
 }
 
-function FileCard({
+const FileCard = memo(function FileCard({
   item,
   publicDomain,
-  onClick,
+  onItemClick,
   onDelete,
   folderSize,
 }: {
   item: FileItem;
   publicDomain?: string;
-  onClick: () => void;
-  onDelete: () => void;
+  onItemClick: (item: FileItem) => void;
+  onDelete: (item: FileItem) => void;
   folderSize?: FolderSizeState;
 }) {
   const isImage = !item.isFolder && isImageFile(item.name);
@@ -66,11 +67,23 @@ function FileCard({
   const fileUrl = getFileUrl(item.key, publicDomain);
   const hasPreview = fileUrl && (isImage || isVideo);
 
+  const handleClick = useCallback(() => {
+    onItemClick(item);
+  }, [onItemClick, item]);
+
+  const handleDelete = useCallback(() => {
+    onDelete(item);
+  }, [onDelete, item]);
+
+  const stopPropagation = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+  }, []);
+
   return (
     <Card
       hoverable
       className={`grid-card ${item.isFolder ? 'folder' : 'file'} ${hasPreview ? 'has-preview' : ''}`}
-      onClick={onClick}
+      onClick={handleClick}
       cover={
         hasPreview ? (
           isImage ? (
@@ -111,11 +124,11 @@ function FileCard({
           : formatBytes(item.size || 0)}
       </div>
       {!item.isFolder && (
-        <div className="grid-card-actions" onClick={(e) => e.stopPropagation()}>
+        <div className="grid-card-actions" onClick={stopPropagation}>
           <Popconfirm
             title="Delete file"
             description={`Are you sure you want to delete "${item.name}"?`}
-            onConfirm={onDelete}
+            onConfirm={handleDelete}
             okText="Delete"
             cancelText="Cancel"
             okButtonProps={{ danger: true }}
@@ -126,9 +139,9 @@ function FileCard({
       )}
     </Card>
   );
-}
+});
 
-export default function FileGridView({
+export default memo(function FileGridView({
   items,
   onItemClick,
   onDelete,
@@ -147,8 +160,8 @@ export default function FileGridView({
             <FileCard
               item={item}
               publicDomain={publicDomain}
-              onClick={() => onItemClick(item)}
-              onDelete={() => onDelete(item)}
+              onItemClick={onItemClick}
+              onDelete={onDelete}
               folderSize={item.isFolder ? folderSizes?.[item.key] : undefined}
             />
           ),
@@ -156,4 +169,4 @@ export default function FileGridView({
       />
     </div>
   );
-}
+});
