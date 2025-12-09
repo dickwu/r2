@@ -72,7 +72,7 @@ const FileCard = memo(function FileCard({
   }, [onItemClick, item]);
 
   const handleDelete = useCallback(() => {
-    onDelete(item);
+    return onDelete(item);
   }, [onDelete, item]);
 
   const stopPropagation = useCallback((e: React.MouseEvent) => {
