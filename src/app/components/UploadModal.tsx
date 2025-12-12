@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { Modal, Typography, Button, Input, Space } from 'antd';
-import { InboxOutlined, KeyOutlined, FolderOutlined, FileAddOutlined } from '@ant-design/icons';
+import { KeyOutlined, FolderOutlined, FileAddOutlined } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { useUploadStore, selectHasActiveUploads } from '../stores/uploadStore';
@@ -136,6 +136,40 @@ export default function UploadModal({
     }
   }, [hasS3Credentials, addTasks]);
 
+  const handleSelectFolder = useCallback(async () => {
+    if (!hasS3Credentials) {
+      setAccessKeyModalOpen(true);
+      return;
+    }
+
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: true,
+      });
+
+      if (selected) {
+        // Get all files in the folder recursively
+        const folderFiles = await invoke<Array<{ file_path: string; relative_path: string; file_size: number }>>(
+          'get_folder_files',
+          { folderPath: selected }
+        );
+
+        if (folderFiles.length > 0) {
+          const tasks = folderFiles.map((file) => ({
+            filePath: file.file_path,
+            fileName: file.relative_path, // Use relative path as the "name" to preserve folder structure
+            fileSize: file.file_size,
+            contentType: getContentType(file.relative_path),
+          }));
+          addTasks(tasks);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to select folder:', e);
+    }
+  }, [hasS3Credentials, addTasks]);
+
   function handleClose() {
     if (!hasActiveUploads) {
       clearAll();
@@ -189,31 +223,62 @@ export default function UploadModal({
         </div>
       )}
 
-      <div
-        onClick={hasActiveUploads ? undefined : handleSelectFiles}
-        style={{
-          border: '2px dashed #d9d9d9',
-          borderRadius: 8,
-          padding: '40px 20px',
-          textAlign: 'center',
-          cursor: hasActiveUploads ? 'not-allowed' : 'pointer',
-          opacity: hasActiveUploads ? 0.5 : 1,
-          transition: 'border-color 0.3s',
-        }}
-        onMouseEnter={(e) => {
-          if (!hasActiveUploads) {
-            e.currentTarget.style.borderColor = '#f6821f';
-          }
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.borderColor = '#d9d9d9';
-        }}
-      >
-        <p style={{ marginBottom: 8 }}>
-          <InboxOutlined style={{ color: '#f6821f', fontSize: 48 }} />
-        </p>
-        <p style={{ fontSize: 16, marginBottom: 4 }}>Click to select files</p>
-        <p style={{ color: '#999', fontSize: 14 }}>Support single or multiple file upload</p>
+      <div style={{ display: 'flex', gap: 12 }}>
+        <div
+          onClick={hasActiveUploads ? undefined : handleSelectFiles}
+          style={{
+            flex: 1,
+            border: '2px dashed #d9d9d9',
+            borderRadius: 8,
+            padding: '24px 16px',
+            textAlign: 'center',
+            cursor: hasActiveUploads ? 'not-allowed' : 'pointer',
+            opacity: hasActiveUploads ? 0.5 : 1,
+            transition: 'border-color 0.3s',
+          }}
+          onMouseEnter={(e) => {
+            if (!hasActiveUploads) {
+              e.currentTarget.style.borderColor = '#f6821f';
+            }
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.borderColor = '#d9d9d9';
+          }}
+        >
+          <p style={{ marginBottom: 8 }}>
+            <FileAddOutlined style={{ color: '#f6821f', fontSize: 36 }} />
+          </p>
+          <p style={{ fontSize: 14, marginBottom: 4 }}>Select Files</p>
+          <p style={{ color: '#999', fontSize: 12 }}>Single or multiple</p>
+        </div>
+
+        <div
+          onClick={hasActiveUploads ? undefined : handleSelectFolder}
+          style={{
+            flex: 1,
+            border: '2px dashed #d9d9d9',
+            borderRadius: 8,
+            padding: '24px 16px',
+            textAlign: 'center',
+            cursor: hasActiveUploads ? 'not-allowed' : 'pointer',
+            opacity: hasActiveUploads ? 0.5 : 1,
+            transition: 'border-color 0.3s',
+          }}
+          onMouseEnter={(e) => {
+            if (!hasActiveUploads) {
+              e.currentTarget.style.borderColor = '#f6821f';
+            }
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.borderColor = '#d9d9d9';
+          }}
+        >
+          <p style={{ marginBottom: 8 }}>
+            <FolderOutlined style={{ color: '#f6821f', fontSize: 36 }} />
+          </p>
+          <p style={{ fontSize: 14, marginBottom: 4 }}>Select Folder</p>
+          <p style={{ color: '#999', fontSize: 12 }}>Upload entire folder</p>
+        </div>
       </div>
 
       <UploadTaskList />

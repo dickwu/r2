@@ -666,6 +666,64 @@ pub async fn get_file_info(file_path: String) -> Result<(u64, String), String> {
     Ok((metadata.len(), file_name))
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderFileInfo {
+    pub file_path: String,
+    pub relative_path: String,  // Path relative to selected folder
+    pub file_size: u64,
+}
+
+/// Recursively get all files in a directory (using stack-based iteration)
+#[tauri::command]
+pub async fn get_folder_files(folder_path: String) -> Result<Vec<FolderFileInfo>, String> {
+    let root = PathBuf::from(&folder_path);
+    if !root.is_dir() {
+        return Err(format!("Not a directory: {}", folder_path));
+    }
+
+    let mut files = Vec::new();
+    let mut stack = vec![root.clone()];
+
+    while let Some(current) = stack.pop() {
+        let mut entries = tokio::fs::read_dir(&current)
+            .await
+            .map_err(|e| format!("Failed to read directory {}: {}", current.display(), e))?;
+
+        while let Some(entry) = entries.next_entry().await.map_err(|e| format!("Failed to read entry: {}", e))? {
+            let path = entry.path();
+            
+            // Skip hidden files/directories
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.') {
+                    continue;
+                }
+            }
+
+            let metadata = tokio::fs::metadata(&path)
+                .await
+                .map_err(|e| format!("Failed to get metadata for {}: {}", path.display(), e))?;
+
+            if metadata.is_file() {
+                let relative = path.strip_prefix(&root)
+                    .map_err(|e| format!("Failed to get relative path: {}", e))?;
+
+                files.push(FolderFileInfo {
+                    file_path: path.to_string_lossy().to_string(),
+                    relative_path: relative.to_string_lossy().to_string(),
+                    file_size: metadata.len(),
+                });
+            } else if metadata.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+
+    // Sort files by relative path for consistent ordering
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    
+    Ok(files)
+}
+
 /// Get all pending/uploading sessions (for showing resumable uploads in UI)
 #[tauri::command]
 pub async fn get_pending_uploads() -> Result<Vec<db::UploadSession>, String> {

@@ -33,6 +33,7 @@ pub fn run() {
             upload::upload_file,
             upload::cancel_upload,
             upload::get_file_info,
+            upload::get_folder_files,
             upload::get_pending_uploads,
             upload::get_upload_session,
             upload::get_session_progress,
