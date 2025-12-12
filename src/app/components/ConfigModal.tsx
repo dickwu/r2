@@ -209,6 +209,14 @@ export default function ConfigModal({ open, onClose, onSave, initialConfig }: Co
           <Input type="hidden" />
         </Form.Item>
 
+        {/* Hidden fields to preserve S3 credentials in form state */}
+        <Form.Item name="accessKeyId" hidden>
+          <Input type="hidden" />
+        </Form.Item>
+        <Form.Item name="secretAccessKey" hidden>
+          <Input type="hidden" />
+        </Form.Item>
+
         <div style={{ marginBottom: 16, maxHeight: 200, overflowY: 'auto' }}>
           {buckets.map((bucket) => {
             const isSelected = selectedBucket === bucket.name;

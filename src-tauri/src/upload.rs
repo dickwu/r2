@@ -70,6 +70,14 @@ fn get_signing_key(secret_key: &str, date_stamp: &str, region: &str, service: &s
     hmac_sha256(&k_service, b"aws4_request")
 }
 
+/// Encode URI path - encode each segment individually, keep / as separator
+fn encode_uri_path(path: &str) -> String {
+    path.split('/')
+        .map(|segment| urlencoding::encode(segment).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Generate AWS Signature V4 presigned URL
 fn generate_presigned_url(
     config: &R2Config,
@@ -86,7 +94,7 @@ fn generate_presigned_url(
     let service = "s3";
 
     let host = format!("{}.r2.cloudflarestorage.com", config.account_id);
-    let canonical_uri = format!("/{}/{}", config.bucket, urlencoding::encode(key));
+    let canonical_uri = format!("/{}/{}", config.bucket, encode_uri_path(key));
 
     let credential_scope = format!("{}/{}/{}/aws4_request", date_stamp, region, service);
 
