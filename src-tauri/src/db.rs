@@ -111,18 +111,6 @@ pub fn create_session(session: &UploadSession) -> Result<()> {
     })
 }
 
-/// Update session's upload_id (after initiating multipart upload)
-pub fn update_session_upload_id(session_id: &str, upload_id: &str) -> Result<()> {
-    with_connection(|conn| {
-        let now = chrono::Utc::now().timestamp();
-        conn.execute(
-            "UPDATE upload_sessions SET upload_id = ?1, updated_at = ?2 WHERE id = ?3",
-            params![upload_id, now, session_id],
-        )?;
-        Ok(())
-    })
-}
-
 /// Update session status
 pub fn update_session_status(session_id: &str, status: &str) -> Result<()> {
     with_connection(|conn| {
@@ -324,3 +312,5 @@ pub fn cleanup_old_sessions() -> Result<usize> {
         Ok(deleted)
     })
 }
+
+
