@@ -422,6 +422,7 @@ pub fn create_account(id: &str, name: Option<&str>) -> Result<Account> {
 }
 
 /// Get account by ID
+#[allow(dead_code)]
 pub fn get_account(id: &str) -> Result<Option<Account>> {
     with_connection(|conn| {
         let mut stmt = conn.prepare("SELECT id, name, created_at, updated_at FROM accounts WHERE id = ?1")?;
@@ -596,6 +597,7 @@ pub fn delete_token(id: i64) -> Result<()> {
 // ============ Bucket CRUD Functions ============
 
 /// Create a new bucket
+#[allow(dead_code)]
 pub fn create_bucket(token_id: i64, name: &str, public_domain: Option<&str>) -> Result<Bucket> {
     with_connection(|conn| {
         let now = chrono::Utc::now().timestamp();
@@ -617,6 +619,7 @@ pub fn create_bucket(token_id: i64, name: &str, public_domain: Option<&str>) -> 
 }
 
 /// Get bucket by ID
+#[allow(dead_code)]
 pub fn get_bucket(id: i64) -> Result<Option<Bucket>> {
     with_connection(|conn| {
         let mut stmt = conn.prepare(
@@ -718,6 +721,7 @@ pub fn save_buckets_for_token(token_id: i64, buckets: &[(String, Option<String>)
 // ============ App State Functions ============
 
 /// Get app state value
+#[allow(dead_code)]
 pub fn get_app_state(key: &str) -> Result<Option<String>> {
     with_connection(|conn| {
         let mut stmt = conn.prepare("SELECT value FROM app_state WHERE key = ?1")?;
@@ -743,6 +747,7 @@ pub fn set_app_state(key: &str, value: &str) -> Result<()> {
 }
 
 /// Delete app state value
+#[allow(dead_code)]
 pub fn delete_app_state(key: &str) -> Result<()> {
     with_connection(|conn| {
         conn.execute("DELETE FROM app_state WHERE key = ?1", params![key])?;
