@@ -69,6 +69,7 @@ export default function ConfigModal({
   const { message } = App.useApp();
 
   // Use Zustand store
+  const accounts = useAccountStore((state) => state.accounts);
   const createAccount = useAccountStore((state) => state.createAccount);
   const updateAccountFn = useAccountStore((state) => state.updateAccount);
   const createToken = useAccountStore((state) => state.createToken);
@@ -95,19 +96,25 @@ export default function ConfigModal({
     } else if (mode === 'edit-token' && editToken) {
       // Load existing buckets for this token
       loadExistingBuckets(editToken.id);
+      // Get account name from store
+      const account = accounts.find((a) => a.account.id === editToken.account_id);
       form.setFieldsValue({
         accountId: editToken.account_id,
+        accountName: account?.account.name || '',
         tokenName: editToken.name || '',
         apiToken: editToken.api_token,
         accessKeyId: editToken.access_key_id,
         secretAccessKey: editToken.secret_access_key,
       });
     } else if (mode === 'add-token' && parentAccountId) {
+      // Get account name from store
+      const account = accounts.find((a) => a.account.id === parentAccountId);
       form.setFieldsValue({
         accountId: parentAccountId,
+        accountName: account?.account.name || '',
       });
     }
-  }, [open, mode, editAccount, editToken, parentAccountId, form]);
+  }, [open, mode, editAccount, editToken, parentAccountId, form, accounts]);
 
   async function loadExistingBuckets(tokenId: number) {
     try {
@@ -231,6 +238,9 @@ export default function ConfigModal({
           return;
         }
 
+        // Update account name if changed
+        await updateAccountFn(values.accountId, values.accountName);
+
         const token = await createToken({
           account_id: values.accountId,
           name: values.tokenName,
@@ -250,6 +260,9 @@ export default function ConfigModal({
 
         message.success('Token added');
       } else if (mode === 'edit-token' && editToken) {
+        // Update account name if changed
+        await updateAccountFn(values.accountId, values.accountName);
+
         // Update existing token
         await updateTokenFn({
           id: editToken.id,
@@ -304,21 +317,26 @@ export default function ConfigModal({
   }
 
   return (
-    <Modal open={open} onCancel={onClose} footer={null} width={500} centered destroyOnHidden>
-      <div style={{ textAlign: 'center', marginBottom: 24 }}>
+    <Modal open={open} onCancel={onClose} footer={null} width={480} centered destroyOnHidden>
+      <div style={{ textAlign: 'center', marginBottom: 16 }}>
         {getIcon()}
-        <h3 style={{ marginTop: 12, marginBottom: 4 }}>{getTitle()}</h3>
-        {mode === 'add-account' && (
-          <p style={{ color: '#666', margin: 0 }}>Add a Cloudflare account with R2 access</p>
-        )}
+        <h3 style={{ marginTop: 8, marginBottom: 0 }}>{getTitle()}</h3>
       </div>
 
-      <Form form={form} layout="vertical" onFinish={handleSubmit} autoComplete="off">
+      <Form
+        form={form}
+        layout="vertical"
+        onFinish={handleSubmit}
+        autoComplete="off"
+        size="small"
+        style={{ '--ant-form-item-margin-bottom': '12px' } as React.CSSProperties}
+      >
         {/* Account ID - only editable when adding */}
         <Form.Item
           label="Account ID"
           name="accountId"
           rules={[{ required: true, message: 'Required' }]}
+          style={{ marginBottom: 12 }}
         >
           <Input
             placeholder="Cloudflare Account ID"
@@ -327,101 +345,89 @@ export default function ConfigModal({
           />
         </Form.Item>
 
-        {/* Account Name - for account modes */}
-        {isAccountMode && (
-          <Form.Item
-            label="Display Name"
-            name="accountName"
-            extra="Optional friendly name for this account"
-          >
-            <Input placeholder="My Account" />
-          </Form.Item>
-        )}
+        {/* Account Name - always show */}
+        <Form.Item label="Account Name" name="accountName" style={{ marginBottom: 12 }}>
+          <Input placeholder="My Account (optional)" />
+        </Form.Item>
 
         {/* Token fields - not shown for edit-account mode */}
         {mode !== 'edit-account' && (
           <>
-            <Divider plain>
-              <Space>
+            <Divider plain style={{ margin: '12px 0 8px' }}>
+              <span style={{ fontSize: 12 }}>
                 <KeyOutlined /> Token Credentials
-              </Space>
+              </span>
             </Divider>
 
-            <Form.Item
-              label="Token Name"
-              name="tokenName"
-              extra="Optional name to identify this token"
-            >
-              <Input placeholder="Production / Staging / etc." />
+            <Form.Item label="Token Name" name="tokenName" style={{ marginBottom: 12 }}>
+              <Input placeholder="Production / Staging (optional)" />
             </Form.Item>
 
             <Form.Item
               label="API Token"
               name="apiToken"
               rules={[{ required: true, message: 'Required' }]}
-              extra="Cloudflare API token with R2 permissions"
+              style={{ marginBottom: 12 }}
             >
-              <Input.Password placeholder="API Token" />
+              <Input.Password placeholder="Cloudflare API Token" />
             </Form.Item>
 
             <Form.Item
               label="Access Key ID"
               name="accessKeyId"
               rules={[{ required: true, message: 'Required' }]}
-              extra="S3-compatible Access Key ID"
+              style={{ marginBottom: 12 }}
             >
-              <Input placeholder="Access Key ID" />
+              <Input placeholder="S3-compatible Access Key ID" />
             </Form.Item>
 
             <Form.Item
               label="Secret Access Key"
               name="secretAccessKey"
               rules={[{ required: true, message: 'Required' }]}
+              style={{ marginBottom: 12 }}
             >
               <Input.Password placeholder="Secret Access Key" />
             </Form.Item>
 
-            <Divider plain>Buckets</Divider>
+            <Divider plain style={{ margin: '12px 0 8px' }}>
+              <span style={{ fontSize: 12 }}>Buckets</span>
+            </Divider>
 
             <div
               style={{
                 display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: 8,
+                justifyContent: 'flex-end',
+                gap: 8,
+                marginBottom: 6,
               }}
             >
-              <span style={{ color: '#666', fontSize: 12 }}>
-                Buckets accessible with this token
-              </span>
-              <Space size="small">
-                <Button
-                  type="link"
-                  size="small"
-                  icon={<PlusOutlined />}
-                  onClick={() => setAddingBucket(true)}
-                  style={{ padding: 0, height: 'auto' }}
-                >
-                  Add
-                </Button>
-                <Button
-                  type="link"
-                  size="small"
-                  icon={<ReloadOutlined spin={loadingBuckets} />}
-                  onClick={handleLoadBuckets}
-                  loading={loadingBuckets}
-                  style={{ padding: 0, height: 'auto' }}
-                >
-                  Load
-                </Button>
-              </Space>
+              <Button
+                type="link"
+                size="small"
+                icon={<PlusOutlined />}
+                onClick={() => setAddingBucket(true)}
+                style={{ padding: 0, height: 'auto', fontSize: 12 }}
+              >
+                Add
+              </Button>
+              <Button
+                type="link"
+                size="small"
+                icon={<ReloadOutlined spin={loadingBuckets} />}
+                onClick={handleLoadBuckets}
+                loading={loadingBuckets}
+                style={{ padding: 0, height: 'auto', fontSize: 12 }}
+              >
+                Load
+              </Button>
             </div>
 
             <Form.Item name="selectedBucket" hidden>
               <Input type="hidden" />
             </Form.Item>
 
-            <div style={{ marginBottom: 16, maxHeight: 200, overflowY: 'auto' }}>
+            <div style={{ marginBottom: 12, maxHeight: 160, overflowY: 'auto' }}>
               {buckets.map((bucket) => {
                 const isSelected = selectedBucket === bucket.name;
                 return (
@@ -430,10 +436,10 @@ export default function ConfigModal({
                     style={{
                       display: 'flex',
                       alignItems: 'center',
-                      gap: 8,
-                      padding: '8px 12px',
-                      marginBottom: 4,
-                      borderRadius: 6,
+                      gap: 6,
+                      padding: '4px 8px',
+                      marginBottom: 2,
+                      borderRadius: 4,
                       border: isSelected
                         ? '1px solid var(--ant-color-primary)'
                         : '1px solid var(--ant-color-border)',
@@ -443,13 +449,16 @@ export default function ConfigModal({
                     onClick={() => form.setFieldValue('selectedBucket', bucket.name)}
                   >
                     {isSelected && (
-                      <CheckOutlined style={{ color: 'var(--ant-color-primary)', flexShrink: 0 }} />
+                      <CheckOutlined
+                        style={{ color: 'var(--ant-color-primary)', flexShrink: 0, fontSize: 12 }}
+                      />
                     )}
                     <span
                       style={{
                         fontWeight: isSelected ? 500 : 400,
-                        minWidth: 60,
-                        maxWidth: 120,
+                        fontSize: 12,
+                        minWidth: 50,
+                        maxWidth: 100,
                         flexShrink: 0,
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
@@ -459,31 +468,37 @@ export default function ConfigModal({
                     >
                       {bucket.name}
                     </span>
-                    <Input
-                      size="small"
-                      addonBefore="https://"
-                      placeholder="domain.com"
-                      value={bucket.publicDomain || ''}
-                      onChange={(e) => handleDomainChange(bucket.name, e.target.value)}
-                      onClick={(e) => e.stopPropagation()}
-                      style={{ flex: 1 }}
-                    />
+                    <Space.Compact size="small" style={{ flex: 1 }}>
+                      <Input
+                        style={{ width: 60, flexShrink: 0, fontSize: 12 }}
+                        value="https://"
+                        disabled
+                      />
+                      <Input
+                        placeholder="domain.com"
+                        value={bucket.publicDomain || ''}
+                        onChange={(e) => handleDomainChange(bucket.name, e.target.value)}
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ flex: 1, fontSize: 12 }}
+                      />
+                    </Space.Compact>
                     <Button
                       type="text"
                       size="small"
                       danger
-                      icon={<DeleteOutlined />}
+                      icon={<DeleteOutlined style={{ fontSize: 12 }} />}
                       onClick={(e) => {
                         e.stopPropagation();
                         handleRemoveBucket(bucket.name);
                       }}
+                      style={{ padding: '0 4px', height: 'auto' }}
                     />
                   </div>
                 );
               })}
 
               {addingBucket && (
-                <div style={{ display: 'flex', gap: 8, padding: '8px 0' }}>
+                <div style={{ display: 'flex', gap: 6, padding: '4px 0' }}>
                   <Input
                     size="small"
                     value={newBucketName}
@@ -495,21 +510,21 @@ export default function ConfigModal({
                     onPressEnter={handleAddBucket}
                     autoFocus
                     placeholder="Enter bucket name"
-                    style={{ flex: 1 }}
+                    style={{ flex: 1, fontSize: 12 }}
                   />
                 </div>
               )}
 
               {buckets.length === 0 && !addingBucket && (
-                <div style={{ padding: '16px 0', textAlign: 'center', color: '#999' }}>
-                  Click &quot;Load&quot; to fetch buckets or &quot;Add&quot; to add manually
+                <div style={{ padding: '8px 0', textAlign: 'center', color: '#999', fontSize: 12 }}>
+                  Click &quot;Load&quot; to fetch or &quot;Add&quot; manually
                 </div>
               )}
             </div>
           </>
         )}
 
-        <Form.Item style={{ marginBottom: 0, marginTop: 16 }}>
+        <Form.Item style={{ marginBottom: 0, marginTop: 12 }}>
           <Button type="primary" htmlType="submit" loading={saving} block>
             {isEditMode ? 'Save Changes' : 'Add'}
           </Button>

@@ -774,3 +774,45 @@ html.dark .drawer-bucket-item.current {
 html.dark .drawer-bucket-item.current {
   border-color: #5a4a00;
 }
+
+/* Scrollbar Styles */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a1a1a1;
+}
+
+/* Dark Mode Scrollbar */
+html.dark ::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+html.dark ::-webkit-scrollbar-thumb {
+  background: #444;
+}
+
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #c1c1c1 #f1f1f1;
+}
+
+html.dark * {
+  scrollbar-color: #444 #1a1a1a;
+}
