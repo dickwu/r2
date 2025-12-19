@@ -68,8 +68,12 @@ echo -e "${GREEN}✓ Updated src-tauri/tauri.conf.json${NC}"
 sed -i '' "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" src-tauri/Cargo.toml
 echo -e "${GREEN}✓ Updated src-tauri/Cargo.toml${NC}"
 
+# Update src-tauri/Cargo.lock (version is on line after 'name = "r2"')
+sed -i '' '/^name = "r2"$/{n;s/^version = ".*"/version = "'"$NEW_VERSION"'"/;}' src-tauri/Cargo.lock
+echo -e "${GREEN}✓ Updated src-tauri/Cargo.lock${NC}"
+
 # Git commit
-git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
 git commit -m "chore: bump version to $NEW_VERSION"
 echo -e "${GREEN}✓ Committed changes${NC}"
 
