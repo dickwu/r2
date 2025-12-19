@@ -1,10 +1,41 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::Manager;
+use tauri::{
+    Manager,
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 mod account;
 mod db;
 mod upload;
+
+const APP_NAME: &str = "R2 Uploader";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const APP_DESCRIPTION: &str = "A desktop application for managing Cloudflare R2 storage buckets.";
+const APP_AUTHOR: &str = "Peilin Wu";
+const APP_LICENSE: &str = "MIT";
+const APP_COPYRIGHT: &str = "© 2025 Peilin Wu";
+const APP_WEBSITE: &str = "https://github.com/dickwu/r2";
+
+fn show_about_dialog<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let about_message = format!(
+        "{}\n\nVersion: {}\nAuthor: {}\nLicense: {}\n{}",
+        APP_DESCRIPTION, APP_VERSION, APP_AUTHOR, APP_LICENSE, APP_COPYRIGHT
+    );
+    
+    app.dialog()
+        .message(&about_message)
+        .title(APP_NAME)
+        .buttons(MessageDialogButtons::OkCancelCustom("OK".to_string(), "View on GitHub".to_string()))
+        .show(move |result| {
+            // If Cancel (View on GitHub) was clicked, open the website
+            if !result {
+                let _ = tauri_plugin_opener::open_url(APP_WEBSITE, None::<&str>);
+            }
+        });
+}
 
 /// Old R2Config format (from tauri-plugin-store)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +213,97 @@ pub fn run() {
             if let Err(e) = db::cleanup_old_sessions() {
                 eprintln!("Failed to cleanup old sessions: {}", e);
             }
+
+            // Setup custom application menu (macOS menu bar)
+            #[cfg(target_os = "macos")]
+            {
+                let app_menu_about = MenuItem::with_id(app, "app_about", "About R2 Uploader", true, None::<&str>)?;
+                let separator = PredefinedMenuItem::separator(app)?;
+                let hide = PredefinedMenuItem::hide(app, Some("Hide"))?;
+                let hide_others = PredefinedMenuItem::hide_others(app, Some("Hide Others"))?;
+                let show_all = PredefinedMenuItem::show_all(app, Some("Show All"))?;
+                let separator2 = PredefinedMenuItem::separator(app)?;
+                let quit = PredefinedMenuItem::quit(app, Some("Quit"))?;
+                
+                let app_submenu = Submenu::with_items(
+                    app,
+                    "R2 Uploader",
+                    true,
+                    &[&app_menu_about, &separator, &hide, &hide_others, &show_all, &separator2, &quit],
+                )?;
+                
+                let edit_menu = Submenu::with_items(
+                    app,
+                    "Edit",
+                    true,
+                    &[
+                        &PredefinedMenuItem::undo(app, Some("Undo"))?,
+                        &PredefinedMenuItem::redo(app, Some("Redo"))?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::cut(app, Some("Cut"))?,
+                        &PredefinedMenuItem::copy(app, Some("Copy"))?,
+                        &PredefinedMenuItem::paste(app, Some("Paste"))?,
+                        &PredefinedMenuItem::select_all(app, Some("Select All"))?,
+                    ],
+                )?;
+                
+                let window_menu = Submenu::with_items(
+                    app,
+                    "Window",
+                    true,
+                    &[
+                        &PredefinedMenuItem::minimize(app, Some("Minimize"))?,
+                        &PredefinedMenuItem::maximize(app, Some("Zoom"))?,
+                        &PredefinedMenuItem::separator(app)?,
+                        &PredefinedMenuItem::close_window(app, Some("Close"))?,
+                    ],
+                )?;
+                
+                let app_menu = Menu::with_items(app, &[&app_submenu, &edit_menu, &window_menu])?;
+                app.set_menu(app_menu)?;
+                
+                app.on_menu_event(|app, event| {
+                    if event.id.as_ref() == "app_about" {
+                        show_about_dialog(app);
+                    }
+                });
+            }
+
+            // Setup system tray
+            let about_item = MenuItem::with_id(app, "about", "About", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&about_item, &quit_item])?;
+
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| {
+                    match event.id.as_ref() {
+                        "about" => {
+                            show_about_dialog(app);
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
             
             Ok(())
         })

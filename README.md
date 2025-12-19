@@ -14,8 +14,8 @@ A desktop application for managing Cloudflare R2 storage buckets. Built with Tau
 - Dark mode support
 - Auto-updates
 
-## Prerequisites
-
+## Screenshots
+![Prerequisites](./images/create-account.png)
 ### Required
 
 - [Node.js](https://nodejs.org/) (v18+)

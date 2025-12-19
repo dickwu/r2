@@ -260,6 +260,22 @@ export default function Home() {
     setConfigModalOpen(true);
   }
 
+  function handleSettingsClick() {
+    const accounts = useAccountStore.getState().accounts;
+    if (!currentConfig) {
+      openAddAccountModal();
+      return;
+    }
+    // Find current token from accounts
+    const accountData = accounts.find((a) => a.account.id === currentConfig.account_id);
+    const tokenData = accountData?.tokens.find((t) => t.token.id === currentConfig.token_id);
+    if (tokenData) {
+      handleEditToken(tokenData.token);
+    } else {
+      openAddAccountModal();
+    }
+  }
+
   const handleItemClick = useCallback((item: FileItem) => {
     if (item.isFolder) {
       setCurrentPath(item.key);
@@ -385,7 +401,7 @@ export default function Home() {
                 icon={theme === 'dark' ? <SunOutlined /> : <MoonOutlined />}
                 onClick={toggleTheme}
               />
-              <Button icon={<SettingOutlined />} onClick={openAddAccountModal} />
+              <Button icon={<SettingOutlined />} onClick={handleSettingsClick} />
             </Space>
           </div>
 

@@ -24,6 +24,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "copyright": "Copyright 2025 Peilin Wu",
+    "license": "MIT",
+    "shortDescription": "A desktop application for managing Cloudflare R2 storage buckets.",
+    "publisher": "Peilin Wu",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

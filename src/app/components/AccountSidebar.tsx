@@ -329,7 +329,7 @@ export default function AccountSidebar({
         placement="right"
         onClose={() => setDrawerOpen(false)}
         open={drawerOpen}
-        width={320}
+        size={320}
         push={false}
         extra={
           <Button
