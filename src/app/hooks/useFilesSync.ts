@@ -11,10 +11,13 @@ export function useFilesSync(config: R2Config | null) {
   const clearSizes = useFolderSizeStore((state) => state.clearSizes);
 
   const query = useQuery({
-    queryKey: ['r2-all-files', config?.bucket],
+    queryKey: ['r2-all-files', config?.accountId, config?.bucket],
     queryFn: async () => {
       if (!config) return null;
       console.log('Syncing all files to IndexedDB...');
+
+      // Clear sizes before resyncing
+      clearSizes();
 
       const allFiles = await listAllR2ObjectsRecursive(config);
       await storeAllFiles(allFiles);
@@ -29,8 +32,10 @@ export function useFilesSync(config: R2Config | null) {
 
   const refresh = useCallback(async () => {
     clearSizes();
-    await queryClient.invalidateQueries({ queryKey: ['r2-all-files', config?.bucket] });
-  }, [queryClient, config?.bucket, clearSizes]);
+    await queryClient.invalidateQueries({
+      queryKey: ['r2-all-files', config?.accountId, config?.bucket],
+    });
+  }, [queryClient, config?.accountId, config?.bucket, clearSizes]);
 
   return {
     isSyncing: query.isFetching,

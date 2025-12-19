@@ -6,7 +6,6 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "store:default",
     "http:default",
     "updater:default",
     "process:allow-restart",

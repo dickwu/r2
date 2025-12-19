@@ -4,11 +4,15 @@ A desktop application for managing Cloudflare R2 storage buckets. Built with Tau
 
 ## Features
 
+- **Multi-Account Support** - Manage multiple Cloudflare accounts in one app
+- **Multiple Tokens per Account** - Each account can have multiple API tokens with different bucket access
 - Browse and manage files in Cloudflare R2 buckets
-- Upload files with drag-and-drop support
-- Preview images and videos
+- Upload files and folders with resumable multipart uploads
+- Preview images and videos directly in the app
 - Video thumbnail generation (via ffmpeg)
-- Copy file URLs to clipboard
+- Copy signed or public URLs to clipboard
+- Dark mode support
+- Auto-updates
 
 ## Prerequisites
 
@@ -65,22 +69,49 @@ bun run tauri build
 
 ## Configuration
 
-On first launch, configure your Cloudflare R2 credentials:
+### Adding Your First Account
 
-1. Click the settings icon
-2. Enter your R2 credentials:
-   - **Account ID** - Your Cloudflare account ID
-   - **Access Key ID** - R2 API token access key
-   - **Secret Access Key** - R2 API token secret key
-   - **Bucket Name** - Your R2 bucket name
-   - **Public URL** (optional) - Custom domain for public access
+1. On first launch, the "Add Account" dialog will open automatically
+2. Enter your Cloudflare credentials:
+   - **Account ID** - Your Cloudflare account ID (found in dashboard URL)
+   - **Display Name** (optional) - Friendly name for the account
+   - **Token Name** (optional) - Name to identify this token (e.g., "Production", "Staging")
+   - **API Token** - Cloudflare API token with R2 read/write permissions
+   - **Access Key ID** - S3-compatible Access Key ID
+   - **Secret Access Key** - S3-compatible Secret Access Key
+3. Click "Load" to fetch available buckets, or manually add bucket names
+4. Configure public domain for each bucket (optional)
+
+### Managing Multiple Accounts
+
+- **Sidebar** - Shows all configured accounts with token/bucket counts
+- **Click account** - Opens drawer with all tokens and buckets for that account
+- **Click bucket** - Switches to that bucket
+- **Context menu** - Edit or delete accounts/tokens
+- **Collapse sidebar** - Click the collapse icon to minimize to icon-only view
+
+### Getting API Credentials
+
+1. Go to [Cloudflare Dashboard](https://dash.cloudflare.com/)
+2. Navigate to **R2** → **Overview** → **Manage R2 API Tokens**
+3. Create a token with appropriate permissions
+4. Note the **Access Key ID** and **Secret Access Key** (shown only once)
+
+## Data Storage
+
+Account configurations are stored locally in a SQLite database:
+
+- **macOS**: `~/Library/Application Support/r2/uploads.db`
+- **Windows**: `%APPDATA%\r2\uploads.db`
+- **Linux**: `~/.local/share/r2/uploads.db`
 
 ## Tech Stack
 
-- **Frontend**: Next.js, React, Ant Design
+- **Frontend**: Next.js, React, Ant Design, Zustand
 - **Backend**: Tauri (Rust)
 - **Storage**: Cloudflare R2 (S3-compatible)
-- **State**: TanStack Query
+- **Database**: SQLite (via rusqlite)
+- **State**: TanStack Query, Zustand
 
 ## IDE Setup
 

@@ -1,13 +1,12 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
-import { Modal, Typography, Button, Input, Space } from 'antd';
+import { useEffect, useCallback, useState } from 'react';
+import { Modal, Typography, Button, Input, App } from 'antd';
 import { KeyOutlined, FolderOutlined, FileAddOutlined } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { useUploadStore, selectHasActiveUploads } from '../stores/uploadStore';
 import type { R2Config } from './ConfigModal';
-import AccessKeyModal from './AccessKeyModal';
 import UploadTaskList from './UploadTaskList';
 
 const { Text } = Typography;
@@ -68,7 +67,7 @@ interface UploadModalProps {
   currentPath: string;
   config: R2Config | null;
   onUploadComplete: () => void;
-  onCredentialsUpdate: (accessKeyId: string, secretAccessKey: string) => void;
+  onCredentialsUpdate: () => void;
 }
 
 export default function UploadModal({
@@ -77,10 +76,8 @@ export default function UploadModal({
   currentPath,
   config,
   onUploadComplete,
-  onCredentialsUpdate,
 }: UploadModalProps) {
-  const [accessKeyModalOpen, setAccessKeyModalOpen] = useState(false);
-
+  const { message } = App.useApp();
   const uploadPath = useUploadStore((s) => s.uploadPath);
   const setUploadPath = useUploadStore((s) => s.setUploadPath);
   const setConfig = useUploadStore((s) => s.setConfig);
@@ -104,7 +101,7 @@ export default function UploadModal({
 
   const handleSelectFiles = useCallback(async () => {
     if (!hasS3Credentials) {
-      setAccessKeyModalOpen(true);
+      message.warning('S3 credentials required. Please configure them in Account Settings.');
       return;
     }
 
@@ -134,11 +131,11 @@ export default function UploadModal({
     } catch (e) {
       console.error('Failed to select files:', e);
     }
-  }, [hasS3Credentials, addTasks]);
+  }, [hasS3Credentials, addTasks, message]);
 
   const handleSelectFolder = useCallback(async () => {
     if (!hasS3Credentials) {
-      setAccessKeyModalOpen(true);
+      message.warning('S3 credentials required. Please configure them in Account Settings.');
       return;
     }
 
@@ -150,10 +147,9 @@ export default function UploadModal({
 
       if (selected) {
         // Get all files in the folder recursively
-        const folderFiles = await invoke<Array<{ file_path: string; relative_path: string; file_size: number }>>(
-          'get_folder_files',
-          { folderPath: selected }
-        );
+        const folderFiles = await invoke<
+          Array<{ file_path: string; relative_path: string; file_size: number }>
+        >('get_folder_files', { folderPath: selected });
 
         if (folderFiles.length > 0) {
           const tasks = folderFiles.map((file) => ({
@@ -168,7 +164,7 @@ export default function UploadModal({
     } catch (e) {
       console.error('Failed to select folder:', e);
     }
-  }, [hasS3Credentials, addTasks]);
+  }, [hasS3Credentials, addTasks, message]);
 
   function handleClose() {
     if (!hasActiveUploads) {
@@ -217,9 +213,9 @@ export default function UploadModal({
           }}
         >
           <Text type="warning">S3 credentials required for uploads</Text>
-          <Button size="small" icon={<KeyOutlined />} onClick={() => setAccessKeyModalOpen(true)}>
-            Configure
-          </Button>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Configure in Account Settings
+          </Text>
         </div>
       )}
 
@@ -282,16 +278,6 @@ export default function UploadModal({
       </div>
 
       <UploadTaskList />
-
-      <AccessKeyModal
-        open={accessKeyModalOpen}
-        onClose={() => setAccessKeyModalOpen(false)}
-        onSave={(accessKeyId, secretAccessKey) => {
-          onCredentialsUpdate(accessKeyId, secretAccessKey);
-        }}
-        initialAccessKeyId={config?.accessKeyId}
-        initialSecretAccessKey={config?.secretAccessKey}
-      />
     </Modal>
   );
 }

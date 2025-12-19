@@ -402,3 +402,375 @@ html.dark .grid-card-meta {
 html.dark .grid-card-actions .ant-btn {
   background: rgba(30, 30, 30, 0.9);
 }
+
+/* Account Sidebar */
+.account-sidebar {
+  width: 260px;
+  min-width: 260px;
+  border-right: 1px solid #f0f0f0;
+  display: flex;
+  flex-direction: column;
+  background: #fafafa;
+  height: 100%;
+  transition:
+    width 0.2s ease,
+    min-width 0.2s ease;
+}
+
+.account-sidebar.collapsed {
+  width: 48px;
+  min-width: 48px;
+}
+
+.account-sidebar.collapsed .sidebar-header {
+  justify-content: center;
+  padding: 12px 8px;
+}
+
+.account-sidebar.collapsed .sidebar-header-title {
+  cursor: pointer;
+}
+
+.account-sidebar.collapsed .sidebar-header-icon {
+  font-size: 20px;
+  transition: color 0.2s;
+}
+
+.account-sidebar.collapsed .sidebar-header-icon:hover {
+  color: #f6821f;
+}
+
+/* Collapsed account items */
+.sidebar-collapsed-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 0;
+  gap: 4px;
+}
+
+.collapsed-account-item {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background: #fff;
+  border: 1px solid #e8e8e8;
+  position: relative;
+  transition: all 0.2s;
+}
+
+.collapsed-account-item:hover {
+  background: #f5f5f5;
+  border-color: #d9d9d9;
+}
+
+.collapsed-account-item.current {
+  border-color: #f6821f;
+  background: #fff7e6;
+}
+
+.collapsed-account-item.add {
+  border-style: dashed;
+  color: #999;
+}
+
+.collapsed-account-item.add:hover {
+  color: #f6821f;
+  border-color: #f6821f;
+}
+
+.collapsed-account-text {
+  font-size: 11px;
+  font-weight: 600;
+  color: #333;
+  letter-spacing: -0.5px;
+}
+
+.collapsed-current-dot {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #52c41a;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  background: #fff;
+}
+
+.sidebar-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #333;
+}
+
+.sidebar-header-icon {
+  color: #f6821f;
+  font-size: 18px;
+}
+
+.sidebar-content {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.sidebar-loading {
+  display: flex;
+  justify-content: center;
+  padding: 32px;
+}
+
+.sidebar-empty {
+  padding: 32px 16px;
+}
+
+.sidebar-empty .ant-empty {
+  margin: 0;
+}
+
+/* Account Menu */
+.account-menu {
+  background: transparent;
+  border: none;
+}
+
+.account-menu .ant-menu-item {
+  height: auto;
+  line-height: 1.4;
+  padding: 8px 16px !important;
+  margin: 0 !important;
+  border-radius: 0;
+}
+
+.account-menu .ant-menu-item:hover {
+  background: #f5f5f5;
+}
+
+.account-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 8px;
+}
+
+.account-menu-icon {
+  font-size: 14px;
+  color: #666;
+  flex-shrink: 0;
+}
+
+.account-menu-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.account-menu-name {
+  font-weight: 500;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-menu-meta {
+  font-size: 11px;
+}
+
+.account-menu-action {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.account-menu .ant-menu-item:hover .account-menu-action {
+  opacity: 1;
+}
+
+.account-menu-arrow {
+  font-size: 10px;
+  color: #999;
+}
+
+.current-indicator {
+  color: #52c41a;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.current-indicator.active {
+  color: #f6821f;
+}
+
+/* Drawer Token/Bucket Styles */
+.drawer-token-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  margin-bottom: 8px;
+}
+
+.drawer-token-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.drawer-token-icon {
+  color: #666;
+  font-size: 14px;
+}
+
+.drawer-token-name {
+  font-weight: 500;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer-buckets {
+  padding-left: 8px;
+}
+
+.drawer-bucket-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+  margin-bottom: 4px;
+}
+
+.drawer-bucket-item:hover {
+  background: #fff7e6;
+}
+
+.drawer-bucket-item.current {
+  background: #fff7e6;
+  border: 1px solid #ffd591;
+}
+
+.drawer-bucket-icon {
+  color: #f6821f;
+  font-size: 16px;
+}
+
+.drawer-bucket-name {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Main Layout with Sidebar */
+.app-layout {
+  display: flex;
+  height: 100vh;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Dark Mode Sidebar */
+html.dark .account-sidebar {
+  background: #1a1a1a;
+  border-color: #303030;
+}
+
+html.dark .account-sidebar.collapsed .sidebar-header-icon:hover {
+  color: #f6821f;
+}
+
+html.dark .collapsed-account-item {
+  background: #2a2a2a;
+  border-color: #404040;
+}
+
+html.dark .collapsed-account-item:hover {
+  background: #333;
+  border-color: #505050;
+}
+
+html.dark .collapsed-account-item.current {
+  border-color: #f6821f;
+  background: #3a2a10;
+}
+
+html.dark .collapsed-account-item.add {
+  color: #666;
+}
+
+html.dark .collapsed-account-item.add:hover {
+  color: #f6821f;
+  border-color: #f6821f;
+}
+
+html.dark .collapsed-account-text {
+  color: #e0e0e0;
+}
+
+html.dark .sidebar-header {
+  background: #1f1f1f;
+  border-color: #303030;
+}
+
+html.dark .sidebar-header-title {
+  color: #e0e0e0;
+}
+
+html.dark .account-menu {
+  background: transparent;
+}
+
+html.dark .account-menu .ant-menu-item {
+  color: #e0e0e0;
+}
+
+html.dark .account-menu .ant-menu-item:hover {
+  background: #2a2a2a;
+}
+
+html.dark .account-menu-name {
+  color: #e0e0e0;
+}
+
+html.dark .account-menu-icon {
+  color: #888;
+}
+
+html.dark .drawer-token-icon {
+  color: #888;
+}
+
+html.dark .drawer-bucket-item:hover,
+html.dark .drawer-bucket-item.current {
+  background: #2a2000;
+}
+
+html.dark .drawer-bucket-item.current {
+  border-color: #5a4a00;
+}

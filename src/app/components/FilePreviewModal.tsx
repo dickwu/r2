@@ -8,12 +8,10 @@ import {
   FileOutlined,
   FileImageOutlined,
   PlaySquareOutlined,
-  KeyOutlined,
 } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { FileItem } from '../hooks/useR2Files';
 import { generateSignedUrl } from '../lib/r2api';
-import AccessKeyModal from './AccessKeyModal';
 
 const { Text, Paragraph } = Typography;
 
@@ -41,7 +39,7 @@ interface FilePreviewModalProps {
   bucket?: string;
   accessKeyId?: string;
   secretAccessKey?: string;
-  onCredentialsUpdate?: (accessKeyId: string, secretAccessKey: string) => void;
+  onCredentialsUpdate?: () => void;
 }
 
 export default function FilePreviewModal({
@@ -53,22 +51,12 @@ export default function FilePreviewModal({
   bucket,
   accessKeyId,
   secretAccessKey,
-  onCredentialsUpdate,
 }: FilePreviewModalProps) {
   const { message } = App.useApp();
   const [signedUrl, setSignedUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [accessKeyModalOpen, setAccessKeyModalOpen] = useState(false);
-  const [localAccessKeyId, setLocalAccessKeyId] = useState(accessKeyId);
-  const [localSecretAccessKey, setLocalSecretAccessKey] = useState(secretAccessKey);
 
-  // Sync local credentials with props
-  useEffect(() => {
-    setLocalAccessKeyId(accessKeyId);
-    setLocalSecretAccessKey(secretAccessKey);
-  }, [accessKeyId, secretAccessKey]);
-
-  const needsCredentials = !publicDomain && (!localAccessKeyId || !localSecretAccessKey);
+  const needsCredentials = !publicDomain && (!accessKeyId || !secretAccessKey);
 
   // Generate signed URL when modal opens
   useEffect(() => {
@@ -85,9 +73,9 @@ export default function FilePreviewModal({
     }
 
     // If S3 credentials are available, generate signed URL
-    if (accountId && bucket && localAccessKeyId && localSecretAccessKey) {
+    if (accountId && bucket && accessKeyId && secretAccessKey) {
       setLoading(true);
-      generateSignedUrl(accountId, bucket, file.key, localAccessKeyId, localSecretAccessKey)
+      generateSignedUrl(accountId, bucket, file.key, accessKeyId, secretAccessKey)
         .then(setSignedUrl)
         .catch((e) => {
           console.error('Failed to generate signed URL:', e);
@@ -99,13 +87,7 @@ export default function FilePreviewModal({
 
     // Fallback: no URL available
     setSignedUrl(null);
-  }, [isOpen, file, publicDomain, accountId, bucket, localAccessKeyId, localSecretAccessKey]);
-
-  function handleCredentialsSave(newAccessKeyId: string, newSecretAccessKey: string) {
-    setLocalAccessKeyId(newAccessKeyId);
-    setLocalSecretAccessKey(newSecretAccessKey);
-    onCredentialsUpdate?.(newAccessKeyId, newSecretAccessKey);
-  }
+  }, [isOpen, file, publicDomain, accountId, bucket, accessKeyId, secretAccessKey]);
 
   if (!file) return null;
 
@@ -185,12 +167,9 @@ export default function FilePreviewModal({
         </Paragraph>
       ) : needsCredentials ? (
         <div style={{ textAlign: 'center', marginBottom: 24 }}>
-          <Paragraph type="secondary" style={{ marginBottom: 12 }}>
-            S3 credentials required for signed URL
+          <Paragraph type="secondary">
+            S3 credentials required for signed URL. Configure in Account Settings.
           </Paragraph>
-          <Button icon={<KeyOutlined />} onClick={() => setAccessKeyModalOpen(true)}>
-            Configure S3 Credentials
-          </Button>
         </div>
       ) : (
         <Paragraph type="secondary" style={{ textAlign: 'center', marginBottom: 24 }}>
@@ -205,18 +184,7 @@ export default function FilePreviewModal({
         <Button type="primary" icon={<CopyOutlined />} onClick={handleCopyUrl} disabled={!fileUrl}>
           Copy URL
         </Button>
-        {!publicDomain && (
-          <Button icon={<KeyOutlined />} onClick={() => setAccessKeyModalOpen(true)} />
-        )}
       </Space>
-
-      <AccessKeyModal
-        open={accessKeyModalOpen}
-        onClose={() => setAccessKeyModalOpen(false)}
-        onSave={handleCredentialsSave}
-        initialAccessKeyId={localAccessKeyId}
-        initialSecretAccessKey={localSecretAccessKey}
-      />
     </Modal>
   );
 }
