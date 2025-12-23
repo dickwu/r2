@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
+    "windows": [ 
       {
         "title": "r2",
         "width": 1200,
@@ -36,7 +36,12 @@
       "icons/icon.ico",
       "icons/icon.png"
     ],
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "nsis": {
+        "perMachine": false
+      }
+    }
   },
   "plugins": {
     "updater": {
