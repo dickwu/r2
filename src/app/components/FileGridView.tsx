@@ -1,5 +1,5 @@
-import { memo, useCallback } from 'react';
-import { Masonry, Card, Popconfirm, Button, Space, Checkbox } from 'antd';
+import { memo, useCallback, CSSProperties, forwardRef } from 'react';
+import { Card, Popconfirm, Button, Space, Checkbox } from 'antd';
 import {
   FolderOutlined,
   FileOutlined,
@@ -8,6 +8,7 @@ import {
   DeleteOutlined,
   EditOutlined,
 } from '@ant-design/icons';
+import { VirtuosoGrid } from 'react-virtuoso';
 import { FileItem } from '../hooks/useR2Files';
 import { FolderMetadata } from '../stores/folderSizeStore';
 import VideoThumbnail from './VideoThumbnail';
@@ -165,6 +166,38 @@ const FileCard = memo(function FileCard({
   );
 });
 
+// Grid container component
+const GridList = forwardRef<HTMLDivElement, React.HTMLProps<HTMLDivElement>>(
+  function GridList({ children, style, ...props }, ref) {
+    return (
+      <div
+        ref={ref}
+        {...props}
+        style={{
+          ...style,
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+          gap: '12px',
+          padding: '12px',
+        }}
+      >
+        {children}
+      </div>
+    );
+  }
+);
+
+// Grid item wrapper component
+const GridItem = forwardRef<HTMLDivElement, React.HTMLProps<HTMLDivElement>>(
+  function GridItem({ children, ...props }, ref) {
+    return (
+      <div ref={ref} {...props}>
+        {children}
+      </div>
+    );
+  }
+);
+
 export default memo(function FileGridView({
   items,
   onItemClick,
@@ -176,26 +209,26 @@ export default memo(function FileGridView({
   onToggleSelection,
 }: FileGridViewProps) {
   return (
-    <div className="file-grid">
-      <Masonry
-        columns={{ xs: 2, sm: 3, md: 4, lg: 5, xl: 6 }}
-        gutter={12}
-        items={items.map((item) => ({
-          key: item.key,
-          data: item,
-          children: (
-            <FileCard
-              item={item}
-              publicDomain={publicDomain}
-              onItemClick={onItemClick}
-              onDelete={onDelete}
-              onRename={onRename}
-              folderMetadata={item.isFolder ? folderSizes?.[item.key] : undefined}
-              isSelected={selectedKeys?.has(item.key)}
-              onToggleSelection={onToggleSelection}
-            />
-          ),
-        }))}
+    <div className="file-grid" style={{ height: '100%' }}>
+      <VirtuosoGrid
+        style={{ height: '100%' }}
+        data={items}
+        components={{
+          List: GridList,
+          Item: GridItem,
+        }}
+        itemContent={(index, item) => (
+          <FileCard
+            item={item}
+            publicDomain={publicDomain}
+            onItemClick={onItemClick}
+            onDelete={onDelete}
+            onRename={onRename}
+            folderMetadata={item.isFolder ? folderSizes?.[item.key] : undefined}
+            isSelected={selectedKeys?.has(item.key)}
+            onToggleSelection={onToggleSelection}
+          />
+        )}
       />
     </div>
   );

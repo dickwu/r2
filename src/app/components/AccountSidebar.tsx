@@ -32,6 +32,8 @@ import { useAccountStore, Account, Token, AccountWithTokens } from '../stores/ac
 
 const { Text } = Typography;
 
+const SIDEBAR_COLLAPSED_KEY = 'account-sidebar-collapsed';
+
 interface AccountSidebarProps {
   onAddAccount: () => void;
   onEditAccount: (account: Account) => void;
@@ -54,9 +56,20 @@ export default function AccountSidebar({
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedAccount, setSelectedAccount] = useState<AccountWithTokens | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
+      return stored === 'true';
+    }
+    return false;
+  });
 
   const { message, modal } = App.useApp();
+
+  function toggleCollapse(value: boolean) {
+    setCollapsed(value);
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(value));
+  }
 
   function handleAccountClick(accountData: AccountWithTokens) {
     setSelectedAccount(accountData);
@@ -210,7 +223,7 @@ export default function AccountSidebar({
     return (
       <div className={`account-sidebar ${collapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
-          <div className="sidebar-header-title" onClick={() => setCollapsed(!collapsed)}>
+          <div className="sidebar-header-title" onClick={() => toggleCollapse(!collapsed)}>
             <CloudOutlined className="sidebar-header-icon" />
             {!collapsed && <span>Accounts</span>}
           </div>
@@ -219,7 +232,7 @@ export default function AccountSidebar({
               type="text"
               size="small"
               icon={<MenuFoldOutlined />}
-              onClick={() => setCollapsed(true)}
+              onClick={() => toggleCollapse(true)}
             />
           )}
         </div>
@@ -237,7 +250,7 @@ export default function AccountSidebar({
       <div className="sidebar-header">
         <div
           className="sidebar-header-title"
-          onClick={() => collapsed && setCollapsed(false)}
+          onClick={() => collapsed && toggleCollapse(false)}
           style={{ cursor: collapsed ? 'pointer' : 'default' }}
         >
           <CloudOutlined className="sidebar-header-icon" />
@@ -253,7 +266,7 @@ export default function AccountSidebar({
                 type="text"
                 size="small"
                 icon={<MenuFoldOutlined />}
-                onClick={() => setCollapsed(true)}
+                onClick={() => toggleCollapse(true)}
               />
             </Tooltip>
           </Space>

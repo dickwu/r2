@@ -17,8 +17,6 @@ import {
 import {
   SettingOutlined,
   ReloadOutlined,
-  FolderOutlined,
-  FileOutlined,
   UploadOutlined,
   HomeOutlined,
   SunOutlined,
@@ -26,10 +24,7 @@ import {
   AppstoreOutlined,
   BarsOutlined,
   SearchOutlined,
-  CaretUpOutlined,
-  CaretDownOutlined,
   DeleteOutlined,
-  EditOutlined,
 } from '@ant-design/icons';
 import { useTheme } from './providers';
 import ConfigModal, { ModalMode } from './components/ConfigModal';
@@ -37,6 +32,7 @@ import UploadModal from './components/UploadModal';
 import FilePreviewModal from './components/FilePreviewModal';
 import FileRenameModal from './components/FileRenameModal';
 import FileGridView from './components/FileGridView';
+import FileListView from './components/FileListView';
 import AccountSidebar from './components/AccountSidebar';
 import StatusBar from './components/StatusBar';
 import { useAccountStore, Account, Token } from './stores/accountStore';
@@ -45,14 +41,6 @@ import { useFilesSync } from './hooks/useFilesSync';
 import { deleteR2Object, renameR2Object } from './lib/r2cache';
 import { useFolderSizeStore } from './stores/folderSizeStore';
 import { formatBytes } from './utils/formatBytes';
-
-function formatDate(date: string): string {
-  return new Date(date).toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  });
-}
 
 type ViewMode = 'list' | 'grid';
 type SortOrder = 'asc' | 'desc' | null;
@@ -83,6 +71,7 @@ export default function Home() {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deleteConfirmInput, setDeleteConfirmInput] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
   const { message } = App.useApp();
   const { theme, toggleTheme } = useTheme();
 
@@ -303,10 +292,11 @@ export default function Home() {
 
     // Close confirmation modal
     closeBatchDeleteConfirm();
+    
+    // Show full-screen loading
+    setIsDeleting(true);
 
     try {
-      message.loading(`Deleting ${count} file${count > 1 ? 's' : ''}...`);
-
       // Delete all selected files
       await Promise.all(keys.map((key) => deleteR2Object(config, key)));
 
@@ -318,6 +308,8 @@ export default function Home() {
     } catch (e) {
       console.error('Batch delete error:', e);
       message.error(`Failed to delete files: ${e instanceof Error ? e.message : 'Unknown error'}`);
+    } finally {
+      setIsDeleting(false);
     }
   }, [config, selectedKeys, message, refresh, refreshSync, closeBatchDeleteConfirm]);
 
@@ -388,7 +380,7 @@ export default function Home() {
     }),
   ];
 
-  if (loading) {
+  if (loading || isDeleting) {
     return (
       <div className="center-container">
         <Spin fullscreen />
@@ -482,99 +474,19 @@ export default function Home() {
                   description={searchQuery ? 'No matching files' : 'This folder is empty'}
                 />
               ) : viewMode === 'list' ? (
-                <>
-                  {/* Header */}
-                  <div className="file-list-header">
-                    <span className="col-checkbox">
-                      <Checkbox
-                        indeterminate={
-                          selectedKeys.size > 0 &&
-                          selectedKeys.size < filteredItems.filter((item) => !item.isFolder).length
-                        }
-                        checked={
-                          selectedKeys.size > 0 &&
-                          selectedKeys.size ===
-                            filteredItems.filter((item) => !item.isFolder).length
-                        }
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            selectAll();
-                          } else {
-                            clearSelection();
-                          }
-                        }}
-                      />
-                    </span>
-                    <span className="col-name">Name</span>
-                    <span className="col-size sortable" onClick={toggleSizeSort}>
-                      Size
-                      {sizeSort === 'asc' && <CaretUpOutlined />}
-                      {sizeSort === 'desc' && <CaretDownOutlined />}
-                    </span>
-                    <span className="col-date">Modified</span>
-                    <span className="col-actions">Actions</span>
-                  </div>
-
-                  {/* Items */}
-                  {filteredItems.map((item) => (
-                    <div
-                      key={item.key}
-                      className={`file-item ${item.isFolder ? 'folder' : 'file'} ${selectedKeys.has(item.key) ? 'selected' : ''}`}
-                      onClick={() => handleItemClick(item)}
-                    >
-                      <span className="col-checkbox" onClick={(e) => e.stopPropagation()}>
-                        {!item.isFolder && (
-                          <Checkbox
-                            checked={selectedKeys.has(item.key)}
-                            onChange={() => toggleSelection(item.key)}
-                          />
-                        )}
-                      </span>
-                      <span className="col-name">
-                        {item.isFolder ? (
-                          <FolderOutlined className="icon folder-icon" />
-                        ) : (
-                          <FileOutlined className="icon file-icon" />
-                        )}
-                        <span className="name">{item.name}</span>
-                      </span>
-                      <span className="col-size">
-                        {item.isFolder
-                          ? metadata[item.key]?.size === 'loading'
-                            ? '...'
-                            : typeof metadata[item.key]?.size === 'number'
-                              ? formatBytes(metadata[item.key].size as number)
-                              : '--'
-                          : formatBytes(item.size || 0)}
-                      </span>
-                      <span className="col-date">
-                        {item.lastModified ? formatDate(item.lastModified) : '--'}
-                      </span>
-                      <span className="col-actions" onClick={(e) => e.stopPropagation()}>
-                        {!item.isFolder && (
-                          <>
-                            <Button
-                              type="text"
-                              size="small"
-                              icon={<EditOutlined />}
-                              onClick={() => handleRenameClick(item)}
-                            />
-                            <Popconfirm
-                              title="Delete file"
-                              description={`Are you sure you want to delete "${item.name}"?`}
-                              onConfirm={() => handleDelete(item)}
-                              okText="Delete"
-                              cancelText="Cancel"
-                              okButtonProps={{ danger: true }}
-                            >
-                              <Button type="text" size="small" danger icon={<DeleteOutlined />} />
-                            </Popconfirm>
-                          </>
-                        )}
-                      </span>
-                    </div>
-                  ))}
-                </>
+                <FileListView
+                  items={filteredItems}
+                  selectedKeys={selectedKeys}
+                  metadata={metadata}
+                  sizeSort={sizeSort}
+                  onItemClick={handleItemClick}
+                  onToggleSelection={toggleSelection}
+                  onSelectAll={selectAll}
+                  onClearSelection={clearSelection}
+                  onToggleSizeSort={toggleSizeSort}
+                  onDelete={handleDelete}
+                  onRename={handleRenameClick}
+                />
               ) : (
                 <FileGridView
                   items={filteredItems}
