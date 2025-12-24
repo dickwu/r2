@@ -1,22 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { getVersion } from '@tauri-apps/api/app';
-import { check } from '@tauri-apps/plugin-updater';
-import { relaunch } from '@tauri-apps/plugin-process';
-import {
-  Button,
-  Breadcrumb,
-  Space,
-  App,
-  Spin,
-  Empty,
-  Segmented,
-  Badge,
-  Tooltip,
-  Input,
-  Popconfirm,
-} from 'antd';
+import { Button, Breadcrumb, Space, App, Spin, Empty, Segmented, Input, Popconfirm } from 'antd';
 import {
   SettingOutlined,
   ReloadOutlined,
@@ -28,7 +13,6 @@ import {
   MoonOutlined,
   AppstoreOutlined,
   BarsOutlined,
-  CloudSyncOutlined,
   SearchOutlined,
   CaretUpOutlined,
   CaretDownOutlined,
@@ -42,19 +26,13 @@ import FilePreviewModal from './components/FilePreviewModal';
 import FileRenameModal from './components/FileRenameModal';
 import FileGridView from './components/FileGridView';
 import AccountSidebar from './components/AccountSidebar';
+import StatusBar from './components/StatusBar';
 import { useAccountStore, Account, Token } from './stores/accountStore';
 import { useR2Files, FileItem } from './hooks/useR2Files';
 import { useFilesSync } from './hooks/useFilesSync';
 import { deleteR2Object, renameR2Object } from './lib/r2api';
 import { useFolderSizeStore } from './stores/folderSizeStore';
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
+import { formatBytes } from './utils/formatBytes';
 
 function formatDate(date: string): string {
   return new Date(date).toLocaleDateString(undefined, {
@@ -90,12 +68,7 @@ export default function Home() {
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [searchQuery, setSearchQuery] = useState('');
   const [sizeSort, setSizeSort] = useState<SortOrder>(null);
-  const [appVersion, setAppVersion] = useState<string>('');
-  const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string } | null>(
-    null
-  );
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const { message, modal } = App.useApp();
+  const { message } = App.useApp();
   const { theme, toggleTheme } = useTheme();
 
   // Convert to R2Config for hooks compatibility
@@ -108,11 +81,11 @@ export default function Home() {
   }, [currentConfig?.bucket, currentConfig?.token_id]);
 
   const { items, isLoading, isFetching, error, refresh } = useR2Files(config, currentPath);
-  const { isSynced, refresh: refreshSync } = useFilesSync(config);
+  const { isSyncing, isSynced, refresh: refreshSync } = useFilesSync(config);
 
-  // Zustand store for folder sizes
-  const folderSizes = useFolderSizeStore((state) => state.sizes);
-  const calculateSizes = useFolderSizeStore((state) => state.calculateSizes);
+  // Zustand store for folder metadata
+  const metadata = useFolderSizeStore((state) => state.metadata);
+  const loadMetadataList = useFolderSizeStore((state) => state.loadMetadataList);
   const clearSizes = useFolderSizeStore((state) => state.clearSizes);
 
   // Clear folder sizes when bucket/token changes
@@ -134,13 +107,13 @@ export default function Home() {
     if (sizeSort) {
       result = [...result].sort((a, b) => {
         const sizeA = a.isFolder
-          ? typeof folderSizes[a.key] === 'number'
-            ? (folderSizes[a.key] as number)
+          ? typeof metadata[a.key]?.size === 'number'
+            ? (metadata[a.key].size as number)
             : 0
           : a.size || 0;
         const sizeB = b.isFolder
-          ? typeof folderSizes[b.key] === 'number'
-            ? (folderSizes[b.key] as number)
+          ? typeof metadata[b.key]?.size === 'number'
+            ? (metadata[b.key].size as number)
             : 0
           : b.size || 0;
         return sizeSort === 'asc' ? sizeA - sizeB : sizeB - sizeA;
@@ -148,17 +121,17 @@ export default function Home() {
     }
 
     return result;
-  }, [items, searchQuery, sizeSort, folderSizes]);
+  }, [items, searchQuery, sizeSort, metadata]);
 
-  // Calculate folder sizes from IndexedDB when items change and sync is complete
+  // Load folder metadata from directory tree when items change and sync is complete
   useEffect(() => {
     if (!isSynced || items.length === 0) return;
 
     const folderKeys = items.filter((item) => item.isFolder).map((item) => item.key);
     if (folderKeys.length > 0) {
-      calculateSizes(folderKeys);
+      loadMetadataList(folderKeys);
     }
-  }, [isSynced, items, calculateSizes]);
+  }, [isSynced, items, loadMetadataList]);
 
   // Show error if API fails
   useEffect(() => {
@@ -171,7 +144,6 @@ export default function Home() {
   // Initialize store on mount
   useEffect(() => {
     initialize();
-    loadVersion();
   }, []);
 
   // Open add account modal if no accounts exist after initialization
@@ -187,45 +159,6 @@ export default function Home() {
       openAddAccountModal();
     }
   }, [initialized, loading, currentConfig]);
-
-  async function loadVersion() {
-    try {
-      const version = await getVersion();
-      setAppVersion(version);
-    } catch (e) {
-      console.error('Failed to get version:', e);
-    }
-  }
-
-  const checkForUpdate = useCallback(async () => {
-    setCheckingUpdate(true);
-    try {
-      const update = await check();
-      if (update) {
-        setUpdateAvailable({ version: update.version, body: update.body ?? undefined });
-        modal.confirm({
-          title: `Update Available: v${update.version}`,
-          content: update.body || 'A new version is available. Would you like to update now?',
-          okText: 'Update Now',
-          cancelText: 'Later',
-          onOk: async () => {
-            message.loading({ content: 'Downloading update...', key: 'update', duration: 0 });
-            await update.downloadAndInstall();
-            message.success({ content: 'Update installed! Restarting...', key: 'update' });
-            await relaunch();
-          },
-        });
-      } else {
-        message.success("You're on the latest version!");
-        setUpdateAvailable(null);
-      }
-    } catch (e) {
-      console.error('Update check failed:', e);
-      message.error('Failed to check for updates');
-    } finally {
-      setCheckingUpdate(false);
-    }
-  }, [message, modal]);
 
   function openAddAccountModal() {
     setConfigModalMode('add-account');
@@ -485,10 +418,10 @@ export default function Home() {
                       </span>
                       <span className="col-size">
                         {item.isFolder
-                          ? folderSizes[item.key] === 'loading'
+                          ? metadata[item.key]?.size === 'loading'
                             ? '...'
-                            : typeof folderSizes[item.key] === 'number'
-                              ? formatBytes(folderSizes[item.key] as number)
+                            : typeof metadata[item.key]?.size === 'number'
+                              ? formatBytes(metadata[item.key].size as number)
                               : '--'
                           : formatBytes(item.size || 0)}
                       </span>
@@ -527,46 +460,21 @@ export default function Home() {
                   onDelete={handleDelete}
                   onRename={handleRenameClick}
                   publicDomain={config?.publicDomain}
-                  folderSizes={folderSizes}
+                  folderSizes={metadata}
                 />
               )}
             </div>
           )}
 
           {/* Status Bar */}
-          <div className="status-bar">
-            <Space size="middle">
-              <Tooltip title="Check for updates">
-                <Badge dot={!!updateAvailable} offset={[-2, 2]}>
-                  <Button
-                    type="text"
-                    size="small"
-                    icon={<CloudSyncOutlined spin={checkingUpdate} />}
-                    onClick={checkForUpdate}
-                    loading={checkingUpdate}
-                  >
-                    v{appVersion || '...'}
-                  </Button>
-                </Badge>
-              </Tooltip>
-              {config && (
-                <span>
-                  {searchQuery
-                    ? `${filteredItems.length} of ${items.length} items`
-                    : `${items.length} items`}
-                </span>
-              )}
-            </Space>
-            {currentConfig && (
-              <span className="domain">
-                {currentConfig.public_domain
-                  ? currentConfig.public_domain
-                  : currentConfig.access_key_id
-                    ? `${currentConfig.account_id}.r2.cloudflarestorage.com (signed)`
-                    : `${currentConfig.account_id}.r2.cloudflarestorage.com`}
-              </span>
-            )}
-          </div>
+          <StatusBar
+            filteredItemsCount={filteredItems.length}
+            totalItemsCount={items.length}
+            searchQuery={searchQuery}
+            hasConfig={!!config}
+            currentConfig={currentConfig}
+            isSyncing={isSyncing}
+          />
 
           <ConfigModal
             open={configModalOpen}

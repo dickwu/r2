@@ -171,6 +171,11 @@ body {
   color: #f6821f;
 }
 
+.status-bar .bucket-stats {
+  color: #666;
+  font-weight: 500;
+}
+
 /* Empty State */
 .file-list .ant-empty {
   padding: 60px 0;
@@ -366,6 +371,10 @@ html.dark .status-bar {
   background: #1f1f1f;
   border-color: #303030;
   color: #666;
+}
+
+html.dark .status-bar .bucket-stats {
+  color: #999;
 }
 
 /* Dark Mode Grid */
@@ -815,4 +824,28 @@ html.dark ::-webkit-scrollbar-thumb:hover {
 
 html.dark * {
   scrollbar-color: #444 #1a1a1a;
+}
+
+/* File Rename Modal Tree Styles */
+.ant-tree .ant-tree-treenode {
+  width: 100%;
+}
+
+.ant-tree .ant-tree-node-content-wrapper {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex !important;
+  align-items: center;
+}
+
+.ant-tree .ant-tree-iconEle {
+  display: inline-flex;
+  align-items: center;
+}
+
+.ant-tree .ant-tree-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
 }

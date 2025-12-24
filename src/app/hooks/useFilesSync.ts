@@ -1,7 +1,7 @@
 import { useCallback } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { listAllR2ObjectsRecursive } from '../lib/r2api';
-import { storeAllFiles } from '../lib/indexeddb';
+import { storeAllFiles, buildDirectoryTree, getAllFiles } from '../lib/indexeddb';
 import { useFolderSizeStore } from '../stores/folderSizeStore';
 import { R2Config } from '../components/ConfigModal';
 
@@ -19,11 +19,22 @@ export function useFilesSync(config: R2Config | null) {
       // Clear sizes before resyncing
       clearSizes();
 
+      // Fetch all files from R2
       const allFiles = await listAllR2ObjectsRecursive(config);
+
+      // Store files in IndexedDB
       await storeAllFiles(allFiles);
 
-      console.log(`Synced ${allFiles.length} files to IndexedDB`);
-      return { count: allFiles.length, timestamp: Date.now() };
+      // Get stored files and build directory tree
+      const storedFiles = await getAllFiles();
+      await buildDirectoryTree(storedFiles);
+
+      console.log(`Synced ${allFiles.length} files and built directory tree`);
+      return {
+        count: allFiles.length,
+        timestamp: Date.now(),
+        treeBuilt: true,
+      };
     },
     enabled: !!config?.token && !!config?.bucket && !!config?.accountId,
     staleTime: 5 * 60 * 1000, // 5 minutes

@@ -1,11 +1,12 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Modal, Input, Form, App, Tree, Space } from 'antd';
-import { FolderOutlined } from '@ant-design/icons';
+import { Modal, Input, Form, App, Tree, Space, Tag, Switch } from 'antd';
+import { FolderOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import type { DataNode } from 'antd/es/tree';
 import type { R2Config } from './ConfigModal';
-import { listAllR2ObjectsRecursive } from '../lib/r2api';
+import { getAllDirectoryNodes } from '../lib/indexeddb';
+import { formatBytes } from '../utils/formatBytes';
 
 // Custom input component for directory path with visual separators
 interface DirectoryInputProps {
@@ -51,6 +52,7 @@ export default function FileRenameModal({
   const [loading, setLoading] = useState(false);
   const [loadingFolders, setLoadingFolders] = useState(false);
   const [treeData, setTreeData] = useState<DataNode[]>([]);
+  const [showMetadata, setShowMetadata] = useState(true);
   const { message } = App.useApp();
   const treeContainerRef = useRef<HTMLDivElement>(null);
 
@@ -71,6 +73,13 @@ export default function FileRenameModal({
       loadFolders();
     }
   }, [open, currentDir, currentName, form]);
+
+  // Rebuild tree when metadata visibility changes
+  useEffect(() => {
+    if (treeData.length > 0) {
+      loadFolders();
+    }
+  }, [showMetadata]);
 
   // Auto-scroll to highlighted directory after tree loads
   useEffect(() => {
@@ -94,25 +103,12 @@ export default function FileRenameModal({
 
     setLoadingFolders(true);
     try {
-      const allObjects = await listAllR2ObjectsRecursive(config);
-
-      // Extract unique folder paths from all object keys
-      const folderSet = new Set<string>();
-
-      for (const obj of allObjects) {
-        const key = obj.key;
-        let currentPath = '';
-        const parts = key.split('/');
-
-        // Build all intermediate folder paths
-        for (let i = 0; i < parts.length - 1; i++) {
-          currentPath += parts[i] + '/';
-          folderSet.add(currentPath);
-        }
-      }
-
-      // Build tree structure
-      const tree = buildFolderTree(Array.from(folderSet).sort());
+      // Load directory nodes from IndexedDB (pre-built during sync)
+      const directoryNodes = await getAllDirectoryNodes();
+      // Extract folder paths from directory nodes
+      const folderPaths = directoryNodes.map((node) => node.path).sort();
+      // Build tree structure with metadata
+      const tree = buildFolderTree(folderPaths, directoryNodes);
       setTreeData(tree);
     } catch (error) {
       console.error('Failed to load folders:', error);
@@ -122,14 +118,34 @@ export default function FileRenameModal({
     }
   };
 
-  // Convert flat folder paths to tree structure
-  const buildFolderTree = (folders: string[]): DataNode[] => {
+  // Convert flat folder paths to tree structure with metadata
+  const buildFolderTree = (
+    folders: string[],
+    directoryNodes: Array<{ path: string; totalFileCount: number; totalSize: number }>
+  ): DataNode[] => {
     const root: DataNode[] = [];
     const map = new Map<string, DataNode>();
 
+    // Create a lookup map for directory metadata
+    const metadataMap = new Map(directoryNodes.map((node) => [node.path, node]));
+
+    // Get root metadata
+    const rootMetadata = metadataMap.get('');
+    const rootTitle =
+      rootMetadata && showMetadata ? (
+        <>
+          <span style={{ flex: 1 }}>/ (root)</span>
+          <Tag color="blue" style={{ fontSize: 11, marginLeft: 'auto' }}>
+            {rootMetadata.totalFileCount} files · {formatBytes(rootMetadata.totalSize)}
+          </Tag>
+        </>
+      ) : (
+        '/ (root)'
+      );
+
     // Add root node
     const rootNode: DataNode = {
-      title: '/ (root)',
+      title: rootTitle,
       key: '',
       icon: <FolderOutlined />,
       children: [],
@@ -143,18 +159,35 @@ export default function FileRenameModal({
     for (const folderPath of sortedFolders) {
       if (!folderPath) continue; // Skip empty root
 
+      // Normalize path: ensure trailing slash for consistency
+      const normalizedPath = folderPath.endsWith('/') ? folderPath : folderPath + '/';
+
       const parts = folderPath.replace(/\/$/, '').split('/');
       const folderName = parts[parts.length - 1];
       const parentPath = parts.length > 1 ? parts.slice(0, -1).join('/') + '/' : '';
 
+      // Get metadata for this folder (try both with and without trailing slash)
+      const metadata = metadataMap.get(folderPath) || metadataMap.get(normalizedPath);
+      const title =
+        metadata && showMetadata ? (
+          <>
+            <span style={{ flex: 1 }}>{folderName}</span>
+            <Tag color="blue" style={{ fontSize: 11, marginLeft: 'auto' }}>
+              {metadata.totalFileCount} files · {formatBytes(metadata.totalSize)}
+            </Tag>
+          </>
+        ) : (
+          folderName
+        );
+
       const node: DataNode = {
-        title: folderName,
-        key: folderPath,
+        title,
+        key: normalizedPath,
         icon: <FolderOutlined />,
         children: [],
       };
 
-      map.set(folderPath, node);
+      map.set(normalizedPath, node);
 
       // Add to parent
       const parent = map.get(parentPath);
@@ -222,9 +255,11 @@ export default function FileRenameModal({
       confirmLoading={loading}
       okText="Save"
       cancelText="Cancel"
-      width={500}
+      width={'90%'}
+      height={'90%'}
+      style={{ top: '3%' }}
     >
-      <Form form={form} layout="vertical">
+      <Form form={form} layout="vertical" style={{ height: '80vh', overflow: 'auto' }}>
         <Form.Item label="Directory Path" name="directory" initialValue={currentDirDisplay}>
           <DirectoryInput />
         </Form.Item>
@@ -242,8 +277,20 @@ export default function FileRenameModal({
 
               return (
                 <div style={{ marginBottom: 16 }}>
-                  <div style={{ marginBottom: 8, fontSize: 14, fontWeight: 500 }}>
-                    Existing Folders
+                  <div
+                    style={{
+                      marginBottom: 8,
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <span style={{ fontSize: 14, fontWeight: 500 }}>Existing Folders</span>
+                    <Space size="small">
+                      <InfoCircleOutlined style={{ color: '#999', fontSize: 12 }} />
+                      <span style={{ fontSize: 12, color: '#666' }}>Show details</span>
+                      <Switch size="small" checked={showMetadata} onChange={setShowMetadata} />
+                    </Space>
                   </div>
                   <div
                     ref={treeContainerRef}
@@ -271,6 +318,9 @@ export default function FileRenameModal({
                             const value = (selectedKeys[0] as string).replace(/\/$/, '');
                             form.setFieldsValue({ directory: value });
                           }
+                        }}
+                        style={{
+                          fontSize: 13,
                         }}
                       />
                     )}

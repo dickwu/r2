@@ -9,18 +9,12 @@ import {
   EditOutlined,
 } from '@ant-design/icons';
 import { FileItem } from '../hooks/useR2Files';
+import { FolderMetadata } from '../stores/folderSizeStore';
 import VideoThumbnail from './VideoThumbnail';
+import { formatBytes } from '../utils/formatBytes';
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'mov', 'm4v'];
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
 
 function getFileExtension(filename: string): string {
   return filename.split('.').pop()?.toLowerCase() || '';
@@ -40,15 +34,13 @@ function getFileUrl(key: string, publicDomain?: string): string | null {
   return `https://${domain}/${key}`;
 }
 
-type FolderSizeState = number | 'loading' | 'error';
-
 interface FileGridViewProps {
   items: FileItem[];
   onItemClick: (item: FileItem) => void;
   onDelete: (item: FileItem) => void;
   onRename: (item: FileItem) => void;
   publicDomain?: string;
-  folderSizes?: Record<string, FolderSizeState>;
+  folderSizes?: Record<string, FolderMetadata>;
 }
 
 const FileCard = memo(function FileCard({
@@ -57,14 +49,14 @@ const FileCard = memo(function FileCard({
   onItemClick,
   onDelete,
   onRename,
-  folderSize,
+  folderMetadata,
 }: {
   item: FileItem;
   publicDomain?: string;
   onItemClick: (item: FileItem) => void;
   onDelete: (item: FileItem) => void;
   onRename: (item: FileItem) => void;
-  folderSize?: FolderSizeState;
+  folderMetadata?: FolderMetadata;
 }) {
   const isImage = !item.isFolder && isImageFile(item.name);
   const isVideo = !item.isFolder && isVideoFile(item.name);
@@ -124,10 +116,10 @@ const FileCard = memo(function FileCard({
       </div>
       <div className="grid-card-meta">
         {item.isFolder
-          ? folderSize === 'loading'
+          ? folderMetadata?.size === 'loading'
             ? '...'
-            : typeof folderSize === 'number'
-              ? formatBytes(folderSize)
+            : typeof folderMetadata?.size === 'number'
+              ? formatBytes(folderMetadata.size)
               : 'Folder'
           : formatBytes(item.size || 0)}
       </div>
@@ -175,7 +167,7 @@ export default memo(function FileGridView({
               onItemClick={onItemClick}
               onDelete={onDelete}
               onRename={onRename}
-              folderSize={item.isFolder ? folderSizes?.[item.key] : undefined}
+              folderMetadata={item.isFolder ? folderSizes?.[item.key] : undefined}
             />
           ),
         }))}
