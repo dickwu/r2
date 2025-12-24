@@ -3,7 +3,7 @@ name = "r2"
 version = "0.1.21"
 description = "A Tauri App"
 authors = ["you"]
-edition = "2021"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -37,7 +37,7 @@ chrono = "0.4"
 urlencoding = "2"
 lazy_static = "1.4"
 libsql = "0.9"
-rusqlite = { version = "0.32", features = ["bundled"] }  # Kept for migration from old databases
+rusqlite = { version = "0.32" }  # Kept for migration from old databases, uses system SQLite
 log = "0.4"
 tauri-plugin-video-thumbnail = { git = "https://github.com/dickwu/tauri-plugin-video-thumbnail" }
 # AWS S3 SDK for R2 operations

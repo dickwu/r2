@@ -49,7 +49,7 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev pkg-config
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libsqlite3-dev pkg-config
 
       - name: Install ffmpeg (macOS)
         if: matrix.platform == 'macos-latest'
@@ -69,7 +69,7 @@ jobs:
         shell: pwsh
         run: |
           # Use vcpkg to install FFmpeg for better Rust integration
-          C:\vcpkg\vcpkg.exe install ffmpeg[core,avcodec,avformat,avutil,swscale]:x64-windows
+          C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows
 
       - name: Setup FFmpeg environment (Windows)
         if: matrix.platform == 'windows-latest'
