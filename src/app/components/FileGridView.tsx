@@ -1,11 +1,12 @@
 import { memo, useCallback } from 'react';
-import { Masonry, Card, Popconfirm, Button } from 'antd';
+import { Masonry, Card, Popconfirm, Button, Space } from 'antd';
 import {
   FolderOutlined,
   FileOutlined,
   FileImageOutlined,
   PlaySquareOutlined,
   DeleteOutlined,
+  EditOutlined,
 } from '@ant-design/icons';
 import { FileItem } from '../hooks/useR2Files';
 import VideoThumbnail from './VideoThumbnail';
@@ -45,6 +46,7 @@ interface FileGridViewProps {
   items: FileItem[];
   onItemClick: (item: FileItem) => void;
   onDelete: (item: FileItem) => void;
+  onRename: (item: FileItem) => void;
   publicDomain?: string;
   folderSizes?: Record<string, FolderSizeState>;
 }
@@ -54,12 +56,14 @@ const FileCard = memo(function FileCard({
   publicDomain,
   onItemClick,
   onDelete,
+  onRename,
   folderSize,
 }: {
   item: FileItem;
   publicDomain?: string;
   onItemClick: (item: FileItem) => void;
   onDelete: (item: FileItem) => void;
+  onRename: (item: FileItem) => void;
   folderSize?: FolderSizeState;
 }) {
   const isImage = !item.isFolder && isImageFile(item.name);
@@ -74,6 +78,10 @@ const FileCard = memo(function FileCard({
   const handleDelete = useCallback(() => {
     return onDelete(item);
   }, [onDelete, item]);
+
+  const handleRename = useCallback(() => {
+    onRename(item);
+  }, [onRename, item]);
 
   const stopPropagation = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -125,16 +133,19 @@ const FileCard = memo(function FileCard({
       </div>
       {!item.isFolder && (
         <div className="grid-card-actions" onClick={stopPropagation}>
-          <Popconfirm
-            title="Delete file"
-            description={`Are you sure you want to delete "${item.name}"?`}
-            onConfirm={handleDelete}
-            okText="Delete"
-            cancelText="Cancel"
-            okButtonProps={{ danger: true }}
-          >
-            <Button type="text" size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
+          <Space size={4}>
+            <Button type="text" size="small" icon={<EditOutlined />} onClick={handleRename} />
+            <Popconfirm
+              title="Delete file"
+              description={`Are you sure you want to delete "${item.name}"?`}
+              onConfirm={handleDelete}
+              okText="Delete"
+              cancelText="Cancel"
+              okButtonProps={{ danger: true }}
+            >
+              <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          </Space>
         </div>
       )}
     </Card>
@@ -145,6 +156,7 @@ export default memo(function FileGridView({
   items,
   onItemClick,
   onDelete,
+  onRename,
   publicDomain,
   folderSizes,
 }: FileGridViewProps) {
@@ -162,6 +174,7 @@ export default memo(function FileGridView({
               publicDomain={publicDomain}
               onItemClick={onItemClick}
               onDelete={onDelete}
+              onRename={onRename}
               folderSize={item.isFolder ? folderSizes?.[item.key] : undefined}
             />
           ),

@@ -1,4 +1,4 @@
-import { fetch } from '@tauri-apps/plugin-http';
+import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import type { R2Config } from '../components/ConfigModal';
 
 export interface R2Object {
@@ -54,7 +54,7 @@ interface ListBucketsResponse {
 export async function listR2Buckets(accountId: string, token: string): Promise<R2Bucket[]> {
   const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/r2/buckets`;
 
-  const response = await fetch(url, {
+  const response = await tauriFetch(url, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -89,7 +89,7 @@ export async function listR2Objects(
   if (cursor) params.set('cursor', cursor);
   params.set('per_page', perPage.toString());
 
-  const response = await fetch(`${url}?${params}`, {
+  const response = await tauriFetch(`${url}?${params}`, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${config.token}`,
@@ -164,7 +164,7 @@ export async function listAllR2ObjectsRecursive(config: R2Config): Promise<R2Obj
 export async function deleteR2Object(config: R2Config, key: string): Promise<void> {
   const url = `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/r2/buckets/${config.bucket}/objects/${encodeURIComponent(key)}`;
 
-  const response = await fetch(url, {
+  const response = await tauriFetch(url, {
     method: 'DELETE',
     headers: {
       Authorization: `Bearer ${config.token}`,
@@ -222,4 +222,102 @@ export async function verifyS3Credentials(
   });
 
   await client.send(new HeadBucketCommand({ Bucket: bucket }));
+}
+
+// Custom HTTP handler that uses Tauri fetch to bypass CORS
+class TauriHttpHandler {
+  async handle(request: any) {
+    const { protocol, hostname, port, path, query, method, headers, body } = request;
+
+    // Build URL with query params if present
+    const queryString = query
+      ? `?${Object.entries(query)
+          .map(([k, v]) => `${k}=${v}`)
+          .join('&')}`
+      : '';
+    const url = `${protocol}//${hostname}${port ? `:${port}` : ''}${path}${queryString}`;
+
+    // Convert headers object to plain object
+    const headerObj: Record<string, string> = {};
+    if (headers) {
+      for (const [key, value] of Object.entries(headers)) {
+        headerObj[key] = String(value);
+      }
+    }
+
+    // Handle body - AWS SDK might send Uint8Array or undefined
+    let fetchBody: BodyInit | undefined = undefined;
+    if (body) {
+      if (body instanceof Uint8Array) {
+        fetchBody = body as BodyInit;
+      } else if (typeof body === 'string') {
+        fetchBody = body;
+      } else {
+        fetchBody = body as BodyInit;
+      }
+    }
+
+    const response = await tauriFetch(url, {
+      method,
+      headers: headerObj,
+      body: fetchBody,
+    });
+
+    const responseText = await response.text();
+    const responseBody = new TextEncoder().encode(responseText);
+
+    return {
+      response: {
+        statusCode: response.status,
+        headers: Object.fromEntries(response.headers.entries()),
+        body: new Uint8Array(responseBody),
+      },
+    };
+  }
+
+  destroy() {
+    // No cleanup needed
+  }
+}
+
+// Rename/move an R2 object using AWS SDK with Tauri fetch
+export async function renameR2Object(
+  accountId: string,
+  bucket: string,
+  accessKeyId: string,
+  secretAccessKey: string,
+  oldKey: string,
+  newKey: string
+): Promise<void> {
+  const { S3Client, CopyObjectCommand, DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+
+  const client = new S3Client({
+    region: 'auto',
+    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+    credentials: {
+      accessKeyId,
+      secretAccessKey,
+    },
+    requestHandler: new TauriHttpHandler() as any,
+  });
+
+  // Copy to new location
+  // Note: CopySource format depends on endpoint style
+  // With path-style: bucket/key
+  // With virtual-hosted style (R2 default): /bucket/key
+  await client.send(
+    new CopyObjectCommand({
+      Bucket: bucket,
+      CopySource: `/${bucket}/${oldKey}`,
+      Key: newKey,
+    })
+  );
+
+  // Delete old object
+  await client.send(
+    new DeleteObjectCommand({
+      Bucket: bucket,
+      Key: oldKey,
+    })
+  );
 }

@@ -33,17 +33,19 @@ import {
   CaretUpOutlined,
   CaretDownOutlined,
   DeleteOutlined,
+  EditOutlined,
 } from '@ant-design/icons';
 import { useTheme } from './providers';
 import ConfigModal, { ModalMode } from './components/ConfigModal';
 import UploadModal from './components/UploadModal';
 import FilePreviewModal from './components/FilePreviewModal';
+import FileRenameModal from './components/FileRenameModal';
 import FileGridView from './components/FileGridView';
 import AccountSidebar from './components/AccountSidebar';
 import { useAccountStore, Account, Token } from './stores/accountStore';
 import { useR2Files, FileItem } from './hooks/useR2Files';
 import { useFilesSync } from './hooks/useFilesSync';
-import { deleteR2Object } from './lib/r2api';
+import { deleteR2Object, renameR2Object } from './lib/r2api';
 import { useFolderSizeStore } from './stores/folderSizeStore';
 
 function formatBytes(bytes: number): string {
@@ -83,6 +85,7 @@ export default function Home() {
 
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
+  const [renameFile, setRenameFile] = useState<FileItem | null>(null);
   const [currentPath, setCurrentPath] = useState('');
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [searchQuery, setSearchQuery] = useState('');
@@ -311,6 +314,40 @@ export default function Home() {
     [config, message, refresh, refreshSync]
   );
 
+  const handleRenameClick = useCallback((item: FileItem) => {
+    setRenameFile(item);
+  }, []);
+
+  const handleRename = useCallback(
+    async (newPath: string) => {
+      if (!renameFile || !currentConfig) return;
+
+      // Check if S3 credentials are available
+      if (!currentConfig.access_key_id || !currentConfig.secret_access_key) {
+        throw new Error('S3 credentials required for rename/move operation');
+      }
+
+      // Perform rename using S3 API
+      await renameR2Object(
+        currentConfig.account_id,
+        currentConfig.bucket,
+        currentConfig.access_key_id,
+        currentConfig.secret_access_key,
+        renameFile.key,
+        newPath
+      );
+
+      // Close preview modal if the renamed file is currently being previewed
+      if (previewFile?.key === renameFile.key) {
+        setPreviewFile(null);
+      }
+
+      // Refresh file list
+      await Promise.all([refresh(), refreshSync()]);
+    },
+    [renameFile, currentConfig, previewFile, refresh, refreshSync]
+  );
+
   function navigateToPath(path: string) {
     setCurrentPath(path);
     setSearchQuery('');
@@ -460,16 +497,24 @@ export default function Home() {
                       </span>
                       <span className="col-actions" onClick={(e) => e.stopPropagation()}>
                         {!item.isFolder && (
-                          <Popconfirm
-                            title="Delete file"
-                            description={`Are you sure you want to delete "${item.name}"?`}
-                            onConfirm={() => handleDelete(item)}
-                            okText="Delete"
-                            cancelText="Cancel"
-                            okButtonProps={{ danger: true }}
-                          >
-                            <Button type="text" size="small" danger icon={<DeleteOutlined />} />
-                          </Popconfirm>
+                          <>
+                            <Button
+                              type="text"
+                              size="small"
+                              icon={<EditOutlined />}
+                              onClick={() => handleRenameClick(item)}
+                            />
+                            <Popconfirm
+                              title="Delete file"
+                              description={`Are you sure you want to delete "${item.name}"?`}
+                              onConfirm={() => handleDelete(item)}
+                              okText="Delete"
+                              cancelText="Cancel"
+                              okButtonProps={{ danger: true }}
+                            >
+                              <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+                            </Popconfirm>
+                          </>
                         )}
                       </span>
                     </div>
@@ -480,6 +525,7 @@ export default function Home() {
                   items={filteredItems}
                   onItemClick={handleItemClick}
                   onDelete={handleDelete}
+                  onRename={handleRenameClick}
                   publicDomain={config?.publicDomain}
                   folderSizes={folderSizes}
                 />
@@ -558,6 +604,15 @@ export default function Home() {
               // Credentials are now managed through the store
               initialize();
             }}
+          />
+
+          <FileRenameModal
+            open={!!renameFile}
+            onClose={() => setRenameFile(null)}
+            fileName={renameFile?.name || ''}
+            filePath={renameFile?.key || ''}
+            onRename={handleRename}
+            config={config}
           />
         </div>
       </div>
