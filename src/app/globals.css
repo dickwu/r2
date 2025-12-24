@@ -94,6 +94,19 @@ body {
   background: #fff7e6;
 }
 
+.file-item.selected {
+  background: #e6f7ff;
+  border-left: 3px solid #1890ff;
+  padding-left: 13px;
+}
+
+.col-checkbox {
+  width: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .col-name {
   flex: 1;
   display: flex;
@@ -317,6 +330,32 @@ body {
   background: #fff7e6;
 }
 
+.grid-card-checkbox {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 10;
+  opacity: 0;
+  transition: opacity 0.2s;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 4px;
+  padding: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.grid-card:hover .grid-card-checkbox {
+  opacity: 1;
+}
+
+.grid-card.selected .grid-card-checkbox {
+  opacity: 1;
+}
+
+.grid-card.selected {
+  border-color: #1890ff;
+  box-shadow: 0 0 0 2px rgba(24, 144, 255, 0.2);
+}
+
 /* Dark Mode */
 html.dark body {
   background-color: #141414;
@@ -352,6 +391,11 @@ html.dark .file-item:hover {
 
 html.dark .file-item.folder:hover {
   background: #2a2000;
+}
+
+html.dark .file-item.selected {
+  background: #111d2c;
+  border-left-color: #1890ff;
 }
 
 html.dark .col-size,
@@ -410,6 +454,15 @@ html.dark .grid-card-meta {
 
 html.dark .grid-card-actions .ant-btn {
   background: rgba(30, 30, 30, 0.9);
+}
+
+html.dark .grid-card-checkbox {
+  background: rgba(30, 30, 30, 0.9);
+}
+
+html.dark .grid-card.selected {
+  border-color: #1890ff;
+  box-shadow: 0 0 0 2px rgba(24, 144, 255, 0.15);
 }
 
 /* Account Sidebar */

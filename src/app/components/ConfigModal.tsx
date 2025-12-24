@@ -11,7 +11,7 @@ import {
   UserOutlined,
   KeyOutlined,
 } from '@ant-design/icons';
-import { listR2Buckets } from '../lib/r2api';
+import { listR2Buckets } from '../lib/r2cache';
 import { useAccountStore, Account, Token, Bucket } from '../stores/accountStore';
 
 export interface BucketConfig {
@@ -160,16 +160,17 @@ export default function ConfigModal({
 
   async function handleLoadBuckets() {
     const accountId = form.getFieldValue('accountId');
-    const apiToken = form.getFieldValue('apiToken');
+    const accessKeyId = form.getFieldValue('accessKeyId');
+    const secretAccessKey = form.getFieldValue('secretAccessKey');
 
-    if (!accountId || !apiToken) {
-      message.warning('Please enter Account ID and API Token first');
+    if (!accountId || !accessKeyId || !secretAccessKey) {
+      message.warning('Please enter Account ID, Access Key ID, and Secret Access Key first');
       return;
     }
 
     setLoadingBuckets(true);
     try {
-      const result = await listR2Buckets(accountId, apiToken);
+      const result = await listR2Buckets(accountId, accessKeyId, secretAccessKey);
       // Merge with existing buckets to preserve domain settings
       const newBuckets = result.map((b) => {
         const existing = buckets.find((eb) => eb.name === b.name);

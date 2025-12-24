@@ -61,7 +61,9 @@ export default function Providers({ children }: { children: React.ReactNode }) {
             },
           }}
         >
-          <App>{children}</App>
+          <App>
+            <div className="user-select-none cursor-default select-none">{children}</div>
+          </App>
         </ConfigProvider>
       </ThemeContext.Provider>
       <ReactQueryDevtools initialIsOpen={false} />

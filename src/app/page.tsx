@@ -1,7 +1,19 @@
 'use client';
 
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { Button, Breadcrumb, Space, App, Spin, Empty, Segmented, Input, Popconfirm } from 'antd';
+import {
+  Button,
+  Breadcrumb,
+  Space,
+  App,
+  Spin,
+  Empty,
+  Segmented,
+  Input,
+  Popconfirm,
+  Checkbox,
+  Modal,
+} from 'antd';
 import {
   SettingOutlined,
   ReloadOutlined,
@@ -30,7 +42,7 @@ import StatusBar from './components/StatusBar';
 import { useAccountStore, Account, Token } from './stores/accountStore';
 import { useR2Files, FileItem } from './hooks/useR2Files';
 import { useFilesSync } from './hooks/useFilesSync';
-import { deleteR2Object, renameR2Object } from './lib/r2api';
+import { deleteR2Object, renameR2Object } from './lib/r2cache';
 import { useFolderSizeStore } from './stores/folderSizeStore';
 import { formatBytes } from './utils/formatBytes';
 
@@ -68,6 +80,9 @@ export default function Home() {
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [searchQuery, setSearchQuery] = useState('');
   const [sizeSort, setSizeSort] = useState<SortOrder>(null);
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleteConfirmInput, setDeleteConfirmInput] = useState('');
   const { message } = App.useApp();
   const { theme, toggleTheme } = useTheme();
 
@@ -78,6 +93,7 @@ export default function Home() {
   useEffect(() => {
     setCurrentPath('');
     setSearchQuery('');
+    setSelectedKeys(new Set());
   }, [currentConfig?.bucket, currentConfig?.token_id]);
 
   const { items, isLoading, isFetching, error, refresh } = useR2Files(config, currentPath);
@@ -216,9 +232,31 @@ export default function Home() {
     if (item.isFolder) {
       setCurrentPath(item.key);
       setSearchQuery('');
+      setSelectedKeys(new Set());
     } else {
       setPreviewFile(item);
     }
+  }, []);
+
+  const toggleSelection = useCallback((key: string) => {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }, []);
+
+  const selectAll = useCallback(() => {
+    const fileKeys = filteredItems.filter((item) => !item.isFolder).map((item) => item.key);
+    setSelectedKeys(new Set(fileKeys));
+  }, [filteredItems]);
+
+  const clearSelection = useCallback(() => {
+    setSelectedKeys(new Set());
   }, []);
 
   const handleRefresh = useCallback(() => {
@@ -247,6 +285,42 @@ export default function Home() {
     [config, message, refresh, refreshSync]
   );
 
+  const openBatchDeleteConfirm = useCallback(() => {
+    setDeleteConfirmInput('');
+    setDeleteConfirmOpen(true);
+  }, []);
+
+  const closeBatchDeleteConfirm = useCallback(() => {
+    setDeleteConfirmOpen(false);
+    setDeleteConfirmInput('');
+  }, []);
+
+  const handleBatchDelete = useCallback(async () => {
+    if (!config || selectedKeys.size === 0) return;
+
+    const keys = Array.from(selectedKeys);
+    const count = keys.length;
+
+    // Close confirmation modal
+    closeBatchDeleteConfirm();
+
+    try {
+      message.loading(`Deleting ${count} file${count > 1 ? 's' : ''}...`);
+
+      // Delete all selected files
+      await Promise.all(keys.map((key) => deleteR2Object(config, key)));
+
+      message.success(`Deleted ${count} file${count > 1 ? 's' : ''}`);
+      setSelectedKeys(new Set());
+
+      // Refresh file list after deletion
+      await Promise.all([refresh(), refreshSync()]);
+    } catch (e) {
+      console.error('Batch delete error:', e);
+      message.error(`Failed to delete files: ${e instanceof Error ? e.message : 'Unknown error'}`);
+    }
+  }, [config, selectedKeys, message, refresh, refreshSync, closeBatchDeleteConfirm]);
+
   const handleRenameClick = useCallback((item: FileItem) => {
     setRenameFile(item);
   }, []);
@@ -262,10 +336,12 @@ export default function Home() {
 
       // Perform rename using S3 API
       await renameR2Object(
-        currentConfig.account_id,
-        currentConfig.bucket,
-        currentConfig.access_key_id,
-        currentConfig.secret_access_key,
+        {
+          accountId: currentConfig.account_id,
+          bucket: currentConfig.bucket,
+          accessKeyId: currentConfig.access_key_id,
+          secretAccessKey: currentConfig.secret_access_key,
+        },
         renameFile.key,
         newPath
       );
@@ -337,6 +413,24 @@ export default function Home() {
           <div className="toolbar">
             <Space>
               <Breadcrumb items={breadcrumbItems} />
+              {selectedKeys.size > 0 && (
+                <>
+                  <span style={{ color: 'var(--text-secondary)' }}>
+                    {selectedKeys.size} selected
+                  </span>
+                  <Button
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={openBatchDeleteConfirm}
+                  >
+                    Delete Selected
+                  </Button>
+                  <Button size="small" onClick={clearSelection}>
+                    Clear
+                  </Button>
+                </>
+              )}
             </Space>
             <Space>
               <Input
@@ -391,6 +485,26 @@ export default function Home() {
                 <>
                   {/* Header */}
                   <div className="file-list-header">
+                    <span className="col-checkbox">
+                      <Checkbox
+                        indeterminate={
+                          selectedKeys.size > 0 &&
+                          selectedKeys.size < filteredItems.filter((item) => !item.isFolder).length
+                        }
+                        checked={
+                          selectedKeys.size > 0 &&
+                          selectedKeys.size ===
+                            filteredItems.filter((item) => !item.isFolder).length
+                        }
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            selectAll();
+                          } else {
+                            clearSelection();
+                          }
+                        }}
+                      />
+                    </span>
                     <span className="col-name">Name</span>
                     <span className="col-size sortable" onClick={toggleSizeSort}>
                       Size
@@ -405,9 +519,17 @@ export default function Home() {
                   {filteredItems.map((item) => (
                     <div
                       key={item.key}
-                      className={`file-item ${item.isFolder ? 'folder' : 'file'}`}
+                      className={`file-item ${item.isFolder ? 'folder' : 'file'} ${selectedKeys.has(item.key) ? 'selected' : ''}`}
                       onClick={() => handleItemClick(item)}
                     >
+                      <span className="col-checkbox" onClick={(e) => e.stopPropagation()}>
+                        {!item.isFolder && (
+                          <Checkbox
+                            checked={selectedKeys.has(item.key)}
+                            onChange={() => toggleSelection(item.key)}
+                          />
+                        )}
+                      </span>
                       <span className="col-name">
                         {item.isFolder ? (
                           <FolderOutlined className="icon folder-icon" />
@@ -461,6 +583,8 @@ export default function Home() {
                   onRename={handleRenameClick}
                   publicDomain={config?.publicDomain}
                   folderSizes={metadata}
+                  selectedKeys={selectedKeys}
+                  onToggleSelection={toggleSelection}
                 />
               )}
             </div>
@@ -522,6 +646,38 @@ export default function Home() {
             onRename={handleRename}
             config={config}
           />
+
+          <Modal
+            title="Confirm Batch Delete"
+            open={deleteConfirmOpen}
+            onCancel={closeBatchDeleteConfirm}
+            onOk={handleBatchDelete}
+            okText="Delete"
+            okButtonProps={{
+              danger: true,
+              disabled: deleteConfirmInput !== selectedKeys.size.toString(),
+            }}
+          >
+            <p>
+              You are about to delete <strong>{selectedKeys.size}</strong> file
+              {selectedKeys.size > 1 ? 's' : ''}.
+            </p>
+            <p>This action cannot be undone.</p>
+            <p style={{ marginTop: 16, marginBottom: 8 }}>
+              Please type <strong>{selectedKeys.size}</strong> to confirm:
+            </p>
+            <Input
+              value={deleteConfirmInput}
+              onChange={(e) => setDeleteConfirmInput(e.target.value)}
+              placeholder={`Type ${selectedKeys.size} to confirm`}
+              autoFocus
+              onPressEnter={() => {
+                if (deleteConfirmInput === selectedKeys.size.toString()) {
+                  handleBatchDelete();
+                }
+              }}
+            />
+          </Modal>
         </div>
       </div>
     </div>

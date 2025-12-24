@@ -252,13 +252,14 @@ async fn upload_multipart(
         key,
         &config.bucket,
         &config.account_id,
-    ) {
+    ).await {
         Ok(Some(session)) => {
             // Found existing session - verify upload_id is still valid on R2
             let upload_id = session.upload_id.clone().unwrap();
             
             // Get completed parts from DB
             let parts = db::get_completed_parts(&session.id)
+                .await
                 .map_err(|e| format!("Failed to get completed parts: {}", e))?;
             
             let part_set: HashSet<i32> = parts.iter().map(|p| p.part_number).collect();
@@ -321,7 +322,7 @@ async fn upload_multipart(
                 status: "uploading".to_string(),
             };
 
-            if let Err(e) = db::create_session(&session) {
+            if let Err(e) = db::create_session(&session).await {
                 log::warn!("Failed to save session to DB: {}", e);
             }
 
@@ -450,7 +451,7 @@ async fn upload_multipart(
                 .to_string();
 
             // Save completed part to DB
-            if let Err(e) = db::save_completed_part(&session_id, part_number as i32, &etag) {
+            if let Err(e) = db::save_completed_part(&session_id, part_number as i32, &etag).await {
                 log::warn!("Failed to save part {} to DB: {}", part_number, e);
             }
 
@@ -504,7 +505,7 @@ async fn upload_multipart(
 
     if cancelled.load(Ordering::SeqCst) {
         // Mark session as cancelled but don't delete (can be resumed later)
-        let _ = db::update_session_status(&session_id, "cancelled");
+        let _ = db::update_session_status(&session_id, "cancelled").await;
         
         // Note: We don't abort the multipart upload on R2 so it can be resumed
         return Err("Upload cancelled".to_string());
@@ -512,7 +513,7 @@ async fn upload_multipart(
 
     if let Some(err) = upload_error {
         // Mark session as failed but keep it for retry
-        let _ = db::update_session_status(&session_id, "uploading");
+        let _ = db::update_session_status(&session_id, "uploading").await;
         return Err(err);
     }
 
@@ -551,8 +552,8 @@ async fn upload_multipart(
     }
 
     // Mark session as completed and clean up
-    let _ = db::update_session_status(&session_id, "completed");
-    let _ = db::delete_session(&session_id);
+    let _ = db::update_session_status(&session_id, "completed").await;
+    let _ = db::delete_session(&session_id).await;
 
     // Final progress update
     let elapsed = start_time.elapsed().as_secs_f64();
@@ -735,23 +736,25 @@ pub async fn get_folder_files(folder_path: String) -> Result<Vec<FolderFileInfo>
 /// Get all pending/uploading sessions (for showing resumable uploads in UI)
 #[tauri::command]
 pub async fn get_pending_uploads() -> Result<Vec<db::UploadSession>, String> {
-    db::get_pending_sessions().map_err(|e| format!("Failed to get pending sessions: {}", e))
+    db::get_pending_sessions().await.map_err(|e| format!("Failed to get pending sessions: {}", e))
 }
 
 /// Get upload session by ID
 #[tauri::command]
 pub async fn get_upload_session(session_id: String) -> Result<Option<db::UploadSession>, String> {
-    db::get_session(&session_id).map_err(|e| format!("Failed to get session: {}", e))
+    db::get_session(&session_id).await.map_err(|e| format!("Failed to get session: {}", e))
 }
 
 /// Get completed parts count for a session (for progress display)
 #[tauri::command]
 pub async fn get_session_progress(session_id: String) -> Result<(i32, i32), String> {
     let session = db::get_session(&session_id)
+        .await
         .map_err(|e| format!("Failed to get session: {}", e))?
         .ok_or("Session not found")?;
     
     let parts = db::get_completed_parts(&session_id)
+        .await
         .map_err(|e| format!("Failed to get parts: {}", e))?;
     
     Ok((parts.len() as i32, session.total_parts))
@@ -760,13 +763,13 @@ pub async fn get_session_progress(session_id: String) -> Result<(i32, i32), Stri
 /// Delete an upload session (e.g., user wants to restart from scratch)
 #[tauri::command]
 pub async fn delete_upload_session(session_id: String) -> Result<(), String> {
-    db::delete_session(&session_id).map_err(|e| format!("Failed to delete session: {}", e))
+    db::delete_session(&session_id).await.map_err(|e| format!("Failed to delete session: {}", e))
 }
 
 /// Clean up old sessions
 #[tauri::command]
 pub async fn cleanup_old_sessions() -> Result<usize, String> {
-    db::cleanup_old_sessions().map_err(|e| format!("Failed to cleanup: {}", e))
+    db::cleanup_old_sessions().await.map_err(|e| format!("Failed to cleanup: {}", e))
 }
 
 /// Check if a file has a resumable upload session
@@ -788,6 +791,8 @@ pub async fn check_resumable_upload(
         .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
         .unwrap_or(0);
     
-    db::find_resumable_session(&file_path, file_size, file_mtime, &object_key, &bucket, &account_id)
-        .map_err(|e| format!("Failed to check resumable session: {}", e))
+    match db::find_resumable_session(&file_path, file_size, file_mtime, &object_key, &bucket, &account_id).await {
+        Ok(result) => Ok(result),
+        Err(e) => Err(format!("Failed to check resumable session: {}", e)),
+    }
 }

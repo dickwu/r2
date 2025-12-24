@@ -4,6 +4,7 @@ import { useEffect, useMemo } from 'react';
 import { Space, Spin } from 'antd';
 import UpdateChecker from './UpdateChecker';
 import { useFolderSizeStore } from '../stores/folderSizeStore';
+import { useSyncStore } from '../stores/syncStore';
 import { formatBytes } from '../utils/formatBytes';
 
 interface StatusBarProps {
@@ -34,6 +35,7 @@ export default function StatusBar({
 }: StatusBarProps) {
   const metadata = useFolderSizeStore((state) => state.metadata);
   const loadMetadata = useFolderSizeStore((state) => state.loadMetadata);
+  const processedFiles = useSyncStore((state) => state.processedFiles);
 
   // Load root directory metadata (empty string = root)
   useEffect(() => {
@@ -70,14 +72,15 @@ export default function StatusBar({
           </span>
         )}
 
-        {/* Bucket-wide statistics */}
-        {hasConfig && bucketStats.loading && (
+        {/* Sync progress */}
+        {hasConfig && isSyncing && (
           <span>
-            <Spin size="small" /> Loading bucket info...
+            <Spin size="small" /> Syncing... {processedFiles.toLocaleString()} files processed
           </span>
         )}
 
-        {hasConfig && !bucketStats.loading && bucketStats.totalFiles !== null && (
+        {/* Bucket-wide statistics (show when not syncing) */}
+        {hasConfig && !isSyncing && !bucketStats.loading && bucketStats.totalFiles !== null && (
           <span className="bucket-stats">
             Bucket: {bucketStats.totalFiles.toLocaleString()} files
             {bucketStats.totalSize !== null && ` · ${formatBytes(bucketStats.totalSize)}`}

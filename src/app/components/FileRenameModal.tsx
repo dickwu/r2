@@ -5,7 +5,7 @@ import { Modal, Input, Form, App, Tree, Space, Tag, Switch } from 'antd';
 import { FolderOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import type { DataNode } from 'antd/es/tree';
 import type { R2Config } from './ConfigModal';
-import { getAllDirectoryNodes } from '../lib/indexeddb';
+import { getAllDirectoryNodes } from '../lib/r2cache';
 import { formatBytes } from '../utils/formatBytes';
 
 // Custom input component for directory path with visual separators

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { listAllR2Objects, R2Object } from '../lib/r2api';
+import { listAllR2Objects, R2Object } from '../lib/r2cache';
 import { R2Config } from '../components/ConfigModal';
 
 export interface FileItem {

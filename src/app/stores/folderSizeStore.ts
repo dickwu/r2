@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { calculateFolderSize, getDirectoryNode, DirectoryNode } from '../lib/indexeddb';
+import { calculateFolderSize, getDirectoryNode, DirectoryNode } from '../lib/r2cache';
 
 type FolderSizeState = number | 'loading' | 'error';
 

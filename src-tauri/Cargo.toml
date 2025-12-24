@@ -28,7 +28,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Upload dependencies
 reqwest = { version = "0.12", features = ["stream", "multipart"] }
-tokio = { version = "1", features = ["fs", "io-util", "sync"] }
+tokio = { version = "1", features = ["fs", "io-util", "sync", "rt-multi-thread"] }
 tokio-util = { version = "0.7", features = ["io"] }
 sha2 = "0.10"
 hmac = "0.12"
@@ -36,7 +36,12 @@ hex = "0.4"
 chrono = "0.4"
 urlencoding = "2"
 lazy_static = "1.4"
-rusqlite = { version = "0.32", features = ["bundled"] }
+libsql = "0.9"
+rusqlite = { version = "0.32", features = ["bundled"] }  # Kept for migration from old databases
 log = "0.4"
 tauri-plugin-video-thumbnail = { git = "https://github.com/dickwu/tauri-plugin-video-thumbnail" }
+# AWS S3 SDK for R2 operations
+aws-config = "1.7"
+aws-sdk-s3 = { version = "1.119", features = ["behavior-version-latest"] }
+aws-credential-types = "1.2"
 

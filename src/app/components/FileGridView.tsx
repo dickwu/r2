@@ -1,5 +1,5 @@
 import { memo, useCallback } from 'react';
-import { Masonry, Card, Popconfirm, Button, Space } from 'antd';
+import { Masonry, Card, Popconfirm, Button, Space, Checkbox } from 'antd';
 import {
   FolderOutlined,
   FileOutlined,
@@ -41,6 +41,8 @@ interface FileGridViewProps {
   onRename: (item: FileItem) => void;
   publicDomain?: string;
   folderSizes?: Record<string, FolderMetadata>;
+  selectedKeys?: Set<string>;
+  onToggleSelection?: (key: string) => void;
 }
 
 const FileCard = memo(function FileCard({
@@ -50,6 +52,8 @@ const FileCard = memo(function FileCard({
   onDelete,
   onRename,
   folderMetadata,
+  isSelected,
+  onToggleSelection,
 }: {
   item: FileItem;
   publicDomain?: string;
@@ -57,6 +61,8 @@ const FileCard = memo(function FileCard({
   onDelete: (item: FileItem) => void;
   onRename: (item: FileItem) => void;
   folderMetadata?: FolderMetadata;
+  isSelected?: boolean;
+  onToggleSelection?: (key: string) => void;
 }) {
   const isImage = !item.isFolder && isImageFile(item.name);
   const isVideo = !item.isFolder && isVideoFile(item.name);
@@ -79,10 +85,20 @@ const FileCard = memo(function FileCard({
     e.stopPropagation();
   }, []);
 
+  const handleToggleSelection = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (onToggleSelection) {
+        onToggleSelection(item.key);
+      }
+    },
+    [onToggleSelection, item.key]
+  );
+
   return (
     <Card
       hoverable
-      className={`grid-card ${item.isFolder ? 'folder' : 'file'} ${hasPreview ? 'has-preview' : ''}`}
+      className={`grid-card ${item.isFolder ? 'folder' : 'file'} ${hasPreview ? 'has-preview' : ''} ${isSelected ? 'selected' : ''}`}
       onClick={handleClick}
       cover={
         hasPreview ? (
@@ -98,6 +114,11 @@ const FileCard = memo(function FileCard({
         ) : undefined
       }
     >
+      {!item.isFolder && onToggleSelection && (
+        <div className="grid-card-checkbox" onClick={handleToggleSelection}>
+          <Checkbox checked={isSelected} />
+        </div>
+      )}
       {!hasPreview && (
         <div className="grid-card-icon">
           {item.isFolder ? (
@@ -151,6 +172,8 @@ export default memo(function FileGridView({
   onRename,
   publicDomain,
   folderSizes,
+  selectedKeys,
+  onToggleSelection,
 }: FileGridViewProps) {
   return (
     <div className="file-grid">
@@ -168,6 +191,8 @@ export default memo(function FileGridView({
               onDelete={onDelete}
               onRename={onRename}
               folderMetadata={item.isFolder ? folderSizes?.[item.key] : undefined}
+              isSelected={selectedKeys?.has(item.key)}
+              onToggleSelection={onToggleSelection}
             />
           ),
         }))}

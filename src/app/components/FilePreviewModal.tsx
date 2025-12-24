@@ -11,7 +11,7 @@ import {
 } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { FileItem } from '../hooks/useR2Files';
-import { generateSignedUrl } from '../lib/r2api';
+import { generateSignedUrl } from '../lib/r2cache';
 
 const { Text, Paragraph } = Typography;
 
