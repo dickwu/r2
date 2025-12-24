@@ -129,6 +129,8 @@ pub struct DirectoryNodeResponse {
     pub size: i64,
     #[serde(rename = "totalSize")]
     pub total_size: i64,
+    #[serde(rename = "lastModified")]
+    pub last_modified: Option<String>,
     #[serde(rename = "lastUpdated")]
     pub last_updated: i64,
 }
@@ -151,6 +153,7 @@ impl From<CachedDirectoryNode> for DirectoryNodeResponse {
             total_file_count: node.total_file_count,
             size: node.size,
             total_size: node.total_size,
+            last_modified: node.last_modified,
             last_updated: node.last_updated,
         }
     }

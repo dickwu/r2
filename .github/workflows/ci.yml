@@ -60,16 +60,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
-          key: ${{ runner.os }}-vcpkg-ffmpeg-${{ hashFiles('.github/workflows/*.yml') }}
+          key: ${{ runner.os }}-vcpkg-deps-${{ hashFiles('.github/workflows/*.yml') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-ffmpeg-
+            ${{ runner.os }}-vcpkg-deps-
 
-      - name: Install ffmpeg (Windows with vcpkg)
+      - name: Install dependencies (Windows with vcpkg)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
-          # Use vcpkg to install FFmpeg for better Rust integration
-          C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows
+          # Use vcpkg to install FFmpeg and SQLite3 for better Rust integration
+          C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows sqlite3:x64-windows
 
       - name: Setup FFmpeg environment (Windows)
         if: matrix.platform == 'windows-latest'

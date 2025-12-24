@@ -68,6 +68,7 @@ export default function Home() {
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [searchQuery, setSearchQuery] = useState('');
   const [sizeSort, setSizeSort] = useState<SortOrder>(null);
+  const [modifiedSort, setModifiedSort] = useState<SortOrder>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deleteConfirmInput, setDeleteConfirmInput] = useState('');
@@ -125,8 +126,25 @@ export default function Home() {
       });
     }
 
+    // Sort by modified date
+    if (modifiedSort) {
+      result = [...result].sort((a, b) => {
+        const dateA = a.isFolder
+          ? metadata[a.key]?.lastModified || ''
+          : a.lastModified || '';
+        const dateB = b.isFolder
+          ? metadata[b.key]?.lastModified || ''
+          : b.lastModified || '';
+        
+        const timeA = dateA ? new Date(dateA).getTime() : 0;
+        const timeB = dateB ? new Date(dateB).getTime() : 0;
+        
+        return modifiedSort === 'asc' ? timeA - timeB : timeB - timeA;
+      });
+    }
+
     return result;
-  }, [items, searchQuery, sizeSort, metadata]);
+  }, [items, searchQuery, sizeSort, modifiedSort, metadata]);
 
   // Load folder metadata from directory tree when items change and sync is complete
   useEffect(() => {
@@ -360,6 +378,18 @@ export default function Home() {
       if (prev === 'desc') return 'asc';
       return null;
     });
+    // Clear modified sort when size sort is activated
+    setModifiedSort(null);
+  }
+
+  function toggleModifiedSort() {
+    setModifiedSort((prev) => {
+      if (prev === null) return 'desc';
+      if (prev === 'desc') return 'asc';
+      return null;
+    });
+    // Clear size sort when modified sort is activated
+    setSizeSort(null);
   }
 
   // Build breadcrumb items
@@ -479,11 +509,13 @@ export default function Home() {
                   selectedKeys={selectedKeys}
                   metadata={metadata}
                   sizeSort={sizeSort}
+                  modifiedSort={modifiedSort}
                   onItemClick={handleItemClick}
                   onToggleSelection={toggleSelection}
                   onSelectAll={selectAll}
                   onClearSelection={clearSelection}
                   onToggleSizeSort={toggleSizeSort}
+                  onToggleModifiedSort={toggleModifiedSort}
                   onDelete={handleDelete}
                   onRename={handleRenameClick}
                 />

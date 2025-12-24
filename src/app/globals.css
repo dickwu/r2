@@ -148,6 +148,19 @@ body {
   font-size: 13px;
 }
 
+.file-list-header .col-date.sortable {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.file-list-header .col-date.sortable:hover {
+  color: #f6821f;
+}
+
 .col-actions {
   width: 60px;
   text-align: center;

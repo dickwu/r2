@@ -174,6 +174,7 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
             total_file_count INTEGER NOT NULL,
             size INTEGER NOT NULL,
             total_size INTEGER NOT NULL,
+            last_modified TEXT,
             last_updated INTEGER NOT NULL,
             PRIMARY KEY (bucket, account_id, path)
         );
@@ -190,6 +191,13 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
         CREATE INDEX IF NOT EXISTS idx_directory_tree_lookup ON directory_tree(bucket, account_id, path);
         "
     ).await?;
+
+    // Migration: Add last_modified column to directory_tree if it doesn't exist
+    // SQLite doesn't have IF NOT EXISTS for columns, so we check and ignore errors
+    let _ = conn.execute(
+        "ALTER TABLE directory_tree ADD COLUMN last_modified TEXT",
+        (),
+    ).await;
 
     DB_CONNECTION.set(conn).map_err(|_| "Database already initialized")?;
     
@@ -848,6 +856,7 @@ pub struct CachedDirectoryNode {
     pub total_file_count: i32,
     pub size: i64,
     pub total_size: i64,
+    pub last_modified: Option<String>,
     pub last_updated: i64,
 }
 
@@ -1005,15 +1014,37 @@ pub async fn build_directory_tree(bucket: &str, account_id: &str, files: &[Cache
         let direct_size: i64 = files.iter().map(|f| f.size).sum();
         let direct_count = files.len() as i32;
         
+        // Find max last_modified from direct files
+        let direct_last_modified: Option<&str> = files.iter()
+            .map(|f| f.last_modified.as_str())
+            .max();
+        
         // Aggregate from subdirectories
         let mut sub_size: i64 = 0;
         let mut sub_count: i32 = 0;
+        let mut sub_last_modified: Option<String> = None;
         for subdir in subdirs {
             if let Some(sub_node) = node_map.get(subdir) {
                 sub_size += sub_node.total_size;
                 sub_count += sub_node.total_file_count;
+                // Track max last_modified from subdirs
+                if let Some(ref sub_lm) = sub_node.last_modified {
+                    sub_last_modified = match sub_last_modified {
+                        None => Some(sub_lm.clone()),
+                        Some(ref current) if sub_lm > current => Some(sub_lm.clone()),
+                        other => other,
+                    };
+                }
             }
         }
+        
+        // Combine direct and subdirectory last_modified (take the max)
+        let last_modified = match (direct_last_modified, sub_last_modified) {
+            (Some(d), Some(s)) => Some(if d > s.as_str() { d.to_string() } else { s }),
+            (Some(d), None) => Some(d.to_string()),
+            (None, Some(s)) => Some(s),
+            (None, None) => None,
+        };
         
         let node = CachedDirectoryNode {
             bucket: bucket.to_string(),
@@ -1023,14 +1054,15 @@ pub async fn build_directory_tree(bucket: &str, account_id: &str, files: &[Cache
             total_file_count: direct_count + sub_count,
             size: direct_size,
             total_size: direct_size + sub_size,
+            last_modified: last_modified.clone(),
             last_updated: now,
         };
         
         // Store in database
         conn.execute(
             "INSERT INTO directory_tree 
-             (bucket, account_id, path, file_count, total_file_count, size, total_size, last_updated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (bucket, account_id, path, file_count, total_file_count, size, total_size, last_modified, last_updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             libsql::params![
                 node.bucket.clone(),
                 node.account_id.clone(),
@@ -1039,6 +1071,7 @@ pub async fn build_directory_tree(bucket: &str, account_id: &str, files: &[Cache
                 node.total_file_count,
                 node.size,
                 node.total_size,
+                last_modified,
                 node.last_updated,
             ],
         ).await?;
@@ -1053,7 +1086,7 @@ pub async fn build_directory_tree(bucket: &str, account_id: &str, files: &[Cache
 pub async fn get_directory_node(bucket: &str, account_id: &str, path: &str) -> DbResult<Option<CachedDirectoryNode>> {
     let conn = get_connection()?;
     let mut rows = conn.query(
-        "SELECT bucket, account_id, path, file_count, total_file_count, size, total_size, last_updated
+        "SELECT bucket, account_id, path, file_count, total_file_count, size, total_size, last_modified, last_updated
          FROM directory_tree
          WHERE bucket = ?1 AND account_id = ?2 AND path = ?3",
         libsql::params![bucket, account_id, path]
@@ -1068,7 +1101,8 @@ pub async fn get_directory_node(bucket: &str, account_id: &str, path: &str) -> D
             total_file_count: row.get(4)?,
             size: row.get(5)?,
             total_size: row.get(6)?,
-            last_updated: row.get(7)?,
+            last_modified: row.get(7)?,
+            last_updated: row.get(8)?,
         }))
     } else {
         Ok(None)
@@ -1079,7 +1113,7 @@ pub async fn get_directory_node(bucket: &str, account_id: &str, path: &str) -> D
 pub async fn get_all_directory_nodes(bucket: &str, account_id: &str) -> DbResult<Vec<CachedDirectoryNode>> {
     let conn = get_connection()?;
     let mut rows = conn.query(
-        "SELECT bucket, account_id, path, file_count, total_file_count, size, total_size, last_updated
+        "SELECT bucket, account_id, path, file_count, total_file_count, size, total_size, last_modified, last_updated
          FROM directory_tree
          WHERE bucket = ?1 AND account_id = ?2
          ORDER BY path",
@@ -1096,7 +1130,8 @@ pub async fn get_all_directory_nodes(bucket: &str, account_id: &str) -> DbResult
             total_file_count: row.get(4)?,
             size: row.get(5)?,
             total_size: row.get(6)?,
-            last_updated: row.get(7)?,
+            last_modified: row.get(7)?,
+            last_updated: row.get(8)?,
         });
     }
     Ok(nodes)

@@ -1,26 +1,16 @@
 import { Button, Checkbox, Popconfirm } from 'antd';
 import {
   FolderOutlined,
-  FileOutlined,
-  FileImageOutlined,
-  FileTextOutlined,
-  FilePdfOutlined,
-  FileZipOutlined,
-  FileExcelOutlined,
-  FileWordOutlined,
-  FilePptOutlined,
-  FileMarkdownOutlined,
-  CodeOutlined,
-  VideoCameraOutlined,
-  AudioOutlined,
   DeleteOutlined,
   EditOutlined,
   CaretUpOutlined,
   CaretDownOutlined,
+  MoreOutlined,
 } from '@ant-design/icons';
 import { Virtuoso } from 'react-virtuoso';
 import { FileItem } from '../hooks/useR2Files';
 import { formatBytes } from '../utils/formatBytes';
+import { getFileIcon } from '../utils/fileIcon';
 
 type SortOrder = 'asc' | 'desc' | null;
 
@@ -28,6 +18,7 @@ interface FolderMetadata {
   size: number | 'loading' | 'error';
   fileCount: number | null;
   totalFileCount: number | null;
+  lastModified: string | null;
 }
 
 interface FileListViewProps {
@@ -35,11 +26,13 @@ interface FileListViewProps {
   selectedKeys: Set<string>;
   metadata: Record<string, FolderMetadata>;
   sizeSort: SortOrder;
+  modifiedSort: SortOrder;
   onItemClick: (item: FileItem) => void;
   onToggleSelection: (key: string) => void;
   onSelectAll: () => void;
   onClearSelection: () => void;
   onToggleSizeSort: () => void;
+  onToggleModifiedSort: () => void;
   onDelete: (item: FileItem) => void;
   onRename: (item: FileItem) => void;
 }
@@ -52,80 +45,18 @@ function formatDate(date: string): string {
   });
 }
 
-function getFileIcon(fileName: string) {
-  const ext = fileName.toLowerCase().split('.').pop() || '';
-  
-  // Image files
-  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'].includes(ext)) {
-    return <FileImageOutlined className="icon file-icon" />;
-  }
-  
-  // Video files
-  if (['mp4', 'avi', 'mkv', 'mov', 'wmv', 'flv', 'webm', 'm4v'].includes(ext)) {
-    return <VideoCameraOutlined className="icon file-icon" />;
-  }
-  
-  // Audio files
-  if (['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'wma'].includes(ext)) {
-    return <AudioOutlined className="icon file-icon" />;
-  }
-  
-  // Document files
-  if (['pdf'].includes(ext)) {
-    return <FilePdfOutlined className="icon file-icon" />;
-  }
-  
-  if (['doc', 'docx'].includes(ext)) {
-    return <FileWordOutlined className="icon file-icon" />;
-  }
-  
-  if (['xls', 'xlsx', 'csv'].includes(ext)) {
-    return <FileExcelOutlined className="icon file-icon" />;
-  }
-  
-  if (['ppt', 'pptx'].includes(ext)) {
-    return <FilePptOutlined className="icon file-icon" />;
-  }
-  
-  // Code files
-  if (['js', 'jsx', 'ts', 'tsx', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'php', 'rb', 'go', 'rs', 'swift', 'kt'].includes(ext)) {
-    return <CodeOutlined className="icon file-icon" />;
-  }
-  
-  // Markup/config files
-  if (['html', 'htm', 'xml', 'json', 'yaml', 'yml', 'toml', 'ini', 'conf'].includes(ext)) {
-    return <CodeOutlined className="icon file-icon" />;
-  }
-  
-  // Text files
-  if (['txt', 'log'].includes(ext)) {
-    return <FileTextOutlined className="icon file-icon" />;
-  }
-  
-  // Markdown
-  if (['md', 'markdown'].includes(ext)) {
-    return <FileMarkdownOutlined className="icon file-icon" />;
-  }
-  
-  // Archive files
-  if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'].includes(ext)) {
-    return <FileZipOutlined className="icon file-icon" />;
-  }
-  
-  // Default
-  return <FileOutlined className="icon file-icon" />;
-}
-
 export default function FileListView({
   items,
   selectedKeys,
   metadata,
   sizeSort,
+  modifiedSort,
   onItemClick,
   onToggleSelection,
   onSelectAll,
   onClearSelection,
   onToggleSizeSort,
+  onToggleModifiedSort,
   onDelete,
   onRename,
 }: FileListViewProps) {
@@ -150,11 +81,17 @@ export default function FileListView({
         </span>
         <span className="col-name">Name</span>
         <span className="col-size sortable" onClick={onToggleSizeSort}>
-          Size
-          {sizeSort === 'asc' && <CaretUpOutlined />}
-          {sizeSort === 'desc' && <CaretDownOutlined />}
+          <span>Size</span>
+          {sizeSort === 'asc' ? <CaretUpOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
+          {sizeSort === 'desc' ? <CaretDownOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
+          {sizeSort === null ? <MoreOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
         </span>
-        <span className="col-date">Modified</span>
+        <span className="col-date sortable" onClick={onToggleModifiedSort}>
+          Modified 
+          {modifiedSort === 'asc' ? <CaretUpOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
+          {modifiedSort === 'desc' ? <CaretDownOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
+          {modifiedSort === null ? <MoreOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
+        </span>
         <span className="col-actions">Actions</span>
       </div>
 
@@ -195,7 +132,13 @@ export default function FileListView({
                 : formatBytes(item.size || 0)}
             </span>
             <span className="col-date">
-              {item.lastModified ? formatDate(item.lastModified) : '--'}
+              {item.isFolder
+                ? metadata[item.key]?.lastModified
+                  ? formatDate(metadata[item.key].lastModified!)
+                  : '--'
+                : item.lastModified
+                  ? formatDate(item.lastModified)
+                  : '--'}
             </span>
             <span className="col-actions" onClick={(e) => e.stopPropagation()}>
               {!item.isFolder && (

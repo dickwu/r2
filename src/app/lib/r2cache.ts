@@ -33,6 +33,7 @@ export interface DirectoryNode {
   totalFileCount: number;
   size: number;
   totalSize: number;
+  lastModified: string | null;
   lastUpdated: number;
 }
 

@@ -7,6 +7,7 @@ export interface FolderMetadata {
   size: FolderSizeState;
   fileCount: number | null;
   totalFileCount: number | null;
+  lastModified: string | null;
 }
 
 interface FolderSizeStore {
@@ -82,6 +83,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
       size: 'loading',
       fileCount: null,
       totalFileCount: null,
+      lastModified: null,
     });
 
     try {
@@ -91,6 +93,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
           size: node.totalSize,
           fileCount: node.fileCount,
           totalFileCount: node.totalFileCount,
+          lastModified: node.lastModified,
         });
       } else {
         // Fallback to old method if node not found
@@ -99,6 +102,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
           size,
           fileCount: null,
           totalFileCount: null,
+          lastModified: null,
         });
       }
     } catch (err) {
@@ -107,6 +111,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
         size: 'error',
         fileCount: null,
         totalFileCount: null,
+        lastModified: null,
       });
     }
   },
