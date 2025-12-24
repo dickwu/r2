@@ -70,7 +70,7 @@ jobs:
         shell: pwsh
         run: |
           # Use vcpkg to install FFmpeg and SQLite3 for better Rust integration
-          C:\vcpkg\vcpkg.exe install ffmpeg[core,avcodec,avformat,avutil,swscale]:x64-windows sqlite3:x64-windows
+          C:\vcpkg\vcpkg.exe install ffmpeg[core,avcodec,avformat,swscale]:x64-windows sqlite3:x64-windows
 
       - name: Setup FFmpeg environment (Windows)
         if: matrix.platform == 'windows-latest'

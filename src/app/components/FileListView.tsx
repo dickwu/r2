@@ -1,4 +1,4 @@
-import { Button, Checkbox, Popconfirm } from 'antd';
+import { Button, Checkbox, Popconfirm, Tooltip } from 'antd';
 import {
   FolderOutlined,
   DeleteOutlined,
@@ -8,6 +8,7 @@ import {
   MoreOutlined,
 } from '@ant-design/icons';
 import { Virtuoso } from 'react-virtuoso';
+import dayjs from 'dayjs';
 import { FileItem } from '../hooks/useR2Files';
 import { formatBytes } from '../utils/formatBytes';
 import { getFileIcon } from '../utils/fileIcon';
@@ -38,11 +39,11 @@ interface FileListViewProps {
 }
 
 function formatDate(date: string): string {
-  return new Date(date).toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  });
+  return dayjs(date).format('YYYY-MM-DD');
+}
+
+function formatDateTime(date: string): string {
+  return dayjs(date).format('YYYY-MM-DD HH:mm:ss');
 }
 
 export default function FileListView({
@@ -131,24 +132,44 @@ export default function FileListView({
               <span className="name">{item.name}</span>
             </span>
             <span className="col-size">
-              {item.isFolder
-                ? metadata[item.key]?.size === 'loading'
-                  ? '...'
-                  : metadata[item.key]?.size === 'error'
-                    ? 'Error'
-                    : typeof metadata[item.key]?.size === 'number'
-                      ? formatBytes(metadata[item.key].size as number)
-                      : '--'
-                : formatBytes(item.size || 0)}
+              {item.isFolder ? (
+                metadata[item.key]?.size === 'loading' ? (
+                  '...'
+                ) : metadata[item.key]?.size === 'error' ? (
+                  'Error'
+                ) : typeof metadata[item.key]?.size === 'number' ? (
+                  <Tooltip
+                    title={
+                      metadata[item.key]?.fileCount !== null
+                        ? `${metadata[item.key]!.fileCount} file${metadata[item.key]!.fileCount !== 1 ? 's' : ''}`
+                        : undefined
+                    }
+                  >
+                    <span>{formatBytes(metadata[item.key].size as number)}</span>
+                  </Tooltip>
+                ) : (
+                  '--'
+                )
+              ) : (
+                formatBytes(item.size || 0)
+              )}
             </span>
             <span className="col-date">
-              {item.isFolder
-                ? metadata[item.key]?.lastModified
-                  ? formatDate(metadata[item.key].lastModified!)
-                  : '--'
-                : item.lastModified
-                  ? formatDate(item.lastModified)
-                  : '--'}
+              {item.isFolder ? (
+                metadata[item.key]?.lastModified ? (
+                  <Tooltip title={formatDateTime(metadata[item.key].lastModified!)}>
+                    <span>{formatDate(metadata[item.key].lastModified!)}</span>
+                  </Tooltip>
+                ) : (
+                  '--'
+                )
+              ) : item.lastModified ? (
+                <Tooltip title={formatDateTime(item.lastModified)}>
+                  <span>{formatDate(item.lastModified)}</span>
+                </Tooltip>
+              ) : (
+                '--'
+              )}
             </span>
             <span className="col-actions" onClick={(e) => e.stopPropagation()}>
               {!item.isFolder && (
