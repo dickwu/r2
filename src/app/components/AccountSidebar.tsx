@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Button,
   Menu,
@@ -65,6 +65,16 @@ export default function AccountSidebar({
   });
 
   const { message, modal } = App.useApp();
+
+  // Sync selectedAccount with store when drawer is open and accounts update
+  useEffect(() => {
+    if (drawerOpen && selectedAccount) {
+      const updatedAccount = accounts.find((a) => a.account.id === selectedAccount.account.id);
+      if (updatedAccount) {
+        setSelectedAccount(updatedAccount);
+      }
+    }
+  }, [accounts, drawerOpen, selectedAccount?.account.id]);
 
   function toggleCollapse(value: boolean) {
     setCollapsed(value);

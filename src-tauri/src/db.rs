@@ -1,9 +1,12 @@
-use libsql::{Builder, Connection};
+use turso::{Builder, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::OnceLock;
+use tokio::sync::Mutex;
 
-static DB_CONNECTION: OnceLock<Connection> = OnceLock::new();
+// Wrap Connection in Mutex to serialize database access
+// turso 0.4.0-pre.19 has race conditions in its page cache when accessed concurrently
+static DB_CONNECTION: OnceLock<Mutex<Connection>> = OnceLock::new();
 
 // Custom error type for database operations
 type DbResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -82,7 +85,7 @@ pub struct CurrentConfig {
 
 /// Initialize the database with required tables
 pub async fn init_db(db_path: &Path) -> DbResult<()> {
-    let db = Builder::new_local(db_path).build().await?;
+    let db = Builder::new_local(db_path.to_str().unwrap()).build().await?;
     let conn = db.connect()?;
     
     // Enable foreign keys
@@ -112,7 +115,7 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
             part_number INTEGER NOT NULL,
             etag TEXT NOT NULL,
             PRIMARY KEY (session_id, part_number),
-            FOREIGN KEY (session_id) REFERENCES upload_sessions(id) ON DELETE CASCADE
+            FOREIGN KEY (session_id) REFERENCES upload_sessions(id)
         );
 
         CREATE INDEX IF NOT EXISTS idx_sessions_status ON upload_sessions(status);
@@ -128,7 +131,7 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
 
         CREATE TABLE IF NOT EXISTS tokens (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            account_id TEXT NOT NULL REFERENCES accounts(id),
             name TEXT,
             api_token TEXT NOT NULL,
             access_key_id TEXT NOT NULL,
@@ -139,7 +142,7 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
 
         CREATE TABLE IF NOT EXISTS buckets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            token_id INTEGER NOT NULL REFERENCES tokens(id) ON DELETE CASCADE,
+            token_id INTEGER NOT NULL REFERENCES tokens(id),
             name TEXT NOT NULL,
             public_domain TEXT,
             created_at INTEGER NOT NULL,
@@ -199,24 +202,24 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
         (),
     ).await;
 
-    DB_CONNECTION.set(conn).map_err(|_| "Database already initialized")?;
+    DB_CONNECTION.set(Mutex::new(conn)).map_err(|_| "Database already initialized")?;
     
     Ok(())
 }
 
-fn get_connection() -> DbResult<&'static Connection> {
+fn get_connection() -> DbResult<&'static Mutex<Connection>> {
     DB_CONNECTION.get().ok_or_else(|| "Database not initialized".into())
 }
 
 /// Create a new upload session
 pub async fn create_session(session: &UploadSession) -> DbResult<()> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     conn.execute(
         "INSERT INTO upload_sessions 
          (id, file_path, file_size, file_mtime, object_key, bucket, account_id, 
           upload_id, content_type, total_parts, created_at, updated_at, status)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        libsql::params![
+        turso::params![
             session.id.clone(),
             session.file_path.clone(),
             session.file_size,
@@ -237,11 +240,11 @@ pub async fn create_session(session: &UploadSession) -> DbResult<()> {
 
 /// Update session status
 pub async fn update_session_status(session_id: &str, status: &str) -> DbResult<()> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
         "UPDATE upload_sessions SET status = ?1, updated_at = ?2 WHERE id = ?3",
-        libsql::params![status, now, session_id],
+        turso::params![status, now, session_id],
     ).await?;
     Ok(())
 }
@@ -255,7 +258,7 @@ pub async fn find_resumable_session(
     bucket: &str,
     account_id: &str,
 ) -> DbResult<Option<UploadSession>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
         "SELECT id, file_path, file_size, file_mtime, object_key, bucket, account_id,
                 upload_id, content_type, total_parts, created_at, updated_at, status
@@ -263,7 +266,7 @@ pub async fn find_resumable_session(
          WHERE file_path = ?1 AND file_size = ?2 AND file_mtime = ?3 
                AND object_key = ?4 AND bucket = ?5 AND account_id = ?6
                AND status = 'uploading' AND upload_id IS NOT NULL",
-        libsql::params![file_path, file_size, file_mtime, object_key, bucket, account_id]
+        turso::params![file_path, file_size, file_mtime, object_key, bucket, account_id]
     ).await?;
     
     if let Some(row) = rows.next().await? {
@@ -289,12 +292,12 @@ pub async fn find_resumable_session(
 
 /// Get session by ID
 pub async fn get_session(session_id: &str) -> DbResult<Option<UploadSession>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
         "SELECT id, file_path, file_size, file_mtime, object_key, bucket, account_id,
                 upload_id, content_type, total_parts, created_at, updated_at, status
          FROM upload_sessions WHERE id = ?1",
-        libsql::params![session_id]
+        turso::params![session_id]
     ).await?;
     
     if let Some(row) = rows.next().await? {
@@ -320,18 +323,19 @@ pub async fn get_session(session_id: &str) -> DbResult<Option<UploadSession>> {
 
 /// Save a completed part
 pub async fn save_completed_part(session_id: &str, part_number: i32, etag: &str) -> DbResult<()> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     conn.execute(
-        "INSERT OR REPLACE INTO completed_parts (session_id, part_number, etag)
-         VALUES (?1, ?2, ?3)",
-        libsql::params![session_id, part_number, etag],
+        "INSERT INTO completed_parts (session_id, part_number, etag)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT (session_id, part_number) DO UPDATE SET etag = ?3",
+        turso::params![session_id, part_number, etag],
     ).await?;
     
     // Update session timestamp
     let now = chrono::Utc::now().timestamp();
     conn.execute(
         "UPDATE upload_sessions SET updated_at = ?1 WHERE id = ?2",
-        libsql::params![now, session_id],
+        turso::params![now, session_id],
     ).await?;
     
     Ok(())
@@ -339,11 +343,11 @@ pub async fn save_completed_part(session_id: &str, part_number: i32, etag: &str)
 
 /// Get all completed parts for a session
 pub async fn get_completed_parts(session_id: &str) -> DbResult<Vec<CompletedPart>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
         "SELECT session_id, part_number, etag FROM completed_parts 
          WHERE session_id = ?1 ORDER BY part_number",
-        libsql::params![session_id]
+        turso::params![session_id]
     ).await?;
     
     let mut parts = Vec::new();
@@ -359,15 +363,15 @@ pub async fn get_completed_parts(session_id: &str) -> DbResult<Vec<CompletedPart
 
 /// Delete session and its parts
 pub async fn delete_session(session_id: &str) -> DbResult<()> {
-    let conn = get_connection()?;
-    conn.execute("DELETE FROM completed_parts WHERE session_id = ?1", libsql::params![session_id]).await?;
-    conn.execute("DELETE FROM upload_sessions WHERE id = ?1", libsql::params![session_id]).await?;
+    let conn = get_connection()?.lock().await;
+    conn.execute("DELETE FROM completed_parts WHERE session_id = ?1", turso::params![session_id]).await?;
+    conn.execute("DELETE FROM upload_sessions WHERE id = ?1", turso::params![session_id]).await?;
     Ok(())
 }
 
 /// Get all pending/uploading sessions (for UI to show resumable uploads)
 pub async fn get_pending_sessions() -> DbResult<Vec<UploadSession>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
         "SELECT id, file_path, file_size, file_mtime, object_key, bucket, account_id,
                 upload_id, content_type, total_parts, created_at, updated_at, status
@@ -400,36 +404,50 @@ pub async fn get_pending_sessions() -> DbResult<Vec<UploadSession>> {
 
 /// Clean up old completed/failed sessions (older than 7 days)
 pub async fn cleanup_old_sessions() -> DbResult<usize> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let cutoff = chrono::Utc::now().timestamp() - (7 * 24 * 60 * 60);
     
-    // First delete parts
-    conn.execute(
-        "DELETE FROM completed_parts WHERE session_id IN 
-         (SELECT id FROM upload_sessions WHERE status IN ('completed', 'failed', 'cancelled') 
-          AND updated_at < ?1)",
-        libsql::params![cutoff],
+    // Step 1: Query session IDs to delete (libsql doesn't support subqueries in WHERE)
+    let mut rows = conn.query(
+        "SELECT id FROM upload_sessions 
+         WHERE (status = 'completed' OR status = 'failed' OR status = 'cancelled')
+         AND updated_at < ?1",
+        turso::params![cutoff]
     ).await?;
     
-    // Then delete sessions
-    let deleted = conn.execute(
-        "DELETE FROM upload_sessions 
-         WHERE status IN ('completed', 'failed', 'cancelled') AND updated_at < ?1",
-        libsql::params![cutoff],
-    ).await?;
+    let mut session_ids: Vec<String> = Vec::new();
+    while let Some(row) = rows.next().await? {
+        session_ids.push(row.get(0)?);
+    }
     
-    Ok(deleted as usize)
+    // Step 2: Delete parts for each session
+    for session_id in &session_ids {
+        conn.execute(
+            "DELETE FROM completed_parts WHERE session_id = ?1",
+            turso::params![session_id.clone()],
+        ).await?;
+    }
+    
+    // Step 3: Delete the sessions
+    for session_id in &session_ids {
+        conn.execute(
+            "DELETE FROM upload_sessions WHERE id = ?1",
+            turso::params![session_id.clone()],
+        ).await?;
+    }
+    
+    Ok(session_ids.len())
 }
 
 // ============ Account CRUD Functions ============
 
 /// Create a new account
 pub async fn create_account(id: &str, name: Option<&str>) -> DbResult<Account> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
         "INSERT INTO accounts (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-        libsql::params![id, name, now, now],
+        turso::params![id, name, now, now],
     ).await?;
     Ok(Account {
         id: id.to_string(),
@@ -442,8 +460,8 @@ pub async fn create_account(id: &str, name: Option<&str>) -> DbResult<Account> {
 /// Get account by ID
 #[allow(dead_code)]
 pub async fn get_account(id: &str) -> DbResult<Option<Account>> {
-    let conn = get_connection()?;
-    let mut rows = conn.query("SELECT id, name, created_at, updated_at FROM accounts WHERE id = ?1", libsql::params![id]).await?;
+    let conn = get_connection()?.lock().await;
+    let mut rows = conn.query("SELECT id, name, created_at, updated_at FROM accounts WHERE id = ?1", turso::params![id]).await?;
     
     if let Some(row) = rows.next().await? {
         Ok(Some(Account {
@@ -459,7 +477,7 @@ pub async fn get_account(id: &str) -> DbResult<Option<Account>> {
 
 /// List all accounts
 pub async fn list_accounts() -> DbResult<Vec<Account>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query("SELECT id, name, created_at, updated_at FROM accounts ORDER BY created_at", ()).await?;
     
     let mut accounts = Vec::new();
@@ -476,19 +494,40 @@ pub async fn list_accounts() -> DbResult<Vec<Account>> {
 
 /// Update account
 pub async fn update_account(id: &str, name: Option<&str>) -> DbResult<()> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
         "UPDATE accounts SET name = ?1, updated_at = ?2 WHERE id = ?3",
-        libsql::params![name, now, id],
+        turso::params![name, now, id],
     ).await?;
     Ok(())
 }
 
-/// Delete account (cascades to tokens and buckets)
+/// Delete account (manually cascades to tokens and buckets)
 pub async fn delete_account(id: &str) -> DbResult<()> {
-    let conn = get_connection()?;
-    conn.execute("DELETE FROM accounts WHERE id = ?1", libsql::params![id]).await?;
+    let conn = get_connection()?.lock().await;
+    
+    // Get all tokens for this account
+    let mut rows = conn.query(
+        "SELECT id FROM tokens WHERE account_id = ?1",
+        turso::params![id]
+    ).await?;
+    
+    let mut token_ids: Vec<i64> = Vec::new();
+    while let Some(row) = rows.next().await? {
+        token_ids.push(row.get(0)?);
+    }
+    
+    // Delete buckets for each token
+    for token_id in &token_ids {
+        conn.execute("DELETE FROM buckets WHERE token_id = ?1", turso::params![*token_id]).await?;
+    }
+    
+    // Delete tokens
+    conn.execute("DELETE FROM tokens WHERE account_id = ?1", turso::params![id]).await?;
+    
+    // Delete account
+    conn.execute("DELETE FROM accounts WHERE id = ?1", turso::params![id]).await?;
     Ok(())
 }
 
@@ -502,12 +541,12 @@ pub async fn create_token(
     access_key_id: &str,
     secret_access_key: &str,
 ) -> DbResult<Token> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
         "INSERT INTO tokens (account_id, name, api_token, access_key_id, secret_access_key, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        libsql::params![account_id, name, api_token, access_key_id, secret_access_key, now, now],
+        turso::params![account_id, name, api_token, access_key_id, secret_access_key, now, now],
     ).await?;
     let id = conn.last_insert_rowid();
     Ok(Token {
@@ -524,11 +563,11 @@ pub async fn create_token(
 
 /// Get token by ID
 pub async fn get_token(id: i64) -> DbResult<Option<Token>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
         "SELECT id, account_id, name, api_token, access_key_id, secret_access_key, created_at, updated_at
          FROM tokens WHERE id = ?1",
-        libsql::params![id]
+        turso::params![id]
     ).await?;
     
     if let Some(row) = rows.next().await? {
@@ -549,11 +588,11 @@ pub async fn get_token(id: i64) -> DbResult<Option<Token>> {
 
 /// List tokens by account
 pub async fn list_tokens_by_account(account_id: &str) -> DbResult<Vec<Token>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
         "SELECT id, account_id, name, api_token, access_key_id, secret_access_key, created_at, updated_at
          FROM tokens WHERE account_id = ?1 ORDER BY created_at",
-        libsql::params![account_id]
+        turso::params![account_id]
     ).await?;
     
     let mut tokens = Vec::new();
@@ -580,20 +619,23 @@ pub async fn update_token(
     access_key_id: &str,
     secret_access_key: &str,
 ) -> DbResult<()> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
         "UPDATE tokens SET name = ?1, api_token = ?2, access_key_id = ?3, secret_access_key = ?4, updated_at = ?5
          WHERE id = ?6",
-        libsql::params![name, api_token, access_key_id, secret_access_key, now, id],
+        turso::params![name, api_token, access_key_id, secret_access_key, now, id],
     ).await?;
     Ok(())
 }
 
-/// Delete token (cascades to buckets)
+/// Delete token (manually cascades to buckets)
 pub async fn delete_token(id: i64) -> DbResult<()> {
-    let conn = get_connection()?;
-    conn.execute("DELETE FROM tokens WHERE id = ?1", libsql::params![id]).await?;
+    let conn = get_connection()?.lock().await;
+    // Delete buckets first
+    conn.execute("DELETE FROM buckets WHERE token_id = ?1", turso::params![id]).await?;
+    // Then delete token
+    conn.execute("DELETE FROM tokens WHERE id = ?1", turso::params![id]).await?;
     Ok(())
 }
 
@@ -602,12 +644,12 @@ pub async fn delete_token(id: i64) -> DbResult<()> {
 /// Create a new bucket
 #[allow(dead_code)]
 pub async fn create_bucket(token_id: i64, name: &str, public_domain: Option<&str>) -> DbResult<Bucket> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
         "INSERT INTO buckets (token_id, name, public_domain, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        libsql::params![token_id, name, public_domain, now, now],
+        turso::params![token_id, name, public_domain, now, now],
     ).await?;
     let id = conn.last_insert_rowid();
     Ok(Bucket {
@@ -623,10 +665,10 @@ pub async fn create_bucket(token_id: i64, name: &str, public_domain: Option<&str
 /// Get bucket by ID
 #[allow(dead_code)]
 pub async fn get_bucket(id: i64) -> DbResult<Option<Bucket>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
         "SELECT id, token_id, name, public_domain, created_at, updated_at FROM buckets WHERE id = ?1",
-        libsql::params![id]
+        turso::params![id]
     ).await?;
     
     if let Some(row) = rows.next().await? {
@@ -645,11 +687,11 @@ pub async fn get_bucket(id: i64) -> DbResult<Option<Bucket>> {
 
 /// List buckets by token
 pub async fn list_buckets_by_token(token_id: i64) -> DbResult<Vec<Bucket>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
         "SELECT id, token_id, name, public_domain, created_at, updated_at
          FROM buckets WHERE token_id = ?1 ORDER BY name",
-        libsql::params![token_id]
+        turso::params![token_id]
     ).await?;
     
     let mut buckets = Vec::new();
@@ -668,29 +710,29 @@ pub async fn list_buckets_by_token(token_id: i64) -> DbResult<Vec<Bucket>> {
 
 /// Update bucket
 pub async fn update_bucket(id: i64, public_domain: Option<&str>) -> DbResult<()> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
         "UPDATE buckets SET public_domain = ?1, updated_at = ?2 WHERE id = ?3",
-        libsql::params![public_domain, now, id],
+        turso::params![public_domain, now, id],
     ).await?;
     Ok(())
 }
 
 /// Delete bucket
 pub async fn delete_bucket(id: i64) -> DbResult<()> {
-    let conn = get_connection()?;
-    conn.execute("DELETE FROM buckets WHERE id = ?1", libsql::params![id]).await?;
+    let conn = get_connection()?.lock().await;
+    conn.execute("DELETE FROM buckets WHERE id = ?1", turso::params![id]).await?;
     Ok(())
 }
 
 /// Save multiple buckets for a token (replace existing)
 pub async fn save_buckets_for_token(token_id: i64, buckets: &[(String, Option<String>)]) -> DbResult<Vec<Bucket>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
     
     // Delete existing buckets for this token
-    conn.execute("DELETE FROM buckets WHERE token_id = ?1", libsql::params![token_id]).await?;
+    conn.execute("DELETE FROM buckets WHERE token_id = ?1", turso::params![token_id]).await?;
     
     // Insert new buckets
     let mut result = Vec::new();
@@ -698,7 +740,7 @@ pub async fn save_buckets_for_token(token_id: i64, buckets: &[(String, Option<St
         conn.execute(
             "INSERT INTO buckets (token_id, name, public_domain, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            libsql::params![token_id, name.clone(), public_domain.clone(), now, now],
+            turso::params![token_id, name.clone(), public_domain.clone(), now, now],
         ).await?;
         let id = conn.last_insert_rowid();
         result.push(Bucket {
@@ -718,8 +760,8 @@ pub async fn save_buckets_for_token(token_id: i64, buckets: &[(String, Option<St
 /// Get app state value
 #[allow(dead_code)]
 pub async fn get_app_state(key: &str) -> DbResult<Option<String>> {
-    let conn = get_connection()?;
-    let mut rows = conn.query("SELECT value FROM app_state WHERE key = ?1", libsql::params![key]).await?;
+    let conn = get_connection()?.lock().await;
+    let mut rows = conn.query("SELECT value FROM app_state WHERE key = ?1", turso::params![key]).await?;
     
     if let Some(row) = rows.next().await? {
         Ok(Some(row.get(0)?))
@@ -730,10 +772,11 @@ pub async fn get_app_state(key: &str) -> DbResult<Option<String>> {
 
 /// Set app state value
 pub async fn set_app_state(key: &str, value: &str) -> DbResult<()> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     conn.execute(
-        "INSERT OR REPLACE INTO app_state (key, value) VALUES (?1, ?2)",
-        libsql::params![key, value],
+        "INSERT INTO app_state (key, value) VALUES (?1, ?2)
+         ON CONFLICT (key) DO UPDATE SET value = ?2",
+        turso::params![key, value],
     ).await?;
     Ok(())
 }
@@ -741,8 +784,8 @@ pub async fn set_app_state(key: &str, value: &str) -> DbResult<()> {
 /// Delete app state value
 #[allow(dead_code)]
 pub async fn delete_app_state(key: &str) -> DbResult<()> {
-    let conn = get_connection()?;
-    conn.execute("DELETE FROM app_state WHERE key = ?1", libsql::params![key]).await?;
+    let conn = get_connection()?.lock().await;
+    conn.execute("DELETE FROM app_state WHERE key = ?1", turso::params![key]).await?;
     Ok(())
 }
 
@@ -750,7 +793,7 @@ pub async fn delete_app_state(key: &str) -> DbResult<()> {
 
 /// Get current configuration (combines token + bucket info)
 pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     
     // Get current token ID
     let mut rows = conn.query("SELECT value FROM app_state WHERE key = 'current_token_id'", ()).await?;
@@ -778,14 +821,14 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
          FROM tokens t
          JOIN accounts a ON t.account_id = a.id
          WHERE t.id = ?1",
-        libsql::params![token_id]
+        turso::params![token_id]
     ).await?;
     
     if let Some(row) = rows.next().await? {
         // Get bucket's public domain
         let mut bucket_rows = conn.query(
             "SELECT public_domain FROM buckets WHERE token_id = ?1 AND name = ?2",
-            libsql::params![token_id, bucket_name.clone()]
+            turso::params![token_id, bucket_name.clone()]
         ).await?;
         let public_domain: Option<String> = if let Some(bucket_row) = bucket_rows.next().await? {
             bucket_row.get(0)?
@@ -811,21 +854,23 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
 
 /// Set current token and bucket
 pub async fn set_current_selection(token_id: i64, bucket_name: &str) -> DbResult<()> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     conn.execute(
-        "INSERT OR REPLACE INTO app_state (key, value) VALUES ('current_token_id', ?1)",
-        libsql::params![token_id.to_string()],
+        "INSERT INTO app_state (key, value) VALUES ('current_token_id', ?1)
+         ON CONFLICT (key) DO UPDATE SET value = ?1",
+        turso::params![token_id.to_string()],
     ).await?;
     conn.execute(
-        "INSERT OR REPLACE INTO app_state (key, value) VALUES ('current_bucket', ?1)",
-        libsql::params![bucket_name],
+        "INSERT INTO app_state (key, value) VALUES ('current_bucket', ?1)
+         ON CONFLICT (key) DO UPDATE SET value = ?1",
+        turso::params![bucket_name],
     ).await?;
     Ok(())
 }
 
 /// Check if any accounts exist
 pub async fn has_accounts() -> DbResult<bool> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query("SELECT COUNT(*) FROM accounts", ()).await?;
     if let Some(row) = rows.next().await? {
         let count: i64 = row.get(0)?;
@@ -862,12 +907,12 @@ pub struct CachedDirectoryNode {
 
 /// Store all files for a bucket (clears existing)
 pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile]) -> DbResult<()> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     
     // Clear existing files for this bucket
     conn.execute(
         "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2",
-        libsql::params![bucket, account_id],
+        turso::params![bucket, account_id],
     ).await?;
     
     // Insert new files
@@ -875,7 +920,7 @@ pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile
         conn.execute(
             "INSERT INTO cached_files (bucket, account_id, key, size, last_modified, synced_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            libsql::params![
+            turso::params![
                 bucket,
                 account_id,
                 file.key.clone(),
@@ -889,9 +934,10 @@ pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile
     // Update sync metadata
     let now = chrono::Utc::now().timestamp();
     conn.execute(
-        "INSERT OR REPLACE INTO sync_meta (bucket, account_id, last_sync, file_count)
-         VALUES (?1, ?2, ?3, ?4)",
-        libsql::params![bucket, account_id, now, files.len() as i32],
+        "INSERT INTO sync_meta (bucket, account_id, last_sync, file_count)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (bucket, account_id) DO UPDATE SET last_sync = ?3, file_count = ?4",
+        turso::params![bucket, account_id, now, files.len() as i32],
     ).await?;
     
     Ok(())
@@ -899,13 +945,13 @@ pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile
 
 /// Get all cached files for a bucket
 pub async fn get_all_cached_files(bucket: &str, account_id: &str) -> DbResult<Vec<CachedFile>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
         "SELECT bucket, account_id, key, size, last_modified, synced_at
          FROM cached_files
          WHERE bucket = ?1 AND account_id = ?2
          ORDER BY key",
-        libsql::params![bucket, account_id]
+        turso::params![bucket, account_id]
     ).await?;
     
     let mut files = Vec::new();
@@ -924,13 +970,13 @@ pub async fn get_all_cached_files(bucket: &str, account_id: &str) -> DbResult<Ve
 
 /// Calculate folder size by prefix
 pub async fn calculate_folder_size(bucket: &str, account_id: &str, prefix: &str) -> DbResult<i64> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let pattern = format!("{}%", prefix);
     
     let mut rows = conn.query(
         "SELECT COALESCE(SUM(size), 0) FROM cached_files
          WHERE bucket = ?1 AND account_id = ?2 AND key LIKE ?3",
-        libsql::params![bucket, account_id, pattern]
+        turso::params![bucket, account_id, pattern]
     ).await?;
     
     if let Some(row) = rows.next().await? {
@@ -943,12 +989,12 @@ pub async fn calculate_folder_size(bucket: &str, account_id: &str, prefix: &str)
 
 /// Build directory tree from files (same algorithm as indexeddb.ts)
 pub async fn build_directory_tree(bucket: &str, account_id: &str, files: &[CachedFile]) -> DbResult<()> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     
     // Clear existing tree for this bucket
     conn.execute(
         "DELETE FROM directory_tree WHERE bucket = ?1 AND account_id = ?2",
-        libsql::params![bucket, account_id],
+        turso::params![bucket, account_id],
     ).await?;
     
     // Build directory map
@@ -1063,7 +1109,7 @@ pub async fn build_directory_tree(bucket: &str, account_id: &str, files: &[Cache
             "INSERT INTO directory_tree 
              (bucket, account_id, path, file_count, total_file_count, size, total_size, last_modified, last_updated)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            libsql::params![
+            turso::params![
                 node.bucket.clone(),
                 node.account_id.clone(),
                 node.path.clone(),
@@ -1084,12 +1130,12 @@ pub async fn build_directory_tree(bucket: &str, account_id: &str, files: &[Cache
 
 /// Get directory node by path
 pub async fn get_directory_node(bucket: &str, account_id: &str, path: &str) -> DbResult<Option<CachedDirectoryNode>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
         "SELECT bucket, account_id, path, file_count, total_file_count, size, total_size, last_modified, last_updated
          FROM directory_tree
          WHERE bucket = ?1 AND account_id = ?2 AND path = ?3",
-        libsql::params![bucket, account_id, path]
+        turso::params![bucket, account_id, path]
     ).await?;
     
     if let Some(row) = rows.next().await? {
@@ -1111,13 +1157,13 @@ pub async fn get_directory_node(bucket: &str, account_id: &str, path: &str) -> D
 
 /// Get all directory nodes for a bucket
 pub async fn get_all_directory_nodes(bucket: &str, account_id: &str) -> DbResult<Vec<CachedDirectoryNode>> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
         "SELECT bucket, account_id, path, file_count, total_file_count, size, total_size, last_modified, last_updated
          FROM directory_tree
          WHERE bucket = ?1 AND account_id = ?2
          ORDER BY path",
-        libsql::params![bucket, account_id]
+        turso::params![bucket, account_id]
     ).await?;
     
     let mut nodes = Vec::new();
@@ -1139,21 +1185,21 @@ pub async fn get_all_directory_nodes(bucket: &str, account_id: &str) -> DbResult
 
 /// Clear all cached data for a bucket
 pub async fn clear_file_cache(bucket: &str, account_id: &str) -> DbResult<()> {
-    let conn = get_connection()?;
+    let conn = get_connection()?.lock().await;
     
     conn.execute(
         "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2",
-        libsql::params![bucket, account_id],
+        turso::params![bucket, account_id],
     ).await?;
     
     conn.execute(
         "DELETE FROM directory_tree WHERE bucket = ?1 AND account_id = ?2",
-        libsql::params![bucket, account_id],
+        turso::params![bucket, account_id],
     ).await?;
     
     conn.execute(
         "DELETE FROM sync_meta WHERE bucket = ?1 AND account_id = ?2",
-        libsql::params![bucket, account_id],
+        turso::params![bucket, account_id],
     ).await?;
     
     Ok(())

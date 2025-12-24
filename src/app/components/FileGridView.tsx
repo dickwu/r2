@@ -167,36 +167,38 @@ const FileCard = memo(function FileCard({
 });
 
 // Grid container component
-const GridList = forwardRef<HTMLDivElement, React.HTMLProps<HTMLDivElement>>(
-  function GridList({ children, style, ...props }, ref) {
-    return (
-      <div
-        ref={ref}
-        {...props}
-        style={{
-          ...style,
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-          gap: '12px',
-          padding: '12px',
-        }}
-      >
-        {children}
-      </div>
-    );
-  }
-);
+const GridList = forwardRef<HTMLDivElement, React.HTMLProps<HTMLDivElement>>(function GridList(
+  { children, style, ...props },
+  ref
+) {
+  return (
+    <div
+      ref={ref}
+      {...props}
+      style={{
+        ...style,
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+        gap: '12px',
+        padding: '12px',
+      }}
+    >
+      {children}
+    </div>
+  );
+});
 
 // Grid item wrapper component
-const GridItem = forwardRef<HTMLDivElement, React.HTMLProps<HTMLDivElement>>(
-  function GridItem({ children, ...props }, ref) {
-    return (
-      <div ref={ref} {...props}>
-        {children}
-      </div>
-    );
-  }
-);
+const GridItem = forwardRef<HTMLDivElement, React.HTMLProps<HTMLDivElement>>(function GridItem(
+  { children, ...props },
+  ref
+) {
+  return (
+    <div ref={ref} {...props}>
+      {children}
+    </div>
+  );
+});
 
 export default memo(function FileGridView({
   items,

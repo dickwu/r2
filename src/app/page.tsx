@@ -87,7 +87,7 @@ export default function Home() {
   }, [currentConfig?.bucket, currentConfig?.token_id]);
 
   const { items, isLoading, isFetching, error, refresh } = useR2Files(config, currentPath);
-  const { isSyncing, isSynced, refresh: refreshSync } = useFilesSync(config);
+  const { isSyncing, isSynced, lastSyncTime, refresh: refreshSync } = useFilesSync(config);
 
   // Zustand store for folder metadata
   const metadata = useFolderSizeStore((state) => state.metadata);
@@ -129,16 +129,12 @@ export default function Home() {
     // Sort by modified date
     if (modifiedSort) {
       result = [...result].sort((a, b) => {
-        const dateA = a.isFolder
-          ? metadata[a.key]?.lastModified || ''
-          : a.lastModified || '';
-        const dateB = b.isFolder
-          ? metadata[b.key]?.lastModified || ''
-          : b.lastModified || '';
-        
+        const dateA = a.isFolder ? metadata[a.key]?.lastModified || '' : a.lastModified || '';
+        const dateB = b.isFolder ? metadata[b.key]?.lastModified || '' : b.lastModified || '';
+
         const timeA = dateA ? new Date(dateA).getTime() : 0;
         const timeB = dateB ? new Date(dateB).getTime() : 0;
-        
+
         return modifiedSort === 'asc' ? timeA - timeB : timeB - timeA;
       });
     }
@@ -147,6 +143,7 @@ export default function Home() {
   }, [items, searchQuery, sizeSort, modifiedSort, metadata]);
 
   // Load folder metadata from directory tree when items change and sync is complete
+  // lastSyncTime ensures metadata reloads after refresh (since isSynced stays true during refetch)
   useEffect(() => {
     if (!isSynced || items.length === 0) return;
 
@@ -154,7 +151,7 @@ export default function Home() {
     if (folderKeys.length > 0) {
       loadMetadataList(folderKeys);
     }
-  }, [isSynced, items, loadMetadataList]);
+  }, [isSynced, lastSyncTime, items, loadMetadataList]);
 
   // Show error if API fails
   useEffect(() => {
@@ -310,7 +307,7 @@ export default function Home() {
 
     // Close confirmation modal
     closeBatchDeleteConfirm();
-    
+
     // Show full-screen loading
     setIsDeleting(true);
 
@@ -542,6 +539,7 @@ export default function Home() {
             hasConfig={!!config}
             currentConfig={currentConfig}
             isSyncing={isSyncing}
+            lastSyncTime={lastSyncTime}
           />
 
           <ConfigModal

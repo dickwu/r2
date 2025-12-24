@@ -23,6 +23,7 @@ interface StatusBarProps {
 
   // Sync state
   isSyncing?: boolean;
+  lastSyncTime?: number | null;
 }
 
 export default function StatusBar({
@@ -32,17 +33,32 @@ export default function StatusBar({
   hasConfig,
   currentConfig,
   isSyncing = false,
+  lastSyncTime,
 }: StatusBarProps) {
   const metadata = useFolderSizeStore((state) => state.metadata);
   const loadMetadata = useFolderSizeStore((state) => state.loadMetadata);
+  const setMetadata = useFolderSizeStore((state) => state.setMetadata);
   const processedFiles = useSyncStore((state) => state.processedFiles);
+
+  // Clear root metadata when sync completes to force fresh load
+  // This fixes the issue where metadata loads before first sync and never updates
+  useEffect(() => {
+    if (lastSyncTime) {
+      setMetadata('', {
+        size: 'loading',
+        fileCount: null,
+        totalFileCount: null,
+        lastModified: null,
+      });
+    }
+  }, [lastSyncTime, setMetadata]);
 
   // Load root directory metadata (empty string = root)
   useEffect(() => {
     if (hasConfig && !isSyncing) {
       loadMetadata('');
     }
-  }, [hasConfig, isSyncing, loadMetadata]);
+  }, [hasConfig, isSyncing, lastSyncTime, loadMetadata]);
 
   // Get bucket-wide statistics from root metadata
   const bucketStats = useMemo(() => {

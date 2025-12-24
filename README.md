@@ -103,16 +103,18 @@ bun run tauri build
 
 Account configurations are stored locally in a SQLite database:
 
-- **macOS**: `~/Library/Application Support/r2/uploads.db`
-- **Windows**: `%APPDATA%\r2\uploads.db`
-- **Linux**: `~/.local/share/r2/uploads.db`
+- **macOS**: `~/Library/Application Support/r2/uploads-turso.db`
+- **Windows**: `%APPDATA%\r2\uploads-turso.db`
+- **Linux**: `~/.local/share/r2/uploads-turso.db`
+
+The app automatically migrates from the old `uploads.db` (rusqlite) format on first launch.
 
 ## Tech Stack
 
 - **Frontend**: Next.js, React, Ant Design, Zustand
 - **Backend**: Tauri (Rust)
 - **Storage**: Cloudflare R2 (S3-compatible)
-- **Database**: SQLite (via rusqlite)
+- **Database**: SQLite (via Turso - Rust-based SQLite-compatible database)
 - **State**: TanStack Query, Zustand
 
 ## IDE Setup

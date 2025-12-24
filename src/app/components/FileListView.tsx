@@ -61,7 +61,7 @@ export default function FileListView({
   onRename,
 }: FileListViewProps) {
   const fileItems = items.filter((item) => !item.isFolder);
-  
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
@@ -82,15 +82,25 @@ export default function FileListView({
         <span className="col-name">Name</span>
         <span className="col-size sortable" onClick={onToggleSizeSort}>
           <span>Size</span>
-          {sizeSort === 'asc' ? <CaretUpOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
-          {sizeSort === 'desc' ? <CaretDownOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
+          {sizeSort === 'asc' ? (
+            <CaretUpOutlined style={{ color: 'var(--text-secondary)' }} />
+          ) : null}
+          {sizeSort === 'desc' ? (
+            <CaretDownOutlined style={{ color: 'var(--text-secondary)' }} />
+          ) : null}
           {sizeSort === null ? <MoreOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
         </span>
         <span className="col-date sortable" onClick={onToggleModifiedSort}>
-          Modified 
-          {modifiedSort === 'asc' ? <CaretUpOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
-          {modifiedSort === 'desc' ? <CaretDownOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
-          {modifiedSort === null ? <MoreOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
+          Modified
+          {modifiedSort === 'asc' ? (
+            <CaretUpOutlined style={{ color: 'var(--text-secondary)' }} />
+          ) : null}
+          {modifiedSort === 'desc' ? (
+            <CaretDownOutlined style={{ color: 'var(--text-secondary)' }} />
+          ) : null}
+          {modifiedSort === null ? (
+            <MoreOutlined style={{ color: 'var(--text-secondary)' }} />
+          ) : null}
         </span>
         <span className="col-actions">Actions</span>
       </div>

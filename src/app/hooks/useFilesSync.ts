@@ -80,6 +80,8 @@ export function useFilesSync(config: R2Config | null) {
     isSyncing: query.isFetching,
     isSynced: query.isSuccess,
     syncError: query.error,
+    // Expose timestamp so consumers can detect when sync completes
+    lastSyncTime: query.data?.timestamp ?? null,
     refresh,
   };
 }

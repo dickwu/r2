@@ -36,7 +36,7 @@ hex = "0.4"
 chrono = "0.4"
 urlencoding = "2"
 lazy_static = "1.4"
-libsql = "0.9"
+turso = "0.4.0-pre.19"
 rusqlite = { version = "0.32" }  # Kept for migration from old databases, uses system SQLite
 log = "0.4"
 tauri-plugin-video-thumbnail = { git = "https://github.com/dickwu/tauri-plugin-video-thumbnail" }
