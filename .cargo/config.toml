@@ -1,0 +1,8 @@
+# Cargo build configuration for cross-platform FFmpeg support
+
+[target.x86_64-pc-windows-msvc]
+rustflags = []
+
+# Environment variables for pkg-config on Windows
+[env]
+# PKG_CONFIG_PATH will be set via CI environment variables
