@@ -44,3 +44,5 @@ Thumbs.db
 
 # Local
 *.local
+
+build-windows.sh

@@ -1,11 +1,13 @@
-# Cargo build configuration for cross-platform FFmpeg support
+# Cargo build configuration for cross-platform builds
 
 [target.x86_64-pc-windows-msvc]
 # Use cargo-xwin for cross-compilation from macOS/Linux to Windows
-# This requires: cargo install cargo-xwin
-# Then run: cargo xwin build --target x86_64-pc-windows-msvc
+# Run: bun run tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
+# Or use: ./build-windows.sh
 rustflags = []
 
-# Environment variables for pkg-config on Windows
-[env]
-# PKG_CONFIG_PATH will be set via CI environment variables
+# Note: When using --runner cargo-xwin, do NOT set CC/CXX here
+# cargo-xwin handles the compiler and Windows SDK setup automatically
+
+# Note: sccache must be disabled for Windows cross-compilation
+# The build script unsets RUSTC_WRAPPER to handle this

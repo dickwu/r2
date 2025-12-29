@@ -22,6 +22,7 @@ jobs:
             args: --target x86_64-apple-darwin
           - platform: macos-latest
             args: --target x86_64-pc-windows-msvc
+            windows_cross: true
           - platform: ubuntu-22.04
             args: ''
 
@@ -38,7 +39,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && (matrix.args == '--target x86_64-pc-windows-msvc' && 'x86_64-pc-windows-msvc' || 'aarch64-apple-darwin,x86_64-apple-darwin') || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && (matrix.windows_cross && 'x86_64-pc-windows-msvc' || 'aarch64-apple-darwin,x86_64-apple-darwin') || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -55,11 +56,12 @@ jobs:
         if: matrix.platform == 'macos-latest'
         run: brew install ffmpeg pkg-config cmake ninja
 
-      - name: Install cargo-xwin (macOS for Windows cross-compilation)
-        if: matrix.platform == 'macos-latest' && matrix.args == '--target x86_64-pc-windows-msvc'
+      - name: Install cargo-xwin (Windows cross-compilation)
+        if: matrix.windows_cross
         run: |
-          cargo install cargo-xwin --locked || true
-          cargo xwin setup || true
+          cargo install cargo-xwin --locked
+          # Trigger xwin setup to download Windows SDK
+          cargo xwin --version || true
 
       - name: Install frontend dependencies
         run: bun install
@@ -70,15 +72,79 @@ jobs:
       - name: Debug - Check signing key
         run: echo "TAURI_SIGNING_PRIVATE_KEY length is ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && 'SET' || 'EMPTY' }}"
 
-      - name: Build Tauri app
+      - name: Build Tauri app (native)
+        if: ${{ !matrix.windows_cross }}
         run: bun tauri build ${{ matrix.args }}
         env:
           CI: true
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      - name: Build Tauri app (Windows cross-compile)
+        if: matrix.windows_cross
+        run: |
+          # Disable sccache for Windows cross-compilation
+          unset RUSTC_WRAPPER
+          
+          # Find xwin cache directory
+          XWIN_CACHE="$HOME/Library/Caches/cargo-xwin/xwin"
+          
+          # Set INCLUDE for clang-cl to find Windows SDK headers
+          if [ -d "$XWIN_CACHE" ]; then
+            export INCLUDE="$XWIN_CACHE/crt/include;$XWIN_CACHE/sdk/include/ucrt;$XWIN_CACHE/sdk/include/um;$XWIN_CACHE/sdk/include/shared"
+            export LIB="$XWIN_CACHE/crt/lib/x86_64;$XWIN_CACHE/sdk/lib/um/x86_64;$XWIN_CACHE/sdk/lib/ucrt/x86_64"
+          fi
+          
+          # Create clang wrapper for crates that call clang directly
+          WRAPPER_DIR=$(mktemp -d)
+          cat > "$WRAPPER_DIR/clang" << 'EOF'
+          #!/bin/bash
+          args=()
+          for arg in "$@"; do
+              if [[ "$arg" == /imsvc/* ]]; then
+                  path="${arg#/imsvc}"
+                  args+=("-I" "$path")
+              else
+                  args+=("$arg")
+              fi
+          done
+          exec /usr/bin/clang "${args[@]}"
+          EOF
+          chmod +x "$WRAPPER_DIR/clang"
+          
+          cat > "$WRAPPER_DIR/clang++" << 'EOF'
+          #!/bin/bash
+          args=()
+          for arg in "$@"; do
+              if [[ "$arg" == /imsvc/* ]]; then
+                  path="${arg#/imsvc}"
+                  args+=("-I" "$path")
+              else
+                  args+=("$arg")
+              fi
+          done
+          exec /usr/bin/clang++ "${args[@]}"
+          EOF
+          chmod +x "$WRAPPER_DIR/clang++"
+          
+          export PATH="$WRAPPER_DIR:$PATH"
+          
+          # Set CFLAGS for SSE4.2 (needed for libwebp-sys)
+          export CFLAGS="-msse4.2"
+          export CXXFLAGS="-msse4.2"
+          export TARGET_CFLAGS="-msse4.2"
+          export TARGET_CXXFLAGS="-msse4.2"
+          export CC_x86_64_pc_windows_msvc="clang-cl"
+          export CXX_x86_64_pc_windows_msvc="clang-cl"
+          
+          # Build with cargo-xwin as runner
+          bun tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --ci
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
       - name: Upload artifacts (macOS)
-        if: matrix.platform == 'macos-latest'
+        if: matrix.platform == 'macos-latest' && !matrix.windows_cross
         uses: actions/upload-artifact@v4
         with:
           name: macos-${{ contains(matrix.args, 'aarch64') && 'arm64' || 'x64' }}
@@ -98,7 +164,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload artifacts (Windows)
-        if: matrix.platform == 'macos-latest' && matrix.args == '--target x86_64-pc-windows-msvc'
+        if: matrix.windows_cross
         uses: actions/upload-artifact@v4
         with:
           name: windows-x64
