@@ -80,6 +80,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      - name: Install LLVM (Windows cross-compilation)
+        if: matrix.windows_cross
+        run: brew install llvm
+
       - name: Build Tauri app (Windows cross-compile)
         if: matrix.windows_cross
         run: |
@@ -95,13 +99,61 @@ jobs:
             export LIB="$XWIN_CACHE/crt/lib/x86_64;$XWIN_CACHE/sdk/lib/um/x86_64;$XWIN_CACHE/sdk/lib/ucrt/x86_64"
           fi
           
-          # Create clang wrapper for crates that call clang directly
+          # Find the real clang-cl binary first
+          REAL_CLANG_CL=""
+          if [ -x "/opt/homebrew/opt/llvm/bin/clang-cl" ]; then
+            REAL_CLANG_CL="/opt/homebrew/opt/llvm/bin/clang-cl"
+          elif [ -x "/usr/local/opt/llvm/bin/clang-cl" ]; then
+            REAL_CLANG_CL="/usr/local/opt/llvm/bin/clang-cl"
+          else
+            echo "Error: Could not find clang-cl"
+            exit 1
+          fi
+          echo "Found real clang-cl at: $REAL_CLANG_CL"
+          
+          # Create compiler wrappers that fix /imsvc argument splitting
+          # cargo-xwin passes "/imsvc" and path as separate args, but clang-cl needs "/imsvc<path>"
           WRAPPER_DIR=$(mktemp -d)
+          
+          # clang-cl wrapper - combines split /imsvc args and adds SSE flags
+          cat > "$WRAPPER_DIR/clang-cl" << EOF
+          #!/bin/bash
+          args=("-msse4.2")  # Enable SSE4.2 (includes SSSE3, SSE4.1) for libwebp-sys etc.
+          prev_was_imsvc=false
+          for arg in "\$@"; do
+              if \$prev_was_imsvc; then
+                  args+=("/imsvc\$arg")
+                  prev_was_imsvc=false
+                  continue
+              fi
+              if [[ "\$arg" == "/imsvc" ]]; then
+                  prev_was_imsvc=true
+                  continue
+              elif [[ "\$arg" == /imsvc/* ]]; then
+                  args+=("\$arg")
+              else
+                  args+=("\$arg")
+              fi
+          done
+          exec "$REAL_CLANG_CL" "\${args[@]}"
+          EOF
+          chmod +x "$WRAPPER_DIR/clang-cl"
+          
+          # clang wrapper - translates /imsvc to -I for regular clang
           cat > "$WRAPPER_DIR/clang" << 'EOF'
           #!/bin/bash
           args=()
+          prev_was_imsvc=false
           for arg in "$@"; do
-              if [[ "$arg" == /imsvc/* ]]; then
+              if $prev_was_imsvc; then
+                  args+=("-I" "$arg")
+                  prev_was_imsvc=false
+                  continue
+              fi
+              if [[ "$arg" == "/imsvc" ]]; then
+                  prev_was_imsvc=true
+                  continue
+              elif [[ "$arg" == /imsvc/* ]]; then
                   path="${arg#/imsvc}"
                   args+=("-I" "$path")
               else
@@ -112,11 +164,21 @@ jobs:
           EOF
           chmod +x "$WRAPPER_DIR/clang"
           
+          # clang++ wrapper
           cat > "$WRAPPER_DIR/clang++" << 'EOF'
           #!/bin/bash
           args=()
+          prev_was_imsvc=false
           for arg in "$@"; do
-              if [[ "$arg" == /imsvc/* ]]; then
+              if $prev_was_imsvc; then
+                  args+=("-I" "$arg")
+                  prev_was_imsvc=false
+                  continue
+              fi
+              if [[ "$arg" == "/imsvc" ]]; then
+                  prev_was_imsvc=true
+                  continue
+              elif [[ "$arg" == /imsvc/* ]]; then
                   path="${arg#/imsvc}"
                   args+=("-I" "$path")
               else
@@ -129,13 +191,10 @@ jobs:
           
           export PATH="$WRAPPER_DIR:$PATH"
           
-          # Set CFLAGS for SSE4.2 (needed for libwebp-sys)
-          export CFLAGS="-msse4.2"
-          export CXXFLAGS="-msse4.2"
-          export TARGET_CFLAGS="-msse4.2"
-          export TARGET_CXXFLAGS="-msse4.2"
-          export CC_x86_64_pc_windows_msvc="clang-cl"
-          export CXX_x86_64_pc_windows_msvc="clang-cl"
+          # Only set CC/CXX to our wrappers, don't set global CFLAGS
+          # cargo-xwin handles CFLAGS internally
+          export CC_x86_64_pc_windows_msvc="$WRAPPER_DIR/clang-cl"
+          export CXX_x86_64_pc_windows_msvc="$WRAPPER_DIR/clang-cl"
           
           # Build with cargo-xwin as runner
           bun tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --ci
