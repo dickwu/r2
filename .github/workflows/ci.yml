@@ -20,9 +20,8 @@ jobs:
             args: --target aarch64-apple-darwin
           - platform: macos-latest
             args: --target x86_64-apple-darwin
-          - platform: macos-latest
-            args: --target x86_64-pc-windows-msvc
-            windows_cross: true
+          - platform: windows-latest
+            args: ''
           - platform: ubuntu-22.04
             args: ''
 
@@ -39,7 +38,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && (matrix.windows_cross && 'x86_64-pc-windows-msvc' || 'aarch64-apple-darwin,x86_64-apple-darwin') || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -56,12 +55,12 @@ jobs:
         if: matrix.platform == 'macos-latest'
         run: brew install ffmpeg pkg-config cmake ninja
 
-      - name: Install cargo-xwin (Windows cross-compilation)
-        if: matrix.windows_cross
+      - name: Install dependencies (Windows)
+        if: matrix.platform == 'windows-latest'
         run: |
-          cargo install cargo-xwin --locked
-          # Trigger xwin setup to download Windows SDK
-          cargo xwin --version || true
+          choco install ffmpeg sqlite -y
+          echo "FFMPEG_DIR=C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg" >> $env:GITHUB_ENV
+          echo "SQLITE3_LIB_DIR=C:\ProgramData\chocolatey\lib\SQLite\tools" >> $env:GITHUB_ENV
 
       - name: Install frontend dependencies
         run: bun install
@@ -72,138 +71,15 @@ jobs:
       - name: Debug - Check signing key
         run: echo "TAURI_SIGNING_PRIVATE_KEY length is ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && 'SET' || 'EMPTY' }}"
 
-      - name: Build Tauri app (native)
-        if: ${{ !matrix.windows_cross }}
+      - name: Build Tauri app
         run: bun tauri build ${{ matrix.args }}
         env:
           CI: true
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      - name: Install LLVM (Windows cross-compilation)
-        if: matrix.windows_cross
-        run: brew install llvm
-
-      - name: Build Tauri app (Windows cross-compile)
-        if: matrix.windows_cross
-        run: |
-          # Disable sccache for Windows cross-compilation
-          unset RUSTC_WRAPPER
-          
-          # Find xwin cache directory
-          XWIN_CACHE="$HOME/Library/Caches/cargo-xwin/xwin"
-          
-          # Set INCLUDE for clang-cl to find Windows SDK headers
-          if [ -d "$XWIN_CACHE" ]; then
-            export INCLUDE="$XWIN_CACHE/crt/include;$XWIN_CACHE/sdk/include/ucrt;$XWIN_CACHE/sdk/include/um;$XWIN_CACHE/sdk/include/shared"
-            export LIB="$XWIN_CACHE/crt/lib/x86_64;$XWIN_CACHE/sdk/lib/um/x86_64;$XWIN_CACHE/sdk/lib/ucrt/x86_64"
-          fi
-          
-          # Find the real clang-cl binary first
-          REAL_CLANG_CL=""
-          if [ -x "/opt/homebrew/opt/llvm/bin/clang-cl" ]; then
-            REAL_CLANG_CL="/opt/homebrew/opt/llvm/bin/clang-cl"
-          elif [ -x "/usr/local/opt/llvm/bin/clang-cl" ]; then
-            REAL_CLANG_CL="/usr/local/opt/llvm/bin/clang-cl"
-          else
-            echo "Error: Could not find clang-cl"
-            exit 1
-          fi
-          echo "Found real clang-cl at: $REAL_CLANG_CL"
-          
-          # Create compiler wrappers that fix /imsvc argument splitting
-          # cargo-xwin passes "/imsvc" and path as separate args, but clang-cl needs "/imsvc<path>"
-          WRAPPER_DIR=$(mktemp -d)
-          
-          # clang-cl wrapper - combines split /imsvc args and adds SSE flags
-          cat > "$WRAPPER_DIR/clang-cl" << EOF
-          #!/bin/bash
-          args=("-msse4.2")  # Enable SSE4.2 (includes SSSE3, SSE4.1) for libwebp-sys etc.
-          prev_was_imsvc=false
-          for arg in "\$@"; do
-              if \$prev_was_imsvc; then
-                  args+=("/imsvc\$arg")
-                  prev_was_imsvc=false
-                  continue
-              fi
-              if [[ "\$arg" == "/imsvc" ]]; then
-                  prev_was_imsvc=true
-                  continue
-              elif [[ "\$arg" == /imsvc/* ]]; then
-                  args+=("\$arg")
-              else
-                  args+=("\$arg")
-              fi
-          done
-          exec "$REAL_CLANG_CL" "\${args[@]}"
-          EOF
-          chmod +x "$WRAPPER_DIR/clang-cl"
-          
-          # clang wrapper - translates /imsvc to -I for regular clang
-          cat > "$WRAPPER_DIR/clang" << 'EOF'
-          #!/bin/bash
-          args=()
-          prev_was_imsvc=false
-          for arg in "$@"; do
-              if $prev_was_imsvc; then
-                  args+=("-I" "$arg")
-                  prev_was_imsvc=false
-                  continue
-              fi
-              if [[ "$arg" == "/imsvc" ]]; then
-                  prev_was_imsvc=true
-                  continue
-              elif [[ "$arg" == /imsvc/* ]]; then
-                  path="${arg#/imsvc}"
-                  args+=("-I" "$path")
-              else
-                  args+=("$arg")
-              fi
-          done
-          exec /usr/bin/clang "${args[@]}"
-          EOF
-          chmod +x "$WRAPPER_DIR/clang"
-          
-          # clang++ wrapper
-          cat > "$WRAPPER_DIR/clang++" << 'EOF'
-          #!/bin/bash
-          args=()
-          prev_was_imsvc=false
-          for arg in "$@"; do
-              if $prev_was_imsvc; then
-                  args+=("-I" "$arg")
-                  prev_was_imsvc=false
-                  continue
-              fi
-              if [[ "$arg" == "/imsvc" ]]; then
-                  prev_was_imsvc=true
-                  continue
-              elif [[ "$arg" == /imsvc/* ]]; then
-                  path="${arg#/imsvc}"
-                  args+=("-I" "$path")
-              else
-                  args+=("$arg")
-              fi
-          done
-          exec /usr/bin/clang++ "${args[@]}"
-          EOF
-          chmod +x "$WRAPPER_DIR/clang++"
-          
-          export PATH="$WRAPPER_DIR:$PATH"
-          
-          # Only set CC/CXX to our wrappers, don't set global CFLAGS
-          # cargo-xwin handles CFLAGS internally
-          export CC_x86_64_pc_windows_msvc="$WRAPPER_DIR/clang-cl"
-          export CXX_x86_64_pc_windows_msvc="$WRAPPER_DIR/clang-cl"
-          
-          # Build with cargo-xwin as runner
-          bun tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --ci
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-
       - name: Upload artifacts (macOS)
-        if: matrix.platform == 'macos-latest' && !matrix.windows_cross
+        if: matrix.platform == 'macos-latest'
         uses: actions/upload-artifact@v4
         with:
           name: macos-${{ contains(matrix.args, 'aarch64') && 'arm64' || 'x64' }}
@@ -223,11 +99,11 @@ jobs:
           if-no-files-found: error
 
       - name: Upload artifacts (Windows)
-        if: matrix.windows_cross
+        if: matrix.platform == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
           name: windows-x64
           path: |
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
