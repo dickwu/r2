@@ -69,6 +69,33 @@ bun run tauri dev
 bun run tauri build
 ```
 
+### Cross-compiling for Windows (from macOS/Linux)
+
+To build Windows binaries from macOS or Linux, you need additional tools:
+
+```bash
+# Install required dependencies
+# macOS
+brew install cmake ninja llvm nsis
+
+# Ubuntu/Debian
+sudo apt-get install cmake ninja-build llvm nsis
+
+# Install cargo-xwin
+cargo install --locked cargo-xwin
+
+# Setup Windows toolchain
+cargo xwin setup
+
+# Add Windows target
+rustup target add x86_64-pc-windows-msvc
+
+# Build for Windows
+bun run tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
+```
+
+**Note:** Cross-compilation is experimental. For production builds, consider using GitHub Actions or a Windows VM.
+
 ## Configuration
 
 ### Adding Your First Account

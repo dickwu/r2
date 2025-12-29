@@ -20,9 +20,9 @@ jobs:
             args: --target aarch64-apple-darwin
           - platform: macos-latest
             args: --target x86_64-apple-darwin
+          - platform: macos-latest
+            args: --target x86_64-pc-windows-msvc
           - platform: ubuntu-22.04
-            args: ''
-          - platform: windows-latest
             args: ''
 
     runs-on: ${{ matrix.platform }}
@@ -38,7 +38,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && (matrix.args == '--target x86_64-pc-windows-msvc' && 'x86_64-pc-windows-msvc' || 'aarch64-apple-darwin,x86_64-apple-darwin') || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -51,34 +51,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libsqlite3-dev pkg-config
 
-      - name: Install ffmpeg (macOS)
+      - name: Install ffmpeg, cmake, and ninja (macOS)
         if: matrix.platform == 'macos-latest'
-        run: brew install ffmpeg pkg-config
+        run: brew install ffmpeg pkg-config cmake ninja
 
-      - name: Setup vcpkg cache (Windows)
-        if: matrix.platform == 'windows-latest'
-        uses: actions/cache@v4
-        with:
-          path: C:\vcpkg\installed
-          key: ${{ runner.os }}-vcpkg-deps-${{ hashFiles('.github/workflows/*.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-vcpkg-deps-
-
-      - name: Install dependencies (Windows with vcpkg)
-        if: matrix.platform == 'windows-latest'
-        shell: pwsh
+      - name: Install cargo-xwin (macOS for Windows cross-compilation)
+        if: matrix.platform == 'macos-latest' && matrix.args == '--target x86_64-pc-windows-msvc'
         run: |
-          # Use vcpkg to install FFmpeg and SQLite3 for better Rust integration
-          C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows sqlite3:x64-windows
-
-      - name: Setup FFmpeg environment (Windows)
-        if: matrix.platform == 'windows-latest'
-        shell: pwsh
-        run: |
-          echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
-          echo "FFMPEG_DIR=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
-          echo "PKG_CONFIG_PATH=C:\vcpkg\installed\x64-windows\lib\pkgconfig" >> $env:GITHUB_ENV
-          echo "C:\vcpkg\installed\x64-windows\bin" >> $env:GITHUB_PATH
+          cargo install cargo-xwin --locked || true
+          cargo xwin setup || true
 
       - name: Install frontend dependencies
         run: bun install
@@ -95,7 +76,6 @@ jobs:
           CI: true
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          VCPKG_ROOT: ${{ matrix.platform == 'windows-latest' && 'C:\vcpkg' || '' }}
 
       - name: Upload artifacts (macOS)
         if: matrix.platform == 'macos-latest'
@@ -118,11 +98,11 @@ jobs:
           if-no-files-found: error
 
       - name: Upload artifacts (Windows)
-        if: matrix.platform == 'windows-latest'
+        if: matrix.platform == 'macos-latest' && matrix.args == '--target x86_64-pc-windows-msvc'
         uses: actions/upload-artifact@v4
         with:
           name: windows-x64
           path: |
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
           if-no-files-found: error

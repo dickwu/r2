@@ -1,6 +1,9 @@
 # Cargo build configuration for cross-platform FFmpeg support
 
 [target.x86_64-pc-windows-msvc]
+# Use cargo-xwin for cross-compilation from macOS/Linux to Windows
+# This requires: cargo install cargo-xwin
+# Then run: cargo xwin build --target x86_64-pc-windows-msvc
 rustflags = []
 
 # Environment variables for pkg-config on Windows

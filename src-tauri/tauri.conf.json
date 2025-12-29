@@ -36,11 +36,7 @@
       "icons/icon.ico",
       "icons/icon.png"
     ],
-    "createUpdaterArtifacts": true,
-    "resources": [
-      "sqlite3.dll",
-      "ffmpeg.dll"
-    ]
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "updater": {
