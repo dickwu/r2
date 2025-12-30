@@ -6,6 +6,11 @@ import { useFolderSizeStore } from '../stores/folderSizeStore';
 import { useSyncStore, SyncPhase } from '../stores/syncStore';
 import { R2Config } from '../components/ConfigModal';
 
+interface IndexingProgress {
+  current: number;
+  total: number;
+}
+
 // Sync all files to SQLite for folder size calculation
 export function useFilesSync(config: R2Config | null) {
   const queryClient = useQueryClient();
@@ -22,9 +27,15 @@ export function useFilesSync(config: R2Config | null) {
       useSyncStore.getState().setPhase(event.payload);
     });
 
+    // Listen for indexing progress events
+    const unlistenIndexing = listen<IndexingProgress>('indexing-progress', (event) => {
+      useSyncStore.getState().setIndexingProgress(event.payload);
+    });
+
     return () => {
       unlistenProgress.then((fn) => fn());
       unlistenPhase.then((fn) => fn());
+      unlistenIndexing.then((fn) => fn());
     };
   }, []);
 

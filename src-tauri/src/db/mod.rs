@@ -17,13 +17,14 @@ pub mod sessions;
 pub mod tokens;
 pub mod file_cache;
 pub mod app_state;
+pub mod dir_tree;
 
 // Re-export types
 pub use accounts::Account;
 pub use buckets::Bucket;
 pub use sessions::UploadSession;
 pub use tokens::{Token, CurrentConfig};
-pub use file_cache::{CachedFile, CachedDirectoryNode, SearchResult};
+pub use file_cache::{CachedFile, CachedDirectoryNode};
 
 // ============ Connection and Initialization ============
 
@@ -107,5 +108,7 @@ pub use buckets::{create_bucket, delete_bucket, list_buckets_by_token, update_bu
 // Re-export file cache functions
 pub use file_cache::{
     store_all_files, get_all_cached_files, search_cached_files, calculate_folder_size, 
-    build_directory_tree, get_directory_node, get_all_directory_nodes, clear_file_cache,
+    get_directory_node, get_all_directory_nodes, clear_file_cache,
 };
+// Re-export directory tree builder
+pub use dir_tree::{build_directory_tree};

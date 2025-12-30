@@ -58,6 +58,7 @@ export default function StatusBar({
   const phase = useSyncStore((state) => state.phase);
   const processedFiles = useSyncStore((state) => state.processedFiles);
   const totalFiles = useSyncStore((state) => state.totalFiles);
+  const indexingProgress = useSyncStore((state) => state.indexingProgress);
 
   // Clear root metadata when sync completes to force fresh load
   useEffect(() => {
@@ -92,14 +93,29 @@ export default function StatusBar({
     };
   }, [metadata]);
 
-  // Render sync progress with phase indicator
+  // Render sync progress with phase indicator and percentage
   const renderSyncProgress = () => {
     if (!isSyncing || phase === 'idle' || phase === 'complete') {
       return null;
     }
 
     const { icon, label } = phaseConfig[phase];
-    const fileCount = totalFiles > 0 ? totalFiles : processedFiles;
+
+    // Calculate progress text based on phase
+    let progressText = '';
+    if (phase === 'fetching') {
+      progressText = `${processedFiles.toLocaleString()} files`;
+    } else if (phase === 'storing') {
+      progressText = `${totalFiles.toLocaleString()} files`;
+    } else if (phase === 'indexing') {
+      const { current, total } = indexingProgress;
+      if (total > 0) {
+        const percentage = Math.round((current / total) * 100);
+        progressText = `${percentage}% (${current.toLocaleString()}/${total.toLocaleString()})`;
+      } else if (totalFiles > 0) {
+        progressText = `${totalFiles.toLocaleString()} files`;
+      }
+    }
 
     return (
       <span className="sync-progress">
@@ -107,12 +123,7 @@ export default function StatusBar({
         <span className="sync-phase">
           {icon} {label}
         </span>
-        {phase === 'fetching' && (
-          <span className="sync-count">{processedFiles.toLocaleString()} files</span>
-        )}
-        {(phase === 'storing' || phase === 'indexing') && fileCount > 0 && (
-          <span className="sync-count">{fileCount.toLocaleString()} files</span>
-        )}
+        {progressText && <span className="sync-count">{progressText}</span>}
       </span>
     );
   };

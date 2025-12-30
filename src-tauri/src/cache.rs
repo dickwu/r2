@@ -243,6 +243,13 @@ pub async fn calculate_folder_size(prefix: String) -> Result<i64, String> {
         .map_err(|e| format!("Failed to calculate folder size: {}", e))
 }
 
+/// Indexing progress payload
+#[derive(Debug, Clone, Serialize)]
+struct IndexingProgress {
+    current: usize,
+    total: usize,
+}
+
 #[tauri::command]
 pub async fn build_directory_tree(app: tauri::AppHandle) -> Result<(), String> {
     let (bucket, account_id) = get_current_bucket_info().await?;
@@ -255,8 +262,13 @@ pub async fn build_directory_tree(app: tauri::AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to get cached files: {}", e))?;
     
-    // Build tree
-    db::build_directory_tree(&bucket, &account_id, &files)
+    // Build tree with progress callback
+    let app_clone = app.clone();
+    let progress_callback = move |current: usize, total: usize| {
+        let _ = app_clone.emit("indexing-progress", IndexingProgress { current, total });
+    };
+    
+    db::build_directory_tree(&bucket, &account_id, &files, Some(progress_callback))
         .await
         .map_err(|e| format!("Failed to build directory tree: {}", e))?;
     
