@@ -44,6 +44,7 @@ interface FileGridViewProps {
   folderSizes?: Record<string, FolderMetadata>;
   selectedKeys?: Set<string>;
   onToggleSelection?: (key: string) => void;
+  showFullPath?: boolean;
 }
 
 const FileCard = memo(function FileCard({
@@ -55,6 +56,7 @@ const FileCard = memo(function FileCard({
   folderMetadata,
   isSelected,
   onToggleSelection,
+  showFullPath,
 }: {
   item: FileItem;
   publicDomain?: string;
@@ -64,6 +66,7 @@ const FileCard = memo(function FileCard({
   folderMetadata?: FolderMetadata;
   isSelected?: boolean;
   onToggleSelection?: (key: string) => void;
+  showFullPath?: boolean;
 }) {
   const isImage = !item.isFolder && isImageFile(item.name);
   const isVideo = !item.isFolder && isVideoFile(item.name);
@@ -133,8 +136,8 @@ const FileCard = memo(function FileCard({
           )}
         </div>
       )}
-      <div className="grid-card-name" title={item.name}>
-        {item.name}
+      <div className="grid-card-name" title={showFullPath ? item.key : item.name}>
+        {showFullPath ? item.key : item.name}
       </div>
       <div className="grid-card-meta">
         {item.isFolder
@@ -209,6 +212,7 @@ export default memo(function FileGridView({
   folderSizes,
   selectedKeys,
   onToggleSelection,
+  showFullPath,
 }: FileGridViewProps) {
   return (
     <div className="file-grid" style={{ height: '100%' }}>
@@ -229,6 +233,7 @@ export default memo(function FileGridView({
             folderMetadata={item.isFolder ? folderSizes?.[item.key] : undefined}
             isSelected={selectedKeys?.has(item.key)}
             onToggleSelection={onToggleSelection}
+            showFullPath={showFullPath}
           />
         )}
       />

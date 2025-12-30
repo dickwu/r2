@@ -1,29 +1,30 @@
 import { useCallback, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { listen } from '@tauri-apps/api/event';
-import {
-  listAllR2ObjectsRecursive,
-  storeAllFiles,
-  buildDirectoryTree,
-  getAllFiles,
-} from '../lib/r2cache';
+import { listAllR2ObjectsRecursive, storeAllFiles, buildDirectoryTree } from '../lib/r2cache';
 import { useFolderSizeStore } from '../stores/folderSizeStore';
-import { useSyncStore } from '../stores/syncStore';
+import { useSyncStore, SyncPhase } from '../stores/syncStore';
 import { R2Config } from '../components/ConfigModal';
 
-// Sync all files to IndexedDB for folder size calculation
+// Sync all files to SQLite for folder size calculation
 export function useFilesSync(config: R2Config | null) {
   const queryClient = useQueryClient();
   const clearSizes = useFolderSizeStore((state) => state.clearSizes);
 
-  // Listen for sync progress events from Tauri backend
+  // Listen for sync progress and phase events from Tauri backend
   useEffect(() => {
-    const unlisten = listen<number>('sync-progress', (event) => {
+    const unlistenProgress = listen<number>('sync-progress', (event) => {
       useSyncStore.getState().setProgress(event.payload);
     });
 
+    // Listen for phase change events from backend
+    const unlistenPhase = listen<SyncPhase>('sync-phase', (event) => {
+      useSyncStore.getState().setPhase(event.payload);
+    });
+
     return () => {
-      unlisten.then((fn) => fn());
+      unlistenProgress.then((fn) => fn());
+      unlistenPhase.then((fn) => fn());
     };
   }, []);
 
@@ -37,15 +38,15 @@ export function useFilesSync(config: R2Config | null) {
       clearSizes();
       useSyncStore.getState().reset();
 
-      // Fetch all files from R2 (progress via Tauri events)
+      // Phase 1: Fetch all files from R2 (phase + progress emitted via Tauri events)
       const allFiles = await listAllR2ObjectsRecursive(config);
+      useSyncStore.getState().setTotalFiles(allFiles.length);
 
-      // Store files in IndexedDB
+      // Phase 2: Store files in SQLite (phase emitted via Tauri events)
       await storeAllFiles(allFiles);
 
-      // Get stored files and build directory tree
-      const storedFiles = await getAllFiles();
-      await buildDirectoryTree(storedFiles);
+      // Phase 3: Build directory tree (phase + complete emitted via Tauri events)
+      await buildDirectoryTree([]);
 
       console.log(`Synced ${allFiles.length} files and built directory tree`);
       return {

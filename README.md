@@ -134,8 +134,6 @@ Account configurations are stored locally in a SQLite database:
 - **Windows**: `%APPDATA%\r2\uploads-turso.db`
 - **Linux**: `~/.local/share/r2/uploads-turso.db`
 
-The app automatically migrates from the old `uploads.db` (rusqlite) format on first launch.
-
 ## Tech Stack
 
 - **Frontend**: Next.js, React, Ant Design, Zustand

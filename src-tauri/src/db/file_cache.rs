@@ -68,9 +68,12 @@ pub fn get_table_sql() -> &'static str {
 
 // ============ File Cache Functions ============
 
-/// Store all files for a bucket (clears existing)
+/// Store all files for a bucket (clears existing) - optimized with batch inserts
 pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile]) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
+    
+    // Begin transaction for atomicity and performance
+    conn.execute("BEGIN TRANSACTION", ()).await?;
     
     // Clear existing files for this bucket
     conn.execute(
@@ -78,20 +81,45 @@ pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile
         turso::params![bucket, account_id],
     ).await?;
     
-    // Insert new files
-    for file in files {
-        conn.execute(
-            "INSERT INTO cached_files (bucket, account_id, key, size, last_modified, synced_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            turso::params![
-                bucket,
-                account_id,
-                file.key.clone(),
-                file.size,
-                file.last_modified.clone(),
-                file.synced_at,
-            ],
-        ).await?;
+    // Batch insert files - SQLite supports multi-row INSERT
+    // Process in chunks of 500 to avoid hitting limits
+    const BATCH_SIZE: usize = 500;
+    
+    for chunk in files.chunks(BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        
+        // Build multi-value INSERT statement
+        let placeholders: Vec<String> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let base = i * 6;
+                format!(
+                    "(?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+                    base + 1, base + 2, base + 3, base + 4, base + 5, base + 6
+                )
+            })
+            .collect();
+        
+        let sql = format!(
+            "INSERT INTO cached_files (bucket, account_id, key, size, last_modified, synced_at) VALUES {}",
+            placeholders.join(", ")
+        );
+        
+        // Build parameters array
+        let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 6);
+        for file in chunk {
+            params.push(bucket.to_string().into());
+            params.push(account_id.to_string().into());
+            params.push(file.key.clone().into());
+            params.push(file.size.into());
+            params.push(file.last_modified.clone().into());
+            params.push(file.synced_at.into());
+        }
+        
+        conn.execute(&sql, params).await?;
     }
     
     // Update sync metadata
@@ -102,6 +130,9 @@ pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile
          ON CONFLICT (bucket, account_id) DO UPDATE SET last_sync = ?3, file_count = ?4",
         turso::params![bucket, account_id, now, files.len() as i32],
     ).await?;
+    
+    // Commit transaction
+    conn.execute("COMMIT", ()).await?;
     
     Ok(())
 }
@@ -129,6 +160,68 @@ pub async fn get_all_cached_files(bucket: &str, account_id: &str) -> DbResult<Ve
         });
     }
     Ok(files)
+}
+
+/// Search result with total count
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub files: Vec<CachedFile>,
+    pub total_count: i32,
+}
+
+/// Search cached files by key pattern (case-insensitive)
+/// Supports multiple terms separated by spaces (AND search)
+/// e.g., "test name" matches files containing both "test" AND "name"
+pub async fn search_cached_files(bucket: &str, account_id: &str, query: &str) -> DbResult<SearchResult> {
+    let conn = get_connection()?.lock().await;
+    
+    // Split query into terms and create LIKE conditions for each
+    let terms: Vec<&str> = query.split_whitespace().filter(|t| !t.is_empty()).collect();
+    
+    if terms.is_empty() {
+        return Ok(SearchResult { files: Vec::new(), total_count: 0 });
+    }
+    
+    // Build WHERE clause with AND for each term
+    let like_conditions: Vec<String> = terms
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("LOWER(key) LIKE ?{}", i + 3))
+        .collect();
+    
+    let where_clause = like_conditions.join(" AND ");
+    let sql = format!(
+        "SELECT bucket, account_id, key, size, last_modified, synced_at
+         FROM cached_files
+         WHERE bucket = ?1 AND account_id = ?2 AND {}
+         ORDER BY key",
+        where_clause
+    );
+    
+    // Build params: bucket, account_id, then patterns for each term
+    let mut params: Vec<turso::Value> = Vec::new();
+    params.push(bucket.to_string().into());
+    params.push(account_id.to_string().into());
+    for term in &terms {
+        params.push(format!("%{}%", term.to_lowercase()).into());
+    }
+    
+    let mut rows = conn.query(&sql, params).await?;
+    
+    let mut files = Vec::new();
+    while let Some(row) = rows.next().await? {
+        files.push(CachedFile {
+            bucket: row.get(0)?,
+            account_id: row.get(1)?,
+            key: row.get(2)?,
+            size: row.get(3)?,
+            last_modified: row.get(4)?,
+            synced_at: row.get(5)?,
+        });
+    }
+    
+    let total_count = files.len() as i32;
+    Ok(SearchResult { files, total_count })
 }
 
 /// Calculate folder size by prefix

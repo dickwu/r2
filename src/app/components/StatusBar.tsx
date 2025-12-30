@@ -2,9 +2,15 @@
 
 import { useEffect, useMemo } from 'react';
 import { Space, Spin } from 'antd';
+import {
+  CloudDownloadOutlined,
+  DatabaseOutlined,
+  BuildOutlined,
+  CheckCircleOutlined,
+} from '@ant-design/icons';
 import UpdateChecker from './UpdateChecker';
 import { useFolderSizeStore } from '../stores/folderSizeStore';
-import { useSyncStore } from '../stores/syncStore';
+import { useSyncStore, SyncPhase } from '../stores/syncStore';
 import { formatBytes } from '../utils/formatBytes';
 
 interface StatusBarProps {
@@ -12,6 +18,7 @@ interface StatusBarProps {
   filteredItemsCount: number;
   totalItemsCount: number;
   searchQuery: string;
+  searchTotalCount?: number; // Total matching files in bucket (from DB search)
   hasConfig: boolean;
 
   // Bucket info
@@ -26,10 +33,20 @@ interface StatusBarProps {
   lastSyncTime?: number | null;
 }
 
+// Phase display configuration
+const phaseConfig: Record<SyncPhase, { icon: React.ReactNode; label: string }> = {
+  idle: { icon: null, label: '' },
+  fetching: { icon: <CloudDownloadOutlined />, label: 'Fetching' },
+  storing: { icon: <DatabaseOutlined />, label: 'Storing' },
+  indexing: { icon: <BuildOutlined />, label: 'Indexing' },
+  complete: { icon: <CheckCircleOutlined />, label: 'Complete' },
+};
+
 export default function StatusBar({
   filteredItemsCount,
   totalItemsCount,
   searchQuery,
+  searchTotalCount = 0,
   hasConfig,
   currentConfig,
   isSyncing = false,
@@ -38,10 +55,11 @@ export default function StatusBar({
   const metadata = useFolderSizeStore((state) => state.metadata);
   const loadMetadata = useFolderSizeStore((state) => state.loadMetadata);
   const setMetadata = useFolderSizeStore((state) => state.setMetadata);
+  const phase = useSyncStore((state) => state.phase);
   const processedFiles = useSyncStore((state) => state.processedFiles);
+  const totalFiles = useSyncStore((state) => state.totalFiles);
 
   // Clear root metadata when sync completes to force fresh load
-  // This fixes the issue where metadata loads before first sync and never updates
   useEffect(() => {
     if (lastSyncTime) {
       setMetadata('', {
@@ -74,6 +92,31 @@ export default function StatusBar({
     };
   }, [metadata]);
 
+  // Render sync progress with phase indicator
+  const renderSyncProgress = () => {
+    if (!isSyncing || phase === 'idle' || phase === 'complete') {
+      return null;
+    }
+
+    const { icon, label } = phaseConfig[phase];
+    const fileCount = totalFiles > 0 ? totalFiles : processedFiles;
+
+    return (
+      <span className="sync-progress">
+        <Spin size="small" />
+        <span className="sync-phase">
+          {icon} {label}
+        </span>
+        {phase === 'fetching' && (
+          <span className="sync-count">{processedFiles.toLocaleString()} files</span>
+        )}
+        {(phase === 'storing' || phase === 'indexing') && fileCount > 0 && (
+          <span className="sync-count">{fileCount.toLocaleString()} files</span>
+        )}
+      </span>
+    );
+  };
+
   return (
     <div className="status-bar">
       <Space size="middle">
@@ -83,17 +126,13 @@ export default function StatusBar({
         {hasConfig && (
           <span>
             {searchQuery
-              ? `${filteredItemsCount} of ${totalItemsCount} items`
+              ? `${searchTotalCount.toLocaleString()} result${searchTotalCount !== 1 ? 's' : ''}`
               : `${totalItemsCount} items`}
           </span>
         )}
 
-        {/* Sync progress */}
-        {hasConfig && isSyncing && (
-          <span>
-            <Spin size="small" /> Syncing... {processedFiles.toLocaleString()} files processed
-          </span>
-        )}
+        {/* Sync progress with phase */}
+        {hasConfig && renderSyncProgress()}
 
         {/* Bucket-wide statistics (show when not syncing) */}
         {hasConfig && !isSyncing && !bucketStats.loading && bucketStats.totalFiles !== null && (

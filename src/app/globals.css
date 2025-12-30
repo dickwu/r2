@@ -202,6 +202,25 @@ body {
   font-weight: 500;
 }
 
+/* Sync Progress Styles */
+.status-bar .sync-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-bar .sync-phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #f6821f;
+  font-weight: 500;
+}
+
+.status-bar .sync-count {
+  color: #666;
+}
+
 /* Empty State */
 .file-list .ant-empty {
   padding: 60px 0;
@@ -432,6 +451,14 @@ html.dark .status-bar {
 
 html.dark .status-bar .bucket-stats {
   color: #999;
+}
+
+html.dark .status-bar .sync-phase {
+  color: #f6821f;
+}
+
+html.dark .status-bar .sync-count {
+  color: #888;
 }
 
 /* Dark Mode Grid */

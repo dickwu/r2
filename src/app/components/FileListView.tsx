@@ -28,6 +28,7 @@ interface FileListViewProps {
   metadata: Record<string, FolderMetadata>;
   sizeSort: SortOrder;
   modifiedSort: SortOrder;
+  showFullPath?: boolean; // Show full path instead of just name (for search results)
   onItemClick: (item: FileItem) => void;
   onToggleSelection: (key: string) => void;
   onSelectAll: () => void;
@@ -52,6 +53,7 @@ export default function FileListView({
   metadata,
   sizeSort,
   modifiedSort,
+  showFullPath = false,
   onItemClick,
   onToggleSelection,
   onSelectAll,
@@ -129,7 +131,9 @@ export default function FileListView({
               ) : (
                 getFileIcon(item.name)
               )}
-              <span className="name">{item.name}</span>
+              <Tooltip title={showFullPath ? item.key : undefined}>
+                <span className="name">{showFullPath ? item.key : item.name}</span>
+              </Tooltip>
             </span>
             <span className="col-size">
               {item.isFolder ? (

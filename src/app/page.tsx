@@ -1,19 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import {
-  Button,
-  Breadcrumb,
-  Space,
-  App,
-  Spin,
-  Empty,
-  Segmented,
-  Input,
-  Popconfirm,
-  Checkbox,
-  Modal,
-} from 'antd';
+import { Button, Breadcrumb, Space, App, Spin, Empty, Segmented, Input } from 'antd';
 import {
   SettingOutlined,
   ReloadOutlined,
@@ -35,12 +23,12 @@ import FileGridView from './components/FileGridView';
 import FileListView from './components/FileListView';
 import AccountSidebar from './components/AccountSidebar';
 import StatusBar from './components/StatusBar';
+import BatchDeleteModal from './components/BatchDeleteModal';
 import { useAccountStore, Account, Token } from './stores/accountStore';
 import { useR2Files, FileItem } from './hooks/useR2Files';
 import { useFilesSync } from './hooks/useFilesSync';
-import { deleteR2Object, renameR2Object } from './lib/r2cache';
+import { deleteR2Object, renameR2Object, searchFiles } from './lib/r2cache';
 import { useFolderSizeStore } from './stores/folderSizeStore';
-import { formatBytes } from './utils/formatBytes';
 
 type ViewMode = 'list' | 'grid';
 type SortOrder = 'asc' | 'desc' | null;
@@ -71,8 +59,10 @@ export default function Home() {
   const [modifiedSort, setModifiedSort] = useState<SortOrder>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  const [deleteConfirmInput, setDeleteConfirmInput] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
+  const [searchResults, setSearchResults] = useState<FileItem[]>([]);
+  const [searchTotalCount, setSearchTotalCount] = useState(0);
+  const [isSearching, setIsSearching] = useState(false);
   const { message } = App.useApp();
   const { theme, toggleTheme } = useTheme();
 
@@ -99,15 +89,48 @@ export default function Home() {
     clearSizes();
   }, [currentConfig?.bucket, currentConfig?.token_id, clearSizes]);
 
-  // Filter and sort items
-  const filteredItems = useMemo(() => {
-    let result = items;
-
-    // Filter by search query
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase();
-      result = result.filter((item) => item.name.toLowerCase().includes(query));
+  // Debounced bucket-wide search
+  useEffect(() => {
+    if (!searchQuery.trim() || !isSynced) {
+      setSearchResults([]);
+      setSearchTotalCount(0);
+      setIsSearching(false);
+      return;
     }
+
+    setIsSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        const result = await searchFiles(searchQuery);
+        // Convert StoredFile to FileItem
+        const fileItems: FileItem[] = result.files.map((file) => {
+          const parts = file.key.split('/');
+          return {
+            key: file.key,
+            name: parts[parts.length - 1],
+            size: file.size,
+            lastModified: file.lastModified,
+            isFolder: false,
+          };
+        });
+        setSearchResults(fileItems);
+        setSearchTotalCount(result.totalCount);
+      } catch (e) {
+        console.error('Search error:', e);
+        setSearchResults([]);
+        setSearchTotalCount(0);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 300); // 300ms debounce
+
+    return () => clearTimeout(timer);
+  }, [searchQuery, isSynced]);
+
+  // Filter and sort items - use search results when searching
+  const filteredItems = useMemo(() => {
+    // When searching, use bucket-wide search results
+    let result = searchQuery.trim() ? searchResults : items;
 
     // Sort by size (list view only)
     if (sizeSort) {
@@ -140,7 +163,7 @@ export default function Home() {
     }
 
     return result;
-  }, [items, searchQuery, sizeSort, modifiedSort, metadata]);
+  }, [items, searchQuery, searchResults, sizeSort, modifiedSort, metadata]);
 
   // Load folder metadata from directory tree when items change and sync is complete
   // lastSyncTime ensures metadata reloads after refresh (since isSynced stays true during refetch)
@@ -290,43 +313,17 @@ export default function Home() {
   );
 
   const openBatchDeleteConfirm = useCallback(() => {
-    setDeleteConfirmInput('');
     setDeleteConfirmOpen(true);
   }, []);
 
   const closeBatchDeleteConfirm = useCallback(() => {
     setDeleteConfirmOpen(false);
-    setDeleteConfirmInput('');
   }, []);
 
-  const handleBatchDelete = useCallback(async () => {
-    if (!config || selectedKeys.size === 0) return;
-
-    const keys = Array.from(selectedKeys);
-    const count = keys.length;
-
-    // Close confirmation modal
-    closeBatchDeleteConfirm();
-
-    // Show full-screen loading
-    setIsDeleting(true);
-
-    try {
-      // Delete all selected files
-      await Promise.all(keys.map((key) => deleteR2Object(config, key)));
-
-      message.success(`Deleted ${count} file${count > 1 ? 's' : ''}`);
-      setSelectedKeys(new Set());
-
-      // Refresh file list after deletion
-      await Promise.all([refresh(), refreshSync()]);
-    } catch (e) {
-      console.error('Batch delete error:', e);
-      message.error(`Failed to delete files: ${e instanceof Error ? e.message : 'Unknown error'}`);
-    } finally {
-      setIsDeleting(false);
-    }
-  }, [config, selectedKeys, message, refresh, refreshSync, closeBatchDeleteConfirm]);
+  const handleBatchDeleteSuccess = useCallback(async () => {
+    setSelectedKeys(new Set());
+    await Promise.all([refresh(), refreshSync()]);
+  }, [refresh, refreshSync]);
 
   const handleRenameClick = useCallback((item: FileItem) => {
     setRenameFile(item);
@@ -453,12 +450,15 @@ export default function Home() {
             </Space>
             <Space>
               <Input
-                placeholder="Search files..."
+                placeholder="Search all files in bucket..."
                 prefix={<SearchOutlined />}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 allowClear
-                style={{ width: 200 }}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                style={{ width: 220 }}
               />
               <Segmented
                 value={viewMode}
@@ -491,14 +491,18 @@ export default function Home() {
           {/* File List */}
           {config && (
             <div className="file-list">
-              {isLoading ? (
+              {isLoading || isSearching ? (
                 <div className="file-list-loading">
-                  <Spin />
+                  <Spin tip={isSearching ? 'Searching bucket...' : undefined} fullscreen />
                 </div>
               ) : filteredItems.length === 0 ? (
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description={searchQuery ? 'No matching files' : 'This folder is empty'}
+                  description={
+                    searchQuery
+                      ? `No files matching "${searchQuery}" in bucket`
+                      : 'This folder is empty'
+                  }
                 />
               ) : viewMode === 'list' ? (
                 <FileListView
@@ -507,6 +511,7 @@ export default function Home() {
                   metadata={metadata}
                   sizeSort={sizeSort}
                   modifiedSort={modifiedSort}
+                  showFullPath={!!searchQuery.trim()}
                   onItemClick={handleItemClick}
                   onToggleSelection={toggleSelection}
                   onSelectAll={selectAll}
@@ -526,6 +531,7 @@ export default function Home() {
                   folderSizes={metadata}
                   selectedKeys={selectedKeys}
                   onToggleSelection={toggleSelection}
+                  showFullPath={!!searchQuery.trim()}
                 />
               )}
             </div>
@@ -536,6 +542,7 @@ export default function Home() {
             filteredItemsCount={filteredItems.length}
             totalItemsCount={items.length}
             searchQuery={searchQuery}
+            searchTotalCount={searchTotalCount}
             hasConfig={!!config}
             currentConfig={currentConfig}
             isSyncing={isSyncing}
@@ -589,37 +596,14 @@ export default function Home() {
             config={config}
           />
 
-          <Modal
-            title="Confirm Batch Delete"
+          <BatchDeleteModal
             open={deleteConfirmOpen}
-            onCancel={closeBatchDeleteConfirm}
-            onOk={handleBatchDelete}
-            okText="Delete"
-            okButtonProps={{
-              danger: true,
-              disabled: deleteConfirmInput !== selectedKeys.size.toString(),
-            }}
-          >
-            <p>
-              You are about to delete <strong>{selectedKeys.size}</strong> file
-              {selectedKeys.size > 1 ? 's' : ''}.
-            </p>
-            <p>This action cannot be undone.</p>
-            <p style={{ marginTop: 16, marginBottom: 8 }}>
-              Please type <strong>{selectedKeys.size}</strong> to confirm:
-            </p>
-            <Input
-              value={deleteConfirmInput}
-              onChange={(e) => setDeleteConfirmInput(e.target.value)}
-              placeholder={`Type ${selectedKeys.size} to confirm`}
-              autoFocus
-              onPressEnter={() => {
-                if (deleteConfirmInput === selectedKeys.size.toString()) {
-                  handleBatchDelete();
-                }
-              }}
-            />
-          </Modal>
+            selectedKeys={selectedKeys}
+            config={config}
+            onClose={closeBatchDeleteConfirm}
+            onSuccess={handleBatchDeleteSuccess}
+            onDeletingChange={setIsDeleting}
+          />
         </div>
       </div>
     </div>

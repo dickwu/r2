@@ -342,13 +342,21 @@ export default function ConfigModal({
           <Input
             placeholder="Cloudflare Account ID"
             disabled={isEditMode || mode === 'add-token'}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
             prefix={<UserOutlined />}
           />
         </Form.Item>
 
         {/* Account Name - always show */}
         <Form.Item label="Account Name" name="accountName" style={{ marginBottom: 12 }}>
-          <Input placeholder="My Account (optional)" />
+          <Input
+            placeholder="My Account (optional)"
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+          />
         </Form.Item>
 
         {/* Token fields - not shown for edit-account mode */}
@@ -361,7 +369,12 @@ export default function ConfigModal({
             </Divider>
 
             <Form.Item label="Token Name" name="tokenName" style={{ marginBottom: 12 }}>
-              <Input placeholder="Production / Staging (optional)" />
+              <Input
+                placeholder="Production / Staging (optional)"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+              />
             </Form.Item>
 
             <Form.Item
@@ -379,7 +392,12 @@ export default function ConfigModal({
               rules={[{ required: true, message: 'Required' }]}
               style={{ marginBottom: 12 }}
             >
-              <Input placeholder="S3-compatible Access Key ID" />
+              <Input
+                placeholder="S3-compatible Access Key ID"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+              />
             </Form.Item>
 
             <Form.Item
@@ -481,6 +499,9 @@ export default function ConfigModal({
                         onChange={(e) => handleDomainChange(bucket.name, e.target.value)}
                         onClick={(e) => e.stopPropagation()}
                         style={{ flex: 1, fontSize: 12 }}
+                        autoComplete="off"
+                        autoCorrect="off"
+                        autoCapitalize="off"
                       />
                     </Space.Compact>
                     <Button

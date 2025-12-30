@@ -69,9 +69,13 @@ pub async fn list_all_r2_objects(
 ) -> Result<Vec<r2::R2Object>, String> {
     let r2_config: r2::R2Config = config.into();
     
+    // Emit fetching phase at start
+    let _ = app.emit("sync-phase", "fetching");
+    
     // Create progress callback that emits Tauri events
+    let app_clone = app.clone();
     let progress_callback = Box::new(move |count: usize| {
-        let _ = app.emit("sync-progress", count);
+        let _ = app_clone.emit("sync-progress", count);
     });
     
     r2::list_all_objects_recursive(&r2_config, Some(progress_callback))
@@ -170,9 +174,15 @@ async fn get_current_bucket_info() -> Result<(String, String), String> {
 }
 
 #[tauri::command]
-pub async fn store_all_files(files: Vec<r2::R2Object>) -> Result<(), String> {
+pub async fn store_all_files(
+    files: Vec<r2::R2Object>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     let (bucket, account_id) = get_current_bucket_info().await?;
     let now = chrono::Utc::now().timestamp();
+    
+    // Emit storing phase
+    let _ = app.emit("sync-phase", "storing");
     
     let cached_files: Vec<CachedFile> = files
         .into_iter()
@@ -202,6 +212,28 @@ pub async fn get_all_cached_files() -> Result<Vec<CachedFileResponse>, String> {
     Ok(files.into_iter().map(|f| f.into()).collect())
 }
 
+/// Search result response with total count
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SearchResultResponse {
+    pub files: Vec<CachedFileResponse>,
+    #[serde(rename = "totalCount")]
+    pub total_count: i32,
+}
+
+#[tauri::command]
+pub async fn search_cached_files(query: String) -> Result<SearchResultResponse, String> {
+    let (bucket, account_id) = get_current_bucket_info().await?;
+    
+    let result = db::search_cached_files(&bucket, &account_id, &query)
+        .await
+        .map_err(|e| format!("Failed to search files: {}", e))?;
+    
+    Ok(SearchResultResponse {
+        files: result.files.into_iter().map(|f| f.into()).collect(),
+        total_count: result.total_count,
+    })
+}
+
 #[tauri::command]
 pub async fn calculate_folder_size(prefix: String) -> Result<i64, String> {
     let (bucket, account_id) = get_current_bucket_info().await?;
@@ -212,8 +244,11 @@ pub async fn calculate_folder_size(prefix: String) -> Result<i64, String> {
 }
 
 #[tauri::command]
-pub async fn build_directory_tree() -> Result<(), String> {
+pub async fn build_directory_tree(app: tauri::AppHandle) -> Result<(), String> {
     let (bucket, account_id) = get_current_bucket_info().await?;
+    
+    // Emit indexing phase
+    let _ = app.emit("sync-phase", "indexing");
     
     // Get all cached files
     let files = db::get_all_cached_files(&bucket, &account_id)
@@ -223,7 +258,12 @@ pub async fn build_directory_tree() -> Result<(), String> {
     // Build tree
     db::build_directory_tree(&bucket, &account_id, &files)
         .await
-        .map_err(|e| format!("Failed to build directory tree: {}", e))
+        .map_err(|e| format!("Failed to build directory tree: {}", e))?;
+    
+    // Emit complete phase
+    let _ = app.emit("sync-phase", "complete");
+    
+    Ok(())
 }
 
 #[tauri::command]

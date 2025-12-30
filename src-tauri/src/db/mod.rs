@@ -23,7 +23,7 @@ pub use accounts::Account;
 pub use buckets::Bucket;
 pub use sessions::UploadSession;
 pub use tokens::{Token, CurrentConfig};
-pub use file_cache::{CachedFile, CachedDirectoryNode};
+pub use file_cache::{CachedFile, CachedDirectoryNode, SearchResult};
 
 // ============ Connection and Initialization ============
 
@@ -79,13 +79,6 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
     // Create file cache tables
     conn.execute_batch(file_cache::get_table_sql()).await?;
 
-    // Migration: Add last_modified column to directory_tree if it doesn't exist
-    // SQLite doesn't have IF NOT EXISTS for columns, so we check and ignore errors
-    let _ = conn.execute(
-        "ALTER TABLE directory_tree ADD COLUMN last_modified TEXT",
-        (),
-    ).await;
-
     DB_CONNECTION.set(Mutex::new(conn)).map_err(|_| "Database already initialized")?;
     
     Ok(())
@@ -113,6 +106,6 @@ pub use accounts::{create_account, delete_account, list_accounts, update_account
 pub use buckets::{create_bucket, delete_bucket, list_buckets_by_token, update_bucket, save_buckets_for_token};
 // Re-export file cache functions
 pub use file_cache::{
-    store_all_files, get_all_cached_files, calculate_folder_size, build_directory_tree,
-    get_directory_node, get_all_directory_nodes, clear_file_cache,
+    store_all_files, get_all_cached_files, search_cached_files, calculate_folder_size, 
+    build_directory_tree, get_directory_node, get_all_directory_nodes, clear_file_cache,
 };

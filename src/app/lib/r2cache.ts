@@ -190,6 +190,15 @@ export async function getAllFiles(): Promise<StoredFile[]> {
   return invoke('get_all_cached_files');
 }
 
+export interface SearchResult {
+  files: StoredFile[];
+  totalCount: number;
+}
+
+export async function searchFiles(query: string): Promise<SearchResult> {
+  return invoke('search_cached_files', { query });
+}
+
 export async function calculateFolderSize(folderPrefix: string): Promise<number> {
   return invoke('calculate_folder_size', { prefix: folderPrefix });
 }
