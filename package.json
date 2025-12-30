@@ -1,7 +1,7 @@
 {
   "name": "Cloudflare R2 Client",
   "private": true,
-  "version": "0.1.25",
+  "version": "0.1.26",
   "scripts": {
     "dev": "next dev --turbopack -p 3000",
     "build": "next build",
