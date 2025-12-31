@@ -37,6 +37,7 @@ interface FileListViewProps {
   onToggleModifiedSort: () => void;
   onDelete: (item: FileItem) => void;
   onRename: (item: FileItem) => void;
+  onFolderDelete?: (item: FileItem) => void;
 }
 
 function formatDate(date: string): string {
@@ -62,6 +63,7 @@ export default function FileListView({
   onToggleModifiedSort,
   onDelete,
   onRename,
+  onFolderDelete,
 }: FileListViewProps) {
   const fileItems = items.filter((item) => !item.isFolder);
 
@@ -176,7 +178,19 @@ export default function FileListView({
               )}
             </span>
             <span className="col-actions" onClick={(e) => e.stopPropagation()}>
-              {!item.isFolder && (
+              {item.isFolder ? (
+                onFolderDelete && (
+                  <Tooltip title="Delete folder">
+                    <Button
+                      type="text"
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={() => onFolderDelete(item)}
+                    />
+                  </Tooltip>
+                )
+              ) : (
                 <>
                   <Button
                     type="text"

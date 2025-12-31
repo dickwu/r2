@@ -6,7 +6,7 @@ use tauri::{
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 mod account;
-mod cache;
+mod commands;
 mod db;
 mod r2;
 mod upload;
@@ -194,21 +194,23 @@ pub fn run() {
             account::has_accounts,
             account::get_all_accounts_with_tokens,
             // R2 commands
-            cache::list_r2_buckets,
-            cache::list_r2_objects,
-            cache::list_all_r2_objects,
-            cache::delete_r2_object,
-            cache::rename_r2_object,
-            cache::generate_signed_url,
+            commands::list_r2_buckets,
+            commands::list_r2_objects,
+            commands::list_all_r2_objects,
+            commands::delete_r2_object,
+            commands::batch_delete_r2_objects,
+            commands::rename_r2_object,
+            commands::batch_move_r2_objects,
+            commands::generate_signed_url,
             // Cache commands
-            cache::store_all_files,
-            cache::get_all_cached_files,
-            cache::search_cached_files,
-            cache::calculate_folder_size,
-            cache::build_directory_tree,
-            cache::get_directory_node,
-            cache::get_all_directory_nodes,
-            cache::clear_file_cache,
+            commands::store_all_files,
+            commands::get_all_cached_files,
+            commands::search_cached_files,
+            commands::calculate_folder_size,
+            commands::build_directory_tree,
+            commands::get_directory_node,
+            commands::get_all_directory_nodes,
+            commands::clear_file_cache,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -13,6 +13,7 @@ import {
   BarsOutlined,
   SearchOutlined,
   DeleteOutlined,
+  FolderOutlined,
 } from '@ant-design/icons';
 import { useTheme } from './providers';
 import ConfigModal, { ModalMode } from './components/ConfigModal';
@@ -24,10 +25,16 @@ import FileListView from './components/FileListView';
 import AccountSidebar from './components/AccountSidebar';
 import StatusBar from './components/StatusBar';
 import BatchDeleteModal from './components/BatchDeleteModal';
+import BatchMoveModal from './components/BatchMoveModal';
 import { useAccountStore, Account, Token } from './stores/accountStore';
 import { useR2Files, FileItem } from './hooks/useR2Files';
 import { useFilesSync } from './hooks/useFilesSync';
-import { deleteR2Object, renameR2Object, searchFiles } from './lib/r2cache';
+import {
+  deleteR2Object,
+  renameR2Object,
+  searchFiles,
+  listAllR2ObjectsUnderPrefix,
+} from './lib/r2cache';
 import { useFolderSizeStore } from './stores/folderSizeStore';
 
 type ViewMode = 'list' | 'grid';
@@ -60,6 +67,8 @@ export default function Home() {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [moveModalOpen, setMoveModalOpen] = useState(false);
+  const [isMoving, setIsMoving] = useState(false);
   const [searchResults, setSearchResults] = useState<FileItem[]>([]);
   const [searchTotalCount, setSearchTotalCount] = useState(0);
   const [isSearching, setIsSearching] = useState(false);
@@ -90,6 +99,7 @@ export default function Home() {
   }, [currentConfig?.bucket, currentConfig?.token_id, clearSizes]);
 
   // Debounced bucket-wide search
+  // lastSyncTime is included so search refreshes after file operations (delete/move/rename)
   useEffect(() => {
     if (!searchQuery.trim() || !isSynced) {
       setSearchResults([]);
@@ -125,7 +135,7 @@ export default function Home() {
     }, 300); // 300ms debounce
 
     return () => clearTimeout(timer);
-  }, [searchQuery, isSynced]);
+  }, [searchQuery, isSynced, lastSyncTime]);
 
   // Filter and sort items - use search results when searching
   const filteredItems = useMemo(() => {
@@ -312,6 +322,34 @@ export default function Home() {
     [config, message, refresh, refreshSync]
   );
 
+  const handleFolderDelete = useCallback(
+    async (item: FileItem) => {
+      if (!config) return;
+      try {
+        message.loading({ content: 'Loading folder contents...', key: 'folder-delete' });
+        const objects = await listAllR2ObjectsUnderPrefix(config, item.key);
+        message.destroy('folder-delete');
+
+        if (objects.length === 0) {
+          message.info('Folder is empty');
+          return;
+        }
+
+        // Set all file keys as selected and open batch delete modal
+        const keys = new Set(objects.map((obj) => obj.key));
+        setSelectedKeys(keys);
+        setDeleteConfirmOpen(true);
+      } catch (e) {
+        message.destroy('folder-delete');
+        console.error('Folder delete error:', e);
+        message.error(
+          `Failed to list folder contents: ${e instanceof Error ? e.message : 'Unknown error'}`
+        );
+      }
+    },
+    [config, message]
+  );
+
   const openBatchDeleteConfirm = useCallback(() => {
     setDeleteConfirmOpen(true);
   }, []);
@@ -321,6 +359,19 @@ export default function Home() {
   }, []);
 
   const handleBatchDeleteSuccess = useCallback(async () => {
+    setSelectedKeys(new Set());
+    await Promise.all([refresh(), refreshSync()]);
+  }, [refresh, refreshSync]);
+
+  const openBatchMoveModal = useCallback(() => {
+    setMoveModalOpen(true);
+  }, []);
+
+  const closeBatchMoveModal = useCallback(() => {
+    setMoveModalOpen(false);
+  }, []);
+
+  const handleBatchMoveSuccess = useCallback(async () => {
     setSelectedKeys(new Set());
     await Promise.all([refresh(), refreshSync()]);
   }, [refresh, refreshSync]);
@@ -404,7 +455,7 @@ export default function Home() {
     }),
   ];
 
-  if (loading || isDeleting) {
+  if (loading) {
     return (
       <div className="center-container">
         <Spin fullscreen />
@@ -434,13 +485,16 @@ export default function Home() {
                   <span style={{ color: 'var(--text-secondary)' }}>
                     {selectedKeys.size} selected
                   </span>
+                  <Button size="small" icon={<FolderOutlined />} onClick={openBatchMoveModal}>
+                    Move
+                  </Button>
                   <Button
                     size="small"
                     danger
                     icon={<DeleteOutlined />}
                     onClick={openBatchDeleteConfirm}
                   >
-                    Delete Selected
+                    Delete
                   </Button>
                   <Button size="small" onClick={clearSelection}>
                     Clear
@@ -520,6 +574,7 @@ export default function Home() {
                   onToggleModifiedSort={toggleModifiedSort}
                   onDelete={handleDelete}
                   onRename={handleRenameClick}
+                  onFolderDelete={handleFolderDelete}
                 />
               ) : (
                 <FileGridView
@@ -527,6 +582,7 @@ export default function Home() {
                   onItemClick={handleItemClick}
                   onDelete={handleDelete}
                   onRename={handleRenameClick}
+                  onFolderDelete={handleFolderDelete}
                   publicDomain={config?.publicDomain}
                   folderSizes={metadata}
                   selectedKeys={selectedKeys}
@@ -603,6 +659,15 @@ export default function Home() {
             onClose={closeBatchDeleteConfirm}
             onSuccess={handleBatchDeleteSuccess}
             onDeletingChange={setIsDeleting}
+          />
+
+          <BatchMoveModal
+            open={moveModalOpen}
+            selectedKeys={selectedKeys}
+            config={config}
+            onClose={closeBatchMoveModal}
+            onSuccess={handleBatchMoveSuccess}
+            onMovingChange={setIsMoving}
           />
         </div>
       </div>

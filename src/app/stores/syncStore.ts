@@ -42,6 +42,11 @@ export const useSyncStore = create<SyncStore>((set) => ({
   },
 
   reset: () => {
-    set({ phase: 'idle', processedFiles: 0, totalFiles: 0, indexingProgress: { current: 0, total: 0 } });
+    set({
+      phase: 'idle',
+      processedFiles: 0,
+      totalFiles: 0,
+      indexingProgress: { current: 0, total: 0 },
+    });
   },
 }));

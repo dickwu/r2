@@ -131,6 +131,23 @@ export async function listAllR2ObjectsRecursive(config: R2Config): Promise<R2Obj
   });
 }
 
+export async function listAllR2ObjectsUnderPrefix(
+  config: R2Config,
+  prefix: string
+): Promise<R2Object[]> {
+  const allObjects: R2Object[] = [];
+  let cursor: string | undefined;
+
+  do {
+    // No delimiter = recursive listing under prefix
+    const result = await listR2Objects(config, { prefix, cursor });
+    allObjects.push(...result.objects);
+    cursor = result.truncated ? result.continuation_token : undefined;
+  } while (cursor);
+
+  return allObjects;
+}
+
 export async function deleteR2Object(config: R2Config, key: string): Promise<void> {
   return invoke('delete_r2_object', {
     config: {
@@ -140,6 +157,27 @@ export async function deleteR2Object(config: R2Config, key: string): Promise<voi
       secret_access_key: config.secretAccessKey || '',
     },
     key,
+  });
+}
+
+export interface BatchDeleteResult {
+  deleted: number;
+  failed: number;
+  errors: string[];
+}
+
+export async function batchDeleteR2Objects(
+  config: R2Config,
+  keys: string[]
+): Promise<BatchDeleteResult> {
+  return invoke('batch_delete_r2_objects', {
+    config: {
+      account_id: config.accountId,
+      bucket: config.bucket,
+      access_key_id: config.accessKeyId || '',
+      secret_access_key: config.secretAccessKey || '',
+    },
+    keys,
   });
 }
 
@@ -157,6 +195,32 @@ export async function renameR2Object(
     },
     oldKey,
     newKey,
+  });
+}
+
+export interface MoveOperation {
+  old_key: string;
+  new_key: string;
+}
+
+export interface BatchMoveResult {
+  moved: number;
+  failed: number;
+  errors: string[];
+}
+
+export async function batchMoveR2Objects(
+  config: R2Config,
+  operations: MoveOperation[]
+): Promise<BatchMoveResult> {
+  return invoke('batch_move_r2_objects', {
+    config: {
+      account_id: config.accountId,
+      bucket: config.bucket,
+      access_key_id: config.accessKeyId || '',
+      secret_access_key: config.secretAccessKey || '',
+    },
+    operations,
   });
 }
 

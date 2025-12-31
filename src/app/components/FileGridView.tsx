@@ -40,6 +40,7 @@ interface FileGridViewProps {
   onItemClick: (item: FileItem) => void;
   onDelete: (item: FileItem) => void;
   onRename: (item: FileItem) => void;
+  onFolderDelete?: (item: FileItem) => void;
   publicDomain?: string;
   folderSizes?: Record<string, FolderMetadata>;
   selectedKeys?: Set<string>;
@@ -53,6 +54,7 @@ const FileCard = memo(function FileCard({
   onItemClick,
   onDelete,
   onRename,
+  onFolderDelete,
   folderMetadata,
   isSelected,
   onToggleSelection,
@@ -63,6 +65,7 @@ const FileCard = memo(function FileCard({
   onItemClick: (item: FileItem) => void;
   onDelete: (item: FileItem) => void;
   onRename: (item: FileItem) => void;
+  onFolderDelete?: (item: FileItem) => void;
   folderMetadata?: FolderMetadata;
   isSelected?: boolean;
   onToggleSelection?: (key: string) => void;
@@ -84,6 +87,12 @@ const FileCard = memo(function FileCard({
   const handleRename = useCallback(() => {
     onRename(item);
   }, [onRename, item]);
+
+  const handleFolderDelete = useCallback(() => {
+    if (onFolderDelete) {
+      onFolderDelete(item);
+    }
+  }, [onFolderDelete, item]);
 
   const stopPropagation = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -148,7 +157,19 @@ const FileCard = memo(function FileCard({
               : 'Folder'
           : formatBytes(item.size || 0)}
       </div>
-      {!item.isFolder && (
+      {item.isFolder ? (
+        onFolderDelete && (
+          <div className="grid-card-actions" onClick={stopPropagation}>
+            <Button
+              type="text"
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              onClick={handleFolderDelete}
+            />
+          </div>
+        )
+      ) : (
         <div className="grid-card-actions" onClick={stopPropagation}>
           <Space size={4}>
             <Button type="text" size="small" icon={<EditOutlined />} onClick={handleRename} />
@@ -208,6 +229,7 @@ export default memo(function FileGridView({
   onItemClick,
   onDelete,
   onRename,
+  onFolderDelete,
   publicDomain,
   folderSizes,
   selectedKeys,
@@ -230,6 +252,7 @@ export default memo(function FileGridView({
             onItemClick={onItemClick}
             onDelete={onDelete}
             onRename={onRename}
+            onFolderDelete={onFolderDelete}
             folderMetadata={item.isFolder ? folderSizes?.[item.key] : undefined}
             isSelected={selectedKeys?.has(item.key)}
             onToggleSelection={onToggleSelection}
