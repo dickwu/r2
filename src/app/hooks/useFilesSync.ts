@@ -60,9 +60,11 @@ export function useFilesSync(config: R2Config | null) {
       await buildDirectoryTree([]);
 
       console.log(`Synced ${allFiles.length} files and built directory tree`);
+      const timestamp = Date.now();
+      useSyncStore.getState().setLastSyncTime(timestamp);
       return {
         count: allFiles.length,
-        timestamp: Date.now(),
+        timestamp,
         treeBuilt: true,
       };
     },
@@ -74,6 +76,11 @@ export function useFilesSync(config: R2Config | null) {
     refetchOnMount: false,
     refetchOnReconnect: false,
   });
+
+  // Sync isSyncing state to zustand store
+  useEffect(() => {
+    useSyncStore.getState().setIsSyncing(query.isFetching);
+  }, [query.isFetching]);
 
   const refresh = useCallback(async () => {
     // Prevent concurrent syncs - check if already syncing

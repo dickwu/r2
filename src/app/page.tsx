@@ -595,15 +595,11 @@ export default function Home() {
 
           {/* Status Bar */}
           <StatusBar
-            filteredItemsCount={filteredItems.length}
             totalItemsCount={items.length}
             searchQuery={searchQuery}
             searchTotalCount={searchTotalCount}
             hasConfig={!!config}
             currentConfig={currentConfig}
-            isSyncing={isSyncing}
-            lastSyncTime={lastSyncTime}
-            isFolderLoading={isFetching}
           />
 
           <ConfigModal

@@ -95,6 +95,11 @@ export function useR2Files(config: R2Config | null, prefix: string = '') {
     retry: 1,
   });
 
+  // Sync isFetching state to zustand store as isFolderLoading
+  useEffect(() => {
+    useSyncStore.getState().setIsFolderLoading(query.isFetching);
+  }, [query.isFetching]);
+
   async function refresh() {
     await queryClient.invalidateQueries({ queryKey });
   }

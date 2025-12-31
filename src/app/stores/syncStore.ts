@@ -14,11 +14,21 @@ interface FolderLoadProgress {
 }
 
 interface SyncStore {
+  // High-level sync status
+  isSyncing: boolean;
+  lastSyncTime: number | null;
+  isFolderLoading: boolean;
+
   // Bucket sync state
   phase: SyncPhase;
   processedFiles: number;
   totalFiles: number;
   indexingProgress: IndexingProgress;
+
+  // Actions - sync
+  setIsSyncing: (syncing: boolean) => void;
+  setLastSyncTime: (time: number | null) => void;
+  setIsFolderLoading: (loading: boolean) => void;
   setPhase: (phase: SyncPhase) => void;
   setProgress: (count: number) => void;
   setTotalFiles: (count: number) => void;
@@ -34,11 +44,28 @@ interface SyncStore {
 }
 
 export const useSyncStore = create<SyncStore>((set) => ({
+  // High-level sync status
+  isSyncing: false,
+  lastSyncTime: null,
+  isFolderLoading: false,
+
   // Bucket sync state
   phase: 'idle',
   processedFiles: 0,
   totalFiles: 0,
   indexingProgress: { current: 0, total: 0 },
+
+  setIsSyncing: (syncing) => {
+    set({ isSyncing: syncing });
+  },
+
+  setLastSyncTime: (time) => {
+    set({ lastSyncTime: time });
+  },
+
+  setIsFolderLoading: (loading) => {
+    set({ isFolderLoading: loading });
+  },
 
   setPhase: (phase) => {
     set({ phase });
