@@ -7,10 +7,11 @@ import {
   DatabaseOutlined,
   BuildOutlined,
   CheckCircleOutlined,
+  FolderOpenOutlined,
 } from '@ant-design/icons';
 import UpdateChecker from './UpdateChecker';
 import { useFolderSizeStore } from '../stores/folderSizeStore';
-import { useSyncStore, SyncPhase } from '../stores/syncStore';
+import { useSyncStore, SyncPhase, FolderLoadPhase } from '../stores/syncStore';
 import { formatBytes } from '../utils/formatBytes';
 
 interface StatusBarProps {
@@ -31,6 +32,9 @@ interface StatusBarProps {
   // Sync state
   isSyncing?: boolean;
   lastSyncTime?: number | null;
+
+  // Folder loading state
+  isFolderLoading?: boolean;
 }
 
 // Phase display configuration
@@ -39,6 +43,13 @@ const phaseConfig: Record<SyncPhase, { icon: React.ReactNode; label: string }> =
   fetching: { icon: <CloudDownloadOutlined />, label: 'Fetching' },
   storing: { icon: <DatabaseOutlined />, label: 'Storing' },
   indexing: { icon: <BuildOutlined />, label: 'Indexing' },
+  complete: { icon: <CheckCircleOutlined />, label: 'Complete' },
+};
+
+// Folder load phase display configuration
+const folderPhaseConfig: Record<FolderLoadPhase, { icon: React.ReactNode; label: string }> = {
+  idle: { icon: null, label: '' },
+  loading: { icon: <FolderOpenOutlined />, label: 'Loading folder' },
   complete: { icon: <CheckCircleOutlined />, label: 'Complete' },
 };
 
@@ -51,6 +62,7 @@ export default function StatusBar({
   currentConfig,
   isSyncing = false,
   lastSyncTime,
+  isFolderLoading = false,
 }: StatusBarProps) {
   const metadata = useFolderSizeStore((state) => state.metadata);
   const loadMetadata = useFolderSizeStore((state) => state.loadMetadata);
@@ -59,6 +71,8 @@ export default function StatusBar({
   const processedFiles = useSyncStore((state) => state.processedFiles);
   const totalFiles = useSyncStore((state) => state.totalFiles);
   const indexingProgress = useSyncStore((state) => state.indexingProgress);
+  const folderLoadPhase = useSyncStore((state) => state.folderLoadPhase);
+  const folderLoadProgress = useSyncStore((state) => state.folderLoadProgress);
 
   // Clear root metadata when sync completes to force fresh load
   useEffect(() => {
@@ -92,6 +106,31 @@ export default function StatusBar({
       loading: rootMetadata.size === 'loading',
     };
   }, [metadata]);
+
+  // Render folder loading progress
+  const renderFolderLoadProgress = () => {
+    if (!isFolderLoading || folderLoadPhase === 'idle' || folderLoadPhase === 'complete') {
+      return null;
+    }
+
+    const { icon, label } = folderPhaseConfig[folderLoadPhase];
+    const { pages, items } = folderLoadProgress;
+
+    let progressText = '';
+    if (pages > 0) {
+      progressText = items > 0 ? `${items.toLocaleString()} items` : `page ${pages}`;
+    }
+
+    return (
+      <span className="sync-progress">
+        <Spin size="small" />
+        <span className="sync-phase">
+          {icon} {label}
+        </span>
+        {progressText && <span className="sync-count">{progressText}</span>}
+      </span>
+    );
+  };
 
   // Render sync progress with phase indicator and percentage
   const renderSyncProgress = () => {
@@ -141,6 +180,9 @@ export default function StatusBar({
               : `${totalItemsCount} items`}
           </span>
         )}
+
+        {/* Folder loading progress */}
+        {hasConfig && renderFolderLoadProgress()}
 
         {/* Sync progress with phase */}
         {hasConfig && renderSyncProgress()}

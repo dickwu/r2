@@ -150,11 +150,29 @@ const FileCard = memo(function FileCard({
       </div>
       <div className="grid-card-meta">
         {item.isFolder
-          ? folderMetadata?.size === 'loading'
-            ? '...'
-            : typeof folderMetadata?.size === 'number'
-              ? formatBytes(folderMetadata.size)
-              : 'Folder'
+          ? (() => {
+              if (folderMetadata?.size === 'loading') return '...';
+              if (folderMetadata?.size === 'error') return 'Error';
+
+              const sizeText =
+                typeof folderMetadata?.size === 'number'
+                  ? formatBytes(folderMetadata.size)
+                  : 'Folder';
+
+              const count = folderMetadata?.totalFileCount ?? folderMetadata?.fileCount;
+              const countText =
+                count != null ? `${count.toLocaleString()} file${count !== 1 ? 's' : ''}` : null;
+
+              return countText ? (
+                <>
+                  <span>{sizeText}</span>
+                  <br />
+                  <span>{countText}</span>
+                </>
+              ) : (
+                sizeText
+              );
+            })()
           : formatBytes(item.size || 0)}
       </div>
       {item.isFolder ? (

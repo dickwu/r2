@@ -1,6 +1,9 @@
+import { useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { listen } from '@tauri-apps/api/event';
 import { listAllR2Objects, R2Object } from '../lib/r2cache';
 import { R2Config } from '../components/ConfigModal';
+import { useSyncStore, FolderLoadPhase } from '../stores/syncStore';
 
 export interface FileItem {
   name: string;
@@ -8,6 +11,11 @@ export interface FileItem {
   isFolder: boolean;
   size?: number;
   lastModified?: string;
+}
+
+interface FolderLoadProgress {
+  pages: number;
+  items: number;
 }
 
 function extractName(key: string, prefix: string): string {
@@ -50,11 +58,30 @@ export function useR2Files(config: R2Config | null, prefix: string = '') {
   const queryClient = useQueryClient();
   const queryKey = ['r2-files', config?.bucket, prefix];
 
+  // Listen for folder loading progress events from Tauri backend
+  useEffect(() => {
+    const unlistenPhase = listen<FolderLoadPhase>('folder-load-phase', (event) => {
+      useSyncStore.getState().setFolderLoadPhase(event.payload);
+    });
+
+    const unlistenProgress = listen<FolderLoadProgress>('folder-load-progress', (event) => {
+      useSyncStore.getState().setFolderLoadProgress(event.payload);
+    });
+
+    return () => {
+      unlistenPhase.then((fn) => fn());
+      unlistenProgress.then((fn) => fn());
+    };
+  }, []);
+
   const query = useQuery({
     queryKey,
     queryFn: async (): Promise<FileItem[]> => {
       if (!config) return [];
       console.log('Fetching R2 files:', { bucket: config.bucket, prefix });
+
+      // Reset folder loading state before starting
+      useSyncStore.getState().resetFolderLoad();
 
       const result = await listAllR2Objects(config, prefix);
       console.log('R2 API result:', {

@@ -170,7 +170,7 @@ pub fn run() {
             upload::cleanup_old_sessions,
             upload::check_resumable_upload,
             // R2 SDK upload command (clean AWS SDK implementation)
-            r2::upload_file_sdk,
+            r2::commands::upload_file_sdk,
             // Account commands
             account::list_accounts,
             account::create_account,
@@ -197,6 +197,7 @@ pub fn run() {
             commands::list_r2_buckets,
             commands::list_r2_objects,
             commands::list_all_r2_objects,
+            commands::list_folder_r2_objects,
             commands::delete_r2_object,
             commands::batch_delete_r2_objects,
             commands::rename_r2_object,

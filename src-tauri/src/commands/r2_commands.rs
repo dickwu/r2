@@ -91,6 +91,38 @@ pub async fn list_all_r2_objects(
         .map_err(|e| format!("Failed to list all objects: {}", e))
 }
 
+// ============ Folder List Command ============
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderLoadProgress {
+    pub pages: usize,
+    pub items: usize,
+}
+
+#[tauri::command]
+pub async fn list_folder_r2_objects(
+    config: R2ConfigInput,
+    prefix: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<r2::ListObjectsResult, String> {
+    let r2_config: r2::R2Config = config.into();
+
+    let _ = app.emit("folder-load-phase", "loading");
+
+    let app_clone = app.clone();
+    let progress_callback = Box::new(move |pages: usize, items: usize| {
+        let _ = app_clone.emit("folder-load-progress", FolderLoadProgress { pages, items });
+    });
+
+    let result = r2::list_folder_objects(&r2_config, prefix.as_deref(), Some(progress_callback))
+        .await
+        .map_err(|e| format!("Failed to list folder objects: {}", e))?;
+
+    let _ = app.emit("folder-load-phase", "complete");
+
+    Ok(result)
+}
+
 // ============ Delete Commands ============
 
 #[tauri::command]

@@ -603,6 +603,7 @@ export default function Home() {
             currentConfig={currentConfig}
             isSyncing={isSyncing}
             lastSyncTime={lastSyncTime}
+            isFolderLoading={isFetching}
           />
 
           <ConfigModal

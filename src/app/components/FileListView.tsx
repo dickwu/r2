@@ -114,105 +114,108 @@ export default function FileListView({
       <Virtuoso
         style={{ flex: 1 }}
         data={items}
-        itemContent={(index, item) => (
-          <div
-            className={`file-item ${item.isFolder ? 'folder' : 'file'} ${selectedKeys.has(item.key) ? 'selected' : ''}`}
-            onClick={() => onItemClick(item)}
-          >
-            <span className="col-checkbox" onClick={(e) => e.stopPropagation()}>
-              {!item.isFolder && (
-                <Checkbox
-                  checked={selectedKeys.has(item.key)}
-                  onChange={() => onToggleSelection(item.key)}
-                />
-              )}
-            </span>
-            <span className="col-name">
-              {item.isFolder ? (
-                <FolderOutlined className="icon folder-icon" />
-              ) : (
-                getFileIcon(item.name)
-              )}
-              <Tooltip title={showFullPath ? item.key : undefined}>
-                <span className="name">{showFullPath ? item.key : item.name}</span>
-              </Tooltip>
-            </span>
-            <span className="col-size">
-              {item.isFolder ? (
-                metadata[item.key]?.size === 'loading' ? (
-                  '...'
-                ) : metadata[item.key]?.size === 'error' ? (
-                  'Error'
-                ) : typeof metadata[item.key]?.size === 'number' ? (
-                  <Tooltip
-                    title={
-                      metadata[item.key]?.fileCount !== null
-                        ? `${metadata[item.key]!.fileCount} file${metadata[item.key]!.fileCount !== 1 ? 's' : ''}`
-                        : undefined
-                    }
-                  >
-                    <span>{formatBytes(metadata[item.key].size as number)}</span>
-                  </Tooltip>
+        itemContent={(index, item) => {
+          const folderMeta = item.isFolder ? metadata[item.key] : undefined;
+          const folderCount = folderMeta?.totalFileCount ?? folderMeta?.fileCount;
+          const folderCountTooltip =
+            folderCount != null
+              ? `${folderCount.toLocaleString()} file${folderCount !== 1 ? 's' : ''}`
+              : undefined;
+
+          return (
+            <div
+              className={`file-item ${item.isFolder ? 'folder' : 'file'} ${selectedKeys.has(item.key) ? 'selected' : ''}`}
+              onClick={() => onItemClick(item)}
+            >
+              <span className="col-checkbox" onClick={(e) => e.stopPropagation()}>
+                {!item.isFolder && (
+                  <Checkbox
+                    checked={selectedKeys.has(item.key)}
+                    onChange={() => onToggleSelection(item.key)}
+                  />
+                )}
+              </span>
+              <span className="col-name">
+                {item.isFolder ? (
+                  <FolderOutlined className="icon folder-icon" />
                 ) : (
-                  '--'
-                )
-              ) : (
-                formatBytes(item.size || 0)
-              )}
-            </span>
-            <span className="col-date">
-              {item.isFolder ? (
-                metadata[item.key]?.lastModified ? (
-                  <Tooltip title={formatDateTime(metadata[item.key].lastModified!)}>
-                    <span>{formatDate(metadata[item.key].lastModified!)}</span>
-                  </Tooltip>
-                ) : (
-                  '--'
-                )
-              ) : item.lastModified ? (
-                <Tooltip title={formatDateTime(item.lastModified)}>
-                  <span>{formatDate(item.lastModified)}</span>
+                  getFileIcon(item.name)
+                )}
+                <Tooltip title={showFullPath ? item.key : undefined}>
+                  <span className="name">{showFullPath ? item.key : item.name}</span>
                 </Tooltip>
-              ) : (
-                '--'
-              )}
-            </span>
-            <span className="col-actions" onClick={(e) => e.stopPropagation()}>
-              {item.isFolder ? (
-                onFolderDelete && (
-                  <Tooltip title="Delete folder">
+              </span>
+              <span className="col-size">
+                {item.isFolder ? (
+                  folderMeta?.size === 'loading' ? (
+                    '...'
+                  ) : folderMeta?.size === 'error' ? (
+                    'Error'
+                  ) : typeof folderMeta?.size === 'number' ? (
+                    <Tooltip title={folderCountTooltip}>
+                      <span>{formatBytes(folderMeta.size as number)}</span>
+                    </Tooltip>
+                  ) : (
+                    '--'
+                  )
+                ) : (
+                  formatBytes(item.size || 0)
+                )}
+              </span>
+              <span className="col-date">
+                {item.isFolder ? (
+                  folderMeta?.lastModified ? (
+                    <Tooltip title={formatDateTime(folderMeta.lastModified)}>
+                      <span>{formatDate(folderMeta.lastModified)}</span>
+                    </Tooltip>
+                  ) : (
+                    '--'
+                  )
+                ) : item.lastModified ? (
+                  <Tooltip title={formatDateTime(item.lastModified)}>
+                    <span>{formatDate(item.lastModified)}</span>
+                  </Tooltip>
+                ) : (
+                  '--'
+                )}
+              </span>
+              <span className="col-actions" onClick={(e) => e.stopPropagation()}>
+                {item.isFolder ? (
+                  onFolderDelete && (
+                    <Tooltip title="Delete folder">
+                      <Button
+                        type="text"
+                        size="small"
+                        danger
+                        icon={<DeleteOutlined />}
+                        onClick={() => onFolderDelete(item)}
+                      />
+                    </Tooltip>
+                  )
+                ) : (
+                  <>
                     <Button
                       type="text"
                       size="small"
-                      danger
-                      icon={<DeleteOutlined />}
-                      onClick={() => onFolderDelete(item)}
+                      icon={<EditOutlined />}
+                      onClick={() => onRename(item)}
                     />
-                  </Tooltip>
-                )
-              ) : (
-                <>
-                  <Button
-                    type="text"
-                    size="small"
-                    icon={<EditOutlined />}
-                    onClick={() => onRename(item)}
-                  />
-                  <Popconfirm
-                    title="Delete file"
-                    description={`Are you sure you want to delete "${item.name}"?`}
-                    onConfirm={() => onDelete(item)}
-                    okText="Delete"
-                    cancelText="Cancel"
-                    okButtonProps={{ danger: true }}
-                  >
-                    <Button type="text" size="small" danger icon={<DeleteOutlined />} />
-                  </Popconfirm>
-                </>
-              )}
-            </span>
-          </div>
-        )}
+                    <Popconfirm
+                      title="Delete file"
+                      description={`Are you sure you want to delete "${item.name}"?`}
+                      onConfirm={() => onDelete(item)}
+                      okText="Delete"
+                      cancelText="Cancel"
+                      okButtonProps={{ danger: true }}
+                    >
+                      <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+                    </Popconfirm>
+                  </>
+                )}
+              </span>
+            </div>
+          );
+        }}
       />
     </div>
   );

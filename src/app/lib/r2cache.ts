@@ -93,29 +93,17 @@ export async function listAllR2Objects(
   config: R2Config,
   prefix: string = ''
 ): Promise<ListObjectsResult> {
-  const allObjects: R2Object[] = [];
-  const allFolders: string[] = [];
-  let cursor: string | undefined;
-
-  do {
-    const result = await listR2Objects(config, { prefix, cursor, delimiter: '/' });
-    allObjects.push(...result.objects);
-
-    // Only add unique folders
-    for (const folder of result.folders) {
-      if (!allFolders.includes(folder)) {
-        allFolders.push(folder);
-      }
-    }
-
-    cursor = result.truncated ? result.continuation_token : undefined;
-  } while (cursor);
-
-  return {
-    objects: allObjects,
-    folders: allFolders,
-    truncated: false,
-  };
+  // Use backend command for folder listing with progress events
+  // Progress is emitted via Tauri events ('folder-load-progress', 'folder-load-phase')
+  return invoke('list_folder_r2_objects', {
+    config: {
+      account_id: config.accountId,
+      bucket: config.bucket,
+      access_key_id: config.accessKeyId || '',
+      secret_access_key: config.secretAccessKey || '',
+    },
+    prefix: prefix || null,
+  });
 }
 
 export async function listAllR2ObjectsRecursive(config: R2Config): Promise<R2Object[]> {
