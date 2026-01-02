@@ -96,6 +96,8 @@ pub async fn store_all_files(files: Vec<r2::R2Object>, app: tauri::AppHandle) ->
             bucket: bucket.clone(),
             account_id: account_id.clone(),
             key: f.key,
+            parent_path: String::new(), // Computed in store_all_files from key
+            name: String::new(),        // Computed in store_all_files from key
             size: f.size,
             last_modified: f.last_modified,
             synced_at: now,
@@ -194,4 +196,29 @@ pub async fn clear_file_cache() -> Result<(), String> {
     db::clear_file_cache(&bucket, &account_id)
         .await
         .map_err(|e| format!("Failed to clear cache: {}", e))
+}
+
+// ============ Folder Contents Command ============
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FolderContentsResponse {
+    pub files: Vec<CachedFileResponse>,
+    pub folders: Vec<String>,
+}
+
+/// Get folder contents from cache (files at this level + immediate subfolders)
+/// This is the cache equivalent of S3 ListObjectsV2 with delimiter="/"
+#[tauri::command]
+pub async fn get_folder_contents(prefix: Option<String>) -> Result<FolderContentsResponse, String> {
+    let (bucket, account_id) = get_current_bucket_info().await?;
+    let prefix_str = prefix.unwrap_or_default();
+
+    let result = db::get_folder_contents(&bucket, &account_id, &prefix_str)
+        .await
+        .map_err(|e| format!("Failed to get folder contents: {}", e))?;
+
+    Ok(FolderContentsResponse {
+        files: result.files.into_iter().map(|f| f.into()).collect(),
+        folders: result.folders,
+    })
 }

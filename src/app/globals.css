@@ -226,6 +226,110 @@ body {
   padding: 60px 0;
 }
 
+/* Sync Overlay - First Load Experience */
+.sync-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 300px;
+  padding: 40px;
+}
+
+.sync-overlay-content {
+  text-align: center;
+  max-width: 320px;
+}
+
+.sync-overlay-icon {
+  font-size: 48px;
+  color: #f6821f;
+  margin-bottom: 16px;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(0.95);
+  }
+}
+
+.sync-overlay-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #333;
+  margin: 0 0 8px 0;
+}
+
+.sync-overlay-description {
+  font-size: 14px;
+  color: #666;
+  margin: 0 0 20px 0;
+}
+
+.sync-overlay-progress {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.sync-overlay-count {
+  font-size: 32px;
+  font-weight: 700;
+  color: #f6821f;
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-overlay-label {
+  font-size: 13px;
+  color: #999;
+}
+
+.sync-overlay-bar {
+  width: 200px;
+  height: 6px;
+  background: #f0f0f0;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.sync-overlay-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #f6821f, #ff9a44);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.sync-overlay-percentage {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f6821f;
+}
+
+/* Dark Mode Sync Overlay */
+html.dark .sync-overlay-title {
+  color: #e0e0e0;
+}
+
+html.dark .sync-overlay-description {
+  color: #888;
+}
+
+html.dark .sync-overlay-label {
+  color: #666;
+}
+
+html.dark .sync-overlay-bar {
+  background: #303030;
+}
+
 /* Grid View */
 .file-grid {
   padding: 16px;

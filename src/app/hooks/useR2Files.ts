@@ -1,9 +1,8 @@
 import { useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { listen } from '@tauri-apps/api/event';
-import { listAllR2Objects, R2Object } from '../lib/r2cache';
+import { getFolderContents, StoredFile } from '../lib/r2cache';
 import { R2Config } from '../components/ConfigModal';
-import { useSyncStore, FolderLoadPhase } from '../stores/syncStore';
+import { useSyncStore } from '../stores/syncStore';
 
 export interface FileItem {
   name: string;
@@ -13,17 +12,12 @@ export interface FileItem {
   lastModified?: string;
 }
 
-interface FolderLoadProgress {
-  pages: number;
-  items: number;
-}
-
 function extractName(key: string, prefix: string): string {
   const relativePath = prefix ? key.slice(prefix.length) : key;
   return relativePath.replace(/\/$/, '');
 }
 
-function buildFileItems(objects: R2Object[], folders: string[], prefix: string): FileItem[] {
+function buildFileItems(files: StoredFile[], folders: string[], prefix: string): FileItem[] {
   const items: FileItem[] = [];
 
   // Add folders first
@@ -36,14 +30,14 @@ function buildFileItems(objects: R2Object[], folders: string[], prefix: string):
   }
 
   // Add files
-  for (const obj of objects) {
-    if (obj.key === prefix || obj.key.endsWith('/')) continue;
+  for (const file of files) {
+    if (file.key === prefix || file.key.endsWith('/')) continue;
     items.push({
-      name: extractName(obj.key, prefix),
-      key: obj.key,
+      name: extractName(file.key, prefix),
+      key: file.key,
       isFolder: false,
-      size: obj.size,
-      lastModified: obj.last_modified,
+      size: file.size,
+      lastModified: file.lastModified,
     });
   }
 
@@ -56,42 +50,28 @@ function buildFileItems(objects: R2Object[], folders: string[], prefix: string):
 
 export function useR2Files(config: R2Config | null, prefix: string = '') {
   const queryClient = useQueryClient();
-  const queryKey = ['r2-files', config?.bucket, prefix];
+  const queryKey = ['folder-contents', config?.bucket, prefix];
 
-  // Listen for folder loading progress events from Tauri backend
-  useEffect(() => {
-    const unlistenPhase = listen<FolderLoadPhase>('folder-load-phase', (event) => {
-      useSyncStore.getState().setFolderLoadPhase(event.payload);
-    });
-
-    const unlistenProgress = listen<FolderLoadProgress>('folder-load-progress', (event) => {
-      useSyncStore.getState().setFolderLoadProgress(event.payload);
-    });
-
-    return () => {
-      unlistenPhase.then((fn) => fn());
-      unlistenProgress.then((fn) => fn());
-    };
-  }, []);
+  // Get sync status from store - only load from cache after sync completes
+  const lastSyncTime = useSyncStore((state) => state.lastSyncTime);
 
   const query = useQuery({
     queryKey,
     queryFn: async (): Promise<FileItem[]> => {
       if (!config) return [];
-      console.log('Fetching R2 files:', { bucket: config.bucket, prefix });
+      console.log('Loading folder from cache:', { bucket: config.bucket, prefix });
 
-      // Reset folder loading state before starting
-      useSyncStore.getState().resetFolderLoad();
-
-      const result = await listAllR2Objects(config, prefix);
-      console.log('R2 API result:', {
-        objects: result.objects.length,
+      // Load from local SQLite cache (instant)
+      const result = await getFolderContents(prefix);
+      console.log('Cache result:', {
+        files: result.files.length,
         folders: result.folders.length,
       });
 
-      return buildFileItems(result.objects, result.folders, prefix);
+      return buildFileItems(result.files, result.folders, prefix);
     },
-    enabled: !!config?.token && !!config?.bucket && !!config?.accountId,
+    // Only enable after sync is complete (lastSyncTime is set)
+    enabled: !!config?.token && !!config?.bucket && !!config?.accountId && lastSyncTime !== null,
     retry: 1,
   });
 

@@ -35,11 +35,30 @@ struct FileInfo {
 #[derive(Debug, Clone)]
 pub struct ComputedNode {
     pub path: String,
+    pub parent_path: String,  // Parent folder path for fast child lookup
     pub file_count: i32,
     pub total_file_count: i32,
     pub size: i64,
     pub total_size: i64,
     pub last_modified: Option<String>,
+}
+
+/// Helper to compute parent path from a folder path
+fn compute_parent_path(path: &str) -> String {
+    // Path like "folder/" -> parent is ""
+    // Path like "folder/sub/" -> parent is "folder/"
+    // Path like "" (root) -> parent is ""
+    if path.is_empty() {
+        return String::new();
+    }
+    
+    // Remove trailing slash, find last slash, include it
+    let without_trailing = path.trim_end_matches('/');
+    if let Some(last_slash) = without_trailing.rfind('/') {
+        without_trailing[..=last_slash].to_string()
+    } else {
+        String::new() // Top-level folder, parent is root
+    }
 }
 
 /// Builder for directory tree from file list.
@@ -205,6 +224,7 @@ impl DirectoryTreeBuilder {
 
             results.push(ComputedNode {
                 path: path.clone(),
+                parent_path: compute_parent_path(path),
                 file_count: direct_count,
                 total_file_count: total_count,
                 size: direct_size,
@@ -242,7 +262,7 @@ impl DirectoryTreeBuilder {
             turso::params![bucket, account_id],
         ).await?;
 
-        // Batch insert
+        // Batch insert (10 columns now with parent_path)
         for chunk in nodes.chunks(DB_BATCH_SIZE) {
             if chunk.is_empty() {
                 continue;
@@ -252,26 +272,27 @@ impl DirectoryTreeBuilder {
                 .iter()
                 .enumerate()
                 .map(|(i, _)| {
-                    let b = i * 9;
+                    let b = i * 10;
                     format!(
-                        "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
-                        b + 1, b + 2, b + 3, b + 4, b + 5, b + 6, b + 7, b + 8, b + 9
+                        "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+                        b + 1, b + 2, b + 3, b + 4, b + 5, b + 6, b + 7, b + 8, b + 9, b + 10
                     )
                 })
                 .collect();
 
             let sql = format!(
                 "INSERT INTO directory_tree 
-                 (bucket, account_id, path, file_count, total_file_count, size, total_size, last_modified, last_updated)
+                 (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated)
                  VALUES {}",
                 placeholders.join(", ")
             );
 
-            let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 9);
+            let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 10);
             for node in chunk {
                 params.push(bucket.to_string().into());
                 params.push(account_id.to_string().into());
                 params.push(node.path.clone().into());
+                params.push(node.parent_path.clone().into());
                 params.push(node.file_count.into());
                 params.push(node.total_file_count.into());
                 params.push(node.size.into());

@@ -203,6 +203,7 @@ pub fn run() {
             commands::rename_r2_object,
             commands::batch_move_r2_objects,
             commands::generate_signed_url,
+            commands::sync_bucket,
             // Cache commands
             commands::store_all_files,
             commands::get_all_cached_files,
@@ -212,6 +213,7 @@ pub fn run() {
             commands::get_directory_node,
             commands::get_all_directory_nodes,
             commands::clear_file_cache,
+            commands::get_folder_contents,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

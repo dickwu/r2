@@ -1,7 +1,7 @@
 import { useCallback, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { listen } from '@tauri-apps/api/event';
-import { listAllR2ObjectsRecursive, storeAllFiles, buildDirectoryTree } from '../lib/r2cache';
+import { syncBucket } from '../lib/r2cache';
 import { useFolderSizeStore } from '../stores/folderSizeStore';
 import { useSyncStore, SyncPhase } from '../stores/syncStore';
 import { R2Config } from '../components/ConfigModal';
@@ -43,28 +43,23 @@ export function useFilesSync(config: R2Config | null) {
     queryKey: ['r2-all-files', config?.accountId, config?.bucket],
     queryFn: async () => {
       if (!config) return null;
-      console.log('Syncing all files...');
+      console.log('Syncing bucket...');
 
       // Clear sizes and reset progress before resyncing
       clearSizes();
       useSyncStore.getState().reset();
 
-      // Phase 1: Fetch all files from R2 (phase + progress emitted via Tauri events)
-      const allFiles = await listAllR2ObjectsRecursive(config);
-      useSyncStore.getState().setTotalFiles(allFiles.length);
+      // Single backend call: fetch from R2, store in DB, build directory tree
+      // Progress events are emitted via Tauri events (sync-progress, sync-phase, indexing-progress)
+      const result = await syncBucket(config);
 
-      // Phase 2: Store files in SQLite (phase emitted via Tauri events)
-      await storeAllFiles(allFiles);
+      console.log(`Synced ${result.count} files and built directory tree`);
+      useSyncStore.getState().setTotalFiles(result.count);
+      useSyncStore.getState().setLastSyncTime(result.timestamp);
 
-      // Phase 3: Build directory tree (phase + complete emitted via Tauri events)
-      await buildDirectoryTree([]);
-
-      console.log(`Synced ${allFiles.length} files and built directory tree`);
-      const timestamp = Date.now();
-      useSyncStore.getState().setLastSyncTime(timestamp);
       return {
-        count: allFiles.length,
-        timestamp,
+        count: result.count,
+        timestamp: result.timestamp,
         treeBuilt: true,
       };
     },

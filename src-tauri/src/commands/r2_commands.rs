@@ -1,5 +1,6 @@
 //! R2 API commands for Tauri frontend
 
+use crate::db::{self, CachedFile};
 use crate::r2;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -89,6 +90,88 @@ pub async fn list_all_r2_objects(
     r2::list_all_objects_recursive(&r2_config, Some(progress_callback))
         .await
         .map_err(|e| format!("Failed to list all objects: {}", e))
+}
+
+// ============ Sync Command ============
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncResult {
+    pub count: i32,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct IndexingProgress {
+    current: usize,
+    total: usize,
+}
+
+/// Sync bucket: fetch all objects from R2, store in cache, and build directory tree.
+/// This consolidates 3 frontend calls into 1 backend operation.
+#[tauri::command]
+pub async fn sync_bucket(
+    config: R2ConfigInput,
+    app: tauri::AppHandle,
+) -> Result<SyncResult, String> {
+    let r2_config: r2::R2Config = config.into();
+    let bucket = r2_config.bucket.clone();
+    let account_id = r2_config.account_id.clone();
+
+    // Phase 1: Fetch all objects from R2
+    let _ = app.emit("sync-phase", "fetching");
+
+    let app_clone = app.clone();
+    let progress_callback = Box::new(move |count: usize| {
+        let _ = app_clone.emit("sync-progress", count);
+    });
+
+    let objects = r2::list_all_objects_recursive(&r2_config, Some(progress_callback))
+        .await
+        .map_err(|e| format!("Failed to fetch objects: {}", e))?;
+
+    let count = objects.len() as i32;
+
+    // Phase 2: Store files in SQLite cache
+    let _ = app.emit("sync-phase", "storing");
+
+    let now = chrono::Utc::now().timestamp();
+    let cached_files: Vec<CachedFile> = objects
+        .into_iter()
+        .map(|obj| CachedFile {
+            bucket: bucket.clone(),
+            account_id: account_id.clone(),
+            key: obj.key,
+            parent_path: String::new(), // Computed in store_all_files from key
+            name: String::new(),        // Computed in store_all_files from key
+            size: obj.size,
+            last_modified: obj.last_modified,
+            synced_at: now,
+        })
+        .collect();
+
+    db::store_all_files(&bucket, &account_id, &cached_files)
+        .await
+        .map_err(|e| format!("Failed to store files: {}", e))?;
+
+    // Phase 3: Build directory tree
+    let _ = app.emit("sync-phase", "indexing");
+
+    let app_clone = app.clone();
+    let indexing_callback = move |current: usize, total: usize| {
+        let _ = app_clone.emit("indexing-progress", IndexingProgress { current, total });
+    };
+
+    db::build_directory_tree(&bucket, &account_id, &cached_files, Some(indexing_callback))
+        .await
+        .map_err(|e| format!("Failed to build directory tree: {}", e))?;
+
+    // Phase 4: Complete
+    let _ = app.emit("sync-phase", "complete");
+
+    Ok(SyncResult {
+        count,
+        timestamp: now,
+    })
 }
 
 // ============ Folder List Command ============

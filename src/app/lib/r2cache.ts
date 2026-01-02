@@ -232,8 +232,38 @@ export async function generateSignedUrl(
   });
 }
 
+// ============ Sync Operation (consolidated) ============
+
+export interface SyncResult {
+  count: number;
+  timestamp: number;
+}
+
+export async function syncBucket(config: R2Config): Promise<SyncResult> {
+  return invoke('sync_bucket', {
+    config: {
+      account_id: config.accountId,
+      bucket: config.bucket,
+      access_key_id: config.accessKeyId || '',
+      secret_access_key: config.secretAccessKey || '',
+    },
+  });
+}
+
+// ============ Folder Contents (from cache) ============
+
+export interface FolderContents {
+  files: StoredFile[];
+  folders: string[];
+}
+
+export async function getFolderContents(prefix: string = ''): Promise<FolderContents> {
+  return invoke('get_folder_contents', { prefix: prefix || null });
+}
+
 // ============ Cache Operations (replaces IndexedDB) ============
 
+/** @deprecated Use syncBucket() instead - files are now stored during sync */
 export async function storeAllFiles(files: R2Object[]): Promise<void> {
   return invoke('store_all_files', { files });
 }
@@ -255,6 +285,7 @@ export async function calculateFolderSize(folderPrefix: string): Promise<number>
   return invoke('calculate_folder_size', { prefix: folderPrefix });
 }
 
+/** @deprecated Use syncBucket() instead - directory tree is now built during sync */
 export async function buildDirectoryTree(files: StoredFile[]): Promise<void> {
   // Files are already in DB, just need to build the tree
   return invoke('build_directory_tree');

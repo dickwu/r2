@@ -8,9 +8,23 @@ pub struct CachedFile {
     pub bucket: String,
     pub account_id: String,
     pub key: String,
+    pub parent_path: String,  // e.g., "" for root, "folder/" for files in folder/
+    pub name: String,         // file name without path
     pub size: i64,
     pub last_modified: String,
     pub synced_at: i64,
+}
+
+/// Helper to extract parent path and name from a key
+fn parse_key(key: &str) -> (String, String) {
+    if let Some(last_slash) = key.rfind('/') {
+        let parent = &key[..=last_slash]; // Include trailing slash
+        let name = &key[last_slash + 1..];
+        (parent.to_string(), name.to_string())
+    } else {
+        // Root level file
+        (String::new(), key.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +32,7 @@ pub struct CachedDirectoryNode {
     pub bucket: String,
     pub account_id: String,
     pub path: String,
+    pub parent_path: String,
     pub file_count: i32,
     pub total_file_count: i32,
     pub size: i64,
@@ -30,20 +45,29 @@ pub struct CachedDirectoryNode {
 pub fn get_table_sql() -> &'static str {
     "
     -- File cache tables (replaces IndexedDB)
+    -- Drop old table to recreate with new schema
+    DROP TABLE IF EXISTS cached_files;
+    
     CREATE TABLE IF NOT EXISTS cached_files (
         bucket TEXT NOT NULL,
         account_id TEXT NOT NULL,
         key TEXT NOT NULL,
+        parent_path TEXT NOT NULL,  -- Parent folder path (empty string for root)
+        name TEXT NOT NULL,          -- File name without path
         size INTEGER NOT NULL,
         last_modified TEXT NOT NULL,
         synced_at INTEGER NOT NULL,
         PRIMARY KEY (bucket, account_id, key)
     );
 
+    -- Drop old directory_tree to recreate with new schema
+    DROP TABLE IF EXISTS directory_tree;
+    
     CREATE TABLE IF NOT EXISTS directory_tree (
         bucket TEXT NOT NULL,
         account_id TEXT NOT NULL,
         path TEXT NOT NULL,
+        parent_path TEXT NOT NULL,  -- Parent folder path for fast child lookup
         file_count INTEGER NOT NULL,
         total_file_count INTEGER NOT NULL,
         size INTEGER NOT NULL,
@@ -61,8 +85,9 @@ pub fn get_table_sql() -> &'static str {
         PRIMARY KEY (bucket, account_id)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_cached_files_prefix ON cached_files(bucket, account_id, key);
-    CREATE INDEX IF NOT EXISTS idx_directory_tree_lookup ON directory_tree(bucket, account_id, path);
+    -- Index for fast folder listing (exact match on parent_path)
+    CREATE INDEX IF NOT EXISTS idx_cached_files_parent ON cached_files(bucket, account_id, parent_path);
+    CREATE INDEX IF NOT EXISTS idx_directory_tree_parent ON directory_tree(bucket, account_id, parent_path);
     "
 }
 
@@ -90,30 +115,35 @@ pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile
             continue;
         }
         
-        // Build multi-value INSERT statement
+        // Build multi-value INSERT statement (8 columns now)
         let placeholders: Vec<String> = chunk
             .iter()
             .enumerate()
             .map(|(i, _)| {
-                let base = i * 6;
+                let base = i * 8;
                 format!(
-                    "(?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
-                    base + 1, base + 2, base + 3, base + 4, base + 5, base + 6
+                    "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+                    base + 1, base + 2, base + 3, base + 4, base + 5, base + 6, base + 7, base + 8
                 )
             })
             .collect();
         
         let sql = format!(
-            "INSERT INTO cached_files (bucket, account_id, key, size, last_modified, synced_at) VALUES {}",
+            "INSERT INTO cached_files (bucket, account_id, key, parent_path, name, size, last_modified, synced_at) VALUES {}",
             placeholders.join(", ")
         );
         
         // Build parameters array
-        let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 6);
+        let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 8);
         for file in chunk {
+            // Compute parent_path and name from key
+            let (parent_path, name) = parse_key(&file.key);
+            
             params.push(bucket.to_string().into());
             params.push(account_id.to_string().into());
             params.push(file.key.clone().into());
+            params.push(parent_path.into());
+            params.push(name.into());
             params.push(file.size.into());
             params.push(file.last_modified.clone().into());
             params.push(file.synced_at.into());
@@ -141,7 +171,7 @@ pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile
 pub async fn get_all_cached_files(bucket: &str, account_id: &str) -> DbResult<Vec<CachedFile>> {
     let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
-        "SELECT bucket, account_id, key, size, last_modified, synced_at
+        "SELECT bucket, account_id, key, parent_path, name, size, last_modified, synced_at
          FROM cached_files
          WHERE bucket = ?1 AND account_id = ?2
          ORDER BY key",
@@ -154,9 +184,11 @@ pub async fn get_all_cached_files(bucket: &str, account_id: &str) -> DbResult<Ve
             bucket: row.get(0)?,
             account_id: row.get(1)?,
             key: row.get(2)?,
-            size: row.get(3)?,
-            last_modified: row.get(4)?,
-            synced_at: row.get(5)?,
+            parent_path: row.get(3)?,
+            name: row.get(4)?,
+            size: row.get(5)?,
+            last_modified: row.get(6)?,
+            synced_at: row.get(7)?,
         });
     }
     Ok(files)
@@ -191,7 +223,7 @@ pub async fn search_cached_files(bucket: &str, account_id: &str, query: &str) ->
     
     let where_clause = like_conditions.join(" AND ");
     let sql = format!(
-        "SELECT bucket, account_id, key, size, last_modified, synced_at
+        "SELECT bucket, account_id, key, parent_path, name, size, last_modified, synced_at
          FROM cached_files
          WHERE bucket = ?1 AND account_id = ?2 AND {}
          ORDER BY key",
@@ -214,9 +246,11 @@ pub async fn search_cached_files(bucket: &str, account_id: &str, query: &str) ->
             bucket: row.get(0)?,
             account_id: row.get(1)?,
             key: row.get(2)?,
-            size: row.get(3)?,
-            last_modified: row.get(4)?,
-            synced_at: row.get(5)?,
+            parent_path: row.get(3)?,
+            name: row.get(4)?,
+            size: row.get(5)?,
+            last_modified: row.get(6)?,
+            synced_at: row.get(7)?,
         });
     }
     
@@ -247,7 +281,7 @@ pub async fn calculate_folder_size(bucket: &str, account_id: &str, prefix: &str)
 pub async fn get_directory_node(bucket: &str, account_id: &str, path: &str) -> DbResult<Option<CachedDirectoryNode>> {
     let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
-        "SELECT bucket, account_id, path, file_count, total_file_count, size, total_size, last_modified, last_updated
+        "SELECT bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated
          FROM directory_tree
          WHERE bucket = ?1 AND account_id = ?2 AND path = ?3",
         turso::params![bucket, account_id, path]
@@ -258,12 +292,13 @@ pub async fn get_directory_node(bucket: &str, account_id: &str, path: &str) -> D
             bucket: row.get(0)?,
             account_id: row.get(1)?,
             path: row.get(2)?,
-            file_count: row.get(3)?,
-            total_file_count: row.get(4)?,
-            size: row.get(5)?,
-            total_size: row.get(6)?,
-            last_modified: row.get(7)?,
-            last_updated: row.get(8)?,
+            parent_path: row.get(3)?,
+            file_count: row.get(4)?,
+            total_file_count: row.get(5)?,
+            size: row.get(6)?,
+            total_size: row.get(7)?,
+            last_modified: row.get(8)?,
+            last_updated: row.get(9)?,
         }))
     } else {
         Ok(None)
@@ -274,7 +309,7 @@ pub async fn get_directory_node(bucket: &str, account_id: &str, path: &str) -> D
 pub async fn get_all_directory_nodes(bucket: &str, account_id: &str) -> DbResult<Vec<CachedDirectoryNode>> {
     let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
-        "SELECT bucket, account_id, path, file_count, total_file_count, size, total_size, last_modified, last_updated
+        "SELECT bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated
          FROM directory_tree
          WHERE bucket = ?1 AND account_id = ?2
          ORDER BY path",
@@ -287,12 +322,13 @@ pub async fn get_all_directory_nodes(bucket: &str, account_id: &str) -> DbResult
             bucket: row.get(0)?,
             account_id: row.get(1)?,
             path: row.get(2)?,
-            file_count: row.get(3)?,
-            total_file_count: row.get(4)?,
-            size: row.get(5)?,
-            total_size: row.get(6)?,
-            last_modified: row.get(7)?,
-            last_updated: row.get(8)?,
+            parent_path: row.get(3)?,
+            file_count: row.get(4)?,
+            total_file_count: row.get(5)?,
+            size: row.get(6)?,
+            total_size: row.get(7)?,
+            last_modified: row.get(8)?,
+            last_updated: row.get(9)?,
         });
     }
     Ok(nodes)
@@ -318,4 +354,63 @@ pub async fn clear_file_cache(bucket: &str, account_id: &str) -> DbResult<()> {
     ).await?;
     
     Ok(())
+}
+
+/// Result of get_folder_contents
+#[derive(Debug, Clone)]
+pub struct FolderContents {
+    pub files: Vec<CachedFile>,
+    pub folders: Vec<String>,
+}
+
+/// Get folder contents from cache (files at this level + immediate subfolders)
+/// This mimics S3 ListObjectsV2 with delimiter="/" behavior
+/// 
+/// FAST: Uses exact match on parent_path (indexed) instead of LIKE patterns
+pub async fn get_folder_contents(bucket: &str, account_id: &str, prefix: &str) -> DbResult<FolderContents> {
+    let conn = get_connection()?.lock().await;
+    
+    // Query 1: Get files directly in this folder using EXACT MATCH on parent_path
+    // This is O(1) index lookup instead of O(n) LIKE scan
+    let mut rows = conn.query(
+        "SELECT bucket, account_id, key, parent_path, name, size, last_modified, synced_at
+         FROM cached_files
+         WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3
+         ORDER BY name",
+        turso::params![bucket, account_id, prefix]
+    ).await?;
+    
+    let mut files = Vec::new();
+    while let Some(row) = rows.next().await? {
+        files.push(CachedFile {
+            bucket: row.get(0)?,
+            account_id: row.get(1)?,
+            key: row.get(2)?,
+            parent_path: row.get(3)?,
+            name: row.get(4)?,
+            size: row.get(5)?,
+            last_modified: row.get(6)?,
+            synced_at: row.get(7)?,
+        });
+    }
+    
+    // Query 2: Get immediate child folders from directory_tree using EXACT MATCH on parent_path
+    // This is O(1) index lookup instead of O(n) LIKE scan
+    let mut rows = conn.query(
+        "SELECT path FROM directory_tree
+         WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3
+         ORDER BY path",
+        turso::params![bucket, account_id, prefix]
+    ).await?;
+    
+    let mut folders = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let folder: String = row.get(0)?;
+        folders.push(folder);
+    }
+    
+    Ok(FolderContents {
+        files,
+        folders,
+    })
 }

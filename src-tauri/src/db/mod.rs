@@ -108,7 +108,7 @@ pub use buckets::{create_bucket, delete_bucket, list_buckets_by_token, update_bu
 // Re-export file cache functions
 pub use file_cache::{
     store_all_files, get_all_cached_files, search_cached_files, calculate_folder_size, 
-    get_directory_node, get_all_directory_nodes, clear_file_cache,
+    get_directory_node, get_all_directory_nodes, clear_file_cache, get_folder_contents,
 };
 // Re-export directory tree builder
 pub use dir_tree::{build_directory_tree};

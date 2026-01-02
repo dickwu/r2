@@ -6,6 +6,7 @@ import { Button, Space, Spin } from 'antd';
 import { LeftOutlined, RightOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
 import { fetch } from '@tauri-apps/plugin-http';
 import DownloadProgress from './DownloadProgress';
+import { useThemeStore } from '../../stores/themeStore';
 import 'react-pdf/dist/Page/TextLayer.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 
@@ -246,11 +247,18 @@ export default function PDFViewer({
   // Memoize file object to prevent unnecessary reloads
   const file = useMemo(() => (pdfData ? { data: pdfData } : null), [pdfData]);
 
+  const appTheme = useThemeStore((s) => s.theme);
+  const isDark = appTheme === 'dark';
+
   return (
     <div className="pdf-viewer-wrapper">
       {/* PDF Controls - Responsive */}
       {showControls && (
-        <div className="mb-3 flex flex-col gap-2 rounded-lg border bg-gray-50 p-2 sm:flex-row sm:items-center sm:justify-between sm:p-3">
+        <div
+          className={`mb-3 flex flex-col gap-2 rounded-lg border p-2 sm:flex-row sm:items-center sm:justify-between sm:p-3 ${
+            isDark ? 'border-gray-700 bg-gray-800' : 'border-gray-200 bg-gray-50'
+          }`}
+        >
           <Space size="small" className="flex-wrap justify-center sm:justify-start">
             <Button
               icon={<LeftOutlined />}

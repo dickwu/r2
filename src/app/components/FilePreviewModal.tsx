@@ -9,13 +9,16 @@ import {
   FileImageOutlined,
   PlaySquareOutlined,
   FilePdfOutlined,
+  FileTextOutlined,
 } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import dynamic from 'next/dynamic';
 import { FileItem } from '../hooks/useR2Files';
 import { generateSignedUrl } from '../lib/r2cache';
+import { TEXT_EXTENSIONS } from './preview/TextViewer';
 
 const PDFViewer = dynamic(() => import('./preview/PDFViewer'), { ssr: false });
+const TextViewer = dynamic(() => import('./preview/TextViewer'), { ssr: false });
 
 const { Text, Paragraph } = Typography;
 
@@ -37,6 +40,10 @@ function isVideoFile(filename: string): boolean {
 
 function isPdfFile(filename: string): boolean {
   return PDF_EXTENSIONS.includes(getFileExtension(filename));
+}
+
+function isTextFile(filename: string): boolean {
+  return TEXT_EXTENSIONS.includes(getFileExtension(filename));
 }
 
 interface FilePreviewModalProps {
@@ -105,6 +112,7 @@ export default function FilePreviewModal({
   const isImage = isImageFile(file.name);
   const isVideo = isVideoFile(file.name);
   const isPdf = isPdfFile(file.name);
+  const isText = isTextFile(file.name);
 
   async function handleOpenUrl() {
     if (!fileUrl) {
@@ -139,7 +147,7 @@ export default function FilePreviewModal({
       onCancel={onClose}
       title={file.name}
       footer={null}
-      width={isPdf ? 800 : 480}
+      width={'85%'}
       centered
       destroyOnHidden
     >
@@ -156,12 +164,16 @@ export default function FilePreviewModal({
           />
         ) : isPdf && fileUrl ? (
           <PDFViewer url={fileUrl} showControls maxHeight="500px" />
+        ) : isText && fileUrl ? (
+          <TextViewer url={fileUrl} filename={file.name} maxHeight="500px" />
         ) : isImage ? (
           <FileImageOutlined style={{ fontSize: 40, color: '#f6821f' }} />
         ) : isVideo ? (
           <PlaySquareOutlined style={{ fontSize: 40, color: '#f6821f' }} />
         ) : isPdf ? (
           <FilePdfOutlined style={{ fontSize: 40, color: '#f6821f' }} />
+        ) : isText ? (
+          <FileTextOutlined style={{ fontSize: 40, color: '#f6821f' }} />
         ) : (
           <FileOutlined style={{ fontSize: 40, color: '#f6821f' }} />
         )}
