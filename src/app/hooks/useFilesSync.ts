@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { listen } from '@tauri-apps/api/event';
 import { syncBucket } from '../lib/r2cache';
@@ -15,6 +15,18 @@ interface IndexingProgress {
 export function useFilesSync(config: R2Config | null) {
   const queryClient = useQueryClient();
   const clearSizes = useFolderSizeStore((state) => state.clearSizes);
+
+  // Get per-bucket sync time
+  const bucketSyncTimes = useSyncStore((state) => state.bucketSyncTimes);
+  const lastSyncTime = useMemo(() => {
+    if (!config?.accountId || !config?.bucket) return null;
+    return useSyncStore.getState().getLastSyncTime(config.accountId, config.bucket);
+  }, [config?.accountId, config?.bucket, bucketSyncTimes]);
+
+  // Update current bucket in store when config changes
+  useEffect(() => {
+    useSyncStore.getState().setCurrentBucket(config?.accountId ?? null, config?.bucket ?? null);
+  }, [config?.accountId, config?.bucket]);
 
   // Listen for sync progress and phase events from Tauri backend
   useEffect(() => {
@@ -45,9 +57,9 @@ export function useFilesSync(config: R2Config | null) {
       if (!config) return null;
       console.log('Syncing bucket...');
 
-      // Clear sizes and reset progress before resyncing
+      // Clear sizes and reset progress (not sync times) before resyncing
       clearSizes();
-      useSyncStore.getState().reset();
+      useSyncStore.getState().resetProgress();
 
       // Single backend call: fetch from R2, store in DB, build directory tree
       // Progress events are emitted via Tauri events (sync-progress, sync-phase, indexing-progress)
@@ -55,7 +67,7 @@ export function useFilesSync(config: R2Config | null) {
 
       console.log(`Synced ${result.count} files and built directory tree`);
       useSyncStore.getState().setTotalFiles(result.count);
-      useSyncStore.getState().setLastSyncTime(result.timestamp);
+      useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, result.timestamp);
 
       return {
         count: result.count,
@@ -84,7 +96,11 @@ export function useFilesSync(config: R2Config | null) {
       return;
     }
     clearSizes();
-    useSyncStore.getState().reset();
+    // Clear sync time for this bucket to force re-sync
+    if (config?.accountId && config?.bucket) {
+      useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, null);
+    }
+    useSyncStore.getState().resetProgress();
     await queryClient.invalidateQueries({
       queryKey: ['r2-all-files', config?.accountId, config?.bucket],
     });
@@ -95,7 +111,7 @@ export function useFilesSync(config: R2Config | null) {
     isSynced: query.isSuccess,
     syncError: query.error,
     // Expose timestamp so consumers can detect when sync completes
-    lastSyncTime: query.data?.timestamp ?? null,
+    lastSyncTime,
     refresh,
   };
 }

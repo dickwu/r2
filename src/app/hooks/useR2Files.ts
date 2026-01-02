@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getFolderContents, StoredFile } from '../lib/r2cache';
 import { R2Config } from '../components/ConfigModal';
@@ -53,8 +53,12 @@ export function useR2Files(config: R2Config | null, prefix: string = '') {
   const queryClient = useQueryClient();
   const queryKey = ['folder-contents', config?.bucket, prefix];
 
-  // Get sync status from store - only load from cache after sync completes
-  const lastSyncTime = useSyncStore((state) => state.lastSyncTime);
+  // Get per-bucket sync time - only load from cache after sync completes
+  const bucketSyncTimes = useSyncStore((state) => state.bucketSyncTimes);
+  const lastSyncTime = useMemo(() => {
+    if (!config?.accountId || !config?.bucket) return null;
+    return useSyncStore.getState().getLastSyncTime(config.accountId, config.bucket);
+  }, [config?.accountId, config?.bucket, bucketSyncTimes]);
 
   const query = useQuery({
     queryKey,

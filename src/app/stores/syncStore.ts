@@ -13,11 +13,20 @@ interface FolderLoadProgress {
   items: number;
 }
 
+// Key format: "accountId:bucket"
+function makeBucketKey(accountId: string, bucket: string): string {
+  return `${accountId}:${bucket}`;
+}
+
 interface SyncStore {
   // High-level sync status
   isSyncing: boolean;
-  lastSyncTime: number | null;
   isFolderLoading: boolean;
+
+  // Per-bucket sync times: Map<"accountId:bucket", timestamp>
+  bucketSyncTimes: Record<string, number>;
+  // Current bucket key for convenience
+  currentBucketKey: string | null;
 
   // Bucket sync state
   phase: SyncPhase;
@@ -27,13 +36,16 @@ interface SyncStore {
 
   // Actions - sync
   setIsSyncing: (syncing: boolean) => void;
-  setLastSyncTime: (time: number | null) => void;
+  setLastSyncTime: (accountId: string, bucket: string, time: number | null) => void;
+  getLastSyncTime: (accountId: string, bucket: string) => number | null;
+  setCurrentBucket: (accountId: string | null, bucket: string | null) => void;
   setIsFolderLoading: (loading: boolean) => void;
   setPhase: (phase: SyncPhase) => void;
   setProgress: (count: number) => void;
   setTotalFiles: (count: number) => void;
   setIndexingProgress: (progress: IndexingProgress) => void;
   reset: () => void;
+  resetProgress: () => void;
 
   // Folder loading state
   folderLoadPhase: FolderLoadPhase;
@@ -43,11 +55,14 @@ interface SyncStore {
   resetFolderLoad: () => void;
 }
 
-export const useSyncStore = create<SyncStore>((set) => ({
+export const useSyncStore = create<SyncStore>((set, get) => ({
   // High-level sync status
   isSyncing: false,
-  lastSyncTime: null,
   isFolderLoading: false,
+
+  // Per-bucket sync times
+  bucketSyncTimes: {},
+  currentBucketKey: null,
 
   // Bucket sync state
   phase: 'idle',
@@ -59,8 +74,26 @@ export const useSyncStore = create<SyncStore>((set) => ({
     set({ isSyncing: syncing });
   },
 
-  setLastSyncTime: (time) => {
-    set({ lastSyncTime: time });
+  setLastSyncTime: (accountId, bucket, time) => {
+    const key = makeBucketKey(accountId, bucket);
+    set((state) => {
+      if (time === null) {
+        // Remove the key from bucketSyncTimes
+        const { [key]: _, ...rest } = state.bucketSyncTimes;
+        return { bucketSyncTimes: rest };
+      }
+      return { bucketSyncTimes: { ...state.bucketSyncTimes, [key]: time } };
+    });
+  },
+
+  getLastSyncTime: (accountId, bucket) => {
+    const key = makeBucketKey(accountId, bucket);
+    return get().bucketSyncTimes[key] ?? null;
+  },
+
+  setCurrentBucket: (accountId, bucket) => {
+    const key = accountId && bucket ? makeBucketKey(accountId, bucket) : null;
+    set({ currentBucketKey: key });
   },
 
   setIsFolderLoading: (loading) => {
@@ -83,7 +116,20 @@ export const useSyncStore = create<SyncStore>((set) => ({
     set({ indexingProgress: progress });
   },
 
+  // Full reset including bucket sync times (for logout, etc.)
   reset: () => {
+    set({
+      phase: 'idle',
+      processedFiles: 0,
+      totalFiles: 0,
+      indexingProgress: { current: 0, total: 0 },
+      bucketSyncTimes: {},
+      currentBucketKey: null,
+    });
+  },
+
+  // Reset only progress state (for refresh), preserves bucket sync times
+  resetProgress: () => {
     set({
       phase: 'idle',
       processedFiles: 0,
