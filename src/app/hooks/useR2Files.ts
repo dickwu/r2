@@ -20,8 +20,9 @@ function extractName(key: string, prefix: string): string {
 function buildFileItems(files: StoredFile[], folders: string[], prefix: string): FileItem[] {
   const items: FileItem[] = [];
 
-  // Add folders first
+  // Add folders first (skip root "/" when at root level)
   for (const folder of folders) {
+    if (folder === '/' || folder === '') continue;
     items.push({
       name: extractName(folder, prefix),
       key: folder,
