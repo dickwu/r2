@@ -8,15 +8,20 @@ import {
   FileOutlined,
   FileImageOutlined,
   PlaySquareOutlined,
+  FilePdfOutlined,
 } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import dynamic from 'next/dynamic';
 import { FileItem } from '../hooks/useR2Files';
 import { generateSignedUrl } from '../lib/r2cache';
+
+const PDFViewer = dynamic(() => import('./preview/PDFViewer'), { ssr: false });
 
 const { Text, Paragraph } = Typography;
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'mov', 'm4v'];
+const PDF_EXTENSIONS = ['pdf'];
 
 function getFileExtension(filename: string): string {
   return filename.split('.').pop()?.toLowerCase() || '';
@@ -28,6 +33,10 @@ function isImageFile(filename: string): boolean {
 
 function isVideoFile(filename: string): boolean {
   return VIDEO_EXTENSIONS.includes(getFileExtension(filename));
+}
+
+function isPdfFile(filename: string): boolean {
+  return PDF_EXTENSIONS.includes(getFileExtension(filename));
 }
 
 interface FilePreviewModalProps {
@@ -95,6 +104,7 @@ export default function FilePreviewModal({
 
   const isImage = isImageFile(file.name);
   const isVideo = isVideoFile(file.name);
+  const isPdf = isPdfFile(file.name);
 
   async function handleOpenUrl() {
     if (!fileUrl) {
@@ -129,7 +139,7 @@ export default function FilePreviewModal({
       onCancel={onClose}
       title={file.name}
       footer={null}
-      width={480}
+      width={isPdf ? 800 : 480}
       centered
       destroyOnHidden
     >
@@ -144,10 +154,14 @@ export default function FilePreviewModal({
             controls
             style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 8 }}
           />
+        ) : isPdf && fileUrl ? (
+          <PDFViewer url={fileUrl} showControls maxHeight="500px" />
         ) : isImage ? (
           <FileImageOutlined style={{ fontSize: 40, color: '#f6821f' }} />
         ) : isVideo ? (
           <PlaySquareOutlined style={{ fontSize: 40, color: '#f6821f' }} />
+        ) : isPdf ? (
+          <FilePdfOutlined style={{ fontSize: 40, color: '#f6821f' }} />
         ) : (
           <FileOutlined style={{ fontSize: 40, color: '#f6821f' }} />
         )}
