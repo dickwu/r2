@@ -20,6 +20,7 @@ interface StatusBarProps {
   // Bucket info
   currentConfig: {
     account_id: string;
+    bucket: string;
     public_domain?: string | null;
     access_key_id?: string | null;
   } | null;
@@ -44,7 +45,11 @@ export default function StatusBar({
         />
         {hasConfig && <FolderLoadProgress />}
         {hasConfig && <SyncProgress />}
-        <BucketStats hasConfig={hasConfig} />
+        <BucketStats
+          hasConfig={hasConfig}
+          accountId={currentConfig?.account_id}
+          bucket={currentConfig?.bucket}
+        />
       </Space>
       <DomainInfo currentConfig={currentConfig} />
     </div>

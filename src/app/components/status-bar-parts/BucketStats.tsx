@@ -7,14 +7,22 @@ import { formatBytes } from '../../utils/formatBytes';
 
 interface BucketStatsProps {
   hasConfig: boolean;
+  accountId?: string;
+  bucket?: string;
 }
 
-export default function BucketStats({ hasConfig }: BucketStatsProps) {
+export default function BucketStats({ hasConfig, accountId, bucket }: BucketStatsProps) {
   const metadata = useFolderSizeStore((state) => state.metadata);
   const loadMetadata = useFolderSizeStore((state) => state.loadMetadata);
   const setMetadata = useFolderSizeStore((state) => state.setMetadata);
   const isSyncing = useSyncStore((state) => state.isSyncing);
-  const lastSyncTime = useSyncStore((state) => state.lastSyncTime);
+  const bucketSyncTimes = useSyncStore((state) => state.bucketSyncTimes);
+
+  // Get per-bucket sync time
+  const lastSyncTime = useMemo(() => {
+    if (!accountId || !bucket) return null;
+    return useSyncStore.getState().getLastSyncTime(accountId, bucket);
+  }, [accountId, bucket, bucketSyncTimes]);
 
   // Clear root metadata when sync completes to force fresh load
   useEffect(() => {
