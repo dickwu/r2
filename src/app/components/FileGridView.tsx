@@ -127,7 +127,7 @@ const FileCard = memo(function FileCard({
         ) : undefined
       }
     >
-      {!item.isFolder && onToggleSelection && (
+      {onToggleSelection && (
         <div className="grid-card-checkbox" onClick={handleToggleSelection}>
           <Checkbox checked={isSelected} />
         </div>

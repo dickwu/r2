@@ -65,16 +65,14 @@ export default function FileListView({
   onRename,
   onFolderDelete,
 }: FileListViewProps) {
-  const fileItems = items.filter((item) => !item.isFolder);
-
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
       <div className="file-list-header">
         <span className="col-checkbox">
           <Checkbox
-            indeterminate={selectedKeys.size > 0 && selectedKeys.size < fileItems.length}
-            checked={selectedKeys.size > 0 && selectedKeys.size === fileItems.length}
+            indeterminate={selectedKeys.size > 0 && selectedKeys.size < items.length}
+            checked={selectedKeys.size > 0 && selectedKeys.size === items.length}
             onChange={(e) => {
               if (e.target.checked) {
                 onSelectAll();
@@ -128,12 +126,10 @@ export default function FileListView({
               onClick={() => onItemClick(item)}
             >
               <span className="col-checkbox" onClick={(e) => e.stopPropagation()}>
-                {!item.isFolder && (
-                  <Checkbox
-                    checked={selectedKeys.has(item.key)}
-                    onChange={() => onToggleSelection(item.key)}
-                  />
-                )}
+                <Checkbox
+                  checked={selectedKeys.has(item.key)}
+                  onChange={() => onToggleSelection(item.key)}
+                />
               </span>
               <span className="col-name">
                 {item.isFolder ? (

@@ -38,6 +38,7 @@ import {
 } from './lib/r2cache';
 import { useFolderSizeStore } from './stores/folderSizeStore';
 import { useSyncStore } from './stores/syncStore';
+import { useBatchOperationStore } from './stores/batchOperationStore';
 
 type ViewMode = 'list' | 'grid';
 type SortOrder = 'asc' | 'desc' | null;
@@ -66,12 +67,24 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState('');
   const [sizeSort, setSizeSort] = useState<SortOrder>(null);
   const [modifiedSort, setModifiedSort] = useState<SortOrder>(null);
-  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  const [isDeleting, setIsDeleting] = useState(false);
-  const [moveModalOpen, setMoveModalOpen] = useState(false);
-  const [isMoving, setIsMoving] = useState(false);
   const [searchResults, setSearchResults] = useState<FileItem[]>([]);
+
+  // Batch operation store
+  const selectedKeys = useBatchOperationStore((state) => state.selectedKeys);
+  const deleteModalOpen = useBatchOperationStore((state) => state.deleteModalOpen);
+  const keysToDelete = useBatchOperationStore((state) => state.keysToDelete);
+  const moveModalOpen = useBatchOperationStore((state) => state.moveModalOpen);
+  const keysToMove = useBatchOperationStore((state) => state.keysToMove);
+  const toggleSelection = useBatchOperationStore((state) => state.toggleSelection);
+  const selectAllKeys = useBatchOperationStore((state) => state.selectAll);
+  const clearSelection = useBatchOperationStore((state) => state.clearSelection);
+  const openDeleteModal = useBatchOperationStore((state) => state.openDeleteModal);
+  const closeDeleteModal = useBatchOperationStore((state) => state.closeDeleteModal);
+  const setDeleting = useBatchOperationStore((state) => state.setDeleting);
+  const openMoveModal = useBatchOperationStore((state) => state.openMoveModal);
+  const closeMoveModal = useBatchOperationStore((state) => state.closeMoveModal);
+  const setMoving = useBatchOperationStore((state) => state.setMoving);
+  const resetBatchOperation = useBatchOperationStore((state) => state.reset);
   const [searchTotalCount, setSearchTotalCount] = useState(0);
   const [isSearching, setIsSearching] = useState(false);
   const { message } = App.useApp();
@@ -85,8 +98,8 @@ export default function Home() {
   useEffect(() => {
     setCurrentPath('');
     setSearchQuery('');
-    setSelectedKeys(new Set());
-  }, [currentConfig?.bucket, currentConfig?.token_id]);
+    resetBatchOperation();
+  }, [currentConfig?.bucket, currentConfig?.token_id, resetBatchOperation]);
 
   const { items, isLoading, isFetching, error, refresh } = useR2Files(config, currentPath);
   const { isSyncing, isSynced, lastSyncTime, refresh: refreshSync } = useFilesSync(config);
@@ -181,6 +194,23 @@ export default function Home() {
     return result;
   }, [items, searchQuery, searchResults, sizeSort, modifiedSort, metadata]);
 
+  // Compute total selected file count (folders count as their file count)
+  const selectedFileCount = useMemo(() => {
+    let count = 0;
+    for (const key of selectedKeys) {
+      if (key.endsWith('/')) {
+        // Folder - use totalFileCount or fileCount from metadata
+        const folderMeta = metadata[key];
+        const folderCount = folderMeta?.totalFileCount ?? folderMeta?.fileCount;
+        count += folderCount ?? 1; // Fallback to 1 if metadata not loaded
+      } else {
+        // File
+        count += 1;
+      }
+    }
+    return count;
+  }, [selectedKeys, metadata]);
+
   // Load folder metadata from directory tree when items change and sync is complete
   // lastSyncTime ensures metadata reloads after refresh (since isSynced stays true during refetch)
   useEffect(() => {
@@ -271,36 +301,58 @@ export default function Home() {
     }
   }
 
-  const handleItemClick = useCallback((item: FileItem) => {
-    if (item.isFolder) {
-      setCurrentPath(item.key);
-      setSearchQuery('');
-      setSelectedKeys(new Set());
-    } else {
-      setPreviewFile(item);
-    }
-  }, []);
-
-  const toggleSelection = useCallback((key: string) => {
-    setSelectedKeys((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) {
-        next.delete(key);
+  const handleItemClick = useCallback(
+    (item: FileItem) => {
+      if (item.isFolder) {
+        setCurrentPath(item.key);
+        setSearchQuery('');
+        clearSelection();
       } else {
-        next.add(key);
+        setPreviewFile(item);
       }
-      return next;
-    });
-  }, []);
+    },
+    [clearSelection]
+  );
 
   const selectAll = useCallback(() => {
-    const fileKeys = filteredItems.filter((item) => !item.isFolder).map((item) => item.key);
-    setSelectedKeys(new Set(fileKeys));
-  }, [filteredItems]);
+    const allKeys = filteredItems.map((item) => item.key);
+    selectAllKeys(allKeys);
+  }, [filteredItems, selectAllKeys]);
 
-  const clearSelection = useCallback(() => {
-    setSelectedKeys(new Set());
-  }, []);
+  // Expand folder keys to all contained file keys
+  const expandFolderKeys = useCallback(
+    async (keys: Set<string>): Promise<Set<string>> => {
+      if (!config) return keys;
+
+      const fileKeys = new Set<string>();
+      const folderKeys: string[] = [];
+
+      // Separate files and folders
+      for (const key of keys) {
+        if (key.endsWith('/')) {
+          folderKeys.push(key);
+        } else {
+          fileKeys.add(key);
+        }
+      }
+
+      // If no folders, return original keys
+      if (folderKeys.length === 0) {
+        return keys;
+      }
+
+      // Expand each folder to its contained files
+      for (const folderKey of folderKeys) {
+        const objects = await listAllR2ObjectsUnderPrefix(config, folderKey);
+        for (const obj of objects) {
+          fileKeys.add(obj.key);
+        }
+      }
+
+      return fileKeys;
+    },
+    [config]
+  );
 
   const handleRefresh = useCallback(() => {
     Promise.all([refresh(), refreshSync()])
@@ -341,10 +393,9 @@ export default function Home() {
           return;
         }
 
-        // Set all file keys as selected and open batch delete modal
+        // Set file keys for batch delete modal
         const keys = new Set(objects.map((obj) => obj.key));
-        setSelectedKeys(keys);
-        setDeleteConfirmOpen(true);
+        openDeleteModal(keys);
       } catch (e) {
         message.destroy('folder-delete');
         console.error('Folder delete error:', e);
@@ -353,34 +404,66 @@ export default function Home() {
         );
       }
     },
-    [config, message]
+    [config, message, openDeleteModal]
   );
 
-  const openBatchDeleteConfirm = useCallback(() => {
-    setDeleteConfirmOpen(true);
-  }, []);
+  const openBatchDeleteConfirm = useCallback(async () => {
+    if (selectedKeys.size === 0) return;
 
-  const closeBatchDeleteConfirm = useCallback(() => {
-    setDeleteConfirmOpen(false);
-  }, []);
+    // Snapshot the current selection
+    const currentSelection = new Set(selectedKeys);
+
+    // Check if any folders are selected
+    const hasFolders = Array.from(currentSelection).some((key) => key.endsWith('/'));
+
+    let finalKeys = currentSelection;
+    if (hasFolders) {
+      message.loading({ content: 'Preparing files...', key: 'batch-prep' });
+      finalKeys = await expandFolderKeys(currentSelection);
+      message.destroy('batch-prep');
+
+      if (finalKeys.size === 0) {
+        message.info('No files to delete');
+        return;
+      }
+    }
+
+    openDeleteModal(finalKeys);
+  }, [selectedKeys, expandFolderKeys, message, openDeleteModal]);
 
   const handleBatchDeleteSuccess = useCallback(async () => {
-    setSelectedKeys(new Set());
+    clearSelection();
     await Promise.all([refresh(), refreshSync()]);
-  }, [refresh, refreshSync]);
+  }, [refresh, refreshSync, clearSelection]);
 
-  const openBatchMoveModal = useCallback(() => {
-    setMoveModalOpen(true);
-  }, []);
+  const openBatchMoveModalHandler = useCallback(async () => {
+    if (selectedKeys.size === 0) return;
 
-  const closeBatchMoveModal = useCallback(() => {
-    setMoveModalOpen(false);
-  }, []);
+    // Snapshot the current selection
+    const currentSelection = new Set(selectedKeys);
+
+    // Check if any folders are selected
+    const hasFolders = Array.from(currentSelection).some((key) => key.endsWith('/'));
+
+    let finalKeys = currentSelection;
+    if (hasFolders) {
+      message.loading({ content: 'Preparing files...', key: 'batch-prep' });
+      finalKeys = await expandFolderKeys(currentSelection);
+      message.destroy('batch-prep');
+
+      if (finalKeys.size === 0) {
+        message.info('No files to move');
+        return;
+      }
+    }
+
+    openMoveModal(finalKeys);
+  }, [selectedKeys, expandFolderKeys, message, openMoveModal]);
 
   const handleBatchMoveSuccess = useCallback(async () => {
-    setSelectedKeys(new Set());
+    clearSelection();
     await Promise.all([refresh(), refreshSync()]);
-  }, [refresh, refreshSync]);
+  }, [refresh, refreshSync, clearSelection]);
 
   const handleRenameClick = useCallback((item: FileItem) => {
     setRenameFile(item);
@@ -489,9 +572,11 @@ export default function Home() {
               {selectedKeys.size > 0 && (
                 <>
                   <span style={{ color: 'var(--text-secondary)' }}>
-                    {selectedKeys.size} selected
+                    {selectedFileCount !== selectedKeys.size
+                      ? `${selectedKeys.size} items (${selectedFileCount.toLocaleString()} files)`
+                      : `${selectedKeys.size} selected`}
                   </span>
-                  <Button size="small" icon={<FolderOutlined />} onClick={openBatchMoveModal}>
+                  <Button size="small" icon={<FolderOutlined />} onClick={openBatchMoveModalHandler}>
                     Move
                   </Button>
                   <Button
@@ -662,21 +747,21 @@ export default function Home() {
           />
 
           <BatchDeleteModal
-            open={deleteConfirmOpen}
-            selectedKeys={selectedKeys}
+            open={deleteModalOpen}
+            selectedKeys={keysToDelete}
             config={config}
-            onClose={closeBatchDeleteConfirm}
+            onClose={closeDeleteModal}
             onSuccess={handleBatchDeleteSuccess}
-            onDeletingChange={setIsDeleting}
+            onDeletingChange={setDeleting}
           />
 
           <BatchMoveModal
             open={moveModalOpen}
-            selectedKeys={selectedKeys}
+            selectedKeys={keysToMove}
             config={config}
-            onClose={closeBatchMoveModal}
+            onClose={closeMoveModal}
             onSuccess={handleBatchMoveSuccess}
-            onMovingChange={setIsMoving}
+            onMovingChange={setMoving}
           />
         </div>
       </div>
