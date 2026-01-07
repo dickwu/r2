@@ -8,6 +8,7 @@ import {
   BucketStats,
   DomainInfo,
   ItemsCount,
+  DownloadProgress,
 } from './status-bar-parts';
 
 interface StatusBarProps {
@@ -16,6 +17,7 @@ interface StatusBarProps {
   searchQuery: string;
   searchTotalCount?: number;
   hasConfig: boolean;
+  isLoadingFiles?: boolean;
 
   // Bucket info
   currentConfig: {
@@ -31,6 +33,7 @@ export default function StatusBar({
   searchQuery,
   searchTotalCount = 0,
   hasConfig,
+  isLoadingFiles = false,
   currentConfig,
 }: StatusBarProps) {
   return (
@@ -50,6 +53,9 @@ export default function StatusBar({
           accountId={currentConfig?.account_id}
           bucket={currentConfig?.bucket}
         />
+        {!isLoadingFiles && (
+          <DownloadProgress bucket={currentConfig?.bucket} accountId={currentConfig?.account_id} />
+        )}
       </Space>
       <DomainInfo currentConfig={currentConfig} />
     </div>

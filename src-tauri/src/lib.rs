@@ -8,6 +8,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 mod account;
 mod commands;
 mod db;
+mod download;
 mod r2;
 mod upload;
 
@@ -214,6 +215,19 @@ pub fn run() {
             commands::get_all_directory_nodes,
             commands::clear_file_cache,
             commands::get_folder_contents,
+            // Download commands
+            download::commands::create_download_task,
+            download::commands::start_download_queue,
+            download::commands::start_all_downloads,
+            download::commands::pause_all_downloads,
+            download::commands::pause_download,
+            download::commands::resume_download,
+            download::commands::cancel_download,
+            download::commands::delete_download_task,
+            download::commands::get_download_tasks,
+            download::commands::clear_finished_downloads,
+            download::commands::clear_all_downloads,
+            download::commands::select_download_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

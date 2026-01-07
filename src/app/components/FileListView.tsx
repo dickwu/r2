@@ -6,6 +6,7 @@ import {
   CaretUpOutlined,
   CaretDownOutlined,
   MoreOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons';
 import { Virtuoso } from 'react-virtuoso';
 import dayjs from 'dayjs';
@@ -37,6 +38,7 @@ interface FileListViewProps {
   onToggleModifiedSort: () => void;
   onDelete: (item: FileItem) => void;
   onRename: (item: FileItem) => void;
+  onDownload?: (item: FileItem) => void;
   onFolderDelete?: (item: FileItem) => void;
 }
 
@@ -63,6 +65,7 @@ export default function FileListView({
   onToggleModifiedSort,
   onDelete,
   onRename,
+  onDownload,
   onFolderDelete,
 }: FileListViewProps) {
   return (
@@ -190,6 +193,16 @@ export default function FileListView({
                   )
                 ) : (
                   <>
+                    {onDownload && (
+                      <Tooltip title="Download">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<DownloadOutlined />}
+                          onClick={() => onDownload(item)}
+                        />
+                      </Tooltip>
+                    )}
                     <Button
                       type="text"
                       size="small"

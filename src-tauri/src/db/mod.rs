@@ -13,6 +13,7 @@ pub(crate) type DbResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>
 // Re-export submodules
 pub mod accounts;
 pub mod buckets;
+pub mod downloads;
 pub mod sessions;
 pub mod tokens;
 pub mod file_cache;
@@ -22,6 +23,7 @@ pub mod dir_tree;
 // Re-export types
 pub use accounts::Account;
 pub use buckets::Bucket;
+pub use downloads::DownloadSession;
 pub use sessions::UploadSession;
 pub use tokens::{Token, CurrentConfig};
 pub use file_cache::{CachedFile, CachedDirectoryNode};
@@ -80,6 +82,9 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
     // Create file cache tables
     conn.execute_batch(file_cache::get_table_sql()).await?;
 
+    // Create download sessions table
+    conn.execute_batch(downloads::get_table_sql()).await?;
+
     DB_CONNECTION.set(Mutex::new(conn)).map_err(|_| "Database already initialized")?;
     
     Ok(())
@@ -99,16 +104,23 @@ pub use tokens::{
 };
 
 // Re-export app_state functions
-pub use app_state::{get_app_state, set_app_state, delete_app_state};
+pub use app_state::set_app_state;
 
 // Re-export account functions
 pub use accounts::{create_account, delete_account, list_accounts, update_account, has_accounts};
 // Re-export bucket functions
-pub use buckets::{create_bucket, delete_bucket, list_buckets_by_token, update_bucket, save_buckets_for_token};
+pub use buckets::{delete_bucket, list_buckets_by_token, update_bucket, save_buckets_for_token};
 // Re-export file cache functions
 pub use file_cache::{
-    store_all_files, get_all_cached_files, search_cached_files, calculate_folder_size, 
+    store_all_files, get_all_cached_files, get_cached_file_size, search_cached_files, calculate_folder_size, 
     get_directory_node, get_all_directory_nodes, clear_file_cache, get_folder_contents,
 };
 // Re-export directory tree builder
 pub use dir_tree::{build_directory_tree};
+// Re-export download session functions
+pub use downloads::{
+    create_download_session, update_download_progress, update_download_status, update_download_file_size,
+    get_download_sessions_for_bucket, delete_download_session,
+    get_pending_downloads, count_active_downloads,
+    pause_all_downloads, resume_all_downloads, delete_finished_downloads, delete_all_downloads,
+};

@@ -194,6 +194,21 @@ pub async fn get_all_cached_files(bucket: &str, account_id: &str) -> DbResult<Ve
     Ok(files)
 }
 
+/// Get a single file's size from cache (returns 0 if not found)
+pub async fn get_cached_file_size(bucket: &str, account_id: &str, key: &str) -> DbResult<i64> {
+    let conn = get_connection()?.lock().await;
+    let mut rows = conn.query(
+        "SELECT size FROM cached_files WHERE bucket = ?1 AND account_id = ?2 AND key = ?3",
+        turso::params![bucket, account_id, key]
+    ).await?;
+    
+    if let Some(row) = rows.next().await? {
+        Ok(row.get(0)?)
+    } else {
+        Ok(0)
+    }
+}
+
 /// Search result with total count
 #[derive(Debug, Clone)]
 pub struct SearchResult {

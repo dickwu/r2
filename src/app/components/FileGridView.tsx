@@ -7,6 +7,7 @@ import {
   PlaySquareOutlined,
   DeleteOutlined,
   EditOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons';
 import { VirtuosoGrid } from 'react-virtuoso';
 import { FileItem } from '../hooks/useR2Files';
@@ -40,6 +41,7 @@ interface FileGridViewProps {
   onItemClick: (item: FileItem) => void;
   onDelete: (item: FileItem) => void;
   onRename: (item: FileItem) => void;
+  onDownload?: (item: FileItem) => void;
   onFolderDelete?: (item: FileItem) => void;
   publicDomain?: string;
   folderSizes?: Record<string, FolderMetadata>;
@@ -54,6 +56,7 @@ const FileCard = memo(function FileCard({
   onItemClick,
   onDelete,
   onRename,
+  onDownload,
   onFolderDelete,
   folderMetadata,
   isSelected,
@@ -65,6 +68,7 @@ const FileCard = memo(function FileCard({
   onItemClick: (item: FileItem) => void;
   onDelete: (item: FileItem) => void;
   onRename: (item: FileItem) => void;
+  onDownload?: (item: FileItem) => void;
   onFolderDelete?: (item: FileItem) => void;
   folderMetadata?: FolderMetadata;
   isSelected?: boolean;
@@ -93,6 +97,12 @@ const FileCard = memo(function FileCard({
       onFolderDelete(item);
     }
   }, [onFolderDelete, item]);
+
+  const handleDownload = useCallback(() => {
+    if (onDownload) {
+      onDownload(item);
+    }
+  }, [onDownload, item]);
 
   const stopPropagation = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -190,6 +200,14 @@ const FileCard = memo(function FileCard({
       ) : (
         <div className="grid-card-actions" onClick={stopPropagation}>
           <Space size={4}>
+            {onDownload && (
+              <Button
+                type="text"
+                size="small"
+                icon={<DownloadOutlined />}
+                onClick={handleDownload}
+              />
+            )}
             <Button type="text" size="small" icon={<EditOutlined />} onClick={handleRename} />
             <Popconfirm
               title="Delete file"
@@ -247,6 +265,7 @@ export default memo(function FileGridView({
   onItemClick,
   onDelete,
   onRename,
+  onDownload,
   onFolderDelete,
   publicDomain,
   folderSizes,
@@ -270,6 +289,7 @@ export default memo(function FileGridView({
             onItemClick={onItemClick}
             onDelete={onDelete}
             onRename={onRename}
+            onDownload={onDownload}
             onFolderDelete={onFolderDelete}
             folderMetadata={item.isFolder ? folderSizes?.[item.key] : undefined}
             isSelected={selectedKeys?.has(item.key)}

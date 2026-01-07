@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { Button, Breadcrumb, Space, App, Spin, Empty, Segmented, Input } from 'antd';
 import {
   SettingOutlined,
@@ -14,7 +14,10 @@ import {
   SearchOutlined,
   DeleteOutlined,
   FolderOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons';
+import { invoke } from '@tauri-apps/api/core';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { useThemeStore } from './stores/themeStore';
 import ConfigModal, { ModalMode } from './components/ConfigModal';
 import UploadModal from './components/UploadModal';
@@ -27,6 +30,7 @@ import StatusBar from './components/StatusBar';
 import BatchDeleteModal from './components/BatchDeleteModal';
 import BatchMoveModal from './components/BatchMoveModal';
 import SyncOverlay from './components/SyncOverlay';
+import DownloadTaskModal from './components/DownloadTaskModal';
 import { useAccountStore, Account, Token } from './stores/accountStore';
 import { useR2Files, FileItem } from './hooks/useR2Files';
 import { useFilesSync } from './hooks/useFilesSync';
@@ -39,6 +43,7 @@ import {
 import { useFolderSizeStore } from './stores/folderSizeStore';
 import { useSyncStore } from './stores/syncStore';
 import { useBatchOperationStore } from './stores/batchOperationStore';
+import { useDownloadStore } from './stores/downloadStore';
 
 type ViewMode = 'list' | 'grid';
 type SortOrder = 'asc' | 'desc' | null;
@@ -85,6 +90,12 @@ export default function Home() {
   const closeMoveModal = useBatchOperationStore((state) => state.closeMoveModal);
   const setMoving = useBatchOperationStore((state) => state.setMoving);
   const resetBatchOperation = useBatchOperationStore((state) => state.reset);
+
+  // Download store
+  const addDownloadTask = useDownloadStore((state) => state.addTask);
+  const updateDownloadTask = useDownloadStore((state) => state.updateTask);
+  const loadDownloadsFromDatabase = useDownloadStore((state) => state.loadFromDatabase);
+
   const [searchTotalCount, setSearchTotalCount] = useState(0);
   const [isSearching, setIsSearching] = useState(false);
   const { message } = App.useApp();
@@ -100,6 +111,40 @@ export default function Home() {
     setSearchQuery('');
     resetBatchOperation();
   }, [currentConfig?.bucket, currentConfig?.token_id, resetBatchOperation]);
+
+  // Load download tasks from database when bucket changes
+  useEffect(() => {
+    if (!currentConfig?.bucket || !currentConfig?.account_id) return;
+
+    const loadDownloads = async () => {
+      try {
+        const sessions = await invoke<
+          Array<{
+            id: string;
+            object_key: string;
+            file_name: string;
+            file_size: number;
+            downloaded_bytes: number;
+            local_path: string;
+            bucket: string;
+            account_id: string;
+            status: string;
+            error: string | null;
+            created_at: number;
+            updated_at: number;
+          }>
+        >('get_download_tasks', {
+          bucket: currentConfig.bucket,
+          accountId: currentConfig.account_id,
+        });
+        loadDownloadsFromDatabase(sessions);
+      } catch (e) {
+        console.error('Failed to load download tasks:', e);
+      }
+    };
+
+    loadDownloads();
+  }, [currentConfig?.bucket, currentConfig?.account_id, loadDownloadsFromDatabase]);
 
   const { items, isLoading, isFetching, error, refresh } = useR2Files(config, currentPath);
   const { isSyncing, isSynced, lastSyncTime, refresh: refreshSync } = useFilesSync(config);
@@ -234,6 +279,111 @@ export default function Home() {
   useEffect(() => {
     initialize();
   }, []);
+
+  // Start download queue via Rust backend
+  const startDownloadQueue = useCallback(async () => {
+    if (!currentConfig?.access_key_id || !currentConfig?.secret_access_key) {
+      return;
+    }
+
+    try {
+      await invoke('start_download_queue', {
+        bucket: currentConfig.bucket,
+        accountId: currentConfig.account_id,
+        accessKeyId: currentConfig.access_key_id,
+        secretAccessKey: currentConfig.secret_access_key,
+      });
+    } catch (e) {
+      console.error('Failed to start download queue:', e);
+    }
+  }, [currentConfig]);
+
+  // Keep refs in sync so event listeners always call the latest versions
+  const startDownloadQueueRef = useRef(startDownloadQueue);
+  startDownloadQueueRef.current = startDownloadQueue;
+
+  const updateDownloadTaskRef = useRef(updateDownloadTask);
+  updateDownloadTaskRef.current = updateDownloadTask;
+
+  // Listen for download progress events - ALWAYS active (even when modal is closed)
+  // This ensures store is updated regardless of UI state
+  useEffect(() => {
+    let unlistenProgress: UnlistenFn | undefined;
+    let unlistenComplete: UnlistenFn | undefined;
+
+    // Throttle progress updates to prevent React update overflow
+    // Store latest progress per task and flush periodically
+    const pendingUpdates = new Map<
+      string,
+      {
+        progress: number;
+        downloadedBytes: number;
+        speed: number;
+        status: 'downloading' | 'success';
+      }
+    >();
+    let flushTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    const flushUpdates = () => {
+      pendingUpdates.forEach((update, taskId) => {
+        updateDownloadTaskRef.current(taskId, update);
+      });
+      pendingUpdates.clear();
+      flushTimeout = null;
+    };
+
+    const setupListeners = async () => {
+      // Listen for progress updates (throttled)
+      unlistenProgress = await listen<{
+        task_id: string;
+        percent: number;
+        downloaded_bytes: number;
+        total_bytes: number;
+        speed: number;
+      }>('download-progress', (event) => {
+        const { task_id, percent, downloaded_bytes, speed } = event.payload;
+
+        // Store latest update for this task
+        pendingUpdates.set(task_id, {
+          progress: percent,
+          downloadedBytes: downloaded_bytes,
+          speed,
+          status: percent >= 100 ? 'success' : 'downloading',
+        });
+
+        // Schedule flush if not already scheduled (every 100ms)
+        if (!flushTimeout) {
+          flushTimeout = setTimeout(flushUpdates, 100);
+        }
+
+        // Immediately flush completed downloads
+        if (percent >= 100) {
+          if (flushTimeout) {
+            clearTimeout(flushTimeout);
+            flushTimeout = null;
+          }
+          flushUpdates();
+        }
+      });
+
+      // Listen for download completion to start next in queue
+      unlistenComplete = await listen<string>('download-complete', () => {
+        setTimeout(() => {
+          startDownloadQueueRef.current();
+        }, 100);
+      });
+    };
+
+    setupListeners();
+
+    return () => {
+      unlistenProgress?.();
+      unlistenComplete?.();
+      if (flushTimeout) {
+        clearTimeout(flushTimeout);
+      }
+    };
+  }, []); // Empty deps - only run once on mount
 
   // Open add account modal if no accounts exist after initialization
   useEffect(() => {
@@ -469,6 +619,146 @@ export default function Home() {
     setRenameFile(item);
   }, []);
 
+  // Download single file
+  const handleDownload = useCallback(
+    async (item: FileItem) => {
+      if (!currentConfig || item.isFolder) return;
+
+      // Check if S3 credentials are available
+      if (!currentConfig.access_key_id || !currentConfig.secret_access_key) {
+        message.error('S3 credentials required for download');
+        return;
+      }
+
+      try {
+        // Open folder picker dialog
+        const folder = await invoke<string | null>('select_download_folder');
+        if (!folder) return; // User cancelled
+
+        const taskId = `download-${Date.now()}-${item.key}`;
+        const fileSize = item.size || 0;
+
+        // Create task in database first
+        await invoke('create_download_task', {
+          taskId,
+          objectKey: item.key,
+          fileName: item.name,
+          fileSize,
+          localPath: folder,
+          bucket: currentConfig.bucket,
+          accountId: currentConfig.account_id,
+        });
+
+        // Add task to download store (as pending)
+        addDownloadTask({
+          id: taskId,
+          key: item.key,
+          fileName: item.name,
+          fileSize,
+          localPath: folder,
+        });
+
+        // Start download queue via Rust backend
+        setTimeout(() => startDownloadQueue(), 50);
+      } catch (e) {
+        console.error('Download error:', e);
+        message.error(`Failed to download: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      }
+    },
+    [currentConfig, message, addDownloadTask, startDownloadQueue]
+  );
+
+  // Batch download selected files
+  const handleBatchDownload = useCallback(async () => {
+    if (selectedKeys.size === 0 || !currentConfig) return;
+
+    // Check if S3 credentials are available
+    if (!currentConfig.access_key_id || !currentConfig.secret_access_key) {
+      message.error('S3 credentials required for download');
+      return;
+    }
+
+    try {
+      // Expand folders to get all files
+      const currentSelection = new Set(selectedKeys);
+      const hasFolders = Array.from(currentSelection).some((key) => key.endsWith('/'));
+
+      let fileKeys = currentSelection;
+      if (hasFolders) {
+        message.loading({ content: 'Preparing files...', key: 'batch-download-prep' });
+        fileKeys = await expandFolderKeys(currentSelection);
+        message.destroy('batch-download-prep');
+
+        if (fileKeys.size === 0) {
+          message.info('No files to download');
+          return;
+        }
+      }
+
+      // Filter out folders from the keys
+      const filesToDownload = Array.from(fileKeys).filter((key) => !key.endsWith('/'));
+
+      if (filesToDownload.length === 0) {
+        message.info('No files to download');
+        return;
+      }
+
+      // Open folder picker dialog
+      const folder = await invoke<string | null>('select_download_folder');
+      if (!folder) return; // User cancelled
+
+      // Add tasks to download store (as pending)
+      // Rust backend will look up file sizes from cache when fileSize is 0
+      for (const key of filesToDownload) {
+        const fileName = key.split('/').pop() || key;
+        const fileSize = filteredItems.find((item) => item.key === key)?.size ?? 0;
+        const taskId = `download-${Date.now()}-${key}`;
+
+        // Create task in database first (Rust looks up file size from cache if 0)
+        try {
+          await invoke('create_download_task', {
+            taskId,
+            objectKey: key,
+            fileName,
+            fileSize,
+            localPath: folder,
+            bucket: currentConfig.bucket,
+            accountId: currentConfig.account_id,
+          });
+        } catch (e) {
+          console.error('Failed to create download task:', e);
+          continue;
+        }
+
+        addDownloadTask({
+          id: taskId,
+          key,
+          fileName,
+          fileSize,
+          localPath: folder,
+        });
+      }
+
+      // Start download queue via Rust backend
+      setTimeout(() => startDownloadQueue(), 50);
+
+      message.success(`Queued ${filesToDownload.length} file(s) for download`);
+    } catch (e) {
+      console.error('Batch download error:', e);
+      message.error(
+        `Failed to start downloads: ${e instanceof Error ? e.message : 'Unknown error'}`
+      );
+    }
+  }, [
+    selectedKeys,
+    currentConfig,
+    message,
+    expandFolderKeys,
+    filteredItems,
+    addDownloadTask,
+    startDownloadQueue,
+  ]);
+
   const handleRename = useCallback(
     async (newPath: string) => {
       if (!renameFile || !currentConfig) return;
@@ -576,7 +866,14 @@ export default function Home() {
                       ? `${selectedKeys.size} items (${selectedFileCount.toLocaleString()} files)`
                       : `${selectedKeys.size} selected`}
                   </span>
-                  <Button size="small" icon={<FolderOutlined />} onClick={openBatchMoveModalHandler}>
+                  <Button size="small" icon={<DownloadOutlined />} onClick={handleBatchDownload}>
+                    Download
+                  </Button>
+                  <Button
+                    size="small"
+                    icon={<FolderOutlined />}
+                    onClick={openBatchMoveModalHandler}
+                  >
                     Move
                   </Button>
                   <Button
@@ -672,6 +969,7 @@ export default function Home() {
                 onToggleModifiedSort={toggleModifiedSort}
                 onDelete={handleDelete}
                 onRename={handleRenameClick}
+                onDownload={handleDownload}
                 onFolderDelete={handleFolderDelete}
               />
             ) : (
@@ -680,6 +978,7 @@ export default function Home() {
                 onItemClick={handleItemClick}
                 onDelete={handleDelete}
                 onRename={handleRenameClick}
+                onDownload={handleDownload}
                 onFolderDelete={handleFolderDelete}
                 publicDomain={config?.publicDomain}
                 folderSizes={metadata}
@@ -696,6 +995,7 @@ export default function Home() {
             searchQuery={searchQuery}
             searchTotalCount={searchTotalCount}
             hasConfig={!!config}
+            isLoadingFiles={isLoading || isSyncing}
             currentConfig={currentConfig}
           />
 
@@ -763,6 +1063,8 @@ export default function Home() {
             onSuccess={handleBatchMoveSuccess}
             onMovingChange={setMoving}
           />
+
+          <DownloadTaskModal currentConfig={currentConfig} />
         </div>
       </div>
     </div>
