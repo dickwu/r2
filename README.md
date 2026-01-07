@@ -8,7 +8,20 @@ A desktop application for managing Cloudflare R2 storage buckets. Built with Tau
 - **Multiple Tokens per Account** - Each account can have multiple API tokens with different bucket access
 - Browse and manage files in Cloudflare R2 buckets
 - Upload files and folders with resumable multipart uploads
-- Preview images and videos directly in the app
+- **File Preview** - Preview files directly in the app:
+  - **Images**: jpg, jpeg, png, gif, webp, svg, bmp, ico
+  - **Videos**: mp4, webm, ogg, mov, m4v
+  - **PDFs**: Full PDF viewer with page navigation
+  - **Text/Code**: Syntax-highlighted viewer with Monaco Editor supporting:
+    - Code: js, ts, jsx, tsx, css, scss, less, html, vue, svelte
+    - Config: json, yaml, yml, toml, xml, ini, env
+    - Documents: txt, md, markdown, rst, log
+    - Scripts: sh, bash, zsh, fish, ps1, bat, cmd
+    - Data: csv, sql
+- **Batch Operations** - Multi-select files and folders for:
+  - **Batch Download** - Download multiple files with progress tracking, pause/resume support
+  - **Batch Move** - Move files to different folders with folder tree picker
+  - **Batch Delete** - Delete multiple files with confirmation and progress indicator
 - Video thumbnail generation (via ffmpeg)
 - Copy signed or public URLs to clipboard
 - Dark mode support
