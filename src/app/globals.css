@@ -1023,6 +1023,23 @@ html.dark * {
   scrollbar-color: #444 #1a1a1a;
 }
 
+/* Dark Mode Modal Scrollbar (Ant Design Modal portal) */
+html.dark .ant-modal-root ::-webkit-scrollbar-track {
+  background: #1f1f1f;
+}
+
+html.dark .ant-modal-root ::-webkit-scrollbar-thumb {
+  background: #444;
+}
+
+html.dark .ant-modal-root ::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+html.dark .ant-modal-root * {
+  scrollbar-color: #444 #1f1f1f;
+}
+
 /* File Rename Modal Tree Styles */
 .ant-tree .ant-tree-treenode {
   width: 100%;
