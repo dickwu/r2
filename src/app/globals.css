@@ -1023,21 +1023,81 @@ html.dark * {
   scrollbar-color: #444 #1a1a1a;
 }
 
-/* Dark Mode Modal Scrollbar (Ant Design Modal portal) */
-html.dark .ant-modal-root ::-webkit-scrollbar-track {
-  background: #1f1f1f;
+/* Dark Mode Modal Scrollbar (Ant Design Modal portal + Virtuoso) */
+html.dark .ant-modal-root ::-webkit-scrollbar,
+html.dark .ant-modal ::-webkit-scrollbar,
+html.dark [data-virtuoso-scroller] ::-webkit-scrollbar {
+  width: 8px !important;
+  height: 8px !important;
 }
 
-html.dark .ant-modal-root ::-webkit-scrollbar-thumb {
-  background: #444;
+html.dark .ant-modal-root ::-webkit-scrollbar-track,
+html.dark .ant-modal ::-webkit-scrollbar-track,
+html.dark [data-virtuoso-scroller]::-webkit-scrollbar-track {
+  background: #1f1f1f !important;
 }
 
-html.dark .ant-modal-root ::-webkit-scrollbar-thumb:hover {
-  background: #555;
+html.dark .ant-modal-root ::-webkit-scrollbar-thumb,
+html.dark .ant-modal ::-webkit-scrollbar-thumb,
+html.dark [data-virtuoso-scroller]::-webkit-scrollbar-thumb {
+  background: #444 !important;
+  border-radius: 4px !important;
 }
 
-html.dark .ant-modal-root * {
-  scrollbar-color: #444 #1f1f1f;
+html.dark .ant-modal-root ::-webkit-scrollbar-thumb:hover,
+html.dark .ant-modal ::-webkit-scrollbar-thumb:hover,
+html.dark [data-virtuoso-scroller]::-webkit-scrollbar-thumb:hover {
+  background: #555 !important;
+}
+
+html.dark .ant-modal-root *,
+html.dark .ant-modal *,
+html.dark [data-virtuoso-scroller] {
+  scrollbar-color: #444 #1f1f1f !important;
+}
+
+/* Download task list scrollbar (Virtuoso) */
+.download-task-list,
+.download-task-list > div {
+  scrollbar-width: thin;
+  scrollbar-color: #c1c1c1 #f1f1f1;
+}
+
+.download-task-list::-webkit-scrollbar,
+.download-task-list > div::-webkit-scrollbar {
+  width: 8px;
+}
+
+.download-task-list::-webkit-scrollbar-track,
+.download-task-list > div::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+.download-task-list::-webkit-scrollbar-thumb,
+.download-task-list > div::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 4px;
+}
+
+html.dark .download-task-list,
+html.dark .download-task-list > div {
+  scrollbar-color: #444 #1f1f1f !important;
+}
+
+html.dark .download-task-list::-webkit-scrollbar-track,
+html.dark .download-task-list > div::-webkit-scrollbar-track {
+  background: #1f1f1f !important;
+}
+
+html.dark .download-task-list::-webkit-scrollbar-thumb,
+html.dark .download-task-list > div::-webkit-scrollbar-thumb {
+  background: #444 !important;
+  border-radius: 4px;
+}
+
+html.dark .download-task-list::-webkit-scrollbar-thumb:hover,
+html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
+  background: #555 !important;
 }
 
 /* File Rename Modal Tree Styles */

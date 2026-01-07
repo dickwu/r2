@@ -217,6 +217,7 @@ export default function DownloadTaskModal({ currentConfig }: DownloadTaskModalPr
     }
     return (
       <Virtuoso
+        className="download-task-list"
         style={{ height: 350 }}
         data={taskList}
         itemContent={(index, task) => (
