@@ -557,6 +557,76 @@ export default function Home() {
     [config, message, openDeleteModal]
   );
 
+  // Download all files in a folder
+  const handleFolderDownload = useCallback(
+    async (item: FileItem) => {
+      if (!config || !item.isFolder || !currentConfig) return;
+
+      // Check if S3 credentials are available
+      if (!currentConfig.access_key_id || !currentConfig.secret_access_key) {
+        message.error('S3 credentials required for download');
+        return;
+      }
+
+      try {
+        message.loading({ content: 'Loading folder contents...', key: 'folder-download' });
+        const objects = await listAllR2ObjectsUnderPrefix(config, item.key);
+        message.destroy('folder-download');
+
+        if (objects.length === 0) {
+          message.info('Folder is empty');
+          return;
+        }
+
+        // Open folder picker dialog
+        const folder = await invoke<string | null>('select_download_folder');
+        if (!folder) return; // User cancelled
+
+        // Queue all files for download
+        for (const obj of objects) {
+          const fileName = obj.key.split('/').pop() || obj.key;
+          const fileSize = obj.size || 0;
+          const taskId = `download-${Date.now()}-${obj.key}`;
+
+          try {
+            await invoke('create_download_task', {
+              taskId,
+              objectKey: obj.key,
+              fileName,
+              fileSize,
+              localPath: folder,
+              bucket: currentConfig.bucket,
+              accountId: currentConfig.account_id,
+            });
+          } catch (e) {
+            console.error('Failed to create download task:', e);
+            continue;
+          }
+
+          addDownloadTask({
+            id: taskId,
+            key: obj.key,
+            fileName,
+            fileSize,
+            localPath: folder,
+          });
+        }
+
+        // Start download queue via Rust backend
+        setTimeout(() => startDownloadQueue(), 50);
+
+        message.success(`Queued ${objects.length} file(s) for download`);
+      } catch (e) {
+        message.destroy('folder-download');
+        console.error('Folder download error:', e);
+        message.error(
+          `Failed to download folder: ${e instanceof Error ? e.message : 'Unknown error'}`
+        );
+      }
+    },
+    [config, currentConfig, message, addDownloadTask, startDownloadQueue]
+  );
+
   const openBatchDeleteConfirm = useCallback(async () => {
     if (selectedKeys.size === 0) return;
 
@@ -971,6 +1041,7 @@ export default function Home() {
                 onRename={handleRenameClick}
                 onDownload={handleDownload}
                 onFolderDelete={handleFolderDelete}
+                onFolderDownload={handleFolderDownload}
               />
             ) : (
               <FileGridView
@@ -980,6 +1051,7 @@ export default function Home() {
                 onRename={handleRenameClick}
                 onDownload={handleDownload}
                 onFolderDelete={handleFolderDelete}
+                onFolderDownload={handleFolderDownload}
                 publicDomain={config?.publicDomain}
                 folderSizes={metadata}
                 selectedKeys={selectedKeys}
@@ -1043,7 +1115,6 @@ export default function Home() {
             fileName={renameFile?.name || ''}
             filePath={renameFile?.key || ''}
             onRename={handleRename}
-            config={config}
           />
 
           <BatchDeleteModal

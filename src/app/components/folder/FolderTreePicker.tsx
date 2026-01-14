@@ -9,8 +9,8 @@ import {
   SearchOutlined,
 } from '@ant-design/icons';
 import type { DataNode } from 'antd/es/tree';
-import { getAllDirectoryNodes } from '../lib/r2cache';
-import { formatBytes } from '../utils/formatBytes';
+import { getAllDirectoryNodes } from '../../lib/r2cache';
+import { formatBytes } from '../../utils/formatBytes';
 
 interface DirectoryNode {
   path: string;

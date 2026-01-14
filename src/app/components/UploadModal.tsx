@@ -1,13 +1,18 @@
 'use client';
 
 import { useEffect, useCallback, useState } from 'react';
-import { Modal, Typography, Button, Input, App } from 'antd';
-import { KeyOutlined, FolderOutlined, FileAddOutlined } from '@ant-design/icons';
+import { Modal, Typography, Button, App } from 'antd';
+import { FolderOutlined, FileAddOutlined, SwapOutlined } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
-import { useUploadStore, selectHasActiveUploads } from '../stores/uploadStore';
+import {
+  useUploadStore,
+  selectHasActiveUploads,
+  selectHasSuccessfulUploads,
+} from '../stores/uploadStore';
 import type { R2Config } from './ConfigModal';
 import UploadTaskList from './UploadTaskList';
+import FolderPickerModal from './folder/FolderPickerModal';
 
 const { Text } = Typography;
 
@@ -78,12 +83,14 @@ export default function UploadModal({
   onUploadComplete,
 }: UploadModalProps) {
   const { message } = App.useApp();
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const uploadPath = useUploadStore((s) => s.uploadPath);
   const setUploadPath = useUploadStore((s) => s.setUploadPath);
   const setConfig = useUploadStore((s) => s.setConfig);
   const addTasks = useUploadStore((s) => s.addTasks);
   const clearAll = useUploadStore((s) => s.clearAll);
   const hasActiveUploads = useUploadStore(selectHasActiveUploads);
+  const hasSuccessfulUploads = useUploadStore(selectHasSuccessfulUploads);
 
   const hasS3Credentials = config?.accessKeyId && config?.secretAccessKey;
 
@@ -168,116 +175,156 @@ export default function UploadModal({
 
   function handleClose() {
     if (!hasActiveUploads) {
+      const shouldReload = hasSuccessfulUploads;
       clearAll();
       onClose();
-      onUploadComplete();
+      if (shouldReload) {
+        onUploadComplete();
+      }
     }
   }
 
   return (
-    <Modal
-      open={isOpen}
-      onCancel={handleClose}
-      footer={null}
-      title="Upload Files"
-      width={520}
-      centered
-      destroyOnHidden
-      maskClosable={!hasActiveUploads}
-      closable={!hasActiveUploads}
-    >
-      <div style={{ marginBottom: 16 }}>
-        <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
-          Upload to:
-        </Text>
-        <Input
-          prefix={<FolderOutlined style={{ color: '#999' }} />}
-          value={uploadPath}
-          onChange={(e) => setUploadPath(e.target.value)}
-          placeholder="/"
-          disabled={hasActiveUploads}
-        />
-      </div>
-
-      {!hasS3Credentials && (
-        <div
-          style={{
-            marginBottom: 16,
-            padding: '12px',
-            background: '#fff7e6',
-            borderRadius: 6,
-            border: '1px solid #ffd591',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-          }}
-        >
-          <Text type="warning">S3 credentials required for uploads</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            Configure in Account Settings
+    <>
+      <Modal
+        open={isOpen}
+        onCancel={handleClose}
+        footer={null}
+        title="Upload Files"
+        width={520}
+        centered
+        destroyOnHidden
+        maskClosable={!hasActiveUploads}
+        closable={!hasActiveUploads}
+      >
+        <div style={{ marginBottom: 16 }}>
+          <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
+            Upload to:
           </Text>
+          <div
+            style={{
+              padding: '8px 12px',
+              background: 'var(--bg-secondary)',
+              borderRadius: 6,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 8,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+              <FolderOutlined style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
+              <span
+                style={{
+                  fontFamily: 'monospace',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {uploadPath ? `/${uploadPath}/` : '/ (root)'}
+              </span>
+            </div>
+            <Button
+              size="small"
+              icon={<SwapOutlined />}
+              onClick={() => setFolderPickerOpen(true)}
+              disabled={hasActiveUploads}
+            >
+              Change...
+            </Button>
+          </div>
         </div>
-      )}
 
-      <div style={{ display: 'flex', gap: 12 }}>
-        <div
-          onClick={hasActiveUploads ? undefined : handleSelectFiles}
-          style={{
-            flex: 1,
-            border: '2px dashed #d9d9d9',
-            borderRadius: 8,
-            padding: '24px 16px',
-            textAlign: 'center',
-            cursor: hasActiveUploads ? 'not-allowed' : 'pointer',
-            opacity: hasActiveUploads ? 0.5 : 1,
-            transition: 'border-color 0.3s',
-          }}
-          onMouseEnter={(e) => {
-            if (!hasActiveUploads) {
-              e.currentTarget.style.borderColor = '#f6821f';
-            }
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.borderColor = '#d9d9d9';
-          }}
-        >
-          <p style={{ marginBottom: 8 }}>
-            <FileAddOutlined style={{ color: '#f6821f', fontSize: 36 }} />
-          </p>
-          <p style={{ fontSize: 14, marginBottom: 4 }}>Select Files</p>
-          <p style={{ color: '#999', fontSize: 12 }}>Single or multiple</p>
+        {!hasS3Credentials && (
+          <div
+            style={{
+              marginBottom: 16,
+              padding: '12px',
+              background: '#fff7e6',
+              borderRadius: 6,
+              border: '1px solid #ffd591',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}
+          >
+            <Text type="warning">S3 credentials required for uploads</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              Configure in Account Settings
+            </Text>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: 12 }}>
+          <div
+            onClick={hasActiveUploads ? undefined : handleSelectFiles}
+            style={{
+              flex: 1,
+              border: '2px dashed #d9d9d9',
+              borderRadius: 8,
+              padding: '24px 16px',
+              textAlign: 'center',
+              cursor: hasActiveUploads ? 'not-allowed' : 'pointer',
+              opacity: hasActiveUploads ? 0.5 : 1,
+              transition: 'border-color 0.3s',
+            }}
+            onMouseEnter={(e) => {
+              if (!hasActiveUploads) {
+                e.currentTarget.style.borderColor = '#f6821f';
+              }
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = '#d9d9d9';
+            }}
+          >
+            <p style={{ marginBottom: 8 }}>
+              <FileAddOutlined style={{ color: '#f6821f', fontSize: 36 }} />
+            </p>
+            <p style={{ fontSize: 14, marginBottom: 4 }}>Select Files</p>
+            <p style={{ color: '#999', fontSize: 12 }}>Single or multiple</p>
+          </div>
+
+          <div
+            onClick={hasActiveUploads ? undefined : handleSelectFolder}
+            style={{
+              flex: 1,
+              border: '2px dashed #d9d9d9',
+              borderRadius: 8,
+              padding: '24px 16px',
+              textAlign: 'center',
+              cursor: hasActiveUploads ? 'not-allowed' : 'pointer',
+              opacity: hasActiveUploads ? 0.5 : 1,
+              transition: 'border-color 0.3s',
+            }}
+            onMouseEnter={(e) => {
+              if (!hasActiveUploads) {
+                e.currentTarget.style.borderColor = '#f6821f';
+              }
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = '#d9d9d9';
+            }}
+          >
+            <p style={{ marginBottom: 8 }}>
+              <FolderOutlined style={{ color: '#f6821f', fontSize: 36 }} />
+            </p>
+            <p style={{ fontSize: 14, marginBottom: 4 }}>Select Folder</p>
+            <p style={{ color: '#999', fontSize: 12 }}>Upload entire folder</p>
+          </div>
         </div>
 
-        <div
-          onClick={hasActiveUploads ? undefined : handleSelectFolder}
-          style={{
-            flex: 1,
-            border: '2px dashed #d9d9d9',
-            borderRadius: 8,
-            padding: '24px 16px',
-            textAlign: 'center',
-            cursor: hasActiveUploads ? 'not-allowed' : 'pointer',
-            opacity: hasActiveUploads ? 0.5 : 1,
-            transition: 'border-color 0.3s',
-          }}
-          onMouseEnter={(e) => {
-            if (!hasActiveUploads) {
-              e.currentTarget.style.borderColor = '#f6821f';
-            }
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.borderColor = '#d9d9d9';
-          }}
-        >
-          <p style={{ marginBottom: 8 }}>
-            <FolderOutlined style={{ color: '#f6821f', fontSize: 36 }} />
-          </p>
-          <p style={{ fontSize: 14, marginBottom: 4 }}>Select Folder</p>
-          <p style={{ color: '#999', fontSize: 12 }}>Upload entire folder</p>
-        </div>
-      </div>
+        <UploadTaskList />
+      </Modal>
 
-      <UploadTaskList />
-    </Modal>
+      {/* Folder Picker Modal */}
+      <FolderPickerModal
+        open={folderPickerOpen}
+        onClose={() => setFolderPickerOpen(false)}
+        selectedPath={uploadPath}
+        onConfirm={setUploadPath}
+        title="Select Upload Folder"
+      />
+    </>
   );
 }

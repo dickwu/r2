@@ -40,6 +40,7 @@ interface FileListViewProps {
   onRename: (item: FileItem) => void;
   onDownload?: (item: FileItem) => void;
   onFolderDelete?: (item: FileItem) => void;
+  onFolderDownload?: (item: FileItem) => void;
 }
 
 function formatDate(date: string): string {
@@ -67,6 +68,7 @@ export default function FileListView({
   onRename,
   onDownload,
   onFolderDelete,
+  onFolderDownload,
 }: FileListViewProps) {
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -180,17 +182,29 @@ export default function FileListView({
               </span>
               <span className="col-actions" onClick={(e) => e.stopPropagation()}>
                 {item.isFolder ? (
-                  onFolderDelete && (
-                    <Tooltip title="Delete folder">
-                      <Button
-                        type="text"
-                        size="small"
-                        danger
-                        icon={<DeleteOutlined />}
-                        onClick={() => onFolderDelete(item)}
-                      />
-                    </Tooltip>
-                  )
+                  <>
+                    {onFolderDownload && (
+                      <Tooltip title="Download folder">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<DownloadOutlined />}
+                          onClick={() => onFolderDownload(item)}
+                        />
+                      </Tooltip>
+                    )}
+                    {onFolderDelete && (
+                      <Tooltip title="Delete folder">
+                        <Button
+                          type="text"
+                          size="small"
+                          danger
+                          icon={<DeleteOutlined />}
+                          onClick={() => onFolderDelete(item)}
+                        />
+                      </Tooltip>
+                    )}
+                  </>
                 ) : (
                   <>
                     {onDownload && (

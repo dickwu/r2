@@ -100,3 +100,6 @@ export const selectFinishedCount = (state: UploadStore) =>
 
 export const selectHasActiveUploads = (state: UploadStore) =>
   state.tasks.some((t) => t.status === 'uploading');
+
+export const selectHasSuccessfulUploads = (state: UploadStore) =>
+  state.tasks.some((t) => t.status === 'success');

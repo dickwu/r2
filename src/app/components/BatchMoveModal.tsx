@@ -1,11 +1,11 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Modal, App, Progress } from 'antd';
-import { FolderOutlined } from '@ant-design/icons';
+import { Modal, App, Progress, Button } from 'antd';
+import { FolderOutlined, SwapOutlined } from '@ant-design/icons';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { batchMoveR2Objects, MoveOperation, R2Config } from '../lib/r2cache';
-import FolderTreePicker from './FolderTreePicker';
+import FolderPickerModal from './folder/FolderPickerModal';
 
 interface BatchMoveProgress {
   completed: number;
@@ -33,6 +33,7 @@ export default function BatchMoveModal({
   const [targetDirectory, setTargetDirectory] = useState('');
   const [isMoving, setIsMoving] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const { message } = App.useApp();
 
   const selectedCount = selectedKeys.size;
@@ -111,55 +112,79 @@ export default function BatchMoveModal({
   const percent = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
 
   return (
-    <Modal
-      title={isMoving ? 'Moving Files...' : 'Move Files'}
-      open={open}
-      onCancel={isMoving ? undefined : onClose}
-      onOk={handleMove}
-      okText="Move"
-      okButtonProps={{ disabled: isMoving }}
-      cancelButtonProps={{ disabled: isMoving }}
-      closable={!isMoving}
-      maskClosable={!isMoving}
-      footer={isMoving ? null : undefined}
-      width="90%"
-      style={{ top: '3%' }}
-    >
-      {isMoving ? (
-        <div style={{ padding: '24px 0' }}>
-          <Progress percent={percent} status="active" />
-          <p style={{ marginTop: 12, textAlign: 'center', color: '#666' }}>
-            {progress.current} / {progress.total} files moved
-          </p>
-        </div>
-      ) : (
-        <div style={{ height: '70vh', overflow: 'auto' }}>
-          <p style={{ marginBottom: 16 }}>
-            Move <strong>{selectedCount}</strong> file{selectedCount > 1 ? 's' : ''} to:
-          </p>
-
-          {/* Current target display */}
-          <div
-            style={{
-              padding: '8px 12px',
-              background: 'var(--bg-secondary)',
-              borderRadius: 6,
-              marginBottom: 16,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-            }}
-          >
-            <FolderOutlined style={{ color: 'var(--text-secondary)' }} />
-            <span style={{ fontFamily: 'monospace' }}>
-              {targetDirectory ? `/${targetDirectory}/` : '/ (root)'}
-            </span>
+    <>
+      <Modal
+        title={isMoving ? 'Moving Files...' : 'Move Files'}
+        open={open}
+        onCancel={isMoving ? undefined : onClose}
+        onOk={handleMove}
+        okText="Move"
+        okButtonProps={{ disabled: isMoving }}
+        cancelButtonProps={{ disabled: isMoving }}
+        closable={!isMoving}
+        maskClosable={!isMoving}
+        footer={isMoving ? null : undefined}
+        width={480}
+        centered
+      >
+        {isMoving ? (
+          <div style={{ padding: '24px 0' }}>
+            <Progress percent={percent} status="active" />
+            <p style={{ marginTop: 12, textAlign: 'center', color: '#666' }}>
+              {progress.current} / {progress.total} files moved
+            </p>
           </div>
+        ) : (
+          <div>
+            <p style={{ marginBottom: 16 }}>
+              Move <strong>{selectedCount}</strong> file{selectedCount > 1 ? 's' : ''} to:
+            </p>
 
-          {/* Folder picker */}
-          <FolderTreePicker selectedPath={targetDirectory} onSelect={setTargetDirectory} />
-        </div>
-      )}
-    </Modal>
+            {/* Current target display */}
+            <div
+              style={{
+                padding: '8px 12px',
+                background: 'var(--bg-secondary)',
+                borderRadius: 6,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+                <FolderOutlined style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
+                <span
+                  style={{
+                    fontFamily: 'monospace',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {targetDirectory ? `/${targetDirectory}/` : '/ (root)'}
+                </span>
+              </div>
+              <Button
+                size="small"
+                icon={<SwapOutlined />}
+                onClick={() => setFolderPickerOpen(true)}
+              >
+                Change...
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Folder Picker Modal */}
+      <FolderPickerModal
+        open={folderPickerOpen}
+        onClose={() => setFolderPickerOpen(false)}
+        selectedPath={targetDirectory}
+        onConfirm={setTargetDirectory}
+        title="Select Target Folder"
+      />
+    </>
   );
 }

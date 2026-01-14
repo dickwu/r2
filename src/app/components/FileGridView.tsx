@@ -43,6 +43,7 @@ interface FileGridViewProps {
   onRename: (item: FileItem) => void;
   onDownload?: (item: FileItem) => void;
   onFolderDelete?: (item: FileItem) => void;
+  onFolderDownload?: (item: FileItem) => void;
   publicDomain?: string;
   folderSizes?: Record<string, FolderMetadata>;
   selectedKeys?: Set<string>;
@@ -58,6 +59,7 @@ const FileCard = memo(function FileCard({
   onRename,
   onDownload,
   onFolderDelete,
+  onFolderDownload,
   folderMetadata,
   isSelected,
   onToggleSelection,
@@ -70,6 +72,7 @@ const FileCard = memo(function FileCard({
   onRename: (item: FileItem) => void;
   onDownload?: (item: FileItem) => void;
   onFolderDelete?: (item: FileItem) => void;
+  onFolderDownload?: (item: FileItem) => void;
   folderMetadata?: FolderMetadata;
   isSelected?: boolean;
   onToggleSelection?: (key: string) => void;
@@ -97,6 +100,12 @@ const FileCard = memo(function FileCard({
       onFolderDelete(item);
     }
   }, [onFolderDelete, item]);
+
+  const handleFolderDownload = useCallback(() => {
+    if (onFolderDownload) {
+      onFolderDownload(item);
+    }
+  }, [onFolderDownload, item]);
 
   const handleDownload = useCallback(() => {
     if (onDownload) {
@@ -186,15 +195,27 @@ const FileCard = memo(function FileCard({
           : formatBytes(item.size || 0)}
       </div>
       {item.isFolder ? (
-        onFolderDelete && (
+        (onFolderDownload || onFolderDelete) && (
           <div className="grid-card-actions" onClick={stopPropagation}>
-            <Button
-              type="text"
-              size="small"
-              danger
-              icon={<DeleteOutlined />}
-              onClick={handleFolderDelete}
-            />
+            <Space size={4}>
+              {onFolderDownload && (
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  onClick={handleFolderDownload}
+                />
+              )}
+              {onFolderDelete && (
+                <Button
+                  type="text"
+                  size="small"
+                  danger
+                  icon={<DeleteOutlined />}
+                  onClick={handleFolderDelete}
+                />
+              )}
+            </Space>
           </div>
         )
       ) : (
@@ -267,6 +288,7 @@ export default memo(function FileGridView({
   onRename,
   onDownload,
   onFolderDelete,
+  onFolderDownload,
   publicDomain,
   folderSizes,
   selectedKeys,
@@ -291,6 +313,7 @@ export default memo(function FileGridView({
             onRename={onRename}
             onDownload={onDownload}
             onFolderDelete={onFolderDelete}
+            onFolderDownload={onFolderDownload}
             folderMetadata={item.isFolder ? folderSizes?.[item.key] : undefined}
             isSelected={selectedKeys?.has(item.key)}
             onToggleSelection={onToggleSelection}
