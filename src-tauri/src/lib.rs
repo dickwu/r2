@@ -204,6 +204,7 @@ pub fn run() {
             commands::rename_r2_object,
             commands::batch_move_r2_objects,
             commands::generate_signed_url,
+            commands::upload_r2_content,
             commands::sync_bucket,
             // Cache commands
             commands::store_all_files,

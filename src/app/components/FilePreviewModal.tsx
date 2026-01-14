@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Modal, Button, Space, Typography, App, Image, Spin } from 'antd';
 import {
   LinkOutlined,
@@ -12,6 +12,7 @@ import {
   FileTextOutlined,
 } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { invoke } from '@tauri-apps/api/core';
 import dynamic from 'next/dynamic';
 import { FileItem } from '../hooks/useR2Files';
 import { generateSignedUrl } from '../lib/r2cache';
@@ -46,6 +47,39 @@ function isTextFile(filename: string): boolean {
   return TEXT_EXTENSIONS.includes(getFileExtension(filename));
 }
 
+// Map file extensions to MIME types for text files
+const TEXT_CONTENT_TYPES: Record<string, string> = {
+  js: 'application/javascript',
+  ts: 'application/typescript',
+  jsx: 'text/jsx',
+  tsx: 'text/tsx',
+  css: 'text/css',
+  scss: 'text/x-scss',
+  less: 'text/x-less',
+  html: 'text/html',
+  xml: 'application/xml',
+  json: 'application/json',
+  yaml: 'text/yaml',
+  yml: 'text/yaml',
+  toml: 'text/x-toml',
+  md: 'text/markdown',
+  markdown: 'text/markdown',
+  sql: 'text/x-sql',
+  sh: 'text/x-shellscript',
+  bash: 'text/x-shellscript',
+  zsh: 'text/x-shellscript',
+  txt: 'text/plain',
+  log: 'text/plain',
+  csv: 'text/csv',
+  ini: 'text/x-ini',
+  env: 'text/plain',
+};
+
+function getContentType(filename: string): string {
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  return TEXT_CONTENT_TYPES[ext] || 'text/plain';
+}
+
 interface FilePreviewModalProps {
   open: boolean;
   onClose: () => void;
@@ -56,6 +90,7 @@ interface FilePreviewModalProps {
   accessKeyId?: string;
   secretAccessKey?: string;
   onCredentialsUpdate?: () => void;
+  onFileUpdated?: () => void;
 }
 
 export default function FilePreviewModal({
@@ -67,12 +102,43 @@ export default function FilePreviewModal({
   bucket,
   accessKeyId,
   secretAccessKey,
+  onFileUpdated,
 }: FilePreviewModalProps) {
   const { message } = App.useApp();
   const [signedUrl, setSignedUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const needsCredentials = !publicDomain && (!accessKeyId || !secretAccessKey);
+  const canEdit = !!(accountId && bucket && accessKeyId && secretAccessKey);
+
+  const handleSaveContent = useCallback(
+    async (content: string) => {
+      if (!file || !accountId || !bucket || !accessKeyId || !secretAccessKey) {
+        throw new Error('Missing credentials or file info');
+      }
+
+      try {
+        await invoke('upload_r2_content', {
+          config: {
+            account_id: accountId,
+            bucket,
+            access_key_id: accessKeyId,
+            secret_access_key: secretAccessKey,
+          },
+          key: file.key,
+          content,
+          contentType: getContentType(file.name),
+        });
+        message.success('File saved successfully');
+        onFileUpdated?.();
+      } catch (err) {
+        console.error('Failed to save file:', err);
+        message.error('Failed to save file');
+        throw err;
+      }
+    },
+    [file, accountId, bucket, accessKeyId, secretAccessKey, message, onFileUpdated]
+  );
 
   // Generate signed URL when modal opens
   useEffect(() => {
@@ -165,7 +231,13 @@ export default function FilePreviewModal({
         ) : isPdf && fileUrl ? (
           <PDFViewer url={fileUrl} showControls maxHeight="500px" />
         ) : isText && fileUrl ? (
-          <TextViewer url={fileUrl} filename={file.name} maxHeight="500px" />
+          <TextViewer
+            url={fileUrl}
+            filename={file.name}
+            maxHeight="500px"
+            editable={canEdit}
+            onSave={handleSaveContent}
+          />
         ) : isImage ? (
           <FileImageOutlined style={{ fontSize: 40, color: '#f6821f' }} />
         ) : isVideo ? (

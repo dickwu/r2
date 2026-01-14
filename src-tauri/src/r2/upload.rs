@@ -10,6 +10,32 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::Semaphore;
 
+/// Upload content directly (simple PUT for in-memory data)
+pub async fn upload_content(
+    config: &R2Config,
+    key: &str,
+    content: Vec<u8>,
+    content_type: Option<&str>,
+) -> R2Result<String> {
+    let client = create_r2_client(config).await?;
+    let body = ByteStream::from(content);
+
+    let mut request = client
+        .put_object()
+        .bucket(&config.bucket)
+        .key(key)
+        .body(body);
+
+    if let Some(ct) = content_type {
+        request = request.content_type(ct);
+    }
+
+    let response = request.send().await?;
+    let etag = response.e_tag().unwrap_or_default().to_string();
+
+    Ok(etag)
+}
+
 /// Upload a file (simple PUT for files < 100MB)
 #[allow(dead_code)]
 pub async fn upload_file_simple(

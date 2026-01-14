@@ -1,8 +1,15 @@
 import { useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getFolderContents, StoredFile } from '../lib/r2cache';
 import { R2Config } from '../components/ConfigModal';
 import { useSyncStore } from '../stores/syncStore';
+
+// Event emitted by backend when cache is updated
+interface CacheUpdatedEvent {
+  action: 'delete' | 'move' | 'update';
+  affected_paths: string[];
+}
 
 export interface FileItem {
   name: string;
@@ -84,6 +91,33 @@ export function useR2Files(config: R2Config | null, prefix: string = '') {
   useEffect(() => {
     useSyncStore.getState().setIsFolderLoading(query.isFetching);
   }, [query.isFetching]);
+
+  // Listen for cache-updated events from backend to auto-refresh affected folders
+  useEffect(() => {
+    if (!config?.bucket) return;
+
+    let unlisten: UnlistenFn | undefined;
+
+    const setupListener = async () => {
+      unlisten = await listen<CacheUpdatedEvent>('cache-updated', (event) => {
+        const { affected_paths } = event.payload;
+        console.log('Cache updated:', event.payload);
+
+        // Invalidate queries for affected paths
+        for (const path of affected_paths) {
+          queryClient.invalidateQueries({
+            queryKey: ['folder-contents', config.bucket, path],
+          });
+        }
+      });
+    };
+
+    setupListener();
+
+    return () => {
+      unlisten?.();
+    };
+  }, [config?.bucket, queryClient]);
 
   async function refresh() {
     await queryClient.invalidateQueries({ queryKey });

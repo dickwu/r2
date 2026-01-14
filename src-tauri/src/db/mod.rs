@@ -113,10 +113,14 @@ pub use buckets::{delete_bucket, list_buckets_by_token, update_bucket, save_buck
 // Re-export file cache functions
 pub use file_cache::{
     store_all_files, get_all_cached_files, get_cached_file_size, search_cached_files, calculate_folder_size, 
-    get_directory_node, get_all_directory_nodes, clear_file_cache, get_folder_contents,
+    get_directory_node, get_all_directory_nodes, clear_file_cache, get_folder_contents, update_cached_file,
+    delete_cached_file, delete_cached_files_batch, move_cached_file,
 };
 // Re-export directory tree builder
-pub use dir_tree::{build_directory_tree};
+pub use dir_tree::{
+    build_directory_tree, update_directory_tree_for_file, 
+    update_directory_tree_for_delete, update_directory_tree_for_move,
+};
 // Re-export download session functions
 pub use downloads::{
     create_download_session, update_download_progress, update_download_status, update_download_file_size,

@@ -26,3 +26,6 @@ pub use objects::{delete_object, delete_objects, rename_object};
 
 // Re-export presigned URL
 pub use presigned::generate_presigned_url;
+
+// Re-export upload operations
+pub use upload::upload_content;

@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { Spin, Typography } from 'antd';
-import { FileTextOutlined } from '@ant-design/icons';
+import { useEffect, useState, useRef } from 'react';
+import { Spin, Typography, Button, Space, Tooltip } from 'antd';
+import { FileTextOutlined, FormatPainterOutlined, SaveOutlined } from '@ant-design/icons';
 import { fetch } from '@tauri-apps/plugin-http';
-import Editor from '@monaco-editor/react';
+import Editor, { type Monaco } from '@monaco-editor/react';
+import type { editor } from 'monaco-editor';
 import DownloadProgress from './DownloadProgress';
 import { useThemeStore } from '../../stores/themeStore';
 
@@ -14,8 +15,10 @@ interface TextViewerProps {
   url: string;
   filename?: string;
   maxHeight?: string;
+  editable?: boolean;
   onLoadSuccess?: () => void;
   onLoadError?: (error: Error) => void;
+  onSave?: (content: string) => Promise<void>;
 }
 
 // Common text file extensions
@@ -77,20 +80,29 @@ export default function TextViewer({
   url,
   filename = '',
   maxHeight = '700px',
+  editable = false,
   onLoadSuccess,
   onLoadError,
+  onSave,
 }: TextViewerProps) {
   const [content, setContent] = useState<string | null>(null);
+  const [editedContent, setEditedContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<{
     loaded: number;
     total: number | null;
   }>({ loaded: 0, total: null });
 
+  const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const monacoRef = useRef<Monaco | null>(null);
+
   const language = getLanguageFromExtension(filename);
   const appTheme = useThemeStore((s) => s.theme);
   const monacoTheme = appTheme === 'dark' ? 'vs-dark' : 'light';
+
+  const isModified = editedContent !== null && editedContent !== content;
 
   useEffect(() => {
     if (!url) {
@@ -174,6 +186,41 @@ export default function TextViewer({
     };
   }, [url, onLoadSuccess, onLoadError]);
 
+  // Reset edited content when original content changes
+  useEffect(() => {
+    setEditedContent(null);
+  }, [content]);
+
+  const handleEditorDidMount = (editor: editor.IStandaloneCodeEditor, monaco: Monaco) => {
+    editorRef.current = editor;
+    monacoRef.current = monaco;
+  };
+
+  const handleFormat = async () => {
+    if (editorRef.current) {
+      await editorRef.current.getAction('editor.action.formatDocument')?.run();
+    }
+  };
+
+  const handleSave = async () => {
+    if (!onSave || editedContent === null) return;
+
+    setSaving(true);
+    try {
+      await onSave(editedContent);
+      // Update original content to match saved content
+      setContent(editedContent);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleEditorChange = (value: string | undefined) => {
+    if (editable && value !== undefined) {
+      setEditedContent(value);
+    }
+  };
+
   if (loading) {
     return <DownloadProgress loaded={downloadProgress.loaded} total={downloadProgress.total} />;
   }
@@ -194,7 +241,8 @@ export default function TextViewer({
     );
   }
 
-  const lineCount = content.split('\n').length;
+  const displayContent = editedContent ?? content;
+  const lineCount = displayContent.split('\n').length;
   // Parse maxHeight to number for Monaco
   const heightNum = parseInt(maxHeight, 10) || 500;
 
@@ -209,25 +257,51 @@ export default function TextViewer({
           isDark ? 'border-gray-700 bg-gray-800' : 'border-gray-200 bg-gray-100'
         }`}
       >
-        <Text className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-          {lineCount} {lineCount === 1 ? 'line' : 'lines'} • {language}
-        </Text>
-        <Text className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-          {(new TextEncoder().encode(content).length / 1024).toFixed(1)} KB
-        </Text>
+        <div className="flex items-center gap-3">
+          <Text className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+            {lineCount} {lineCount === 1 ? 'line' : 'lines'} • {language}
+          </Text>
+          {isModified && <Text className="text-sm text-orange-500">• Modified</Text>}
+        </div>
+        <div className="flex items-center gap-2">
+          <Text className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+            {(new TextEncoder().encode(displayContent).length / 1024).toFixed(1)} KB
+          </Text>
+          {editable && (
+            <Space size="small">
+              <Tooltip title="Format Document">
+                <Button size="small" icon={<FormatPainterOutlined />} onClick={handleFormat} />
+              </Tooltip>
+              <Tooltip title={isModified ? 'Save Changes' : 'No changes to save'}>
+                <Button
+                  size="small"
+                  type={isModified ? 'primary' : 'default'}
+                  icon={<SaveOutlined />}
+                  onClick={handleSave}
+                  loading={saving}
+                  disabled={!isModified || !onSave}
+                >
+                  Save
+                </Button>
+              </Tooltip>
+            </Space>
+          )}
+        </div>
       </div>
       <Editor
         height={heightNum - 40}
         language={language}
-        value={content}
+        value={displayContent}
         theme={monacoTheme}
+        onMount={handleEditorDidMount}
+        onChange={handleEditorChange}
         options={{
-          readOnly: true,
+          readOnly: !editable,
           minimap: { enabled: lineCount > 100 },
           scrollBeyondLastLine: false,
           fontSize: 13,
           lineNumbers: 'on',
-          renderLineHighlight: 'none',
+          renderLineHighlight: editable ? 'line' : 'none',
           selectionHighlight: true,
           wordWrap: 'on',
           contextmenu: true,

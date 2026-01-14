@@ -209,6 +209,180 @@ pub async fn get_cached_file_size(bucket: &str, account_id: &str, key: &str) -> 
     }
 }
 
+/// Delete a single cached file.
+/// Returns the file's size for directory tree updates (negative delta).
+pub async fn delete_cached_file(
+    bucket: &str,
+    account_id: &str,
+    key: &str,
+) -> DbResult<i64> {
+    let conn = get_connection()?.lock().await;
+    
+    // Get file size before deleting
+    let mut rows = conn.query(
+        "SELECT size FROM cached_files WHERE bucket = ?1 AND account_id = ?2 AND key = ?3",
+        turso::params![bucket, account_id, key]
+    ).await?;
+    
+    let size: i64 = if let Some(row) = rows.next().await? {
+        row.get(0)?
+    } else {
+        return Ok(0); // File not in cache
+    };
+    drop(rows);
+    
+    // Delete the file record
+    conn.execute(
+        "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2 AND key = ?3",
+        turso::params![bucket, account_id, key],
+    ).await?;
+    
+    Ok(size)
+}
+
+/// Delete multiple cached files in batch.
+/// Returns a map of key -> size for directory tree updates.
+pub async fn delete_cached_files_batch(
+    bucket: &str,
+    account_id: &str,
+    keys: &[String],
+) -> DbResult<std::collections::HashMap<String, i64>> {
+    if keys.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    
+    let conn = get_connection()?.lock().await;
+    let mut file_sizes: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    
+    // Get sizes for all files
+    for chunk in keys.chunks(500) {
+        let placeholders: Vec<String> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 3))
+            .collect();
+        
+        let sql = format!(
+            "SELECT key, size FROM cached_files WHERE bucket = ?1 AND account_id = ?2 AND key IN ({})",
+            placeholders.join(", ")
+        );
+        
+        let mut params: Vec<turso::Value> = Vec::new();
+        params.push(bucket.to_string().into());
+        params.push(account_id.to_string().into());
+        for key in chunk {
+            params.push(key.clone().into());
+        }
+        
+        let mut rows = conn.query(&sql, params).await?;
+        while let Some(row) = rows.next().await? {
+            let key: String = row.get(0)?;
+            let size: i64 = row.get(1)?;
+            file_sizes.insert(key, size);
+        }
+    }
+    
+    // Delete all files
+    for chunk in keys.chunks(500) {
+        let placeholders: Vec<String> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 3))
+            .collect();
+        
+        let sql = format!(
+            "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2 AND key IN ({})",
+            placeholders.join(", ")
+        );
+        
+        let mut params: Vec<turso::Value> = Vec::new();
+        params.push(bucket.to_string().into());
+        params.push(account_id.to_string().into());
+        for key in chunk {
+            params.push(key.clone().into());
+        }
+        
+        conn.execute(&sql, params).await?;
+    }
+    
+    Ok(file_sizes)
+}
+
+/// Move/rename a cached file to a new key.
+/// Returns (size, last_modified) for directory tree updates.
+pub async fn move_cached_file(
+    bucket: &str,
+    account_id: &str,
+    old_key: &str,
+    new_key: &str,
+) -> DbResult<Option<(i64, String)>> {
+    let conn = get_connection()?.lock().await;
+    
+    // Get file info
+    let mut rows = conn.query(
+        "SELECT size, last_modified FROM cached_files WHERE bucket = ?1 AND account_id = ?2 AND key = ?3",
+        turso::params![bucket, account_id, old_key]
+    ).await?;
+    
+    let file_info = if let Some(row) = rows.next().await? {
+        let size: i64 = row.get(0)?;
+        let last_modified: String = row.get(1)?;
+        Some((size, last_modified))
+    } else {
+        return Ok(None); // File not in cache
+    };
+    drop(rows);
+    
+    // Compute new parent_path and name
+    let (new_parent_path, new_name) = parse_key(new_key);
+    let now = chrono::Utc::now().timestamp();
+    
+    // Update the file record with new key, parent_path, and name
+    conn.execute(
+        "UPDATE cached_files SET key = ?1, parent_path = ?2, name = ?3, synced_at = ?4
+         WHERE bucket = ?5 AND account_id = ?6 AND key = ?7",
+        turso::params![new_key, new_parent_path, new_name, now, bucket, account_id, old_key],
+    ).await?;
+    
+    Ok(file_info)
+}
+
+/// Update a single cached file's size and last_modified.
+/// Returns the size difference (new_size - old_size) for directory tree updates.
+pub async fn update_cached_file(
+    bucket: &str,
+    account_id: &str,
+    key: &str,
+    new_size: i64,
+    last_modified: &str,
+) -> DbResult<i64> {
+    let conn = get_connection()?.lock().await;
+    
+    // Get old size for delta calculation
+    let mut rows = conn.query(
+        "SELECT size FROM cached_files WHERE bucket = ?1 AND account_id = ?2 AND key = ?3",
+        turso::params![bucket, account_id, key]
+    ).await?;
+    
+    let old_size: i64 = if let Some(row) = rows.next().await? {
+        row.get(0)?
+    } else {
+        0
+    };
+    drop(rows);
+    
+    let now = chrono::Utc::now().timestamp();
+    
+    // Update the file record
+    conn.execute(
+        "UPDATE cached_files SET size = ?1, last_modified = ?2, synced_at = ?3
+         WHERE bucket = ?4 AND account_id = ?5 AND key = ?6",
+        turso::params![new_size, last_modified, now, bucket, account_id, key],
+    ).await?;
+    
+    Ok(new_size - old_size)
+}
+
 /// Search result with total count
 #[derive(Debug, Clone)]
 pub struct SearchResult {

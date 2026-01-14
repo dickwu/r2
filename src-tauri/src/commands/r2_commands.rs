@@ -38,6 +38,32 @@ pub struct ListObjectsInput {
     pub max_keys: Option<i32>,
 }
 
+// ============ Cache Update Event ============
+
+/// Event emitted when local cache is updated after R2 operations.
+/// Frontend can listen to this to refresh affected views.
+#[derive(Debug, Clone, Serialize)]
+pub struct CacheUpdatedEvent {
+    pub action: String,              // "delete" | "move" | "update"
+    pub affected_paths: Vec<String>, // Parent folder paths that changed
+}
+
+/// Extract unique parent paths from a list of file keys
+fn get_unique_parent_paths(keys: &[String]) -> Vec<String> {
+    let mut paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    
+    for key in keys {
+        let parent = if let Some(last_slash) = key.rfind('/') {
+            key[..=last_slash].to_string()
+        } else {
+            String::new() // Root
+        };
+        paths.insert(parent);
+    }
+    
+    paths.into_iter().collect()
+}
+
 // ============ List Commands ============
 
 #[tauri::command]
@@ -209,12 +235,38 @@ pub async fn list_folder_r2_objects(
 // ============ Delete Commands ============
 
 #[tauri::command]
-pub async fn delete_r2_object(config: R2ConfigInput, key: String) -> Result<(), String> {
+pub async fn delete_r2_object(
+    config: R2ConfigInput,
+    key: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let bucket = config.bucket.clone();
+    let account_id = config.account_id.clone();
     let r2_config: r2::R2Config = config.into();
 
+    // Delete from R2
     r2::delete_object(&r2_config, &key)
         .await
-        .map_err(|e| format!("Failed to delete object: {}", e))
+        .map_err(|e| format!("Failed to delete object: {}", e))?;
+
+    // Update local database cache
+    let file_size = db::delete_cached_file(&bucket, &account_id, &key)
+        .await
+        .map_err(|e| format!("Failed to update file cache: {}", e))?;
+
+    if file_size > 0 {
+        db::update_directory_tree_for_delete(&bucket, &account_id, &key, file_size)
+            .await
+            .map_err(|e| format!("Failed to update directory tree: {}", e))?;
+    }
+
+    // Emit cache-updated event
+    let _ = app.emit("cache-updated", CacheUpdatedEvent {
+        action: "delete".to_string(),
+        affected_paths: get_unique_parent_paths(&[key]),
+    });
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -237,6 +289,8 @@ pub async fn batch_delete_r2_objects(
     keys: Vec<String>,
     app: tauri::AppHandle,
 ) -> Result<BatchDeleteResult, String> {
+    let bucket = config.bucket.clone();
+    let account_id = config.account_id.clone();
     let r2_config: r2::R2Config = config.into();
     let total = keys.len();
 
@@ -248,9 +302,15 @@ pub async fn batch_delete_r2_objects(
         });
     }
 
+    // Get file sizes before deleting (for directory tree updates)
+    let file_sizes = db::delete_cached_files_batch(&bucket, &account_id, &keys)
+        .await
+        .unwrap_or_default();
+
     let mut completed = 0;
     let mut failed = 0;
     let mut errors: Vec<String> = vec![];
+    let mut deleted_keys: Vec<String> = vec![];
 
     const BATCH_SIZE: usize = 1000;
 
@@ -258,9 +318,10 @@ pub async fn batch_delete_r2_objects(
         let batch_keys: Vec<String> = chunk.to_vec();
         let batch_count = batch_keys.len();
 
-        match r2::delete_objects(&r2_config, batch_keys).await {
+        match r2::delete_objects(&r2_config, batch_keys.clone()).await {
             Ok(_) => {
                 completed += batch_count;
+                deleted_keys.extend(batch_keys);
             }
             Err(e) => {
                 failed += batch_count;
@@ -278,6 +339,21 @@ pub async fn batch_delete_r2_objects(
         );
     }
 
+    // Update directory tree for successfully deleted files
+    for key in &deleted_keys {
+        if let Some(&size) = file_sizes.get(key) {
+            let _ = db::update_directory_tree_for_delete(&bucket, &account_id, key, size).await;
+        }
+    }
+
+    // Emit cache-updated event
+    if !deleted_keys.is_empty() {
+        let _ = app.emit("cache-updated", CacheUpdatedEvent {
+            action: "delete".to_string(),
+            affected_paths: get_unique_parent_paths(&deleted_keys),
+        });
+    }
+
     Ok(BatchDeleteResult {
         deleted: completed,
         failed,
@@ -292,12 +368,34 @@ pub async fn rename_r2_object(
     config: R2ConfigInput,
     old_key: String,
     new_key: String,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
+    let bucket = config.bucket.clone();
+    let account_id = config.account_id.clone();
     let r2_config: r2::R2Config = config.into();
 
+    // Rename in R2
     r2::rename_object(&r2_config, &old_key, &new_key)
         .await
-        .map_err(|e| format!("Failed to rename object: {}", e))
+        .map_err(|e| format!("Failed to rename object: {}", e))?;
+
+    // Update local database cache
+    if let Some((size, last_modified)) = db::move_cached_file(&bucket, &account_id, &old_key, &new_key)
+        .await
+        .map_err(|e| format!("Failed to update file cache: {}", e))?
+    {
+        db::update_directory_tree_for_move(&bucket, &account_id, &old_key, &new_key, size, &last_modified)
+            .await
+            .map_err(|e| format!("Failed to update directory tree: {}", e))?;
+    }
+
+    // Emit cache-updated event
+    let _ = app.emit("cache-updated", CacheUpdatedEvent {
+        action: "move".to_string(),
+        affected_paths: get_unique_parent_paths(&[old_key, new_key]),
+    });
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -326,6 +424,8 @@ pub async fn batch_move_r2_objects(
     operations: Vec<MoveOperation>,
     app: tauri::AppHandle,
 ) -> Result<BatchMoveResult, String> {
+    let bucket = config.bucket.clone();
+    let account_id = config.account_id.clone();
     let r2_config: r2::R2Config = config.into();
     let total = operations.len();
 
@@ -342,6 +442,8 @@ pub async fn batch_move_r2_objects(
     let completed = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicUsize::new(0));
     let errors = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    // Track successful moves for database updates
+    let successful_moves = Arc::new(tokio::sync::Mutex::new(Vec::<MoveOperation>::new()));
 
     let mut handles = Vec::new();
 
@@ -355,6 +457,7 @@ pub async fn batch_move_r2_objects(
         let completed = completed.clone();
         let failed = failed.clone();
         let errors = errors.clone();
+        let successful_moves = successful_moves.clone();
         let app = app.clone();
 
         let handle = tokio::spawn(async move {
@@ -366,6 +469,8 @@ pub async fn batch_move_r2_objects(
                 match r2::rename_object(&config, &op.old_key, &op.new_key).await {
                     Ok(_) => {
                         completed.fetch_add(1, Ordering::SeqCst);
+                        let mut moves = successful_moves.lock().await;
+                        moves.push(op);
                     }
                     Err(e) => {
                         failed.fetch_add(1, Ordering::SeqCst);
@@ -394,6 +499,29 @@ pub async fn batch_move_r2_objects(
         let _ = handle.await;
     }
 
+    // Update local database for successful moves
+    let moves = successful_moves.lock().await;
+    let mut affected_keys: Vec<String> = Vec::new();
+    for op in moves.iter() {
+        if let Ok(Some((size, last_modified))) = 
+            db::move_cached_file(&bucket, &account_id, &op.old_key, &op.new_key).await
+        {
+            let _ = db::update_directory_tree_for_move(
+                &bucket, &account_id, &op.old_key, &op.new_key, size, &last_modified
+            ).await;
+            affected_keys.push(op.old_key.clone());
+            affected_keys.push(op.new_key.clone());
+        }
+    }
+
+    // Emit cache-updated event
+    if !affected_keys.is_empty() {
+        let _ = app.emit("cache-updated", CacheUpdatedEvent {
+            action: "move".to_string(),
+            affected_paths: get_unique_parent_paths(&affected_keys),
+        });
+    }
+
     let final_completed = completed.load(Ordering::SeqCst);
     let final_failed = failed.load(Ordering::SeqCst);
     let final_errors = errors.lock().await.clone();
@@ -419,4 +547,54 @@ pub async fn generate_signed_url(
     r2::generate_presigned_url(&r2_config, &key, expires_in_secs)
         .await
         .map_err(|e| format!("Failed to generate signed URL: {}", e))
+}
+
+// ============ Upload Content ============
+
+#[tauri::command]
+pub async fn upload_r2_content(
+    config: R2ConfigInput,
+    key: String,
+    content: String,
+    content_type: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let bucket = config.bucket.clone();
+    let account_id = config.account_id.clone();
+    let r2_config: r2::R2Config = config.into();
+
+    // Calculate content size before converting to bytes
+    let content_bytes = content.into_bytes();
+    let new_size = content_bytes.len() as i64;
+
+    // Upload to R2
+    let etag = r2::upload_content(
+        &r2_config,
+        &key,
+        content_bytes,
+        content_type.as_deref(),
+    )
+    .await
+    .map_err(|e| format!("Failed to upload content: {}", e))?;
+
+    // Update local database cache
+    let last_modified = chrono::Utc::now().to_rfc3339();
+
+    // Update the file record and get size delta
+    let size_delta = db::update_cached_file(&bucket, &account_id, &key, new_size, &last_modified)
+        .await
+        .map_err(|e| format!("Failed to update file cache: {}", e))?;
+
+    // Update directory tree (all ancestor folders)
+    db::update_directory_tree_for_file(&bucket, &account_id, &key, size_delta, &last_modified)
+        .await
+        .map_err(|e| format!("Failed to update directory tree: {}", e))?;
+
+    // Emit cache-updated event
+    let _ = app.emit("cache-updated", CacheUpdatedEvent {
+        action: "update".to_string(),
+        affected_paths: get_unique_parent_paths(&[key]),
+    });
+
+    Ok(etag)
 }

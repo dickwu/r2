@@ -330,3 +330,170 @@ where
     let nodes = builder.build(files, progress).await;
     DirectoryTreeBuilder::store(bucket, account_id, &nodes).await
 }
+
+/// Helper to get all ancestor paths for a file key (including root "")
+fn get_ancestor_paths(key: &str) -> (String, Vec<String>) {
+    let mut paths: Vec<String> = Vec::new();
+    
+    // Get the parent path of the file
+    let parent_path = if let Some(last_slash) = key.rfind('/') {
+        key[..=last_slash].to_string()
+    } else {
+        String::new() // Root level file
+    };
+    
+    // Add all ancestor paths
+    let mut current = parent_path.clone();
+    paths.push(current.clone());
+    
+    while !current.is_empty() {
+        let without_trailing = current.trim_end_matches('/');
+        if let Some(last_slash) = without_trailing.rfind('/') {
+            current = without_trailing[..=last_slash].to_string();
+        } else {
+            current = String::new(); // Root
+        }
+        paths.push(current.clone());
+    }
+    
+    (parent_path, paths)
+}
+
+// ============ Core Directory Delta Function ============
+
+/// Apply a delta to directory tree for a single file operation.
+/// This is the core function used by delete, move, and update operations.
+///
+/// - `file_count_delta`: -1 for delete, +1 for add, 0 for size-only change
+/// - `size_delta`: negative for delete/move-from, positive for add/move-to/size-increase
+/// - `last_modified`: Some() to update timestamp (add/update), None to skip (delete)
+async fn apply_directory_delta(
+    bucket: &str,
+    account_id: &str,
+    key: &str,
+    file_count_delta: i32,
+    size_delta: i64,
+    last_modified: Option<&str>,
+) -> DbResult<()> {
+    let conn = get_connection()?.lock().await;
+    let now = chrono::Utc::now().timestamp();
+    
+    let (parent_path, paths_to_update) = get_ancestor_paths(key);
+    
+    for path in &paths_to_update {
+        let is_direct_parent = path == &parent_path;
+        let path_str = path.as_str();
+        
+        match (is_direct_parent, last_modified) {
+            // Direct parent with last_modified update
+            (true, Some(lm)) => {
+                conn.execute(
+                    "UPDATE directory_tree 
+                     SET file_count = file_count + ?1,
+                         total_file_count = total_file_count + ?1,
+                         size = size + ?2,
+                         total_size = total_size + ?2,
+                         last_modified = CASE 
+                             WHEN last_modified IS NULL OR ?3 > last_modified THEN ?3 
+                             ELSE last_modified 
+                         END,
+                         last_updated = ?4
+                     WHERE bucket = ?5 AND account_id = ?6 AND path = ?7",
+                    turso::params![file_count_delta, size_delta, lm, now, bucket, account_id, path_str],
+                ).await?;
+            }
+            // Direct parent without last_modified update (delete)
+            (true, None) => {
+                conn.execute(
+                    "UPDATE directory_tree 
+                     SET file_count = file_count + ?1,
+                         total_file_count = total_file_count + ?1,
+                         size = size + ?2,
+                         total_size = total_size + ?2,
+                         last_updated = ?3
+                     WHERE bucket = ?4 AND account_id = ?5 AND path = ?6",
+                    turso::params![file_count_delta, size_delta, now, bucket, account_id, path_str],
+                ).await?;
+            }
+            // Ancestor with last_modified update
+            (false, Some(lm)) => {
+                conn.execute(
+                    "UPDATE directory_tree 
+                     SET total_file_count = total_file_count + ?1,
+                         total_size = total_size + ?2,
+                         last_modified = CASE 
+                             WHEN last_modified IS NULL OR ?3 > last_modified THEN ?3 
+                             ELSE last_modified 
+                         END,
+                         last_updated = ?4
+                     WHERE bucket = ?5 AND account_id = ?6 AND path = ?7",
+                    turso::params![file_count_delta, size_delta, lm, now, bucket, account_id, path_str],
+                ).await?;
+            }
+            // Ancestor without last_modified update (delete)
+            (false, None) => {
+                conn.execute(
+                    "UPDATE directory_tree 
+                     SET total_file_count = total_file_count + ?1,
+                         total_size = total_size + ?2,
+                         last_updated = ?3
+                     WHERE bucket = ?4 AND account_id = ?5 AND path = ?6",
+                    turso::params![file_count_delta, size_delta, now, bucket, account_id, path_str],
+                ).await?;
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+// ============ Public API Functions ============
+
+/// Update directory tree when a file is deleted.
+/// Decreases file_count and sizes for the file's parent and all ancestors.
+pub async fn update_directory_tree_for_delete(
+    bucket: &str,
+    account_id: &str,
+    key: &str,
+    file_size: i64,
+) -> DbResult<()> {
+    apply_directory_delta(bucket, account_id, key, -1, -file_size, None).await
+}
+
+/// Update directory tree for a file move/rename operation.
+/// Decreases counts/sizes in old location, increases in new location.
+pub async fn update_directory_tree_for_move(
+    bucket: &str,
+    account_id: &str,
+    old_key: &str,
+    new_key: &str,
+    file_size: i64,
+    last_modified: &str,
+) -> DbResult<()> {
+    // Get parent paths to check if it's a same-folder rename
+    let (old_parent, _) = get_ancestor_paths(old_key);
+    let (new_parent, _) = get_ancestor_paths(new_key);
+    
+    // If moving within same folder, no directory tree changes needed
+    if old_parent == new_parent {
+        return Ok(());
+    }
+    
+    // Decrease in old location
+    apply_directory_delta(bucket, account_id, old_key, -1, -file_size, None).await?;
+    
+    // Increase in new location
+    apply_directory_delta(bucket, account_id, new_key, 1, file_size, Some(last_modified)).await
+}
+
+/// Update directory tree when a single file's size changes.
+/// Updates the file's parent folder and all ancestor folders.
+pub async fn update_directory_tree_for_file(
+    bucket: &str,
+    account_id: &str,
+    key: &str,
+    size_delta: i64,
+    last_modified: &str,
+) -> DbResult<()> {
+    apply_directory_delta(bucket, account_id, key, 0, size_delta, Some(last_modified)).await
+}
