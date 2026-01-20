@@ -1,3 +1,4 @@
+use std::path::Path;
 use tauri::{
     Manager,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
@@ -39,6 +40,60 @@ fn show_about_dialog<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         });
 }
 
+async fn confirm_db_reset<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    db_path: &Path,
+    error: &str,
+) -> bool {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let message = format!(
+        "Failed to load local database:\n{}\n\nLocation: {}\n\nRemove the database file and recreate it? This will clear local cache and sessions.",
+        error,
+        db_path.display()
+    );
+
+    app.dialog()
+        .message(&message)
+        .title(APP_NAME)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Remove DB File".to_string(),
+            "Quit".to_string(),
+        ))
+        .show(move |confirmed| {
+            let _ = tx.send(confirmed);
+        });
+
+    rx.await.unwrap_or(false)
+}
+
+async fn init_db_with_recovery<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    db_path: &Path,
+) -> Result<(), String> {
+    if let Err(err) = db::init_db(db_path).await {
+        let should_reset = confirm_db_reset(app, db_path, &err.to_string()).await;
+        if !should_reset {
+            return Err(format!("Database initialization failed: {}", err));
+        }
+
+        if let Err(remove_err) = std::fs::remove_file(db_path) {
+            if remove_err.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!(
+                    "Failed to remove database file {}: {}",
+                    db_path.display(),
+                    remove_err
+                ));
+            }
+        }
+
+        db::init_db(db_path)
+            .await
+            .map_err(|e| format!("Failed to reinitialize database: {}", e))?;
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -54,11 +109,27 @@ pub fn run() {
             std::fs::create_dir_all(&app_data_dir).expect("Failed to create app data dir");
             
             let db_path = app_data_dir.join("uploads-turso.db");
-            
+
             let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+            let app_handle = app.handle();
+            let init_result = rt.block_on(async { init_db_with_recovery(&app_handle, &db_path).await });
+
+            if let Err(err) = init_result {
+                let exit_handle = app_handle.clone();
+                app_handle.dialog()
+                    .message(&err)
+                    .title(APP_NAME)
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        "OK".to_string(),
+                        "Quit".to_string(),
+                    ))
+                    .show(move |_| {
+                        exit_handle.exit(1);
+                    });
+                return Ok(());
+            }
+
             rt.block_on(async {
-                db::init_db(&db_path).await.expect("Failed to initialize database");
-                
                 // Clean up old sessions on startup
                 if let Err(e) = db::cleanup_old_sessions().await {
                     eprintln!("Failed to cleanup old sessions: {}", e);
