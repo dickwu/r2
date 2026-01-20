@@ -26,6 +26,7 @@ pub fn get_table_sql() -> &'static str {
     );
 
     CREATE INDEX IF NOT EXISTS idx_aws_buckets_account ON aws_buckets(account_id);
+    CREATE INDEX IF NOT EXISTS idx_aws_buckets_unique ON aws_buckets(account_id, name);
     "
 }
 

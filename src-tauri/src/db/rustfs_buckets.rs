@@ -26,6 +26,7 @@ pub fn get_table_sql() -> &'static str {
     );
 
     CREATE INDEX IF NOT EXISTS idx_rustfs_buckets_account ON rustfs_buckets(account_id);
+    CREATE INDEX IF NOT EXISTS idx_rustfs_buckets_unique ON rustfs_buckets(account_id, name);
     "
 }
 

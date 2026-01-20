@@ -26,6 +26,7 @@ pub fn get_table_sql() -> &'static str {
     );
 
     CREATE INDEX IF NOT EXISTS idx_minio_buckets_account ON minio_buckets(account_id);
+    CREATE INDEX IF NOT EXISTS idx_minio_buckets_unique ON minio_buckets(account_id, name);
     "
 }
 

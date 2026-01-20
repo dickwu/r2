@@ -37,7 +37,7 @@ base64 = "0.22"
 chrono = "0.4"
 urlencoding = "2"
 lazy_static = "1.4"
-turso = "0.4.3"
+turso = "0.4.4-pre"
 log = "0.4"
 tauri-plugin-video-thumbnail = { git = "https://github.com/dickwu/tauri-plugin-video-thumbnail" }
 # AWS S3 SDK for R2 operations

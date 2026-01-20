@@ -86,6 +86,7 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_buckets_token ON buckets(token_id);
+        CREATE INDEX IF NOT EXISTS idx_buckets_unique ON buckets(token_id, name);
         "
     ).await?;
 

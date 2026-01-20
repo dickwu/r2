@@ -560,7 +560,6 @@ export default function AccountSidebar({
                 <Tooltip
                   key={bucket.name}
                   title={
-                    (selectedAccount.provider === 'r2' || selectedAccount.provider === 'aws') &&
                     bucket.public_domain_host
                       ? `${bucket.public_domain_scheme || 'https'}://${bucket.public_domain_host}`
                       : null
