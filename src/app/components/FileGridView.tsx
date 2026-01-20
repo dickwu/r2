@@ -14,6 +14,7 @@ import { FileItem } from '../hooks/useR2Files';
 import { FolderMetadata } from '../stores/folderSizeStore';
 import VideoThumbnail from './VideoThumbnail';
 import { formatBytes } from '../utils/formatBytes';
+import { buildPublicUrl, StorageConfig } from '../lib/r2cache';
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'mov', 'm4v'];
@@ -30,12 +31,6 @@ function isVideoFile(filename: string): boolean {
   return VIDEO_EXTENSIONS.includes(getFileExtension(filename));
 }
 
-function getFileUrl(key: string, publicDomain?: string): string | null {
-  if (!publicDomain) return null;
-  const domain = publicDomain.replace(/\/$/, '');
-  return `https://${domain}/${key}`;
-}
-
 interface FileGridViewProps {
   items: FileItem[];
   onItemClick: (item: FileItem) => void;
@@ -44,7 +39,7 @@ interface FileGridViewProps {
   onDownload?: (item: FileItem) => void;
   onFolderDelete?: (item: FileItem) => void;
   onFolderDownload?: (item: FileItem) => void;
-  publicDomain?: string;
+  storageConfig?: StorageConfig | null;
   folderSizes?: Record<string, FolderMetadata>;
   selectedKeys?: Set<string>;
   onToggleSelection?: (key: string) => void;
@@ -53,7 +48,7 @@ interface FileGridViewProps {
 
 const FileCard = memo(function FileCard({
   item,
-  publicDomain,
+  storageConfig,
   onItemClick,
   onDelete,
   onRename,
@@ -66,7 +61,7 @@ const FileCard = memo(function FileCard({
   showFullPath,
 }: {
   item: FileItem;
-  publicDomain?: string;
+  storageConfig?: StorageConfig | null;
   onItemClick: (item: FileItem) => void;
   onDelete: (item: FileItem) => void;
   onRename: (item: FileItem) => void;
@@ -80,7 +75,9 @@ const FileCard = memo(function FileCard({
 }) {
   const isImage = !item.isFolder && isImageFile(item.name);
   const isVideo = !item.isFolder && isVideoFile(item.name);
-  const fileUrl = getFileUrl(item.key, publicDomain);
+  const fileUrl = storageConfig?.publicDomain
+    ? buildPublicUrl(storageConfig, item.key)
+    : null;
   const hasPreview = fileUrl && (isImage || isVideo);
 
   const handleClick = useCallback(() => {
@@ -289,7 +286,7 @@ export default memo(function FileGridView({
   onDownload,
   onFolderDelete,
   onFolderDownload,
-  publicDomain,
+  storageConfig,
   folderSizes,
   selectedKeys,
   onToggleSelection,
@@ -307,7 +304,7 @@ export default memo(function FileGridView({
         itemContent={(index, item) => (
           <FileCard
             item={item}
-            publicDomain={publicDomain}
+            storageConfig={storageConfig}
             onItemClick={onItemClick}
             onDelete={onDelete}
             onRename={onRename}

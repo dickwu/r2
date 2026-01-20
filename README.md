@@ -1,12 +1,13 @@
 # Cloudflare R2 Client
 
-A desktop application for managing Cloudflare R2 storage buckets. Built with Tauri, Next.js, and React.
+A desktop application for managing S3-compatible storage (Cloudflare R2, AWS S3, MinIO, RustFS). Built with Tauri, Next.js, and React.
 
 ## Features
 
-- **Multi-Account Support** - Manage multiple Cloudflare accounts in one app
-- **Multiple Tokens per Account** - Each account can have multiple API tokens with different bucket access
-- Browse and manage files in Cloudflare R2 buckets
+- **Multi-Provider Support** - R2, AWS S3, MinIO, and RustFS (path-style forced)
+- **Multi-Account Support** - Manage multiple accounts across providers
+- **Multiple Tokens per Account (R2)** - Each account can have multiple API tokens with different bucket access
+- Browse and manage files in S3-compatible buckets
 - Upload files and folders with resumable multipart uploads
 - **File Preview** - Preview files directly in the app:
   - **Images**: jpg, jpeg, png, gif, webp, svg, bmp, ico
@@ -23,7 +24,7 @@ A desktop application for managing Cloudflare R2 storage buckets. Built with Tau
   - **Batch Move** - Move files to different folders with folder tree picker
   - **Batch Delete** - Delete multiple files with confirmation and progress indicator
 - Video thumbnail generation (via ffmpeg)
-- Copy signed or public URLs to clipboard
+- Copy signed or public URLs to clipboard (provider-aware link building)
 - Dark mode support
 - Auto-updates
 
@@ -111,18 +112,35 @@ bun run tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
 
 ## Configuration
 
-### Adding Your First Account
+### Adding an Account
 
 1. On first launch, the "Add Account" dialog will open automatically
-2. Enter your Cloudflare credentials:
-   - **Account ID** - Your Cloudflare account ID (found in dashboard URL)
-   - **Display Name** (optional) - Friendly name for the account
-   - **Token Name** (optional) - Name to identify this token (e.g., "Production", "Staging")
-   - **API Token** - Cloudflare API token with R2 read/write permissions
-   - **Access Key ID** - S3-compatible Access Key ID
-   - **Secret Access Key** - S3-compatible Secret Access Key
-3. Click "Load" to fetch available buckets, or manually add bucket names
-4. Configure public domain for each bucket (optional)
+2. Choose the provider (R2, AWS, MinIO, RustFS) via the clickable tags
+3. Enter provider-specific credentials:
+   - **R2**:
+     - **Account ID** (required) - Cloudflare account ID (from dashboard URL)
+     - **Token Name** (optional)
+     - **API Token** - R2 read/write token
+     - **Access Key ID** / **Secret Access Key**
+   - **AWS S3**:
+     - **Access Key ID** / **Secret Access Key**
+     - **Region** (required)
+     - **Endpoint** (optional custom scheme + host)
+     - **Force Path Style** (optional)
+   - **MinIO**:
+     - **Access Key ID** / **Secret Access Key**
+     - **Endpoint** (scheme + host/port)
+     - **Force Path Style** (optional)
+   - **RustFS**:
+     - **Access Key ID** / **Secret Access Key**
+     - **Endpoint** (scheme + host/port)
+     - **Force Path Style** is always enabled (not configurable)
+4. Click "Load" to fetch available buckets, or manually add bucket names
+5. Configure public domain per bucket (optional, R2/AWS only)
+
+**Endpoint/Domain Tips**
+- Endpoint and domain inputs accept full URLs (scheme + host) and normalize automatically.
+- For R2/AWS public domains, you can select `http`/`https` explicitly.
 
 ### Managing Multiple Accounts
 
@@ -134,10 +152,19 @@ bun run tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
 
 ### Getting API Credentials
 
+**Cloudflare R2**
 1. Go to [Cloudflare Dashboard](https://dash.cloudflare.com/)
 2. Navigate to **R2** → **Overview** → **Manage R2 API Tokens**
 3. Create a token with appropriate permissions
 4. Note the **Access Key ID** and **Secret Access Key** (shown only once)
+
+**AWS S3**
+- Create an IAM user with S3 permissions and generate access keys.
+- Note the **Region** for your buckets.
+
+**MinIO / RustFS**
+- Use the access/secret keys from your deployment.
+- Set the endpoint host/port and scheme (http/https).
 
 ## Data Storage
 
@@ -151,7 +178,7 @@ Account configurations are stored locally in a SQLite database:
 
 - **Frontend**: Next.js, React, Ant Design, Zustand
 - **Backend**: Tauri (Rust)
-- **Storage**: Cloudflare R2 (S3-compatible)
+- **Storage**: Cloudflare R2, AWS S3, MinIO, RustFS (S3-compatible)
 - **Database**: SQLite (via Turso - Rust-based SQLite-compatible database)
 - **State**: TanStack Query, Zustand
 

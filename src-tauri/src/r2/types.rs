@@ -1,10 +1,8 @@
 //! R2 types and client creation
 
-use aws_config::Region;
-use aws_credential_types::Credentials;
-use aws_sdk_s3::config::Builder as S3ConfigBuilder;
 use aws_sdk_s3::Client;
 use serde::{Deserialize, Serialize};
+use crate::providers::s3_client::{create_s3_client, S3ClientConfig};
 
 pub type R2Result<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -40,22 +38,14 @@ pub struct ListObjectsResult {
 
 /// Create an S3 client configured for Cloudflare R2
 pub async fn create_r2_client(config: &R2Config) -> R2Result<Client> {
-    let credentials = Credentials::new(
-        &config.access_key_id,
-        &config.secret_access_key,
-        None,
-        None,
-        "r2-provider",
-    );
-
     let endpoint_url = format!("https://{}.r2.cloudflarestorage.com", config.account_id);
+    let client = create_s3_client(&S3ClientConfig {
+        access_key_id: &config.access_key_id,
+        secret_access_key: &config.secret_access_key,
+        region: "auto",
+        endpoint_url: Some(endpoint_url.as_str()),
+        force_path_style: true,
+    })?;
 
-    let s3_config = S3ConfigBuilder::new()
-        .credentials_provider(credentials)
-        .region(Region::new("auto"))
-        .endpoint_url(endpoint_url)
-        .force_path_style(true)
-        .build();
-
-    Ok(Client::from_conf(s3_config))
+    Ok(client)
 }

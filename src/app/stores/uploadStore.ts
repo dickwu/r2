@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { R2Config } from '../components/ConfigModal';
+import type { StorageConfig } from '../lib/r2cache';
 
 export type UploadStatus = 'pending' | 'uploading' | 'success' | 'error' | 'cancelled';
 
@@ -18,10 +18,10 @@ export interface UploadTask {
 interface UploadStore {
   tasks: UploadTask[];
   uploadPath: string;
-  config: R2Config | null;
+  config: StorageConfig | null;
 
   // Actions
-  setConfig: (config: R2Config | null) => void;
+  setConfig: (config: StorageConfig | null) => void;
   setUploadPath: (path: string) => void;
   addTasks: (tasks: Omit<UploadTask, 'id' | 'status' | 'progress' | 'speed'>[]) => void;
   removeTask: (id: string) => void;

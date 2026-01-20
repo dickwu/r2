@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Modal, App, Progress, Button } from 'antd';
 import { FolderOutlined, SwapOutlined } from '@ant-design/icons';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { batchMoveR2Objects, MoveOperation, R2Config } from '../lib/r2cache';
+import { batchMoveObjects, MoveOperation, StorageConfig } from '../lib/r2cache';
 import FolderPickerModal from './folder/FolderPickerModal';
 
 interface BatchMoveProgress {
@@ -16,7 +16,7 @@ interface BatchMoveProgress {
 interface BatchMoveModalProps {
   open: boolean;
   selectedKeys: Set<string>;
-  config: R2Config | null | undefined;
+  config: StorageConfig | null | undefined;
   onClose: () => void;
   onSuccess: () => void;
   onMovingChange?: (isMoving: boolean) => void;
@@ -75,7 +75,7 @@ export default function BatchMoveModal({
       });
 
       // Use Rust batch move API (6 concurrent operations)
-      const result = await batchMoveR2Objects(config, operations);
+      const result = await batchMoveObjects(config, operations);
 
       // Cleanup listener
       unlisten?.();

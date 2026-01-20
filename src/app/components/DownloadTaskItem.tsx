@@ -18,15 +18,9 @@ const { Text } = Typography;
 interface DownloadTaskItemProps {
   task: DownloadTask;
   onResume?: () => void;
-  currentConfig?: {
-    account_id: string;
-    bucket: string;
-    access_key_id?: string | null;
-    secret_access_key?: string | null;
-  } | null;
 }
 
-export default function DownloadTaskItem({ task, onResume, currentConfig }: DownloadTaskItemProps) {
+export default function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
   // Pause download - UI will update via download-status-changed event
   async function handlePause() {
     try {

@@ -1,16 +1,94 @@
 //! Download Tauri commands
 
 use crate::db::{self, DownloadSession};
-use crate::r2::R2Config;
+use crate::providers::{aws, minio, rustfs};
+use serde::Deserialize;
 use chrono::Utc;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter};
 
 use super::types::{DownloadBatchOperation, DownloadStatusChanged, DownloadTaskDeleted};
 use super::worker::{
-    get_pending_sessions_to_start, spawn_download_task, DOWNLOAD_CANCEL_REGISTRY,
+    get_pending_sessions_to_start, spawn_download_task, DownloadConfig, DOWNLOAD_CANCEL_REGISTRY,
     DOWNLOAD_PAUSE_REGISTRY,
 };
+
+#[derive(Debug, Deserialize)]
+pub struct DownloadConfigInput {
+    pub provider: String,
+    pub account_id: String,
+    pub bucket: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub region: Option<String>,
+    pub endpoint_scheme: Option<String>,
+    pub endpoint_host: Option<String>,
+    pub force_path_style: Option<bool>,
+}
+
+fn build_download_config(input: &DownloadConfigInput) -> Result<DownloadConfig, String> {
+    match input.provider.as_str() {
+        "aws" => {
+            let region = input
+                .region
+                .as_ref()
+                .ok_or_else(|| "AWS region is required".to_string())?
+                .to_string();
+            Ok(DownloadConfig::Aws(aws::AwsConfig {
+                bucket: input.bucket.clone(),
+                access_key_id: input.access_key_id.clone(),
+                secret_access_key: input.secret_access_key.clone(),
+                region,
+                endpoint_scheme: input.endpoint_scheme.clone(),
+                endpoint_host: input.endpoint_host.clone(),
+                force_path_style: input.force_path_style.unwrap_or(false),
+            }))
+        }
+        "minio" => {
+            let endpoint_scheme = input
+                .endpoint_scheme
+                .clone()
+                .unwrap_or_else(|| "https".to_string());
+            let endpoint_host = input
+                .endpoint_host
+                .clone()
+                .ok_or_else(|| "MinIO endpoint host is required".to_string())?;
+            Ok(DownloadConfig::Minio(minio::MinioConfig {
+                bucket: input.bucket.clone(),
+                access_key_id: input.access_key_id.clone(),
+                secret_access_key: input.secret_access_key.clone(),
+                endpoint_scheme,
+                endpoint_host,
+                force_path_style: input.force_path_style.unwrap_or(true),
+            }))
+        }
+        "rustfs" => {
+            let endpoint_scheme = input
+                .endpoint_scheme
+                .clone()
+                .unwrap_or_else(|| "https".to_string());
+            let endpoint_host = input
+                .endpoint_host
+                .clone()
+                .ok_or_else(|| "RustFS endpoint host is required".to_string())?;
+            Ok(DownloadConfig::Rustfs(rustfs::RustfsConfig {
+                bucket: input.bucket.clone(),
+                access_key_id: input.access_key_id.clone(),
+                secret_access_key: input.secret_access_key.clone(),
+                endpoint_scheme,
+                endpoint_host,
+                force_path_style: true,
+            }))
+        }
+        "r2" => Ok(DownloadConfig::R2(crate::r2::R2Config {
+            account_id: input.account_id.clone(),
+            bucket: input.bucket.clone(),
+            access_key_id: input.access_key_id.clone(),
+            secret_access_key: input.secret_access_key.clone(),
+        })),
+        _ => Err(format!("Unsupported provider: {}", input.provider)),
+    }
+}
 
 /// Create a download session in the database
 /// If file_size is 0, looks up the size from file cache
@@ -58,26 +136,18 @@ pub async fn create_download_task(
 #[tauri::command]
 pub async fn start_download_queue(
     app: AppHandle,
-    bucket: String,
-    account_id: String,
-    access_key_id: String,
-    secret_access_key: String,
+    config: DownloadConfigInput,
 ) -> Result<i64, String> {
-    let config = R2Config {
-        account_id: account_id.clone(),
-        bucket: bucket.clone(),
-        access_key_id,
-        secret_access_key,
-    };
+    let download_config = build_download_config(&config)?;
 
     // Get sessions to start (this updates their status in DB and emits events)
-    let sessions = get_pending_sessions_to_start(&app, &bucket, &account_id).await?;
+    let sessions = get_pending_sessions_to_start(&app, &config.bucket, &config.account_id).await?;
     let started_count = sessions.len() as i64;
 
     // Spawn download tasks for each session
     for session in sessions {
         let app_clone = app.clone();
-        let config_clone = config.clone();
+        let config_clone = download_config.clone();
         tokio::spawn(async move {
             spawn_download_task(app_clone, session, config_clone).await;
         });
@@ -90,13 +160,10 @@ pub async fn start_download_queue(
 #[tauri::command]
 pub async fn start_all_downloads(
     app: AppHandle,
-    bucket: String,
-    account_id: String,
-    access_key_id: String,
-    secret_access_key: String,
+    config: DownloadConfigInput,
 ) -> Result<i64, String> {
     // First, set all paused tasks to pending in DB
-    let resumed_count = db::resume_all_downloads(&bucket, &account_id)
+    let resumed_count = db::resume_all_downloads(&config.bucket, &config.account_id)
         .await
         .map_err(|e| format!("Failed to resume downloads: {}", e))?;
 
@@ -105,24 +172,18 @@ pub async fn start_all_downloads(
         "download-batch-operation",
         DownloadBatchOperation {
             operation: "resume_all".to_string(),
-            bucket: bucket.clone(),
-            account_id: account_id.clone(),
+            bucket: config.bucket.clone(),
+            account_id: config.account_id.clone(),
         },
     );
 
     // Then get sessions to start and spawn tasks
-    let config = R2Config {
-        account_id: account_id.clone(),
-        bucket: bucket.clone(),
-        access_key_id,
-        secret_access_key,
-    };
-
-    let sessions = get_pending_sessions_to_start(&app, &bucket, &account_id).await?;
+    let download_config = build_download_config(&config)?;
+    let sessions = get_pending_sessions_to_start(&app, &config.bucket, &config.account_id).await?;
 
     for session in sessions {
         let app_clone = app.clone();
-        let config_clone = config.clone();
+        let config_clone = download_config.clone();
         tokio::spawn(async move {
             spawn_download_task(app_clone, session, config_clone).await;
         });

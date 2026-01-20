@@ -10,7 +10,7 @@ import {
   selectHasActiveUploads,
   selectHasSuccessfulUploads,
 } from '../stores/uploadStore';
-import type { R2Config } from './ConfigModal';
+import type { StorageConfig } from '../lib/r2cache';
 import UploadTaskList from './UploadTaskList';
 import FolderPickerModal from './folder/FolderPickerModal';
 
@@ -70,7 +70,7 @@ interface UploadModalProps {
   open: boolean;
   onClose: () => void;
   currentPath: string;
-  config: R2Config | null;
+  config: StorageConfig | null;
   onUploadComplete: () => void;
   onCredentialsUpdate: () => void;
 }
@@ -92,7 +92,12 @@ export default function UploadModal({
   const hasActiveUploads = useUploadStore(selectHasActiveUploads);
   const hasSuccessfulUploads = useUploadStore(selectHasSuccessfulUploads);
 
-  const hasS3Credentials = config?.accessKeyId && config?.secretAccessKey;
+  const hasS3Credentials =
+    !!config?.accessKeyId &&
+    !!config?.secretAccessKey &&
+    (config.provider !== 'aws' || !!config.region) &&
+    (config.provider !== 'minio' || (!!config.endpointHost && !!config.endpointScheme)) &&
+    (config.provider !== 'rustfs' || (!!config.endpointHost && !!config.endpointScheme));
 
   // Sync config to store
   useEffect(() => {

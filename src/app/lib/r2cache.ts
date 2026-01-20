@@ -1,25 +1,33 @@
 import { invoke } from '@tauri-apps/api/core';
+import { getProviderAdapter } from '../providers/index';
+import type {
+  BatchDeleteResult,
+  BatchMoveResult,
+  ListObjectsOptions,
+  ListObjectsResult,
+  MoveOperation,
+  StorageBucket,
+  StorageConfig,
+  StorageObject,
+  SyncResult,
+} from '../providers/types';
 
-// ============ Types ============
-
-export interface R2Object {
-  key: string;
-  size: number;
-  last_modified: string;
-  etag: string;
-}
-
-export interface R2Bucket {
-  name: string;
-  creation_date: string;
-}
-
-export interface ListObjectsResult {
-  objects: R2Object[];
-  folders: string[];
-  truncated: boolean;
-  continuation_token?: string;
-}
+export type {
+  BatchDeleteResult,
+  BatchMoveResult,
+  ListObjectsOptions,
+  ListObjectsResult,
+  MoveOperation,
+  StorageBucket,
+  StorageConfig,
+  StorageObject,
+  SyncResult,
+  StorageProvider,
+  R2StorageConfig,
+  AwsStorageConfig,
+  MinioStorageConfig,
+  RustfsStorageConfig,
+} from '../providers/types';
 
 export interface StoredFile {
   key: string;
@@ -37,98 +45,40 @@ export interface DirectoryNode {
   lastUpdated: number;
 }
 
-export interface R2Config {
-  accountId: string;
-  token?: string;
-  accessKeyId?: string;
-  secretAccessKey?: string;
-  bucket: string;
-  publicDomain?: string;
+// ============ Provider Operations ============
+
+export async function listBuckets(config: StorageConfig): Promise<StorageBucket[]> {
+  return getProviderAdapter(config).listBuckets(config);
 }
 
-// ============ R2 Operations ============
-
-export async function listR2Buckets(
-  accountId: string,
-  accessKeyId: string,
-  secretAccessKey: string
-): Promise<R2Bucket[]> {
-  return invoke('list_r2_buckets', {
-    accountId,
-    accessKeyId,
-    secretAccessKey,
-  });
-}
-
-export interface ListObjectsOptions {
-  prefix?: string;
-  delimiter?: string;
-  cursor?: string;
-  perPage?: number;
-}
-
-export async function listR2Objects(
-  config: R2Config,
+export async function listObjects(
+  config: StorageConfig,
   options: ListObjectsOptions = {}
 ): Promise<ListObjectsResult> {
-  const { prefix, delimiter, cursor, perPage } = options;
-
-  return invoke('list_r2_objects', {
-    input: {
-      config: {
-        account_id: config.accountId,
-        bucket: config.bucket,
-        access_key_id: config.accessKeyId || '',
-        secret_access_key: config.secretAccessKey || '',
-      },
-      prefix: prefix || null,
-      delimiter: delimiter || null,
-      continuation_token: cursor || null,
-      max_keys: perPage || null,
-    },
-  });
+  return getProviderAdapter(config).listObjects(config, options);
 }
 
-export async function listAllR2Objects(
-  config: R2Config,
+export async function listAllObjects(
+  config: StorageConfig,
   prefix: string = ''
 ): Promise<ListObjectsResult> {
-  // Use backend command for folder listing with progress events
-  // Progress is emitted via Tauri events ('folder-load-progress', 'folder-load-phase')
-  return invoke('list_folder_r2_objects', {
-    config: {
-      account_id: config.accountId,
-      bucket: config.bucket,
-      access_key_id: config.accessKeyId || '',
-      secret_access_key: config.secretAccessKey || '',
-    },
-    prefix: prefix || null,
-  });
+  return getProviderAdapter(config).listFolderObjects(config, prefix);
 }
 
-export async function listAllR2ObjectsRecursive(config: R2Config): Promise<R2Object[]> {
-  // Progress is now emitted via Tauri events ('sync-progress')
-  // Listen to these events in your component to track progress
-  return invoke('list_all_r2_objects', {
-    config: {
-      account_id: config.accountId,
-      bucket: config.bucket,
-      access_key_id: config.accessKeyId || '',
-      secret_access_key: config.secretAccessKey || '',
-    },
-  });
+export async function listAllObjectsRecursive(config: StorageConfig): Promise<StorageObject[]> {
+  return getProviderAdapter(config).listAllObjectsRecursive(config);
 }
 
-export async function listAllR2ObjectsUnderPrefix(
-  config: R2Config,
+export async function listAllObjectsUnderPrefix(
+  config: StorageConfig,
   prefix: string
-): Promise<R2Object[]> {
-  const allObjects: R2Object[] = [];
+): Promise<StorageObject[]> {
+  const allObjects: StorageObject[] = [];
   let cursor: string | undefined;
 
   do {
     // No delimiter = recursive listing under prefix
-    const result = await listR2Objects(config, { prefix, cursor });
+    const result = await listObjects(config, { prefix, cursor });
     allObjects.push(...result.objects);
     cursor = result.truncated ? result.continuation_token : undefined;
   } while (cursor);
@@ -136,118 +86,61 @@ export async function listAllR2ObjectsUnderPrefix(
   return allObjects;
 }
 
-export async function deleteR2Object(config: R2Config, key: string): Promise<void> {
-  return invoke('delete_r2_object', {
-    config: {
-      account_id: config.accountId,
-      bucket: config.bucket,
-      access_key_id: config.accessKeyId || '',
-      secret_access_key: config.secretAccessKey || '',
-    },
-    key,
-  });
+export async function deleteObject(config: StorageConfig, key: string): Promise<void> {
+  return getProviderAdapter(config).deleteObject(config, key);
 }
 
-export interface BatchDeleteResult {
-  deleted: number;
-  failed: number;
-  errors: string[];
-}
-
-export async function batchDeleteR2Objects(
-  config: R2Config,
+export async function batchDeleteObjects(
+  config: StorageConfig,
   keys: string[]
 ): Promise<BatchDeleteResult> {
-  return invoke('batch_delete_r2_objects', {
-    config: {
-      account_id: config.accountId,
-      bucket: config.bucket,
-      access_key_id: config.accessKeyId || '',
-      secret_access_key: config.secretAccessKey || '',
-    },
-    keys,
-  });
+  return getProviderAdapter(config).batchDeleteObjects(config, keys);
 }
 
-export async function renameR2Object(
-  config: R2Config,
+export async function renameObject(
+  config: StorageConfig,
   oldKey: string,
   newKey: string
 ): Promise<void> {
-  return invoke('rename_r2_object', {
-    config: {
-      account_id: config.accountId,
-      bucket: config.bucket,
-      access_key_id: config.accessKeyId || '',
-      secret_access_key: config.secretAccessKey || '',
-    },
-    oldKey,
-    newKey,
-  });
+  return getProviderAdapter(config).renameObject(config, oldKey, newKey);
 }
 
-export interface MoveOperation {
-  old_key: string;
-  new_key: string;
-}
-
-export interface BatchMoveResult {
-  moved: number;
-  failed: number;
-  errors: string[];
-}
-
-export async function batchMoveR2Objects(
-  config: R2Config,
+export async function batchMoveObjects(
+  config: StorageConfig,
   operations: MoveOperation[]
 ): Promise<BatchMoveResult> {
-  return invoke('batch_move_r2_objects', {
-    config: {
-      account_id: config.accountId,
-      bucket: config.bucket,
-      access_key_id: config.accessKeyId || '',
-      secret_access_key: config.secretAccessKey || '',
-    },
-    operations,
-  });
+  return getProviderAdapter(config).batchMoveObjects(config, operations);
 }
 
 export async function generateSignedUrl(
-  accountId: string,
-  bucket: string,
+  config: StorageConfig,
   key: string,
-  accessKeyId: string,
-  secretAccessKey: string,
   expiresIn: number = 3600
 ): Promise<string> {
-  return invoke('generate_signed_url', {
-    config: {
-      account_id: accountId,
-      bucket,
-      access_key_id: accessKeyId,
-      secret_access_key: secretAccessKey,
-    },
-    key,
-    expiresIn,
-  });
+  return getProviderAdapter(config).generateSignedUrl(config, key, expiresIn);
+}
+
+export async function uploadContent(
+  config: StorageConfig,
+  key: string,
+  content: string,
+  contentType?: string
+): Promise<string> {
+  return getProviderAdapter(config).uploadContent(config, key, content, contentType);
 }
 
 // ============ Sync Operation (consolidated) ============
 
-export interface SyncResult {
-  count: number;
-  timestamp: number;
+export async function syncBucket(config: StorageConfig): Promise<SyncResult> {
+  return getProviderAdapter(config).syncBucket(config);
 }
 
-export async function syncBucket(config: R2Config): Promise<SyncResult> {
-  return invoke('sync_bucket', {
-    config: {
-      account_id: config.accountId,
-      bucket: config.bucket,
-      access_key_id: config.accessKeyId || '',
-      secret_access_key: config.secretAccessKey || '',
-    },
-  });
+export function buildBucketBaseUrl(config: StorageConfig): string | null {
+  return getProviderAdapter(config).buildBucketBaseUrl(config);
+}
+
+export function buildPublicUrl(config: StorageConfig, key: string): string | null {
+  return getProviderAdapter(config).buildPublicUrl(config, key);
 }
 
 // ============ Folder Contents (from cache) ============
@@ -264,7 +157,7 @@ export async function getFolderContents(prefix: string = ''): Promise<FolderCont
 // ============ Cache Operations (replaces IndexedDB) ============
 
 /** @deprecated Use syncBucket() instead - files are now stored during sync */
-export async function storeAllFiles(files: R2Object[]): Promise<void> {
+export async function storeAllFiles(files: StorageObject[]): Promise<void> {
   return invoke('store_all_files', { files });
 }
 

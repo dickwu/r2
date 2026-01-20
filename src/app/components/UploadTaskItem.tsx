@@ -44,6 +44,14 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
   // Start upload when status changes to 'uploading'
   useEffect(() => {
     if (task.status !== 'uploading' || isUploadingRef.current || !config) return;
+    if (!config.accessKeyId || !config.secretAccessKey) return;
+    if (config.provider === 'aws' && !config.region) return;
+    if (
+      (config.provider === 'minio' || config.provider === 'rustfs') &&
+      (!config.endpointHost || !config.endpointScheme)
+    ) {
+      return;
+    }
 
     isUploadingRef.current = true;
 
@@ -67,15 +75,41 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
     });
 
     // Call Rust upload function
-    invoke<UploadResult>('upload_file', {
+    const command =
+      config.provider === 'r2'
+        ? 'upload_file'
+        : config.provider === 'aws'
+          ? 'upload_aws_file'
+          : config.provider === 'minio'
+            ? 'upload_minio_file'
+            : 'upload_rustfs_file';
+
+    const endpointScheme =
+      config.provider === 'minio' || config.provider === 'rustfs'
+        ? config.endpointScheme
+        : config.provider === 'aws'
+          ? config.endpointScheme ?? undefined
+          : undefined;
+    const endpointHost =
+      config.provider === 'minio' || config.provider === 'rustfs'
+        ? config.endpointHost
+        : config.provider === 'aws'
+          ? config.endpointHost ?? undefined
+          : undefined;
+
+    invoke<UploadResult>(command, {
       taskId: task.id,
       filePath: task.filePath,
       key,
       contentType: task.contentType,
       accountId: config.accountId,
       bucket: config.bucket,
-      accessKeyId: config.accessKeyId!,
-      secretAccessKey: config.secretAccessKey!,
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      region: config.provider === 'aws' ? config.region : undefined,
+      endpointScheme,
+      endpointHost,
+      forcePathStyle: config.provider === 'r2' ? undefined : config.forcePathStyle,
     })
       .then((result) => {
         if (result.success) {

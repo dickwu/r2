@@ -2,6 +2,7 @@
 
 use crate::db::{self, CachedDirectoryNode, CachedFile};
 use crate::r2;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
@@ -221,4 +222,34 @@ pub async fn get_folder_contents(prefix: Option<String>) -> Result<FolderContent
         files: result.files.into_iter().map(|f| f.into()).collect(),
         folders: result.folders,
     })
+}
+
+// ============ URL Fetch Command ============
+
+/// Fetch a URL and return the content as base64-encoded bytes.
+/// This bypasses Tauri HTTP plugin scope restrictions by using reqwest directly.
+#[tauri::command]
+pub async fn fetch_url_bytes(url: String) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch URL: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "HTTP {}: {}",
+            response.status().as_u16(),
+            response.status().canonical_reason().unwrap_or("Unknown error")
+        ));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    Ok(BASE64.encode(&bytes))
 }

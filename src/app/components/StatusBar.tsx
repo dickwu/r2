@@ -11,6 +11,8 @@ import {
   DownloadProgress,
 } from './status-bar-parts';
 
+import type { StorageConfig } from '../lib/r2cache';
+
 interface StatusBarProps {
   // Current view items
   totalItemsCount: number;
@@ -20,12 +22,7 @@ interface StatusBarProps {
   isLoadingFiles?: boolean;
 
   // Bucket info
-  currentConfig: {
-    account_id: string;
-    bucket: string;
-    public_domain?: string | null;
-    access_key_id?: string | null;
-  } | null;
+  storageConfig: StorageConfig | null;
 }
 
 export default function StatusBar({
@@ -34,7 +31,7 @@ export default function StatusBar({
   searchTotalCount = 0,
   hasConfig,
   isLoadingFiles = false,
-  currentConfig,
+  storageConfig,
 }: StatusBarProps) {
   return (
     <div className="status-bar">
@@ -50,14 +47,14 @@ export default function StatusBar({
         {hasConfig && <SyncProgress />}
         <BucketStats
           hasConfig={hasConfig}
-          accountId={currentConfig?.account_id}
-          bucket={currentConfig?.bucket}
+          accountId={storageConfig?.accountId}
+          bucket={storageConfig?.bucket}
         />
         {!isLoadingFiles && (
-          <DownloadProgress bucket={currentConfig?.bucket} accountId={currentConfig?.account_id} />
+          <DownloadProgress bucket={storageConfig?.bucket} accountId={storageConfig?.accountId} />
         )}
       </Space>
-      <DomainInfo currentConfig={currentConfig} />
+      <DomainInfo storageConfig={storageConfig} />
     </div>
   );
 }

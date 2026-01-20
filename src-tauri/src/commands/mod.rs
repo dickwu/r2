@@ -6,7 +6,13 @@
 
 mod file_cache;
 mod r2_commands;
+mod aws_commands;
+mod minio_commands;
+mod rustfs_commands;
 
 // Re-export all commands
 pub use file_cache::*;
 pub use r2_commands::*;
+pub use aws_commands::*;
+pub use minio_commands::*;
+pub use rustfs_commands::*;

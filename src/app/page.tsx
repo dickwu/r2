@@ -31,14 +31,15 @@ import BatchDeleteModal from './components/BatchDeleteModal';
 import BatchMoveModal from './components/BatchMoveModal';
 import SyncOverlay from './components/SyncOverlay';
 import DownloadTaskModal from './components/DownloadTaskModal';
-import { useAccountStore, Account, Token } from './stores/accountStore';
+import { useAccountStore, ProviderAccount, Token } from './stores/accountStore';
 import { useR2Files, FileItem } from './hooks/useR2Files';
 import { useFilesSync } from './hooks/useFilesSync';
 import {
-  deleteR2Object,
-  renameR2Object,
+  deleteObject,
+  renameObject,
   searchFiles,
-  listAllR2ObjectsUnderPrefix,
+  listAllObjectsUnderPrefix,
+  StorageConfig,
 } from './lib/r2cache';
 import { useFolderSizeStore } from './stores/folderSizeStore';
 import { useSyncStore } from './stores/syncStore';
@@ -55,12 +56,12 @@ export default function Home() {
   const initialized = useAccountStore((state) => state.initialized);
   const initialize = useAccountStore((state) => state.initialize);
   const hasAccounts = useAccountStore((state) => state.hasAccounts);
-  const toR2Config = useAccountStore((state) => state.toR2Config);
+  const toStorageConfig = useAccountStore((state) => state.toStorageConfig);
 
   // Modal state
   const [configModalOpen, setConfigModalOpen] = useState(false);
   const [configModalMode, setConfigModalMode] = useState<ModalMode>('add-account');
-  const [editAccount, setEditAccount] = useState<Account | null>(null);
+  const [editAccount, setEditAccount] = useState<ProviderAccount | null>(null);
   const [editToken, setEditToken] = useState<Token | null>(null);
   const [parentAccountId, setParentAccountId] = useState<string | undefined>();
 
@@ -102,19 +103,33 @@ export default function Home() {
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
 
-  // Convert to R2Config for hooks compatibility
-  const config = useMemo(() => toR2Config(), [currentConfig]);
+  const config = useMemo<StorageConfig | null>(() => toStorageConfig(), [currentConfig, toStorageConfig]);
+  const isConfigReady = useMemo(() => {
+    if (!config?.accountId || !config?.bucket) return false;
+    if (config.provider === 'r2') {
+      return !!config.accessKeyId && !!config.secretAccessKey;
+    }
+    if (config.provider === 'aws') {
+      return !!config.accessKeyId && !!config.secretAccessKey && !!config.region;
+    }
+    return (
+      !!config.accessKeyId &&
+      !!config.secretAccessKey &&
+      !!config.endpointHost &&
+      !!config.endpointScheme
+    );
+  }, [config]);
 
   // Reset path to root when bucket changes
   useEffect(() => {
     setCurrentPath('');
     setSearchQuery('');
     resetBatchOperation();
-  }, [currentConfig?.bucket, currentConfig?.token_id, resetBatchOperation]);
+  }, [currentConfig?.bucket, currentConfig?.account_id, currentConfig?.provider, resetBatchOperation]);
 
   // Load download tasks from database when bucket changes
   useEffect(() => {
-    if (!currentConfig?.bucket || !currentConfig?.account_id) return;
+    if (!config?.bucket || !config?.accountId) return;
 
     const loadDownloads = async () => {
       try {
@@ -134,8 +149,8 @@ export default function Home() {
             updated_at: number;
           }>
         >('get_download_tasks', {
-          bucket: currentConfig.bucket,
-          accountId: currentConfig.account_id,
+          bucket: config.bucket,
+          accountId: config.accountId,
         });
         loadDownloadsFromDatabase(sessions);
       } catch (e) {
@@ -144,7 +159,7 @@ export default function Home() {
     };
 
     loadDownloads();
-  }, [currentConfig?.bucket, currentConfig?.account_id, loadDownloadsFromDatabase]);
+  }, [config?.bucket, config?.accountId, loadDownloadsFromDatabase]);
 
   const { items, isLoading, isFetching, error, refresh } = useR2Files(config, currentPath);
   const { isSyncing, isSynced, lastSyncTime, refresh: refreshSync } = useFilesSync(config);
@@ -160,7 +175,7 @@ export default function Home() {
   // Clear folder sizes when bucket/token changes
   useEffect(() => {
     clearSizes();
-  }, [currentConfig?.bucket, currentConfig?.token_id, clearSizes]);
+  }, [currentConfig?.bucket, currentConfig?.account_id, currentConfig?.provider, clearSizes]);
 
   // Debounced bucket-wide search
   // lastSyncTime is included so search refreshes after file operations (delete/move/rename)
@@ -282,21 +297,28 @@ export default function Home() {
 
   // Start download queue via Rust backend
   const startDownloadQueue = useCallback(async () => {
-    if (!currentConfig?.access_key_id || !currentConfig?.secret_access_key) {
+    if (!config || !isConfigReady) {
       return;
     }
 
     try {
       await invoke('start_download_queue', {
-        bucket: currentConfig.bucket,
-        accountId: currentConfig.account_id,
-        accessKeyId: currentConfig.access_key_id,
-        secretAccessKey: currentConfig.secret_access_key,
+        config: {
+          provider: config.provider,
+          account_id: config.accountId,
+          bucket: config.bucket,
+          access_key_id: config.accessKeyId,
+          secret_access_key: config.secretAccessKey,
+          region: config.provider === 'aws' ? config.region : null,
+          endpoint_scheme: config.provider !== 'r2' ? config.endpointScheme : null,
+          endpoint_host: config.provider !== 'r2' ? config.endpointHost : null,
+          force_path_style: config.provider === 'r2' ? null : config.forcePathStyle,
+        },
       });
     } catch (e) {
       console.error('Failed to start download queue:', e);
     }
-  }, [currentConfig]);
+  }, [config, isConfigReady]);
 
   // Keep refs in sync so event listeners always call the latest versions
   const startDownloadQueueRef = useRef(startDownloadQueue);
@@ -411,7 +433,7 @@ export default function Home() {
     openAddAccountModal();
   }
 
-  function handleEditAccount(account: Account) {
+  function handleEditAccount(account: ProviderAccount) {
     setConfigModalMode('edit-account');
     setEditAccount(account);
     setEditToken(null);
@@ -441,14 +463,23 @@ export default function Home() {
       openAddAccountModal();
       return;
     }
-    // Find current token from accounts
-    const accountData = accounts.find((a) => a.account.id === currentConfig.account_id);
-    const tokenData = accountData?.tokens.find((t) => t.token.id === currentConfig.token_id);
-    if (tokenData) {
-      handleEditToken(tokenData.token);
-    } else {
+    const accountData = accounts.find(
+      (a) => a.account.id === currentConfig.account_id && a.provider === currentConfig.provider
+    );
+    if (!accountData) {
       openAddAccountModal();
+      return;
     }
+
+    if (currentConfig.provider === 'r2' && accountData.provider === 'r2') {
+      const tokenData = accountData.tokens.find((t) => t.token.id === currentConfig.token_id);
+      if (tokenData) {
+        handleEditToken(tokenData.token);
+        return;
+      }
+    }
+
+    handleEditAccount(accountData);
   }
 
   const handleItemClick = useCallback(
@@ -493,7 +524,7 @@ export default function Home() {
 
       // Expand each folder to its contained files
       for (const folderKey of folderKeys) {
-        const objects = await listAllR2ObjectsUnderPrefix(config, folderKey);
+        const objects = await listAllObjectsUnderPrefix(config, folderKey);
         for (const obj of objects) {
           fileKeys.add(obj.key);
         }
@@ -518,7 +549,7 @@ export default function Home() {
     async (item: FileItem) => {
       if (!config) return;
       try {
-        await deleteR2Object(config, item.key);
+        await deleteObject(config, item.key);
         message.success(`Deleted "${item.name}"`);
         // Refresh file list after deletion
         await Promise.all([refresh(), refreshSync()]);
@@ -535,7 +566,7 @@ export default function Home() {
       if (!config) return;
       try {
         message.loading({ content: 'Loading folder contents...', key: 'folder-delete' });
-        const objects = await listAllR2ObjectsUnderPrefix(config, item.key);
+        const objects = await listAllObjectsUnderPrefix(config, item.key);
         message.destroy('folder-delete');
 
         if (objects.length === 0) {
@@ -560,17 +591,11 @@ export default function Home() {
   // Download all files in a folder
   const handleFolderDownload = useCallback(
     async (item: FileItem) => {
-      if (!config || !item.isFolder || !currentConfig) return;
-
-      // Check if S3 credentials are available
-      if (!currentConfig.access_key_id || !currentConfig.secret_access_key) {
-        message.error('S3 credentials required for download');
-        return;
-      }
+      if (!config || !item.isFolder || !isConfigReady) return;
 
       try {
         message.loading({ content: 'Loading folder contents...', key: 'folder-download' });
-        const objects = await listAllR2ObjectsUnderPrefix(config, item.key);
+        const objects = await listAllObjectsUnderPrefix(config, item.key);
         message.destroy('folder-download');
 
         if (objects.length === 0) {
@@ -595,8 +620,8 @@ export default function Home() {
               fileName,
               fileSize,
               localPath: folder,
-              bucket: currentConfig.bucket,
-              accountId: currentConfig.account_id,
+              bucket: config.bucket,
+              accountId: config.accountId,
             });
           } catch (e) {
             console.error('Failed to create download task:', e);
@@ -624,7 +649,7 @@ export default function Home() {
         );
       }
     },
-    [config, currentConfig, message, addDownloadTask, startDownloadQueue]
+    [config, isConfigReady, message, addDownloadTask, startDownloadQueue]
   );
 
   const openBatchDeleteConfirm = useCallback(async () => {
@@ -692,13 +717,7 @@ export default function Home() {
   // Download single file
   const handleDownload = useCallback(
     async (item: FileItem) => {
-      if (!currentConfig || item.isFolder) return;
-
-      // Check if S3 credentials are available
-      if (!currentConfig.access_key_id || !currentConfig.secret_access_key) {
-        message.error('S3 credentials required for download');
-        return;
-      }
+      if (!config || item.isFolder || !isConfigReady) return;
 
       try {
         // Open folder picker dialog
@@ -715,8 +734,8 @@ export default function Home() {
           fileName: item.name,
           fileSize,
           localPath: folder,
-          bucket: currentConfig.bucket,
-          accountId: currentConfig.account_id,
+          bucket: config.bucket,
+          accountId: config.accountId,
         });
 
         // Add task to download store (as pending)
@@ -735,18 +754,12 @@ export default function Home() {
         message.error(`Failed to download: ${e instanceof Error ? e.message : 'Unknown error'}`);
       }
     },
-    [currentConfig, message, addDownloadTask, startDownloadQueue]
+    [config, isConfigReady, message, addDownloadTask, startDownloadQueue]
   );
 
   // Batch download selected files
   const handleBatchDownload = useCallback(async () => {
-    if (selectedKeys.size === 0 || !currentConfig) return;
-
-    // Check if S3 credentials are available
-    if (!currentConfig.access_key_id || !currentConfig.secret_access_key) {
-      message.error('S3 credentials required for download');
-      return;
-    }
+    if (selectedKeys.size === 0 || !config || !isConfigReady) return;
 
     try {
       // Expand folders to get all files
@@ -786,15 +799,15 @@ export default function Home() {
 
         // Create task in database first (Rust looks up file size from cache if 0)
         try {
-          await invoke('create_download_task', {
-            taskId,
-            objectKey: key,
-            fileName,
-            fileSize,
-            localPath: folder,
-            bucket: currentConfig.bucket,
-            accountId: currentConfig.account_id,
-          });
+            await invoke('create_download_task', {
+              taskId,
+              objectKey: key,
+              fileName,
+              fileSize,
+              localPath: folder,
+              bucket: config.bucket,
+              accountId: config.accountId,
+            });
         } catch (e) {
           console.error('Failed to create download task:', e);
           continue;
@@ -821,7 +834,8 @@ export default function Home() {
     }
   }, [
     selectedKeys,
-    currentConfig,
+    config,
+    isConfigReady,
     message,
     expandFolderKeys,
     filteredItems,
@@ -831,24 +845,9 @@ export default function Home() {
 
   const handleRename = useCallback(
     async (newPath: string) => {
-      if (!renameFile || !currentConfig) return;
+      if (!renameFile || !config || !isConfigReady) return;
 
-      // Check if S3 credentials are available
-      if (!currentConfig.access_key_id || !currentConfig.secret_access_key) {
-        throw new Error('S3 credentials required for rename/move operation');
-      }
-
-      // Perform rename using S3 API
-      await renameR2Object(
-        {
-          accountId: currentConfig.account_id,
-          bucket: currentConfig.bucket,
-          accessKeyId: currentConfig.access_key_id,
-          secretAccessKey: currentConfig.secret_access_key,
-        },
-        renameFile.key,
-        newPath
-      );
+      await renameObject(config, renameFile.key, newPath);
 
       // Close preview modal if the renamed file is currently being previewed
       if (previewFile?.key === renameFile.key) {
@@ -858,7 +857,7 @@ export default function Home() {
       // Refresh file list
       await Promise.all([refresh(), refreshSync()]);
     },
-    [renameFile, currentConfig, previewFile, refresh, refreshSync]
+    [renameFile, config, isConfigReady, previewFile, refresh, refreshSync]
   );
 
   function navigateToPath(path: string) {
@@ -1052,7 +1051,7 @@ export default function Home() {
                 onDownload={handleDownload}
                 onFolderDelete={handleFolderDelete}
                 onFolderDownload={handleFolderDownload}
-                publicDomain={config?.publicDomain}
+                storageConfig={config}
                 folderSizes={metadata}
                 selectedKeys={selectedKeys}
                 onToggleSelection={toggleSelection}
@@ -1068,7 +1067,7 @@ export default function Home() {
             searchTotalCount={searchTotalCount}
             hasConfig={!!config}
             isLoadingFiles={isLoading || isSyncing}
-            currentConfig={currentConfig}
+            storageConfig={config}
           />
 
           <ConfigModal
@@ -1098,11 +1097,7 @@ export default function Home() {
             open={!!previewFile}
             onClose={() => setPreviewFile(null)}
             file={previewFile}
-            publicDomain={config?.publicDomain}
-            accountId={config?.accountId}
-            bucket={config?.bucket}
-            accessKeyId={config?.accessKeyId}
-            secretAccessKey={config?.secretAccessKey}
+            config={config}
             onCredentialsUpdate={() => {
               // Credentials are now managed through the store
               initialize();
@@ -1135,7 +1130,7 @@ export default function Home() {
             onMovingChange={setMoving}
           />
 
-          <DownloadTaskModal currentConfig={currentConfig} />
+          <DownloadTaskModal storageConfig={config} />
         </div>
       </div>
     </div>

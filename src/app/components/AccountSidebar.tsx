@@ -13,6 +13,7 @@ import {
   Divider,
   Space,
   Typography,
+  Tag,
 } from 'antd';
 import type { MenuProps } from 'antd';
 import {
@@ -28,7 +29,16 @@ import {
   RightOutlined,
   MenuFoldOutlined,
 } from '@ant-design/icons';
-import { useAccountStore, Account, Token, AccountWithTokens } from '../stores/accountStore';
+import {
+  useAccountStore,
+  Account,
+  Token,
+  ProviderAccount,
+  AwsAccount,
+  MinioAccount,
+  AwsBucket,
+  MinioBucket,
+} from '../stores/accountStore';
 
 const { Text } = Typography;
 
@@ -36,7 +46,7 @@ const SIDEBAR_COLLAPSED_KEY = 'account-sidebar-collapsed';
 
 interface AccountSidebarProps {
   onAddAccount: () => void;
-  onEditAccount: (account: Account) => void;
+  onEditAccount: (account: ProviderAccount) => void;
   onAddToken: (accountId: string) => void;
   onEditToken: (token: Token) => void;
 }
@@ -50,12 +60,18 @@ export default function AccountSidebar({
   const accounts = useAccountStore((state) => state.accounts);
   const currentConfig = useAccountStore((state) => state.currentConfig);
   const loading = useAccountStore((state) => state.loading);
-  const selectBucket = useAccountStore((state) => state.selectBucket);
+  const selectR2Bucket = useAccountStore((state) => state.selectR2Bucket);
+  const selectAwsBucket = useAccountStore((state) => state.selectAwsBucket);
+  const selectMinioBucket = useAccountStore((state) => state.selectMinioBucket);
+  const selectRustfsBucket = useAccountStore((state) => state.selectRustfsBucket);
   const deleteAccount = useAccountStore((state) => state.deleteAccount);
+  const deleteAwsAccount = useAccountStore((state) => state.deleteAwsAccount);
+  const deleteMinioAccount = useAccountStore((state) => state.deleteMinioAccount);
+  const deleteRustfsAccount = useAccountStore((state) => state.deleteRustfsAccount);
   const deleteToken = useAccountStore((state) => state.deleteToken);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [selectedAccount, setSelectedAccount] = useState<AccountWithTokens | null>(null);
+  const [selectedAccount, setSelectedAccount] = useState<ProviderAccount | null>(null);
   const [collapsed, setCollapsed] = useState(() => {
     if (typeof window !== 'undefined') {
       const stored = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
@@ -81,14 +97,26 @@ export default function AccountSidebar({
     localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(value));
   }
 
-  function handleAccountClick(accountData: AccountWithTokens) {
+  function handleAccountClick(accountData: ProviderAccount) {
     setSelectedAccount(accountData);
     setDrawerOpen(true);
   }
 
-  async function handleSelectBucket(tokenId: number, bucketName: string) {
+  async function handleSelectBucket(
+    provider: ProviderAccount['provider'],
+    id: string | number,
+    bucketName: string
+  ) {
     try {
-      await selectBucket(tokenId, bucketName);
+      if (provider === 'r2') {
+        await selectR2Bucket(id as number, bucketName);
+      } else if (provider === 'aws') {
+        await selectAwsBucket(id as string, bucketName);
+      } else if (provider === 'minio') {
+        await selectMinioBucket(id as string, bucketName);
+      } else {
+        await selectRustfsBucket(id as string, bucketName);
+      }
       message.success(`Switched to ${bucketName}`);
       setDrawerOpen(false);
     } catch {
@@ -96,7 +124,7 @@ export default function AccountSidebar({
     }
   }
 
-  async function handleDeleteAccount(accountId: string) {
+  async function handleDeleteAccount(account: ProviderAccount) {
     modal.confirm({
       title: 'Delete Account',
       content:
@@ -105,9 +133,17 @@ export default function AccountSidebar({
       okButtonProps: { danger: true },
       onOk: async () => {
         try {
-          await deleteAccount(accountId);
+          if (account.provider === 'r2') {
+            await deleteAccount(account.account.id);
+          } else if (account.provider === 'aws') {
+            await deleteAwsAccount(account.account.id);
+          } else if (account.provider === 'minio') {
+            await deleteMinioAccount(account.account.id);
+          } else {
+            await deleteRustfsAccount(account.account.id);
+          }
           message.success('Account deleted');
-          if (selectedAccount?.account.id === accountId) {
+          if (selectedAccount?.account.id === account.account.id) {
             setDrawerOpen(false);
             setSelectedAccount(null);
           }
@@ -136,38 +172,44 @@ export default function AccountSidebar({
     });
   }
 
-  function getAccountContextMenu(account: Account): MenuProps['items'] {
-    return [
+  function getAccountContextMenu(accountData: ProviderAccount): MenuProps['items'] {
+    const items: MenuProps['items'] = [
       {
         key: 'edit',
         label: 'Edit Account',
         icon: <EditOutlined />,
         onClick: (e) => {
           e.domEvent.stopPropagation();
-          onEditAccount(account);
+          onEditAccount(accountData);
         },
       },
-      {
+    ];
+
+    if (accountData.provider === 'r2') {
+      items.push({
         key: 'add-token',
         label: 'Add Token',
         icon: <PlusOutlined />,
         onClick: (e) => {
           e.domEvent.stopPropagation();
-          onAddToken(account.id);
+          onAddToken(accountData.account.id);
         },
+      });
+    }
+
+    items.push({ type: 'divider' });
+    items.push({
+      key: 'delete',
+      label: 'Delete Account',
+      icon: <DeleteOutlined />,
+      danger: true,
+      onClick: (e) => {
+        e.domEvent.stopPropagation();
+        handleDeleteAccount(accountData);
       },
-      { type: 'divider' },
-      {
-        key: 'delete',
-        label: 'Delete Account',
-        icon: <DeleteOutlined />,
-        danger: true,
-        onClick: (e) => {
-          e.domEvent.stopPropagation();
-          handleDeleteAccount(account.id);
-        },
-      },
-    ];
+    });
+
+    return items;
   }
 
   function getTokenContextMenu(token: Token): MenuProps['items'] {
@@ -192,9 +234,21 @@ export default function AccountSidebar({
   // Build menu items for accounts
   const menuItems: MenuProps['items'] = accounts.map((accountData) => {
     const account = accountData.account;
-    const isCurrentAccount = currentConfig?.account_id === account.id;
-    const tokenCount = accountData.tokens.length;
-    const bucketCount = accountData.tokens.reduce((sum, t) => sum + t.buckets.length, 0);
+    const isCurrentAccount =
+      currentConfig?.account_id === account.id && currentConfig?.provider === accountData.provider;
+    const tokenCount = accountData.provider === 'r2' ? accountData.tokens.length : 0;
+    const bucketCount =
+      accountData.provider === 'r2'
+        ? accountData.tokens.reduce((sum, t) => sum + t.buckets.length, 0)
+        : accountData.buckets.length;
+    const providerLabel =
+      accountData.provider === 'r2'
+        ? 'R2'
+        : accountData.provider === 'aws'
+          ? 'AWS'
+          : accountData.provider === 'minio'
+            ? 'MinIO'
+            : 'RustFS';
 
     return {
       key: account.id,
@@ -205,14 +259,30 @@ export default function AccountSidebar({
             <span className="account-menu-name">
               {account.name || account.id.slice(0, 12) + '...'}
             </span>
+            <Tag
+              color={
+                accountData.provider === 'r2'
+                  ? 'blue'
+                  : accountData.provider === 'aws'
+                    ? 'gold'
+                    : accountData.provider === 'minio'
+                      ? 'cyan'
+                      : 'purple'
+              }
+              style={{ marginInlineStart: 6 }}
+            >
+              {providerLabel}
+            </Tag>
             <Text type="secondary" className="account-menu-meta">
-              {tokenCount} token{tokenCount !== 1 ? 's' : ''}, {bucketCount} bucket
-              {bucketCount !== 1 ? 's' : ''}
+              {tokenCount > 0
+                ? `${tokenCount} token${tokenCount !== 1 ? 's' : ''}, `
+                : ''}
+              {bucketCount} bucket{bucketCount !== 1 ? 's' : ''}
             </Text>
           </div>
           <Space size={4}>
             {isCurrentAccount && <CheckCircleFilled className="current-indicator" />}
-            <Dropdown menu={{ items: getAccountContextMenu(account) }} trigger={['click']}>
+            <Dropdown menu={{ items: getAccountContextMenu(accountData) }} trigger={['click']}>
               <Button
                 type="text"
                 size="small"
@@ -287,11 +357,24 @@ export default function AccountSidebar({
         <div className="sidebar-collapsed-content">
           {accounts.map((accountData) => {
             const account = accountData.account;
-            const isCurrentAccount = currentConfig?.account_id === account.id;
-            const tokenCount = accountData.tokens.length;
-            const bucketCount = accountData.tokens.reduce((sum, t) => sum + t.buckets.length, 0);
+            const isCurrentAccount =
+              currentConfig?.account_id === account.id &&
+              currentConfig?.provider === accountData.provider;
+            const tokenCount = accountData.provider === 'r2' ? accountData.tokens.length : 0;
+            const bucketCount =
+              accountData.provider === 'r2'
+                ? accountData.tokens.reduce((sum, t) => sum + t.buckets.length, 0)
+                : accountData.buckets.length;
             const displayName = account.name || account.id.slice(0, 12);
             const shortName = displayName.slice(0, 3).toUpperCase();
+            const providerLabel =
+              accountData.provider === 'r2'
+                ? 'R2'
+                : accountData.provider === 'aws'
+                  ? 'AWS'
+                  : accountData.provider === 'minio'
+                    ? 'MinIO'
+                    : 'RustFS';
 
             return (
               <Tooltip
@@ -300,8 +383,11 @@ export default function AccountSidebar({
                   <div>
                     <div style={{ fontWeight: 500 }}>{displayName}</div>
                     <div style={{ fontSize: 12, opacity: 0.8 }}>
-                      {tokenCount} token{tokenCount !== 1 ? 's' : ''}, {bucketCount} bucket
-                      {bucketCount !== 1 ? 's' : ''}
+                      {providerLabel} ·{' '}
+                      {tokenCount > 0
+                        ? `${tokenCount} token${tokenCount !== 1 ? 's' : ''}, `
+                        : ''}
+                      {bucketCount} bucket{bucketCount !== 1 ? 's' : ''}
                     </div>
                   </div>
                 }
@@ -347,6 +433,27 @@ export default function AccountSidebar({
             <span>
               {selectedAccount?.account.name || selectedAccount?.account.id.slice(0, 12) + '...'}
             </span>
+            {selectedAccount && (
+              <Tag
+                color={
+                  selectedAccount.provider === 'r2'
+                    ? 'blue'
+                    : selectedAccount.provider === 'aws'
+                      ? 'gold'
+                      : selectedAccount.provider === 'minio'
+                        ? 'cyan'
+                        : 'purple'
+                }
+              >
+                {selectedAccount.provider === 'r2'
+                  ? 'R2'
+                  : selectedAccount.provider === 'aws'
+                    ? 'AWS'
+                    : selectedAccount.provider === 'minio'
+                      ? 'MinIO'
+                      : 'RustFS'}
+              </Tag>
+            )}
           </Space>
         }
         placement="right"
@@ -355,85 +462,133 @@ export default function AccountSidebar({
         size={320}
         push={false}
         extra={
-          <Button
-            type="text"
-            size="small"
-            icon={<PlusOutlined />}
-            onClick={() => {
-              if (selectedAccount) {
-                onAddToken(selectedAccount.account.id);
-              }
-            }}
-          >
-            Add Token
-          </Button>
-        }
-      >
-        {selectedAccount?.tokens.length === 0 ? (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No tokens">
+          selectedAccount?.provider === 'r2' ? (
             <Button
-              type="primary"
+              type="text"
+              size="small"
               icon={<PlusOutlined />}
-              onClick={() => onAddToken(selectedAccount.account.id)}
+              onClick={() => {
+                if (selectedAccount) {
+                  onAddToken(selectedAccount.account.id);
+                }
+              }}
             >
               Add Token
             </Button>
-          </Empty>
-        ) : (
-          selectedAccount?.tokens.map((tokenData, index) => {
-            const token = tokenData.token;
-            const isCurrentToken = currentConfig?.token_id === token.id;
+          ) : null
+        }
+      >
+        {selectedAccount?.provider === 'r2' ? (
+          selectedAccount.tokens.length === 0 ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No tokens">
+              <Button
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={() => onAddToken(selectedAccount.account.id)}
+              >
+                Add Token
+              </Button>
+            </Empty>
+          ) : (
+            selectedAccount.tokens.map((tokenData, index) => {
+              const token = tokenData.token;
+              const isCurrentToken =
+                currentConfig?.provider === 'r2' && currentConfig?.token_id === token.id;
 
-            return (
-              <div key={token.id}>
-                {index > 0 && <Divider style={{ margin: '16px 0' }} />}
+              return (
+                <div key={token.id}>
+                  {index > 0 && <Divider style={{ margin: '16px 0' }} />}
 
-                {/* Token Header */}
-                <div className="drawer-token-header">
-                  <div className="drawer-token-info">
-                    <KeyOutlined className="drawer-token-icon" />
-                    <span className="drawer-token-name">{token.name || 'Unnamed Token'}</span>
-                    {isCurrentToken && <CheckCircleFilled className="current-indicator" />}
+                  <div className="drawer-token-header">
+                    <div className="drawer-token-info">
+                      <KeyOutlined className="drawer-token-icon" />
+                      <span className="drawer-token-name">{token.name || 'Unnamed Token'}</span>
+                      {isCurrentToken && <CheckCircleFilled className="current-indicator" />}
+                    </div>
+                    <Dropdown menu={{ items: getTokenContextMenu(token) }} trigger={['click']}>
+                      <Button type="text" size="small" icon={<MoreOutlined />} />
+                    </Dropdown>
                   </div>
-                  <Dropdown menu={{ items: getTokenContextMenu(token) }} trigger={['click']}>
-                    <Button type="text" size="small" icon={<MoreOutlined />} />
-                  </Dropdown>
-                </div>
 
-                {/* Buckets */}
-                <div className="drawer-buckets">
-                  {tokenData.buckets.map((bucket) => {
-                    const isCurrentBucket = isCurrentToken && currentConfig?.bucket === bucket.name;
+                  <div className="drawer-buckets">
+                    {tokenData.buckets.map((bucket) => {
+                      const isCurrentBucket =
+                        isCurrentToken && currentConfig?.bucket === bucket.name;
 
-                    return (
-                      <Tooltip
-                        key={bucket.name}
-                        title={bucket.public_domain ? `https://${bucket.public_domain}` : null}
-                        placement="right"
-                      >
-                        <div
-                          className={`drawer-bucket-item ${isCurrentBucket ? 'current' : ''}`}
-                          onClick={() => handleSelectBucket(token.id, bucket.name)}
+                      return (
+                        <Tooltip
+                          key={bucket.name}
+                          title={
+                            bucket.public_domain
+                              ? `${bucket.public_domain_scheme || 'https'}://${bucket.public_domain}`
+                              : null
+                          }
+                          placement="right"
                         >
-                          <DatabaseOutlined className="drawer-bucket-icon" />
-                          <span className="drawer-bucket-name">{bucket.name}</span>
-                          {isCurrentBucket && (
-                            <CheckCircleFilled className="current-indicator active" />
-                          )}
-                        </div>
-                      </Tooltip>
-                    );
-                  })}
-                  {tokenData.buckets.length === 0 && (
-                    <Text type="secondary" style={{ padding: '8px 12px', display: 'block' }}>
-                      No buckets configured
-                    </Text>
-                  )}
+                          <div
+                            className={`drawer-bucket-item ${isCurrentBucket ? 'current' : ''}`}
+                            onClick={() => handleSelectBucket('r2', token.id, bucket.name)}
+                          >
+                            <DatabaseOutlined className="drawer-bucket-icon" />
+                            <span className="drawer-bucket-name">{bucket.name}</span>
+                            {isCurrentBucket && (
+                              <CheckCircleFilled className="current-indicator active" />
+                            )}
+                          </div>
+                        </Tooltip>
+                      );
+                    })}
+                    {tokenData.buckets.length === 0 && (
+                      <Text type="secondary" style={{ padding: '8px 12px', display: 'block' }}>
+                        No buckets configured
+                      </Text>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })
-        )}
+              );
+            })
+          )
+        ) : selectedAccount ? (
+          <div className="drawer-buckets">
+            {selectedAccount.buckets.map((bucket) => {
+              const isCurrentBucket =
+                currentConfig?.provider === selectedAccount.provider &&
+                currentConfig?.account_id === selectedAccount.account.id &&
+                currentConfig?.bucket === bucket.name;
+
+              return (
+                <Tooltip
+                  key={bucket.name}
+                  title={
+                    (selectedAccount.provider === 'r2' || selectedAccount.provider === 'aws') &&
+                    bucket.public_domain_host
+                      ? `${bucket.public_domain_scheme || 'https'}://${bucket.public_domain_host}`
+                      : null
+                  }
+                  placement="right"
+                >
+                  <div
+                    className={`drawer-bucket-item ${isCurrentBucket ? 'current' : ''}`}
+                    onClick={() =>
+                      handleSelectBucket(selectedAccount.provider, selectedAccount.account.id, bucket.name)
+                    }
+                  >
+                    <DatabaseOutlined className="drawer-bucket-icon" />
+                    <span className="drawer-bucket-name">{bucket.name}</span>
+                    {isCurrentBucket && (
+                      <CheckCircleFilled className="current-indicator active" />
+                    )}
+                  </div>
+                </Tooltip>
+              );
+            })}
+            {selectedAccount.buckets.length === 0 && (
+              <Text type="secondary" style={{ padding: '8px 12px', display: 'block' }}>
+                No buckets configured
+              </Text>
+            )}
+          </div>
+        ) : null}
       </Drawer>
     </div>
   );
@@ -447,4 +602,9 @@ export type {
   TokenWithBuckets,
   AccountWithTokens,
   CurrentConfig,
+  AwsAccount,
+  MinioAccount,
+  AwsBucket,
+  MinioBucket,
+  ProviderAccount,
 } from '../stores/accountStore';

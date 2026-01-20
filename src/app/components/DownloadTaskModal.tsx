@@ -15,17 +15,13 @@ import {
   DownloadTask,
 } from '../stores/downloadStore';
 import DownloadTaskItem from './DownloadTaskItem';
+import type { StorageConfig } from '../lib/r2cache';
 
 interface DownloadTaskModalProps {
-  currentConfig?: {
-    account_id: string;
-    bucket: string;
-    access_key_id?: string | null;
-    secret_access_key?: string | null;
-  } | null;
+  storageConfig?: StorageConfig | null;
 }
 
-export default function DownloadTaskModal({ currentConfig }: DownloadTaskModalProps) {
+export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalProps) {
   const tasks = useDownloadStore((state) => state.tasks);
   const modalOpen = useDownloadStore((state) => state.modalOpen);
   const setModalOpen = useDownloadStore((state) => state.setModalOpen);
@@ -68,12 +64,12 @@ export default function DownloadTaskModal({ currentConfig }: DownloadTaskModalPr
   // Reload tasks from database (only used on modal open for initial sync)
   const reloadTasksFromDatabase = useCallback(
     async (showLoading = false) => {
-      if (!currentConfig?.bucket || !currentConfig?.account_id) return;
+      if (!storageConfig?.bucket || !storageConfig?.accountId) return;
       if (showLoading) setLoading(true);
       try {
         const sessions = await invoke<DownloadSession[]>('get_download_tasks', {
-          bucket: currentConfig.bucket,
-          accountId: currentConfig.account_id,
+          bucket: storageConfig.bucket,
+          accountId: storageConfig.accountId,
         });
         loadFromDatabase(sessions);
       } catch (e) {
@@ -82,15 +78,15 @@ export default function DownloadTaskModal({ currentConfig }: DownloadTaskModalPr
         if (showLoading) setLoading(false);
       }
     },
-    [currentConfig?.bucket, currentConfig?.account_id, loadFromDatabase]
+    [storageConfig?.bucket, storageConfig?.accountId, loadFromDatabase]
   );
 
   // Reload tasks from database when modal opens
   useEffect(() => {
-    if (modalOpen && currentConfig?.bucket && currentConfig?.account_id) {
+    if (modalOpen && storageConfig?.bucket && storageConfig?.accountId) {
       reloadTasksFromDatabase(true);
     }
-  }, [modalOpen, reloadTasksFromDatabase]);
+  }, [modalOpen, reloadTasksFromDatabase, storageConfig?.bucket, storageConfig?.accountId]);
 
   const handleClose = () => {
     setModalOpen(false);
@@ -98,12 +94,12 @@ export default function DownloadTaskModal({ currentConfig }: DownloadTaskModalPr
 
   // Pause all downloads via Rust backend
   const handlePauseAll = async () => {
-    if (!currentConfig?.bucket || !currentConfig?.account_id) return;
+    if (!storageConfig?.bucket || !storageConfig?.accountId) return;
 
     try {
       const count = await invoke<number>('pause_all_downloads', {
-        bucket: currentConfig.bucket,
-        accountId: currentConfig.account_id,
+        bucket: storageConfig.bucket,
+        accountId: storageConfig.accountId,
       });
       // Reload immediately to update UI - don't rely solely on async event
       await reloadTasksFromDatabase();
@@ -116,17 +112,31 @@ export default function DownloadTaskModal({ currentConfig }: DownloadTaskModalPr
 
   // Start/resume all paused and pending downloads via Rust backend
   const handleStartAll = async () => {
-    if (!currentConfig?.access_key_id || !currentConfig?.secret_access_key) {
+    if (
+      !storageConfig?.accessKeyId ||
+      !storageConfig?.secretAccessKey ||
+      (storageConfig.provider === 'aws' && !storageConfig.region) ||
+      ((storageConfig.provider === 'minio' || storageConfig.provider === 'rustfs') &&
+        (!storageConfig.endpointHost || !storageConfig.endpointScheme))
+    ) {
       message.error('S3 credentials required to start downloads');
       return;
     }
 
     try {
       const resumedCount = await invoke<number>('start_all_downloads', {
-        bucket: currentConfig.bucket,
-        accountId: currentConfig.account_id,
-        accessKeyId: currentConfig.access_key_id,
-        secretAccessKey: currentConfig.secret_access_key,
+        config: {
+          provider: storageConfig.provider,
+          account_id: storageConfig.accountId,
+          bucket: storageConfig.bucket,
+          access_key_id: storageConfig.accessKeyId,
+          secret_access_key: storageConfig.secretAccessKey,
+          region: storageConfig.provider === 'aws' ? storageConfig.region : null,
+          endpoint_scheme: storageConfig.provider !== 'r2' ? storageConfig.endpointScheme : null,
+          endpoint_host: storageConfig.provider !== 'r2' ? storageConfig.endpointHost : null,
+          force_path_style:
+            storageConfig.provider === 'r2' ? null : storageConfig.forcePathStyle,
+        },
       });
       // Reload immediately to update UI - don't rely solely on async event
       await reloadTasksFromDatabase();
@@ -143,7 +153,13 @@ export default function DownloadTaskModal({ currentConfig }: DownloadTaskModalPr
 
   // Resume a single paused download (events will update UI)
   const handleResume = async (taskId: string) => {
-    if (!currentConfig?.access_key_id || !currentConfig?.secret_access_key) {
+    if (
+      !storageConfig?.accessKeyId ||
+      !storageConfig?.secretAccessKey ||
+      (storageConfig.provider === 'aws' && !storageConfig.region) ||
+      ((storageConfig.provider === 'minio' || storageConfig.provider === 'rustfs') &&
+        (!storageConfig.endpointHost || !storageConfig.endpointScheme))
+    ) {
       message.error('S3 credentials required to resume download');
       return;
     }
@@ -154,10 +170,18 @@ export default function DownloadTaskModal({ currentConfig }: DownloadTaskModalPr
 
       // Start download queue to pick up this task
       await invoke('start_download_queue', {
-        bucket: currentConfig.bucket,
-        accountId: currentConfig.account_id,
-        accessKeyId: currentConfig.access_key_id,
-        secretAccessKey: currentConfig.secret_access_key,
+        config: {
+          provider: storageConfig.provider,
+          account_id: storageConfig.accountId,
+          bucket: storageConfig.bucket,
+          access_key_id: storageConfig.accessKeyId,
+          secret_access_key: storageConfig.secretAccessKey,
+          region: storageConfig.provider === 'aws' ? storageConfig.region : null,
+          endpoint_scheme: storageConfig.provider !== 'r2' ? storageConfig.endpointScheme : null,
+          endpoint_host: storageConfig.provider !== 'r2' ? storageConfig.endpointHost : null,
+          force_path_style:
+            storageConfig.provider === 'r2' ? null : storageConfig.forcePathStyle,
+        },
       });
       // UI will update via download-status-changed events
     } catch (e) {
@@ -168,12 +192,12 @@ export default function DownloadTaskModal({ currentConfig }: DownloadTaskModalPr
 
   // Clear finished tasks via Rust backend
   const handleClearFinished = async () => {
-    if (!currentConfig?.bucket || !currentConfig?.account_id) return;
+    if (!storageConfig?.bucket || !storageConfig?.accountId) return;
 
     try {
       await invoke('clear_finished_downloads', {
-        bucket: currentConfig.bucket,
-        accountId: currentConfig.account_id,
+        bucket: storageConfig.bucket,
+        accountId: storageConfig.accountId,
       });
       // Reload immediately to update UI
       await reloadTasksFromDatabase();
@@ -186,12 +210,12 @@ export default function DownloadTaskModal({ currentConfig }: DownloadTaskModalPr
   // Clear all tasks via Rust backend
   const handleClearAll = async () => {
     if (hasActiveDownloads) return;
-    if (!currentConfig?.bucket || !currentConfig?.account_id) return;
+    if (!storageConfig?.bucket || !storageConfig?.accountId) return;
 
     try {
       await invoke('clear_all_downloads', {
-        bucket: currentConfig.bucket,
-        accountId: currentConfig.account_id,
+        bucket: storageConfig.bucket,
+        accountId: storageConfig.accountId,
       });
       // Reload immediately to update UI
       await reloadTasksFromDatabase();
@@ -225,7 +249,6 @@ export default function DownloadTaskModal({ currentConfig }: DownloadTaskModalPr
             key={task.id}
             task={task}
             onResume={() => handleResume(task.id)}
-            currentConfig={currentConfig}
           />
         )}
       />

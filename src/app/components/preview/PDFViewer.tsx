@@ -4,7 +4,7 @@ import { useEffect, useState, useRef, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { Button, Space, Spin } from 'antd';
 import { LeftOutlined, RightOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
-import { fetch } from '@tauri-apps/plugin-http';
+import { invoke } from '@tauri-apps/api/core';
 import DownloadProgress from './DownloadProgress';
 import { useThemeStore } from '../../stores/themeStore';
 import 'react-pdf/dist/Page/TextLayer.css';
@@ -111,7 +111,7 @@ export default function PDFViewer({
     return () => observer.disconnect();
   }, [numPages, showAllPages, currentPage]);
 
-  // Fetch PDF via Tauri HTTP to bypass CORS with progress tracking
+  // Fetch PDF via Tauri backend to bypass HTTP scope restrictions
   useEffect(() => {
     if (!url) {
       setPdfData(null);
@@ -125,53 +125,22 @@ export default function PDFViewer({
     setCurrentPage(1);
     setDownloadProgress({ loaded: 0, total: null });
 
-    const fetchWithProgress = async () => {
+    const fetchPdf = async () => {
       try {
-        const response = await fetch(url);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        // Use Tauri command to fetch PDF bytes (returns base64-encoded string)
+        const base64Data = await invoke<string>('fetch_url_bytes', { url });
+
+        if (cancelled) return;
+
+        // Decode base64 to Uint8Array
+        const binaryString = atob(base64Data);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
         }
 
-        const contentLength = response.headers.get('content-length');
-        const total = contentLength ? parseInt(contentLength, 10) : null;
-
-        if (!response.body) {
-          // Fallback if no streaming body
-          const buffer = await response.arrayBuffer();
-          if (!cancelled) {
-            setPdfData(new Uint8Array(buffer));
-          }
-          return;
-        }
-
-        // Stream the response for progress tracking
-        const reader = response.body.getReader();
-        const chunks: Uint8Array[] = [];
-        let loaded = 0;
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (cancelled) {
-            reader.cancel();
-            return;
-          }
-
-          chunks.push(value);
-          loaded += value.length;
-          setDownloadProgress({ loaded, total });
-        }
-
-        if (!cancelled) {
-          // Combine chunks into single Uint8Array
-          const combined = new Uint8Array(loaded);
-          let offset = 0;
-          for (const chunk of chunks) {
-            combined.set(chunk, offset);
-            offset += chunk.length;
-          }
-          setPdfData(combined);
-        }
+        setDownloadProgress({ loaded: bytes.length, total: bytes.length });
+        setPdfData(bytes);
       } catch (err) {
         if (!cancelled) {
           console.error('Failed to fetch PDF:', err);
@@ -186,7 +155,7 @@ export default function PDFViewer({
       }
     };
 
-    fetchWithProgress();
+    fetchPdf();
 
     return () => {
       cancelled = true;

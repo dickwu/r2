@@ -1,7 +1,8 @@
 //! Download worker - internal download logic with streaming and progress tracking
 
 use crate::db::{self, DownloadSession};
-use crate::r2::{generate_presigned_url, R2Config};
+use crate::providers::{aws, minio, rustfs};
+use crate::r2::R2Config;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,6 +15,14 @@ use tokio::sync::Mutex;
 
 use super::types::{DownloadProgress, DownloadStatusChanged, MAX_CONCURRENT_DOWNLOADS};
 
+#[derive(Debug, Clone)]
+pub(crate) enum DownloadConfig {
+    R2(R2Config),
+    Aws(aws::AwsConfig),
+    Minio(minio::MinioConfig),
+    Rustfs(rustfs::RustfsConfig),
+}
+
 /// Write buffer size for downloads (2 MB) - reduces I/O operations
 const WRITE_BUFFER_SIZE: usize = 2 * 1024 * 1024;
 
@@ -23,10 +32,10 @@ lazy_static::lazy_static! {
     pub(crate) static ref DOWNLOAD_PAUSE_REGISTRY: Mutex<HashMap<String, Arc<AtomicBool>>> = Mutex::new(HashMap::new());
 }
 
-/// Download a single file from R2 with streaming and progress (internal)
+/// Download a single file with streaming and progress (internal)
 pub(crate) async fn download_file_internal(
     client: &Client,
-    config: &R2Config,
+    config: &DownloadConfig,
     key: &str,
     destination: &PathBuf,
     task_id: &str,
@@ -48,9 +57,28 @@ pub(crate) async fn download_file_internal(
     );
 
     // Generate presigned URL for the object (fresh URL every time)
-    let presigned_url: String = generate_presigned_url(config, key, 3600)
-        .await
-        .map_err(|e| format!("Failed to generate presigned URL: {}", e))?;
+    let presigned_url: String = match config {
+        DownloadConfig::R2(cfg) => {
+            crate::r2::generate_presigned_url(cfg, key, 3600)
+                .await
+                .map_err(|e| format!("Failed to generate presigned URL: {}", e))?
+        }
+        DownloadConfig::Aws(cfg) => {
+            aws::generate_presigned_url(cfg, key, 3600)
+                .await
+                .map_err(|e| format!("Failed to generate presigned URL: {}", e))?
+        }
+        DownloadConfig::Minio(cfg) => {
+            minio::generate_presigned_url(cfg, key, 3600)
+                .await
+                .map_err(|e| format!("Failed to generate presigned URL: {}", e))?
+        }
+        DownloadConfig::Rustfs(cfg) => {
+            rustfs::generate_presigned_url(cfg, key, 3600)
+                .await
+                .map_err(|e| format!("Failed to generate presigned URL: {}", e))?
+        }
+    };
 
     // Check if we should resume from existing partial file
     let existing_bytes = if destination.exists() {
@@ -311,7 +339,7 @@ pub(crate) async fn download_file_internal(
 }
 
 /// Spawn a download task
-pub(crate) async fn spawn_download_task(app: AppHandle, session: DownloadSession, config: R2Config) {
+pub(crate) async fn spawn_download_task(app: AppHandle, session: DownloadSession, config: DownloadConfig) {
     let task_id = session.id.clone();
 
     // Register cancel and pause flags

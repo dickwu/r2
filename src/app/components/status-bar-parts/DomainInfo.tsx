@@ -1,25 +1,23 @@
 'use client';
 
+import { buildBucketBaseUrl, StorageConfig } from '../../lib/r2cache';
+
 interface DomainInfoProps {
-  currentConfig: {
-    account_id: string;
-    public_domain?: string | null;
-    access_key_id?: string | null;
-  } | null;
+  storageConfig: StorageConfig | null;
 }
 
-export default function DomainInfo({ currentConfig }: DomainInfoProps) {
-  if (!currentConfig) {
+export default function DomainInfo({ storageConfig }: DomainInfoProps) {
+  if (!storageConfig) {
     return null;
   }
 
+  const baseUrl = buildBucketBaseUrl(storageConfig);
+  const isSigned = !storageConfig.publicDomain;
+
   return (
     <span className="domain">
-      {currentConfig.public_domain
-        ? currentConfig.public_domain
-        : currentConfig.access_key_id
-          ? `${currentConfig.account_id}.r2.cloudflarestorage.com (signed)`
-          : `${currentConfig.account_id}.r2.cloudflarestorage.com`}
+      {baseUrl ? baseUrl.replace(/^https?:\/\//, '') : 'Unknown'}
+      {isSigned ? ' (signed)' : ''}
     </span>
   );
 }

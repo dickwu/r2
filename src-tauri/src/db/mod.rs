@@ -12,20 +12,32 @@ pub(crate) type DbResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>
 
 // Re-export submodules
 pub mod accounts;
+pub mod aws_accounts;
+pub mod aws_buckets;
 pub mod buckets;
 pub mod downloads;
 pub mod sessions;
 pub mod tokens;
+pub mod minio_accounts;
+pub mod minio_buckets;
+pub mod rustfs_accounts;
+pub mod rustfs_buckets;
 pub mod file_cache;
 pub mod app_state;
 pub mod dir_tree;
 
 // Re-export types
 pub use accounts::Account;
+pub use aws_accounts::AwsAccount;
+pub use aws_buckets::AwsBucket;
 pub use buckets::Bucket;
 pub use downloads::DownloadSession;
 pub use sessions::UploadSession;
 pub use tokens::{Token, CurrentConfig};
+pub use minio_accounts::MinioAccount;
+pub use minio_buckets::MinioBucket;
+pub use rustfs_accounts::RustfsAccount;
+pub use rustfs_buckets::RustfsBucket;
 pub use file_cache::{CachedFile, CachedDirectoryNode};
 
 // ============ Connection and Initialization ============
@@ -67,6 +79,7 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
             token_id INTEGER NOT NULL REFERENCES tokens(id),
             name TEXT NOT NULL,
             public_domain TEXT,
+            public_domain_scheme TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             UNIQUE(token_id, name)
@@ -74,6 +87,42 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
 
         CREATE INDEX IF NOT EXISTS idx_buckets_token ON buckets(token_id);
         "
+    ).await?;
+
+    // Backfill public_domain_scheme for existing R2 buckets (idempotent)
+    let _ = conn
+        .execute("ALTER TABLE buckets ADD COLUMN public_domain_scheme TEXT", ())
+        .await;
+    let _ = conn
+        .execute(
+            "UPDATE buckets SET public_domain_scheme = 'https' WHERE public_domain_scheme IS NULL",
+            (),
+        )
+        .await;
+
+    // Provider-specific tables
+    conn.execute_batch(
+        &format!(
+            "{}{}",
+            aws_accounts::get_table_sql(),
+            aws_buckets::get_table_sql()
+        )
+    ).await?;
+
+    conn.execute_batch(
+        &format!(
+            "{}{}",
+            minio_accounts::get_table_sql(),
+            minio_buckets::get_table_sql()
+        )
+    ).await?;
+
+    conn.execute_batch(
+        &format!(
+            "{}{}",
+            rustfs_accounts::get_table_sql(),
+            rustfs_buckets::get_table_sql()
+        )
     ).await?;
     
     // Create app_state table
@@ -100,7 +149,8 @@ pub use sessions::{
 // Re-export token functions
 pub use tokens::{
     create_token, get_token, list_tokens_by_account, update_token, delete_token,
-    get_current_config, set_current_selection,
+    get_current_config, set_current_selection, set_current_aws_selection, set_current_minio_selection,
+    set_current_rustfs_selection,
 };
 
 // Re-export app_state functions
@@ -110,6 +160,21 @@ pub use app_state::set_app_state;
 pub use accounts::{create_account, delete_account, list_accounts, update_account, has_accounts};
 // Re-export bucket functions
 pub use buckets::{delete_bucket, list_buckets_by_token, update_bucket, save_buckets_for_token};
+// Re-export AWS provider functions
+pub use aws_accounts::{
+    create_aws_account, delete_aws_account, list_aws_accounts, update_aws_account,
+};
+pub use aws_buckets::{list_aws_buckets_by_account, save_aws_buckets_for_account};
+// Re-export MinIO provider functions
+pub use minio_accounts::{
+    create_minio_account, delete_minio_account, list_minio_accounts, update_minio_account,
+};
+pub use minio_buckets::{list_minio_buckets_by_account, save_minio_buckets_for_account};
+// Re-export RustFS provider functions
+pub use rustfs_accounts::{
+    create_rustfs_account, delete_rustfs_account, list_rustfs_accounts, update_rustfs_account,
+};
+pub use rustfs_buckets::{list_rustfs_buckets_by_account, save_rustfs_buckets_for_account};
 // Re-export file cache functions
 pub use file_cache::{
     store_all_files, get_all_cached_files, get_cached_file_size, search_cached_files, calculate_folder_size, 

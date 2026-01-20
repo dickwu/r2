@@ -2,7 +2,7 @@ import { useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getFolderContents, StoredFile } from '../lib/r2cache';
-import { R2Config } from '../components/ConfigModal';
+import { StorageConfig } from '../lib/r2cache';
 import { useSyncStore } from '../stores/syncStore';
 
 // Event emitted by backend when cache is updated
@@ -56,9 +56,15 @@ function buildFileItems(files: StoredFile[], folders: string[], prefix: string):
   });
 }
 
-export function useR2Files(config: R2Config | null, prefix: string = '') {
+export function useR2Files(config: StorageConfig | null, prefix: string = '') {
   const queryClient = useQueryClient();
-  const queryKey = ['folder-contents', config?.bucket, prefix];
+  const queryKey = [
+    'folder-contents',
+    config?.provider,
+    config?.accountId,
+    config?.bucket,
+    prefix,
+  ];
 
   // Get per-bucket sync time - only load from cache after sync completes
   const bucketSyncTimes = useSyncStore((state) => state.bucketSyncTimes);
@@ -66,6 +72,22 @@ export function useR2Files(config: R2Config | null, prefix: string = '') {
     if (!config?.accountId || !config?.bucket) return null;
     return useSyncStore.getState().getLastSyncTime(config.accountId, config.bucket);
   }, [config?.accountId, config?.bucket, bucketSyncTimes]);
+
+  const isConfigReady = useMemo(() => {
+    if (!config?.accountId || !config?.bucket) return false;
+    if (config.provider === 'r2') {
+      return !!config.accessKeyId && !!config.secretAccessKey;
+    }
+    if (config.provider === 'aws') {
+      return !!config.accessKeyId && !!config.secretAccessKey && !!config.region;
+    }
+    return (
+      !!config.accessKeyId &&
+      !!config.secretAccessKey &&
+      !!config.endpointHost &&
+      !!config.endpointScheme
+    );
+  }, [config]);
 
   const query = useQuery({
     queryKey,
@@ -83,7 +105,7 @@ export function useR2Files(config: R2Config | null, prefix: string = '') {
       return buildFileItems(result.files, result.folders, prefix);
     },
     // Only enable after sync is complete (lastSyncTime is set)
-    enabled: !!config?.token && !!config?.bucket && !!config?.accountId && lastSyncTime !== null,
+    enabled: isConfigReady && lastSyncTime !== null,
     retry: 1,
   });
 
@@ -106,7 +128,7 @@ export function useR2Files(config: R2Config | null, prefix: string = '') {
         // Invalidate queries for affected paths
         for (const path of affected_paths) {
           queryClient.invalidateQueries({
-            queryKey: ['folder-contents', config.bucket, path],
+            queryKey: ['folder-contents', config.provider, config.accountId, config.bucket, path],
           });
         }
       });
@@ -117,7 +139,7 @@ export function useR2Files(config: R2Config | null, prefix: string = '') {
     return () => {
       unlisten?.();
     };
-  }, [config?.bucket, queryClient]);
+  }, [config?.bucket, config?.accountId, config?.provider, queryClient]);
 
   async function refresh() {
     await queryClient.invalidateQueries({ queryKey });

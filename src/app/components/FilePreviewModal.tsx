@@ -12,10 +12,9 @@ import {
   FileTextOutlined,
 } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { invoke } from '@tauri-apps/api/core';
 import dynamic from 'next/dynamic';
 import { FileItem } from '../hooks/useR2Files';
-import { generateSignedUrl } from '../lib/r2cache';
+import { generateSignedUrl, uploadContent, StorageConfig } from '../lib/r2cache';
 import { TEXT_EXTENSIONS } from './preview/TextViewer';
 
 const PDFViewer = dynamic(() => import('./preview/PDFViewer'), { ssr: false });
@@ -84,11 +83,7 @@ interface FilePreviewModalProps {
   open: boolean;
   onClose: () => void;
   file: FileItem | null;
-  publicDomain?: string;
-  accountId?: string;
-  bucket?: string;
-  accessKeyId?: string;
-  secretAccessKey?: string;
+  config?: StorageConfig | null;
   onCredentialsUpdate?: () => void;
   onFileUpdated?: () => void;
 }
@@ -97,38 +92,30 @@ export default function FilePreviewModal({
   open: isOpen,
   onClose,
   file,
-  publicDomain,
-  accountId,
-  bucket,
-  accessKeyId,
-  secretAccessKey,
+  config,
   onFileUpdated,
 }: FilePreviewModalProps) {
   const { message } = App.useApp();
   const [signedUrl, setSignedUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const needsCredentials = !publicDomain && (!accessKeyId || !secretAccessKey);
-  const canEdit = !!(accountId && bucket && accessKeyId && secretAccessKey);
+  const hasCredentials =
+    !!config?.accessKeyId &&
+    !!config?.secretAccessKey &&
+    (config.provider !== 'aws' || !!config.region) &&
+    (config.provider !== 'minio' || (!!config.endpointHost && !!config.endpointScheme)) &&
+    (config.provider !== 'rustfs' || (!!config.endpointHost && !!config.endpointScheme));
+  const needsCredentials = !config?.publicDomain && !hasCredentials;
+  const canEdit = !!(config?.bucket && hasCredentials);
 
   const handleSaveContent = useCallback(
     async (content: string) => {
-      if (!file || !accountId || !bucket || !accessKeyId || !secretAccessKey) {
+      if (!file || !config || !hasCredentials) {
         throw new Error('Missing credentials or file info');
       }
 
       try {
-        await invoke('upload_r2_content', {
-          config: {
-            account_id: accountId,
-            bucket,
-            access_key_id: accessKeyId,
-            secret_access_key: secretAccessKey,
-          },
-          key: file.key,
-          content,
-          contentType: getContentType(file.name),
-        });
+        await uploadContent(config, file.key, content, getContentType(file.name));
         message.success('File saved successfully');
         onFileUpdated?.();
       } catch (err) {
@@ -137,7 +124,7 @@ export default function FilePreviewModal({
         throw err;
       }
     },
-    [file, accountId, bucket, accessKeyId, secretAccessKey, message, onFileUpdated]
+    [file, config, hasCredentials, message, onFileUpdated]
   );
 
   // Generate signed URL when modal opens
@@ -148,16 +135,17 @@ export default function FilePreviewModal({
     }
 
     // If public domain is set, use it directly
-    if (publicDomain) {
-      const domain = publicDomain.replace(/\/$/, '');
-      setSignedUrl(`https://${domain}/${file.key}`);
+    if (config?.publicDomain) {
+      const domain = config.publicDomain.replace(/\/$/, '');
+      const scheme = config.publicDomainScheme || 'https';
+      setSignedUrl(`${scheme}://${domain}/${file.key}`);
       return;
     }
 
     // If S3 credentials are available, generate signed URL
-    if (accountId && bucket && accessKeyId && secretAccessKey) {
+    if (config && hasCredentials) {
       setLoading(true);
-      generateSignedUrl(accountId, bucket, file.key, accessKeyId, secretAccessKey)
+      generateSignedUrl(config, file.key)
         .then(setSignedUrl)
         .catch((e) => {
           console.error('Failed to generate signed URL:', e);
@@ -169,7 +157,7 @@ export default function FilePreviewModal({
 
     // Fallback: no URL available
     setSignedUrl(null);
-  }, [isOpen, file, publicDomain, accountId, bucket, accessKeyId, secretAccessKey]);
+  }, [isOpen, file, config, hasCredentials]);
 
   if (!file) return null;
 

@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Modal, Input, Progress, Button, App } from 'antd';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { batchDeleteR2Objects, R2Config } from '../lib/r2cache';
+import { batchDeleteObjects, StorageConfig } from '../lib/r2cache';
 
 interface BatchDeleteProgress {
   completed: number;
@@ -14,7 +14,7 @@ interface BatchDeleteProgress {
 interface BatchDeleteModalProps {
   open: boolean;
   selectedKeys: Set<string>;
-  config: R2Config | null | undefined;
+  config: StorageConfig | null | undefined;
   onClose: () => void;
   onSuccess: () => void;
   onDeletingChange?: (isDeleting: boolean) => void;
@@ -65,7 +65,7 @@ export default function BatchDeleteModal({
       });
 
       // Use Rust batch delete API
-      const result = await batchDeleteR2Objects(config, keys);
+      const result = await batchDeleteObjects(config, keys);
 
       // Cleanup listener
       unlisten?.();

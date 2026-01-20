@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { listen } from '@tauri-apps/api/event';
-import { syncBucket } from '../lib/r2cache';
+import { syncBucket, StorageConfig } from '../lib/r2cache';
 import { useFolderSizeStore } from '../stores/folderSizeStore';
 import { useSyncStore, SyncPhase } from '../stores/syncStore';
-import { R2Config } from '../components/ConfigModal';
 
 interface IndexingProgress {
   current: number;
@@ -12,7 +11,7 @@ interface IndexingProgress {
 }
 
 // Sync all files to SQLite for folder size calculation
-export function useFilesSync(config: R2Config | null) {
+export function useFilesSync(config: StorageConfig | null) {
   const queryClient = useQueryClient();
   const clearSizes = useFolderSizeStore((state) => state.clearSizes);
 
@@ -51,8 +50,24 @@ export function useFilesSync(config: R2Config | null) {
     };
   }, []);
 
+  const isConfigReady = useMemo(() => {
+    if (!config?.accountId || !config?.bucket) return false;
+    if (config.provider === 'r2') {
+      return !!config.accessKeyId && !!config.secretAccessKey;
+    }
+    if (config.provider === 'aws') {
+      return !!config.accessKeyId && !!config.secretAccessKey && !!config.region;
+    }
+    return (
+      !!config.accessKeyId &&
+      !!config.secretAccessKey &&
+      !!config.endpointHost &&
+      !!config.endpointScheme
+    );
+  }, [config]);
+
   const query = useQuery({
-    queryKey: ['r2-all-files', config?.accountId, config?.bucket],
+    queryKey: ['storage-all-files', config?.provider, config?.accountId, config?.bucket],
     queryFn: async () => {
       if (!config) return null;
       console.log('Syncing bucket...');
@@ -75,7 +90,7 @@ export function useFilesSync(config: R2Config | null) {
         treeBuilt: true,
       };
     },
-    enabled: !!config?.token && !!config?.bucket && !!config?.accountId,
+    enabled: isConfigReady,
     staleTime: 5 * 60 * 1000, // 5 minutes
     retry: 1,
     // Prevent concurrent syncs for the same bucket
@@ -102,7 +117,7 @@ export function useFilesSync(config: R2Config | null) {
     }
     useSyncStore.getState().resetProgress();
     await queryClient.invalidateQueries({
-      queryKey: ['r2-all-files', config?.accountId, config?.bucket],
+      queryKey: ['storage-all-files', config?.provider, config?.accountId, config?.bucket],
     });
   }, [queryClient, config?.accountId, config?.bucket, clearSizes, query.isFetching]);
 

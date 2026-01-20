@@ -17,7 +17,7 @@
     "core:event:allow-unlisten",
     {
       "identifier": "http:default",
-      "allow": [{ "url": "https://api.cloudflare.com/*" }, { "url": "https://*" }]
+      "allow": [{ "url": "https://api.cloudflare.com/*" }, { "url": "https://*" }, { "url": "http://*/*" }]
     }
   ]
 }
