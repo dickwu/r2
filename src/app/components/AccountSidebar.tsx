@@ -244,15 +244,28 @@ export default function AccountSidebar({
             ? 'MinIO'
             : 'RustFS';
 
+    const providerShortLabel =
+      accountData.provider === 'r2'
+        ? 'R2'
+        : accountData.provider === 'aws'
+          ? 'AWS'
+          : accountData.provider === 'minio'
+            ? 'MIO'
+            : 'RFS';
+
     return {
       key: account.id,
       label: (
         <div className="account-menu-item">
-          <UserOutlined className="account-menu-icon" />
-          <div className="account-menu-content">
-            <span className="account-menu-name">
-              {account.name || account.id.slice(0, 12) + '...'}
-            </span>
+          <div
+            style={{
+              position: 'relative',
+              display: 'inline-flex',
+              marginRight: 8,
+              width: '20px',
+              textAlign: 'center',
+            }}
+          >
             <Tag
               color={
                 accountData.provider === 'r2'
@@ -263,10 +276,23 @@ export default function AccountSidebar({
                       ? 'cyan'
                       : 'purple'
               }
-              style={{ marginInlineStart: 6 }}
+              style={{
+                position: 'absolute',
+                top: -4,
+                right: -8,
+                fontSize: 10,
+                lineHeight: '14px',
+                padding: '0 4px',
+                height: 16,
+              }}
             >
-              {providerLabel}
+              {providerShortLabel}
             </Tag>
+          </div>
+          <div className="account-menu-content">
+            <span className="account-menu-name">
+              {account.name || account.id.slice(0, 12) + '...'}
+            </span>
             <Text type="secondary" className="account-menu-meta">
               {tokenCount > 0 ? `${tokenCount} token${tokenCount !== 1 ? 's' : ''}, ` : ''}
               {bucketCount} bucket{bucketCount !== 1 ? 's' : ''}
@@ -386,8 +412,27 @@ export default function AccountSidebar({
                 <div
                   className={`collapsed-account-item ${isCurrentAccount ? 'current' : ''}`}
                   onClick={() => handleAccountClick(accountData)}
+                  style={{ position: 'relative' }}
                 >
                   <span className="collapsed-account-text">{shortName}</span>
+                  <span
+                    style={{
+                      position: 'absolute',
+                      top: 2,
+                      right: 2,
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      backgroundColor:
+                        accountData.provider === 'r2'
+                          ? '#1677ff'
+                          : accountData.provider === 'aws'
+                            ? '#faad14'
+                            : accountData.provider === 'minio'
+                              ? '#13c2c2'
+                              : '#722ed1',
+                    }}
+                  />
                   {isCurrentAccount && <span className="collapsed-current-dot" />}
                 </div>
               </Tooltip>

@@ -8,6 +8,7 @@ import {
   FileOutlined,
   FileImageOutlined,
   PlaySquareOutlined,
+  SoundOutlined,
   FilePdfOutlined,
   FileTextOutlined,
 } from '@ant-design/icons';
@@ -23,7 +24,8 @@ const TextViewer = dynamic(() => import('@/app/components/preview/TextViewer'), 
 const { Text, Paragraph } = Typography;
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
-const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'mov', 'm4v'];
+const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogv', 'mov', 'm4v'];
+const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac', 'opus'];
 const PDF_EXTENSIONS = ['pdf'];
 
 function getFileExtension(filename: string): string {
@@ -36,6 +38,10 @@ function isImageFile(filename: string): boolean {
 
 function isVideoFile(filename: string): boolean {
   return VIDEO_EXTENSIONS.includes(getFileExtension(filename));
+}
+
+function isAudioFile(filename: string): boolean {
+  return AUDIO_EXTENSIONS.includes(getFileExtension(filename));
 }
 
 function isPdfFile(filename: string): boolean {
@@ -98,6 +104,20 @@ export default function FilePreviewModal({
   const { message } = App.useApp();
   const [signedUrl, setSignedUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [windowSize, setWindowSize] = useState({ width: 0, height: 0 });
+
+  // Track window size for responsive behavior
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const updateSize = () => {
+      setWindowSize({ width: window.innerWidth, height: window.innerHeight });
+    };
+
+    updateSize();
+    window.addEventListener('resize', updateSize);
+    return () => window.removeEventListener('resize', updateSize);
+  }, []);
 
   const hasCredentials =
     !!config?.accessKeyId &&
@@ -165,6 +185,7 @@ export default function FilePreviewModal({
 
   const isImage = isImageFile(file.name);
   const isVideo = isVideoFile(file.name);
+  const isAudio = isAudioFile(file.name);
   const isPdf = isPdfFile(file.name);
   const isText = isTextFile(file.name);
 
@@ -195,34 +216,63 @@ export default function FilePreviewModal({
     }
   }
 
+  // Calculate responsive dimensions based on window size
+  const getModalWidth = () => {
+    const width = windowSize.width || (typeof window !== 'undefined' ? window.innerWidth : 1024);
+    if (width < 640) return '95%'; // Mobile
+    if (width < 1024) return '90%'; // Tablet
+    return '85%'; // Desktop
+  };
+
+  const getPreviewMaxHeight = () => {
+    const height = windowSize.height || (typeof window !== 'undefined' ? window.innerHeight : 768);
+    // Use 60% of viewport height, capped at 800px for very large screens
+    return `${Math.min(height * 0.6, 800)}px`;
+  };
+
   return (
     <Modal
       open={isOpen}
       onCancel={onClose}
       title={file.name}
       footer={null}
-      width={'85%'}
+      width={getModalWidth()}
       centered
       destroyOnHidden
+      style={{ maxWidth: 1400 }}
     >
       <div style={{ textAlign: 'center', marginBottom: 24 }}>
         {loading ? (
           <Spin />
         ) : isImage && fileUrl ? (
-          <Image src={fileUrl} alt={file.name} style={{ maxHeight: 300, objectFit: 'contain' }} />
+          <Image
+            src={fileUrl}
+            alt={file.name}
+            style={{
+              maxHeight: getPreviewMaxHeight(),
+              maxWidth: '100%',
+              objectFit: 'contain',
+            }}
+          />
         ) : isVideo && fileUrl ? (
           <video
             src={fileUrl}
             controls
-            style={{ maxWidth: '100%', maxHeight: 300, borderRadius: 8 }}
+            style={{
+              maxWidth: '100%',
+              maxHeight: getPreviewMaxHeight(),
+              borderRadius: 8,
+            }}
           />
+        ) : isAudio && fileUrl ? (
+          <audio src={fileUrl} controls style={{ width: '100%' }} />
         ) : isPdf && fileUrl ? (
-          <PDFViewer url={fileUrl} showControls maxHeight="500px" />
+          <PDFViewer url={fileUrl} showControls maxHeight={getPreviewMaxHeight()} />
         ) : isText && fileUrl ? (
           <TextViewer
             url={fileUrl}
             filename={file.name}
-            maxHeight="500px"
+            maxHeight={getPreviewMaxHeight()}
             editable={canEdit}
             onSave={handleSaveContent}
           />
@@ -230,6 +280,8 @@ export default function FilePreviewModal({
           <FileImageOutlined style={{ fontSize: 40, color: '#f6821f' }} />
         ) : isVideo ? (
           <PlaySquareOutlined style={{ fontSize: 40, color: '#f6821f' }} />
+        ) : isAudio ? (
+          <SoundOutlined style={{ fontSize: 40, color: '#f6821f' }} />
         ) : isPdf ? (
           <FilePdfOutlined style={{ fontSize: 40, color: '#f6821f' }} />
         ) : isText ? (
