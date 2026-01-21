@@ -9,10 +9,10 @@ import {
   useUploadStore,
   selectHasActiveUploads,
   selectHasSuccessfulUploads,
-} from '../stores/uploadStore';
-import type { StorageConfig } from '../lib/r2cache';
-import UploadTaskList from './UploadTaskList';
-import FolderPickerModal from './folder/FolderPickerModal';
+} from '@/app/stores/uploadStore';
+import type { StorageConfig } from '@/app/lib/r2cache';
+import UploadTaskList from '@/app/components/UploadTaskList';
+import FolderPickerModal from '@/app/components/folder/FolderPickerModal';
 
 const { Text } = Typography;
 

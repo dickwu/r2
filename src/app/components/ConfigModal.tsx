@@ -11,7 +11,7 @@ import {
   UserOutlined,
   KeyOutlined,
 } from '@ant-design/icons';
-import { listBuckets, StorageProvider } from '../lib/r2cache';
+import { listBuckets, StorageProvider } from '@/app/lib/r2cache';
 import {
   useAccountStore,
   Account,
@@ -23,7 +23,7 @@ import {
   AwsBucket,
   MinioBucket,
   RustfsBucket,
-} from '../stores/accountStore';
+} from '@/app/stores/accountStore';
 
 export interface BucketConfig {
   name: string;
@@ -167,9 +167,7 @@ export default function ConfigModal({
       });
     } else if (mode === 'add-token' && parentAccountId) {
       setProvider('r2');
-      const account = accounts.find(
-        (a) => a.provider === 'r2' && a.account.id === parentAccountId
-      );
+      const account = accounts.find((a) => a.provider === 'r2' && a.account.id === parentAccountId);
       form.setFieldsValue({
         accountId: parentAccountId,
         accountName: account?.account.name || '',
@@ -213,7 +211,9 @@ export default function ConfigModal({
 
   async function loadMinioBuckets(accountId: string) {
     try {
-      const existingBuckets = await invoke<MinioBucket[]>('list_minio_bucket_configs', { accountId });
+      const existingBuckets = await invoke<MinioBucket[]>('list_minio_bucket_configs', {
+        accountId,
+      });
       const bucketConfigs = existingBuckets.map((b) => ({
         name: b.name,
       }));
@@ -228,7 +228,9 @@ export default function ConfigModal({
 
   async function loadRustfsBuckets(accountId: string) {
     try {
-      const existingBuckets = await invoke<RustfsBucket[]>('list_rustfs_bucket_configs', { accountId });
+      const existingBuckets = await invoke<RustfsBucket[]>('list_rustfs_bucket_configs', {
+        accountId,
+      });
       const bucketConfigs = existingBuckets.map((b) => ({
         name: b.name,
       }));
@@ -298,9 +300,7 @@ export default function ConfigModal({
 
   function handleDomainSchemeChange(bucketName: string, scheme: string) {
     setBuckets(
-      buckets.map((b) =>
-        b.name === bucketName ? { ...b, publicDomainScheme: scheme } : b
-      )
+      buckets.map((b) => (b.name === bucketName ? { ...b, publicDomainScheme: scheme } : b))
     );
   }
 
@@ -311,7 +311,8 @@ export default function ConfigModal({
     const region = form.getFieldValue('region');
     const endpointScheme = form.getFieldValue('endpointScheme') || 'https';
     const endpointHost = form.getFieldValue('endpointHost');
-    const forcePathStyle = provider === 'rustfs' ? true : form.getFieldValue('forcePathStyle') || false;
+    const forcePathStyle =
+      provider === 'rustfs' ? true : form.getFieldValue('forcePathStyle') || false;
 
     if (provider === 'r2' && (!accountId || !accessKeyId || !secretAccessKey)) {
       message.warning('Please enter Account ID, Access Key ID, and Secret Access Key first');
@@ -377,17 +378,19 @@ export default function ConfigModal({
                 }
       );
       // Merge with existing buckets to preserve domain settings
-    const newBuckets = result.map((b) => {
-      const existing = buckets.find((eb) => eb.name === b.name);
-      if (existing) {
+      const newBuckets = result.map((b) => {
+        const existing = buckets.find((eb) => eb.name === b.name);
+        if (existing) {
+          return showDomainSettings
+            ? existing
+            : {
+                name: existing.name,
+              };
+        }
         return showDomainSettings
-          ? existing
-          : {
-              name: existing.name,
-            };
-      }
-      return showDomainSettings ? { name: b.name, publicDomainScheme: 'https' } : { name: b.name };
-    });
+          ? { name: b.name, publicDomainScheme: 'https' }
+          : { name: b.name };
+      });
       setBuckets(newBuckets);
       message.success(`Found ${newBuckets.length} bucket(s)`);
 
@@ -807,7 +810,12 @@ export default function ConfigModal({
                 <Form.Item
                   name="endpointHost"
                   noStyle
-                  rules={[{ required: provider === 'minio' || provider === 'rustfs', message: 'Required' }]}
+                  rules={[
+                    {
+                      required: provider === 'minio' || provider === 'rustfs',
+                      message: 'Required',
+                    },
+                  ]}
                 >
                   <Input
                     placeholder={

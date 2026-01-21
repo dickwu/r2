@@ -10,11 +10,11 @@ import {
   DownloadOutlined,
 } from '@ant-design/icons';
 import { VirtuosoGrid } from 'react-virtuoso';
-import { FileItem } from '../hooks/useR2Files';
-import { FolderMetadata } from '../stores/folderSizeStore';
-import VideoThumbnail from './VideoThumbnail';
-import { formatBytes } from '../utils/formatBytes';
-import { buildPublicUrl, StorageConfig } from '../lib/r2cache';
+import { FileItem } from '@/app/hooks/useR2Files';
+import { FolderMetadata } from '@/app/stores/folderSizeStore';
+import VideoThumbnail from '@/app/components/VideoThumbnail';
+import { formatBytes } from '@/app/utils/formatBytes';
+import { buildPublicUrl, StorageConfig } from '@/app/lib/r2cache';
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'mov', 'm4v'];
@@ -75,9 +75,7 @@ const FileCard = memo(function FileCard({
 }) {
   const isImage = !item.isFolder && isImageFile(item.name);
   const isVideo = !item.isFolder && isVideoFile(item.name);
-  const fileUrl = storageConfig?.publicDomain
-    ? buildPublicUrl(storageConfig, item.key)
-    : null;
+  const fileUrl = storageConfig?.publicDomain ? buildPublicUrl(storageConfig, item.key) : null;
   const hasPreview = fileUrl && (isImage || isVideo);
 
   const handleClick = useCallback(() => {

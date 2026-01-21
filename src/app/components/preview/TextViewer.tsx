@@ -3,11 +3,12 @@
 import { useEffect, useState, useRef } from 'react';
 import { Spin, Typography, Button, Space, Tooltip } from 'antd';
 import { FileTextOutlined, FormatPainterOutlined, SaveOutlined } from '@ant-design/icons';
-import { fetch } from '@tauri-apps/plugin-http';
+import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
+import { invoke } from '@tauri-apps/api/core';
 import Editor, { type Monaco } from '@monaco-editor/react';
 import type { editor } from 'monaco-editor';
-import DownloadProgress from './DownloadProgress';
-import { useThemeStore } from '../../stores/themeStore';
+import DownloadProgress from '@/app/components/preview/DownloadProgress';
+import { useThemeStore } from '@/app/stores/themeStore';
 
 const { Text } = Typography;
 
@@ -76,6 +77,21 @@ function getLanguageFromExtension(filename: string): string {
   return langMap[ext] || 'plaintext';
 }
 
+function isScopeError(err: unknown): boolean {
+  if (!err) return false;
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  return message.toLowerCase().includes('url not allowed on the configured scope');
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
 export default function TextViewer({
   url,
   filename = '',
@@ -116,9 +132,19 @@ export default function TextViewer({
     setContent(null);
     setDownloadProgress({ loaded: 0, total: null });
 
+    const fetchViaBackend = async () => {
+      const base64Data = await invoke<string>('fetch_url_bytes', { url });
+      if (cancelled) return;
+      const bytes = base64ToBytes(base64Data);
+      setDownloadProgress({ loaded: bytes.length, total: bytes.length });
+      const text = new TextDecoder('utf-8').decode(bytes);
+      setContent(text);
+      onLoadSuccess?.();
+    };
+
     const fetchWithProgress = async () => {
       try {
-        const response = await fetch(url);
+        const response = await tauriFetch(url);
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -166,12 +192,21 @@ export default function TextViewer({
           onLoadSuccess?.();
         }
       } catch (err) {
-        if (!cancelled) {
-          console.error('Failed to fetch text:', err);
-          const errorMsg = err instanceof Error ? err.message : 'Failed to load file';
-          setError(errorMsg);
-          onLoadError?.(err instanceof Error ? err : new Error(errorMsg));
+        if (cancelled) return;
+        let fetchError: unknown = err;
+        if (isScopeError(err)) {
+          try {
+            await fetchViaBackend();
+            return;
+          } catch (fallbackErr) {
+            fetchError = fallbackErr;
+          }
         }
+
+        console.error('Failed to fetch text:', fetchError);
+        const errorMsg = fetchError instanceof Error ? fetchError.message : 'Failed to load file';
+        setError(errorMsg);
+        onLoadError?.(fetchError instanceof Error ? fetchError : new Error(errorMsg));
       } finally {
         if (!cancelled) {
           setLoading(false);

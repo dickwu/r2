@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Modal } from 'antd';
-import FolderTreePicker from './FolderTreePicker';
+import FolderTreePicker from '@/app/components/folder/FolderTreePicker';
 
 export interface FolderPickerModalProps {
   open: boolean;

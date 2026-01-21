@@ -1,9 +1,9 @@
 'use client';
 
 import { useEffect, useMemo } from 'react';
-import { useFolderSizeStore } from '../../stores/folderSizeStore';
-import { useSyncStore } from '../../stores/syncStore';
-import { formatBytes } from '../../utils/formatBytes';
+import { useFolderSizeStore } from '@/app/stores/folderSizeStore';
+import { useSyncStore } from '@/app/stores/syncStore';
+import { formatBytes } from '@/app/utils/formatBytes';
 
 interface BucketStatsProps {
   hasConfig: boolean;

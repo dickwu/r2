@@ -58,13 +58,7 @@ function buildFileItems(files: StoredFile[], folders: string[], prefix: string):
 
 export function useR2Files(config: StorageConfig | null, prefix: string = '') {
   const queryClient = useQueryClient();
-  const queryKey = [
-    'folder-contents',
-    config?.provider,
-    config?.accountId,
-    config?.bucket,
-    prefix,
-  ];
+  const queryKey = ['folder-contents', config?.provider, config?.accountId, config?.bucket, prefix];
 
   // Get per-bucket sync time - only load from cache after sync completes
   const bucketSyncTimes = useSyncStore((state) => state.bucketSyncTimes);

@@ -10,9 +10,9 @@ import {
 } from '@ant-design/icons';
 import { Virtuoso } from 'react-virtuoso';
 import dayjs from 'dayjs';
-import { FileItem } from '../hooks/useR2Files';
-import { formatBytes } from '../utils/formatBytes';
-import { getFileIcon } from '../utils/fileIcon';
+import { FileItem } from '@/app/hooks/useR2Files';
+import { formatBytes } from '@/app/utils/formatBytes';
+import { getFileIcon } from '@/app/utils/fileIcon';
 
 type SortOrder = 'asc' | 'desc' | null;
 

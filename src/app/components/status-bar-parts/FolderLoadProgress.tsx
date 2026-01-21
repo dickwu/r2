@@ -2,7 +2,7 @@
 
 import { Spin } from 'antd';
 import { FolderOpenOutlined, CheckCircleOutlined } from '@ant-design/icons';
-import { useSyncStore, FolderLoadPhase } from '../../stores/syncStore';
+import { useSyncStore, FolderLoadPhase } from '@/app/stores/syncStore';
 
 const folderPhaseConfig: Record<FolderLoadPhase, { icon: React.ReactNode; label: string }> = {
   idle: { icon: null, label: '' },

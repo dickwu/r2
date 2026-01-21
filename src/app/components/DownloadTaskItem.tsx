@@ -11,7 +11,7 @@ import {
   StopOutlined,
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
-import { type DownloadTask } from '../stores/downloadStore';
+import { type DownloadTask } from '@/app/stores/downloadStore';
 
 const { Text } = Typography;
 

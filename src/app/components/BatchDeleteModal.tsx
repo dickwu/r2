@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Modal, Input, Progress, Button, App } from 'antd';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { batchDeleteObjects, StorageConfig } from '../lib/r2cache';
+import { batchDeleteObjects, StorageConfig } from '@/app/lib/r2cache';
 
 interface BatchDeleteProgress {
   completed: number;

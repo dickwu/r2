@@ -5,11 +5,11 @@ import type {
   RustfsStorageConfig,
   StorageConfig,
   StorageProviderAdapter,
-} from './types';
-import { r2Provider } from './r2';
-import { awsProvider } from './aws';
-import { minioProvider } from './minio';
-import { rustfsProvider } from './rustfs';
+} from '@/app/providers/types';
+import { r2Provider } from '@/app/providers/r2';
+import { awsProvider } from '@/app/providers/aws';
+import { minioProvider } from '@/app/providers/minio';
+import { rustfsProvider } from '@/app/providers/rustfs';
 
 export function getProviderAdapter(
   config: R2StorageConfig
@@ -23,9 +23,7 @@ export function getProviderAdapter(
 export function getProviderAdapter(
   config: RustfsStorageConfig
 ): StorageProviderAdapter<RustfsStorageConfig>;
-export function getProviderAdapter(
-  config: StorageConfig
-): StorageProviderAdapter<StorageConfig>;
+export function getProviderAdapter(config: StorageConfig): StorageProviderAdapter<StorageConfig>;
 export function getProviderAdapter(config: StorageConfig): StorageProviderAdapter {
   switch (config.provider) {
     case 'r2':

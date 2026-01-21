@@ -139,6 +139,7 @@ bun run tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
 5. Configure public domain per bucket (optional, R2/AWS only)
 
 **Endpoint/Domain Tips**
+
 - Endpoint and domain inputs accept full URLs (scheme + host) and normalize automatically.
 - For R2/AWS public domains, you can select `http`/`https` explicitly.
 
@@ -153,16 +154,19 @@ bun run tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
 ### Getting API Credentials
 
 **Cloudflare R2**
+
 1. Go to [Cloudflare Dashboard](https://dash.cloudflare.com/)
 2. Navigate to **R2** → **Overview** → **Manage R2 API Tokens**
 3. Create a token with appropriate permissions
 4. Note the **Access Key ID** and **Secret Access Key** (shown only once)
 
 **AWS S3**
+
 - Create an IAM user with S3 permissions and generate access keys.
 - Note the **Region** for your buckets.
 
 **MinIO / RustFS**
+
 - Use the access/secret keys from your deployment.
 - Set the endpoint host/port and scheme (http/https).
 

@@ -1,7 +1,7 @@
 'use client';
 
 import { Space } from 'antd';
-import UpdateChecker from './UpdateChecker';
+import UpdateChecker from '@/app/components/UpdateChecker';
 import {
   SyncProgress,
   FolderLoadProgress,
@@ -9,9 +9,9 @@ import {
   DomainInfo,
   ItemsCount,
   DownloadProgress,
-} from './status-bar-parts';
+} from '@/app/components/status-bar-parts';
 
-import type { StorageConfig } from '../lib/r2cache';
+import type { StorageConfig } from '@/app/lib/r2cache';
 
 interface StatusBarProps {
   // Current view items

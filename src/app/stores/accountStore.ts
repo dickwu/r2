@@ -216,7 +216,11 @@ interface AccountStore {
   deleteAwsAccount: (id: string) => Promise<void>;
   saveAwsBuckets: (
     accountId: string,
-    buckets: { name: string; public_domain_scheme?: string | null; public_domain_host?: string | null }[]
+    buckets: {
+      name: string;
+      public_domain_scheme?: string | null;
+      public_domain_host?: string | null;
+    }[]
   ) => Promise<AwsBucket[]>;
 
   // MinIO Account CRUD
@@ -240,7 +244,11 @@ interface AccountStore {
   deleteMinioAccount: (id: string) => Promise<void>;
   saveMinioBuckets: (
     accountId: string,
-    buckets: { name: string; public_domain_scheme?: string | null; public_domain_host?: string | null }[]
+    buckets: {
+      name: string;
+      public_domain_scheme?: string | null;
+      public_domain_host?: string | null;
+    }[]
   ) => Promise<MinioBucket[]>;
 
   // RustFS Account CRUD
@@ -262,7 +270,11 @@ interface AccountStore {
   deleteRustfsAccount: (id: string) => Promise<void>;
   saveRustfsBuckets: (
     accountId: string,
-    buckets: { name: string; public_domain_scheme?: string | null; public_domain_host?: string | null }[]
+    buckets: {
+      name: string;
+      public_domain_scheme?: string | null;
+      public_domain_host?: string | null;
+    }[]
   ) => Promise<RustfsBucket[]>;
 
   // Helpers

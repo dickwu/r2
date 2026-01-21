@@ -30,17 +30,8 @@ import {
   MenuFoldOutlined,
   SwapOutlined,
 } from '@ant-design/icons';
-import {
-  useAccountStore,
-  Account,
-  Token,
-  ProviderAccount,
-  AwsAccount,
-  MinioAccount,
-  AwsBucket,
-  MinioBucket,
-} from '../stores/accountStore';
-import AccountTransferModal from './AccountTransferModal';
+import { useAccountStore, Token, ProviderAccount } from '@/app/stores/accountStore';
+import AccountTransferModal from '@/app/components/AccountTransferModal';
 
 const { Text } = Typography;
 
@@ -277,9 +268,7 @@ export default function AccountSidebar({
               {providerLabel}
             </Tag>
             <Text type="secondary" className="account-menu-meta">
-              {tokenCount > 0
-                ? `${tokenCount} token${tokenCount !== 1 ? 's' : ''}, `
-                : ''}
+              {tokenCount > 0 ? `${tokenCount} token${tokenCount !== 1 ? 's' : ''}, ` : ''}
               {bucketCount} bucket{bucketCount !== 1 ? 's' : ''}
             </Text>
           </div>
@@ -387,9 +376,7 @@ export default function AccountSidebar({
                     <div style={{ fontWeight: 500 }}>{displayName}</div>
                     <div style={{ fontSize: 12, opacity: 0.8 }}>
                       {providerLabel} ·{' '}
-                      {tokenCount > 0
-                        ? `${tokenCount} token${tokenCount !== 1 ? 's' : ''}, `
-                        : ''}
+                      {tokenCount > 0 ? `${tokenCount} token${tokenCount !== 1 ? 's' : ''}, ` : ''}
                       {bucketCount} bucket{bucketCount !== 1 ? 's' : ''}
                     </div>
                   </div>
@@ -428,7 +415,7 @@ export default function AccountSidebar({
         </div>
       )}
 
-      <div className={`sidebar-footer${collapsed ? ' collapsed' : ''}`}>
+      <div className={`sidebar-footer${collapsed ? 'collapsed' : ''}`}>
         {collapsed ? (
           <Tooltip title="Import / Export" placement="right">
             <div className="collapsed-account-item" onClick={() => setTransferModalOpen(true)}>
@@ -442,10 +429,7 @@ export default function AccountSidebar({
         )}
       </div>
 
-      <AccountTransferModal
-        open={transferModalOpen}
-        onClose={() => setTransferModalOpen(false)}
-      />
+      <AccountTransferModal open={transferModalOpen} onClose={() => setTransferModalOpen(false)} />
 
       {/* Tokens & Buckets Drawer */}
       <Drawer
@@ -591,14 +575,16 @@ export default function AccountSidebar({
                   <div
                     className={`drawer-bucket-item ${isCurrentBucket ? 'current' : ''}`}
                     onClick={() =>
-                      handleSelectBucket(selectedAccount.provider, selectedAccount.account.id, bucket.name)
+                      handleSelectBucket(
+                        selectedAccount.provider,
+                        selectedAccount.account.id,
+                        bucket.name
+                      )
                     }
                   >
                     <DatabaseOutlined className="drawer-bucket-icon" />
                     <span className="drawer-bucket-name">{bucket.name}</span>
-                    {isCurrentBucket && (
-                      <CheckCircleFilled className="current-indicator active" />
-                    )}
+                    {isCurrentBucket && <CheckCircleFilled className="current-indicator active" />}
                   </div>
                 </Tooltip>
               );

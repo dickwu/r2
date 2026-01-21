@@ -5,8 +5,8 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import { Button, Space, Spin } from 'antd';
 import { LeftOutlined, RightOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
-import DownloadProgress from './DownloadProgress';
-import { useThemeStore } from '../../stores/themeStore';
+import DownloadProgress from '@/app/components/preview/DownloadProgress';
+import { useThemeStore } from '@/app/stores/themeStore';
 import 'react-pdf/dist/Page/TextLayer.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 

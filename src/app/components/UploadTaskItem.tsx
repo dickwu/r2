@@ -10,7 +10,7 @@ import {
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { useUploadStore, type UploadTask } from '../stores/uploadStore';
+import { useUploadStore, type UploadTask } from '@/app/stores/uploadStore';
 
 const { Text } = Typography;
 
@@ -88,13 +88,13 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
       config.provider === 'minio' || config.provider === 'rustfs'
         ? config.endpointScheme
         : config.provider === 'aws'
-          ? config.endpointScheme ?? undefined
+          ? (config.endpointScheme ?? undefined)
           : undefined;
     const endpointHost =
       config.provider === 'minio' || config.provider === 'rustfs'
         ? config.endpointHost
         : config.provider === 'aws'
-          ? config.endpointHost ?? undefined
+          ? (config.endpointHost ?? undefined)
           : undefined;
 
     invoke<UploadResult>(command, {

@@ -7,7 +7,7 @@ import {
   BuildOutlined,
   CheckCircleOutlined,
 } from '@ant-design/icons';
-import { useSyncStore, SyncPhase } from '../../stores/syncStore';
+import { useSyncStore, SyncPhase } from '@/app/stores/syncStore';
 
 const phaseConfig: Record<SyncPhase, { icon: React.ReactNode; label: string }> = {
   idle: { icon: null, label: '' },

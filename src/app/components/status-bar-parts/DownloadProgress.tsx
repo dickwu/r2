@@ -19,8 +19,8 @@ import {
   MAX_CONCURRENT_DOWNLOADS,
   DownloadSession,
   setupDownloadEventListeners,
-} from '../../stores/downloadStore';
-import { formatBytes } from '../../utils/formatBytes';
+} from '@/app/stores/downloadStore';
+import { formatBytes } from '@/app/utils/formatBytes';
 
 const { Text } = Typography;
 

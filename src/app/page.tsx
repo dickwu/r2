@@ -18,33 +18,33 @@ import {
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { useThemeStore } from './stores/themeStore';
-import ConfigModal, { ModalMode } from './components/ConfigModal';
-import UploadModal from './components/UploadModal';
-import FilePreviewModal from './components/FilePreviewModal';
-import FileRenameModal from './components/FileRenameModal';
-import FileGridView from './components/FileGridView';
-import FileListView from './components/FileListView';
-import AccountSidebar from './components/AccountSidebar';
-import StatusBar from './components/StatusBar';
-import BatchDeleteModal from './components/BatchDeleteModal';
-import BatchMoveModal from './components/BatchMoveModal';
-import SyncOverlay from './components/SyncOverlay';
-import DownloadTaskModal from './components/DownloadTaskModal';
-import { useAccountStore, ProviderAccount, Token } from './stores/accountStore';
-import { useR2Files, FileItem } from './hooks/useR2Files';
-import { useFilesSync } from './hooks/useFilesSync';
+import { useThemeStore } from '@/app/stores/themeStore';
+import ConfigModal, { ModalMode } from '@/app/components/ConfigModal';
+import UploadModal from '@/app/components/UploadModal';
+import FilePreviewModal from '@/app/components/FilePreviewModal';
+import FileRenameModal from '@/app/components/FileRenameModal';
+import FileGridView from '@/app/components/FileGridView';
+import FileListView from '@/app/components/FileListView';
+import AccountSidebar from '@/app/components/AccountSidebar';
+import StatusBar from '@/app/components/StatusBar';
+import BatchDeleteModal from '@/app/components/BatchDeleteModal';
+import BatchMoveModal from '@/app/components/BatchMoveModal';
+import SyncOverlay from '@/app/components/SyncOverlay';
+import DownloadTaskModal from '@/app/components/DownloadTaskModal';
+import { useAccountStore, ProviderAccount, Token } from '@/app/stores/accountStore';
+import { useR2Files, FileItem } from '@/app/hooks/useR2Files';
+import { useFilesSync } from '@/app/hooks/useFilesSync';
 import {
   deleteObject,
   renameObject,
   searchFiles,
   listAllObjectsUnderPrefix,
   StorageConfig,
-} from './lib/r2cache';
-import { useFolderSizeStore } from './stores/folderSizeStore';
-import { useSyncStore } from './stores/syncStore';
-import { useBatchOperationStore } from './stores/batchOperationStore';
-import { useDownloadStore } from './stores/downloadStore';
+} from '@/app/lib/r2cache';
+import { useFolderSizeStore } from '@/app/stores/folderSizeStore';
+import { useSyncStore } from '@/app/stores/syncStore';
+import { useBatchOperationStore } from '@/app/stores/batchOperationStore';
+import { useDownloadStore } from '@/app/stores/downloadStore';
 
 type ViewMode = 'list' | 'grid';
 type SortOrder = 'asc' | 'desc' | null;
@@ -103,7 +103,10 @@ export default function Home() {
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
 
-  const config = useMemo<StorageConfig | null>(() => toStorageConfig(), [currentConfig, toStorageConfig]);
+  const config = useMemo<StorageConfig | null>(
+    () => toStorageConfig(),
+    [currentConfig, toStorageConfig]
+  );
   const isConfigReady = useMemo(() => {
     if (!config?.accountId || !config?.bucket) return false;
     if (config.provider === 'r2') {
@@ -125,7 +128,12 @@ export default function Home() {
     setCurrentPath('');
     setSearchQuery('');
     resetBatchOperation();
-  }, [currentConfig?.bucket, currentConfig?.account_id, currentConfig?.provider, resetBatchOperation]);
+  }, [
+    currentConfig?.bucket,
+    currentConfig?.account_id,
+    currentConfig?.provider,
+    resetBatchOperation,
+  ]);
 
   // Load download tasks from database when bucket changes
   useEffect(() => {
@@ -799,15 +807,15 @@ export default function Home() {
 
         // Create task in database first (Rust looks up file size from cache if 0)
         try {
-            await invoke('create_download_task', {
-              taskId,
-              objectKey: key,
-              fileName,
-              fileSize,
-              localPath: folder,
-              bucket: config.bucket,
-              accountId: config.accountId,
-            });
+          await invoke('create_download_task', {
+            taskId,
+            objectKey: key,
+            fileName,
+            fileSize,
+            localPath: folder,
+            bucket: config.bucket,
+            accountId: config.accountId,
+          });
         } catch (e) {
           console.error('Failed to create download task:', e);
           continue;

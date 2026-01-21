@@ -4,10 +4,7 @@ import { Modal, Alert, Button, Typography, Space, App } from 'antd';
 import { DownloadOutlined, UploadOutlined } from '@ant-design/icons';
 import { save, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs';
-import {
-  useAccountStore,
-  ProviderAccount,
-} from '../stores/accountStore';
+import { useAccountStore, ProviderAccount } from '@/app/stores/accountStore';
 
 const { Text } = Typography;
 
@@ -300,13 +297,7 @@ export default function AccountTransferModal({ open, onClose }: AccountTransferM
   }
 
   return (
-    <Modal
-      open={open}
-      onCancel={onClose}
-      footer={null}
-      title="Import / Export Accounts"
-      centered
-    >
+    <Modal open={open} onCancel={onClose} footer={null} title="Import / Export Accounts" centered>
       <Space orientation="vertical" size="middle" style={{ width: '100%' }}>
         <Alert
           type="warning"

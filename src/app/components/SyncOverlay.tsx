@@ -6,7 +6,7 @@ import {
   BuildOutlined,
   CheckCircleOutlined,
 } from '@ant-design/icons';
-import { useSyncStore, SyncPhase } from '../stores/syncStore';
+import { useSyncStore, SyncPhase } from '@/app/stores/syncStore';
 
 // Sync progress overlay for first-load experience
 export default function SyncOverlay() {

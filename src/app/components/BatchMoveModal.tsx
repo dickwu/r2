@@ -4,8 +4,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { Modal, App, Progress, Button } from 'antd';
 import { FolderOutlined, SwapOutlined } from '@ant-design/icons';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { batchMoveObjects, MoveOperation, StorageConfig } from '../lib/r2cache';
-import FolderPickerModal from './folder/FolderPickerModal';
+import { batchMoveObjects, MoveOperation, StorageConfig } from '@/app/lib/r2cache';
+import FolderPickerModal from '@/app/components/folder/FolderPickerModal';
 
 interface BatchMoveProgress {
   completed: number;

@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { App, ConfigProvider, theme } from 'antd';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
-import { useThemeStore, initializeTheme } from './stores/themeStore';
+import { useThemeStore, initializeTheme } from '@/app/stores/themeStore';
 
 export default function Providers({ children }: { children: React.ReactNode }) {
   const currentTheme = useThemeStore((s) => s.theme);

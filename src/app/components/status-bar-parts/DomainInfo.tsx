@@ -1,6 +1,6 @@
 'use client';
 
-import { buildBucketBaseUrl, StorageConfig } from '../../lib/r2cache';
+import { buildBucketBaseUrl, StorageConfig } from '@/app/lib/r2cache';
 
 interface DomainInfoProps {
   storageConfig: StorageConfig | null;

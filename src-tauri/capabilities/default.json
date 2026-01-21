@@ -24,7 +24,7 @@
       "allow": [
         { "url": "https://api.cloudflare.com/*" },
         { "url": "https://*" },
-        { "url": "http://*/*" }
+        { "url": "http://**" }
       ]
     }
   ]

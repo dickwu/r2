@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Modal, Input, Form, App, Button } from 'antd';
 import { FolderOutlined, SwapOutlined } from '@ant-design/icons';
-import FolderPickerModal from './folder/FolderPickerModal';
+import FolderPickerModal from '@/app/components/folder/FolderPickerModal';
 
 export interface FileRenameModalProps {
   open: boolean;

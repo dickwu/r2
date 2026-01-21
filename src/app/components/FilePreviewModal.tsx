@@ -13,12 +13,12 @@ import {
 } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import dynamic from 'next/dynamic';
-import { FileItem } from '../hooks/useR2Files';
-import { generateSignedUrl, uploadContent, StorageConfig } from '../lib/r2cache';
-import { TEXT_EXTENSIONS } from './preview/TextViewer';
+import { FileItem } from '@/app/hooks/useR2Files';
+import { generateSignedUrl, uploadContent, StorageConfig } from '@/app/lib/r2cache';
+import { TEXT_EXTENSIONS } from '@/app/components/preview/TextViewer';
 
-const PDFViewer = dynamic(() => import('./preview/PDFViewer'), { ssr: false });
-const TextViewer = dynamic(() => import('./preview/TextViewer'), { ssr: false });
+const PDFViewer = dynamic(() => import('@/app/components/preview/PDFViewer'), { ssr: false });
+const TextViewer = dynamic(() => import('@/app/components/preview/TextViewer'), { ssr: false });
 
 const { Text, Paragraph } = Typography;
 

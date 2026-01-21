@@ -2,7 +2,7 @@
 
 import { Progress, Typography } from 'antd';
 import { CloudDownloadOutlined } from '@ant-design/icons';
-import { useThemeStore } from '../../stores/themeStore';
+import { useThemeStore } from '@/app/stores/themeStore';
 
 const { Text } = Typography;
 

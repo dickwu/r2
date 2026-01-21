@@ -8,8 +8,8 @@ import {
   selectUploadingCount,
   selectFinishedCount,
   selectHasActiveUploads,
-} from '../stores/uploadStore';
-import UploadTaskItem from './UploadTaskItem';
+} from '@/app/stores/uploadStore';
+import UploadTaskItem from '@/app/components/UploadTaskItem';
 
 const { Text } = Typography;
 

@@ -13,9 +13,9 @@ import {
   selectHasActiveDownloads,
   DownloadSession,
   DownloadTask,
-} from '../stores/downloadStore';
-import DownloadTaskItem from './DownloadTaskItem';
-import type { StorageConfig } from '../lib/r2cache';
+} from '@/app/stores/downloadStore';
+import DownloadTaskItem from '@/app/components/DownloadTaskItem';
+import type { StorageConfig } from '@/app/lib/r2cache';
 
 interface DownloadTaskModalProps {
   storageConfig?: StorageConfig | null;
@@ -134,8 +134,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
           region: storageConfig.provider === 'aws' ? storageConfig.region : null,
           endpoint_scheme: storageConfig.provider !== 'r2' ? storageConfig.endpointScheme : null,
           endpoint_host: storageConfig.provider !== 'r2' ? storageConfig.endpointHost : null,
-          force_path_style:
-            storageConfig.provider === 'r2' ? null : storageConfig.forcePathStyle,
+          force_path_style: storageConfig.provider === 'r2' ? null : storageConfig.forcePathStyle,
         },
       });
       // Reload immediately to update UI - don't rely solely on async event
@@ -179,8 +178,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
           region: storageConfig.provider === 'aws' ? storageConfig.region : null,
           endpoint_scheme: storageConfig.provider !== 'r2' ? storageConfig.endpointScheme : null,
           endpoint_host: storageConfig.provider !== 'r2' ? storageConfig.endpointHost : null,
-          force_path_style:
-            storageConfig.provider === 'r2' ? null : storageConfig.forcePathStyle,
+          force_path_style: storageConfig.provider === 'r2' ? null : storageConfig.forcePathStyle,
         },
       });
       // UI will update via download-status-changed events
@@ -245,11 +243,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
         style={{ height: 350 }}
         data={taskList}
         itemContent={(index, task) => (
-          <DownloadTaskItem
-            key={task.id}
-            task={task}
-            onResume={() => handleResume(task.id)}
-          />
+          <DownloadTaskItem key={task.id} task={task} onResume={() => handleResume(task.id)} />
         )}
       />
     );
