@@ -15,22 +15,14 @@ export const useThemeStore = create<ThemeState>()(
       theme: 'light',
       setTheme: (theme) => {
         set({ theme });
-        document.documentElement.classList.toggle('dark', theme === 'dark');
       },
       toggleTheme: () => {
         const next = get().theme === 'light' ? 'dark' : 'light';
         set({ theme: next });
-        document.documentElement.classList.toggle('dark', next === 'dark');
       },
     }),
     {
       name: 'theme-storage',
-      onRehydrateStorage: () => (state) => {
-        // Apply theme class on rehydration
-        if (state) {
-          document.documentElement.classList.toggle('dark', state.theme === 'dark');
-        }
-      },
     }
   )
 );

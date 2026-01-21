@@ -11,13 +11,21 @@
     "process:allow-restart",
     "dialog:default",
     "dialog:allow-open",
+    "dialog:allow-save",
+    "fs:default",
+    "fs:allow-write-text-file",
+    "fs:allow-read-text-file",
     "video-thumbnail:default",
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     {
       "identifier": "http:default",
-      "allow": [{ "url": "https://api.cloudflare.com/*" }, { "url": "https://*" }, { "url": "http://*/*" }]
+      "allow": [
+        { "url": "https://api.cloudflare.com/*" },
+        { "url": "https://*" },
+        { "url": "http://*/*" }
+      ]
     }
   ]
 }

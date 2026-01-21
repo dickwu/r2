@@ -653,6 +653,8 @@ html.dark .grid-card.selected {
   align-items: center;
   padding: 8px 0;
   gap: 4px;
+  flex: 1;
+  overflow-y: auto;
 }
 
 .collapsed-account-item {
@@ -731,6 +733,23 @@ html.dark .grid-card.selected {
 .sidebar-content {
   flex: 1;
   overflow-y: auto;
+}
+
+.sidebar-footer {
+  padding: 12px 16px;
+  border-top: 1px solid #f0f0f0;
+  background: #fff;
+}
+
+.sidebar-footer.collapsed {
+  padding: 8px 0;
+  display: flex;
+  justify-content: center;
+}
+
+.sidebar-footer.collapsed .collapsed-account-item {
+  width: 32px;
+  height: 32px;
 }
 
 .sidebar-loading {
@@ -940,6 +959,11 @@ html.dark .collapsed-account-text {
 }
 
 html.dark .sidebar-header {
+  background: #1f1f1f;
+  border-color: #303030;
+}
+
+html.dark .sidebar-footer {
   background: #1f1f1f;
   border-color: #303030;
 }

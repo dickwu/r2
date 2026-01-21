@@ -28,6 +28,7 @@ import {
   CloudOutlined,
   RightOutlined,
   MenuFoldOutlined,
+  SwapOutlined,
 } from '@ant-design/icons';
 import {
   useAccountStore,
@@ -39,6 +40,7 @@ import {
   AwsBucket,
   MinioBucket,
 } from '../stores/accountStore';
+import AccountTransferModal from './AccountTransferModal';
 
 const { Text } = Typography;
 
@@ -72,6 +74,7 @@ export default function AccountSidebar({
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedAccount, setSelectedAccount] = useState<ProviderAccount | null>(null);
+  const [transferModalOpen, setTransferModalOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(() => {
     if (typeof window !== 'undefined') {
       const stored = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
@@ -424,6 +427,25 @@ export default function AccountSidebar({
           )}
         </div>
       )}
+
+      <div className={`sidebar-footer${collapsed ? ' collapsed' : ''}`}>
+        {collapsed ? (
+          <Tooltip title="Import / Export" placement="right">
+            <div className="collapsed-account-item" onClick={() => setTransferModalOpen(true)}>
+              <SwapOutlined />
+            </div>
+          </Tooltip>
+        ) : (
+          <Button block icon={<SwapOutlined />} onClick={() => setTransferModalOpen(true)}>
+            Import / Export
+          </Button>
+        )}
+      </div>
+
+      <AccountTransferModal
+        open={transferModalOpen}
+        onClose={() => setTransferModalOpen(false)}
+      />
 
       {/* Tokens & Buckets Drawer */}
       <Drawer

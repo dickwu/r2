@@ -15,6 +15,10 @@ export default function Providers({ children }: { children: React.ReactNode }) {
     setMounted(true);
   }, []);
 
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', currentTheme === 'dark');
+  }, [currentTheme]);
+
   const [queryClient] = useState(
     () =>
       new QueryClient({

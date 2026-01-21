@@ -240,7 +240,7 @@ interface AccountStore {
   deleteMinioAccount: (id: string) => Promise<void>;
   saveMinioBuckets: (
     accountId: string,
-    buckets: { name: string }[]
+    buckets: { name: string; public_domain_scheme?: string | null; public_domain_host?: string | null }[]
   ) => Promise<MinioBucket[]>;
 
   // RustFS Account CRUD
@@ -260,7 +260,10 @@ interface AccountStore {
     endpoint_host: string;
   }) => Promise<void>;
   deleteRustfsAccount: (id: string) => Promise<void>;
-  saveRustfsBuckets: (accountId: string, buckets: { name: string }[]) => Promise<RustfsBucket[]>;
+  saveRustfsBuckets: (
+    accountId: string,
+    buckets: { name: string; public_domain_scheme?: string | null; public_domain_host?: string | null }[]
+  ) => Promise<RustfsBucket[]>;
 
   // Helpers
   hasAccounts: () => boolean;
@@ -610,6 +613,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         accountId,
         buckets: buckets.map((b) => ({
           name: b.name,
+          public_domain_scheme: b.public_domain_scheme ?? null,
+          public_domain_host: b.public_domain_host ?? null,
         })),
       });
       await get().loadAccounts();
@@ -679,6 +684,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         accountId,
         buckets: buckets.map((b) => ({
           name: b.name,
+          public_domain_scheme: b.public_domain_scheme ?? null,
+          public_domain_host: b.public_domain_host ?? null,
         })),
       });
       await get().loadAccounts();
