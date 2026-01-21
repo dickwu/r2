@@ -49,6 +49,8 @@ import { useDownloadStore } from '@/app/stores/downloadStore';
 type ViewMode = 'list' | 'grid';
 type SortOrder = 'asc' | 'desc' | null;
 
+const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
 export default function Home() {
   // Use Zustand store for account management
   const currentConfig = useAccountStore((state) => state.currentConfig);
@@ -71,6 +73,7 @@ export default function Home() {
   const [currentPath, setCurrentPath] = useState('');
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [searchQuery, setSearchQuery] = useState('');
+  const [nameSort, setNameSort] = useState<SortOrder>(null);
   const [sizeSort, setSizeSort] = useState<SortOrder>(null);
   const [modifiedSort, setModifiedSort] = useState<SortOrder>(null);
   const [searchResults, setSearchResults] = useState<FileItem[]>([]);
@@ -229,6 +232,20 @@ export default function Home() {
     // When searching, use bucket-wide search results
     let result = searchQuery.trim() ? searchResults : items;
 
+    // Sort by name
+    if (nameSort) {
+      const useFullPath = searchQuery.trim().length > 0;
+      result = [...result].sort((a, b) => {
+        if (a.isFolder && !b.isFolder) return -1;
+        if (!a.isFolder && b.isFolder) return 1;
+
+        const labelA = useFullPath ? a.key : a.name;
+        const labelB = useFullPath ? b.key : b.name;
+        const compare = nameCollator.compare(labelA, labelB);
+        return nameSort === 'asc' ? compare : -compare;
+      });
+    }
+
     // Sort by size (list view only)
     if (sizeSort) {
       result = [...result].sort((a, b) => {
@@ -260,7 +277,7 @@ export default function Home() {
     }
 
     return result;
-  }, [items, searchQuery, searchResults, sizeSort, modifiedSort, metadata]);
+  }, [items, searchQuery, searchResults, nameSort, sizeSort, modifiedSort, metadata]);
 
   // Compute total selected file count (folders count as their file count)
   const selectedFileCount = useMemo(() => {
@@ -881,6 +898,7 @@ export default function Home() {
     });
     // Clear modified sort when size sort is activated
     setModifiedSort(null);
+    setNameSort(null);
   }
 
   function toggleModifiedSort() {
@@ -891,6 +909,17 @@ export default function Home() {
     });
     // Clear size sort when modified sort is activated
     setSizeSort(null);
+    setNameSort(null);
+  }
+
+  function toggleNameSort() {
+    setNameSort((prev) => {
+      if (prev === null) return 'desc';
+      if (prev === 'desc') return 'asc';
+      return null;
+    });
+    setSizeSort(null);
+    setModifiedSort(null);
   }
 
   // Build breadcrumb items
@@ -1035,6 +1064,7 @@ export default function Home() {
                 items={filteredItems}
                 selectedKeys={selectedKeys}
                 metadata={metadata}
+                nameSort={nameSort}
                 sizeSort={sizeSort}
                 modifiedSort={modifiedSort}
                 showFullPath={!!searchQuery.trim()}
@@ -1042,6 +1072,7 @@ export default function Home() {
                 onToggleSelection={toggleSelection}
                 onSelectAll={selectAll}
                 onClearSelection={clearSelection}
+                onToggleNameSort={toggleNameSort}
                 onToggleSizeSort={toggleSizeSort}
                 onToggleModifiedSort={toggleModifiedSort}
                 onDelete={handleDelete}

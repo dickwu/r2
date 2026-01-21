@@ -27,6 +27,7 @@ interface FileListViewProps {
   items: FileItem[];
   selectedKeys: Set<string>;
   metadata: Record<string, FolderMetadata>;
+  nameSort: SortOrder;
   sizeSort: SortOrder;
   modifiedSort: SortOrder;
   showFullPath?: boolean; // Show full path instead of just name (for search results)
@@ -34,6 +35,7 @@ interface FileListViewProps {
   onToggleSelection: (key: string) => void;
   onSelectAll: () => void;
   onClearSelection: () => void;
+  onToggleNameSort: () => void;
   onToggleSizeSort: () => void;
   onToggleModifiedSort: () => void;
   onDelete: (item: FileItem) => void;
@@ -55,6 +57,7 @@ export default function FileListView({
   items,
   selectedKeys,
   metadata,
+  nameSort,
   sizeSort,
   modifiedSort,
   showFullPath = false,
@@ -62,6 +65,7 @@ export default function FileListView({
   onToggleSelection,
   onSelectAll,
   onClearSelection,
+  onToggleNameSort,
   onToggleSizeSort,
   onToggleModifiedSort,
   onDelete,
@@ -87,7 +91,16 @@ export default function FileListView({
             }}
           />
         </span>
-        <span className="col-name">Name</span>
+        <span className="col-name sortable" onClick={onToggleNameSort}>
+          <span>Name</span>
+          {nameSort === 'asc' ? (
+            <CaretUpOutlined style={{ color: 'var(--text-secondary)' }} />
+          ) : null}
+          {nameSort === 'desc' ? (
+            <CaretDownOutlined style={{ color: 'var(--text-secondary)' }} />
+          ) : null}
+          {nameSort === null ? <MoreOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
+        </span>
         <span className="col-size sortable" onClick={onToggleSizeSort}>
           <span>Size</span>
           {sizeSort === 'asc' ? (

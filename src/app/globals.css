@@ -115,6 +115,16 @@ body {
   min-width: 0;
 }
 
+.file-list-header .col-name.sortable {
+  cursor: pointer;
+  user-select: none;
+  gap: 4px;
+}
+
+.file-list-header .col-name.sortable:hover {
+  color: #f6821f;
+}
+
 .col-name .name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -540,6 +550,10 @@ html.dark .col-date {
 }
 
 html.dark .file-list-header .col-size.sortable:hover {
+  color: #f6821f;
+}
+
+html.dark .file-list-header .col-name.sortable:hover {
   color: #f6821f;
 }
 

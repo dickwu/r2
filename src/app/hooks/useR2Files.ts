@@ -19,6 +19,8 @@ export interface FileItem {
   lastModified?: string;
 }
 
+const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
 function extractName(key: string, prefix: string): string {
   const relativePath = prefix ? key.slice(prefix.length) : key;
   return relativePath.replace(/\/$/, '');
@@ -52,7 +54,7 @@ function buildFileItems(files: StoredFile[], folders: string[], prefix: string):
   return items.sort((a, b) => {
     if (a.isFolder && !b.isFolder) return -1;
     if (!a.isFolder && b.isFolder) return 1;
-    return a.name.localeCompare(b.name);
+    return nameCollator.compare(a.name, b.name);
   });
 }
 
