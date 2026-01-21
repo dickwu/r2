@@ -659,4 +659,4 @@ export type {
   AwsBucket,
   MinioBucket,
   ProviderAccount,
-} from '../stores/accountStore';
+} from '@/app/stores/accountStore';

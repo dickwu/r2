@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import type { StorageConfig, StorageProvider } from '../lib/r2cache';
+import type { StorageConfig, StorageProvider } from '@/app/lib/r2cache';
 
 // Types matching Rust structs
 export interface Account {

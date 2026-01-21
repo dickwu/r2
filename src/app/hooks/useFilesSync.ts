@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { listen } from '@tauri-apps/api/event';
-import { syncBucket, StorageConfig } from '../lib/r2cache';
-import { useFolderSizeStore } from '../stores/folderSizeStore';
-import { useSyncStore, SyncPhase } from '../stores/syncStore';
+import { syncBucket, StorageConfig } from '@/app/lib/r2cache';
+import { useFolderSizeStore } from '@/app/stores/folderSizeStore';
+import { useSyncStore, SyncPhase } from '@/app/stores/syncStore';
 
 interface IndexingProgress {
   current: number;

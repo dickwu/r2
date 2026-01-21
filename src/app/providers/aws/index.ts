@@ -10,7 +10,7 @@ import type {
   SyncResult,
   MoveOperation,
   StorageProviderAdapter,
-} from '../types';
+} from '@/app/providers/types';
 
 function requireAwsFields(config: AwsStorageConfig) {
   if (!config.accessKeyId || !config.secretAccessKey || !config.region) {

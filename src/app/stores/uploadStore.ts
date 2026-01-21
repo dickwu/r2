@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { StorageConfig } from '../lib/r2cache';
+import type { StorageConfig } from '@/app/lib/r2cache';
 
 export type UploadStatus = 'pending' | 'uploading' | 'success' | 'error' | 'cancelled';
 

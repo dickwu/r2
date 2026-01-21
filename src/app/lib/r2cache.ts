@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { getProviderAdapter } from '../providers/index';
+import { getProviderAdapter } from '@/app/providers/index';
 import type {
   BatchDeleteResult,
   BatchMoveResult,
@@ -10,7 +10,7 @@ import type {
   StorageConfig,
   StorageObject,
   SyncResult,
-} from '../providers/types';
+} from '@/app/providers/types';
 
 export type {
   BatchDeleteResult,
@@ -27,7 +27,7 @@ export type {
   AwsStorageConfig,
   MinioStorageConfig,
   RustfsStorageConfig,
-} from '../providers/types';
+} from '@/app/providers/types';
 
 export interface StoredFile {
   key: string;

@@ -1,9 +1,9 @@
 import { useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { getFolderContents, StoredFile } from '../lib/r2cache';
-import { StorageConfig } from '../lib/r2cache';
-import { useSyncStore } from '../stores/syncStore';
+import { getFolderContents, StoredFile } from '@/app/lib/r2cache';
+import { StorageConfig } from '@/app/lib/r2cache';
+import { useSyncStore } from '@/app/stores/syncStore';
 
 // Event emitted by backend when cache is updated
 interface CacheUpdatedEvent {

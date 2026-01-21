@@ -10,7 +10,7 @@ import type {
   SyncResult,
   MoveOperation,
   StorageProviderAdapter,
-} from '../types';
+} from '@/app/providers/types';
 
 function requireRustfsFields(config: RustfsStorageConfig) {
   if (!config.accessKeyId || !config.secretAccessKey || !config.endpointHost) {

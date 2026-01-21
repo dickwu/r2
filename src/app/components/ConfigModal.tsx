@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { readTextFile } from '@tauri-apps/plugin-fs';
 import { Form, Input, Button, Modal, App, Space, Divider, Tag, Select, Switch } from 'antd';
 import {
   ReloadOutlined,
@@ -10,15 +12,13 @@ import {
   CheckOutlined,
   UserOutlined,
   KeyOutlined,
+  SwapOutlined,
 } from '@ant-design/icons';
 import { listBuckets, StorageProvider } from '@/app/lib/r2cache';
 import {
   useAccountStore,
-  Account,
   Token,
   Bucket,
-  AwsAccount,
-  MinioAccount,
   ProviderAccount,
   AwsBucket,
   MinioBucket,
@@ -49,7 +49,7 @@ export type ModalMode = 'add-account' | 'edit-account' | 'add-token' | 'edit-tok
 
 interface ConfigModalProps {
   open: boolean;
-  onClose: () => void;
+  onClose: (force?: boolean) => void;
   mode: ModalMode;
   editAccount?: ProviderAccount | null;
   editToken?: Token | null;
@@ -100,6 +100,7 @@ export default function ConfigModal({
   const isEditMode = mode === 'edit-account' || mode === 'edit-token';
   const isR2Provider = provider === 'r2';
   const showDomainSettings = provider === 'r2' || provider === 'aws';
+  const showImportOption = mode === 'add-account' && accounts.length === 0;
 
   useEffect(() => {
     if (!open) {
@@ -607,12 +608,242 @@ export default function ConfigModal({
         message.success('Token updated');
       }
 
-      onClose();
+      onClose(true);
     } catch (e) {
       console.error('Save failed:', e);
       message.error(e instanceof Error ? e.message : 'Failed to save');
     } finally {
       setSaving(false);
+    }
+  }
+
+  function extractAccountsFromPayload(payload: unknown): ProviderAccount[] | null {
+    if (Array.isArray(payload)) {
+      return payload as ProviderAccount[];
+    }
+    if (payload && typeof payload === 'object' && 'accounts' in payload) {
+      const accountsValue = (payload as { accounts?: unknown }).accounts;
+      if (Array.isArray(accountsValue)) {
+        return accountsValue as ProviderAccount[];
+      }
+    }
+    return null;
+  }
+
+  async function handleImportAccounts(rawAccounts: ProviderAccount[]): Promise<boolean> {
+    const existingR2Ids = new Set(
+      accounts.filter((account) => account.provider === 'r2').map((account) => account.account.id)
+    );
+    const seenR2Ids = new Set<string>();
+    let imported = 0;
+    let skipped = 0;
+    let failed = 0;
+    let warnings = 0;
+
+    for (const entry of rawAccounts) {
+      if (!entry || typeof entry !== 'object' || !('provider' in entry)) {
+        skipped += 1;
+        continue;
+      }
+
+      const accountData = entry as ProviderAccount;
+      try {
+        if (accountData.provider === 'r2') {
+          const account = accountData.account;
+          if (!account?.id) {
+            failed += 1;
+            continue;
+          }
+          if (existingR2Ids.has(account.id) || seenR2Ids.has(account.id)) {
+            skipped += 1;
+            continue;
+          }
+          await createAccount(account.id, account.name || undefined);
+          seenR2Ids.add(account.id);
+
+          const tokenEntries = Array.isArray(accountData.tokens) ? accountData.tokens : [];
+          for (const tokenEntry of tokenEntries) {
+            const token = tokenEntry?.token;
+            if (!token?.api_token || !token?.access_key_id || !token?.secret_access_key) {
+              warnings += 1;
+              continue;
+            }
+            try {
+              const createdToken = await createToken({
+                account_id: account.id,
+                name: token.name || undefined,
+                api_token: token.api_token,
+                access_key_id: token.access_key_id,
+                secret_access_key: token.secret_access_key,
+              });
+              const bucketEntries = Array.isArray(tokenEntry?.buckets) ? tokenEntry.buckets : [];
+              if (bucketEntries.length > 0) {
+                await saveBuckets(
+                  createdToken.id,
+                  bucketEntries
+                    .filter((bucket) => bucket?.name)
+                    .map((bucket) => ({
+                      name: bucket.name,
+                      public_domain: bucket.public_domain ?? null,
+                      public_domain_scheme: bucket.public_domain_scheme ?? null,
+                    }))
+                );
+              }
+            } catch (e) {
+              console.error('Failed to import R2 token:', e);
+              warnings += 1;
+            }
+          }
+          imported += 1;
+        } else if (accountData.provider === 'aws') {
+          const account = accountData.account;
+          if (
+            !account?.access_key_id ||
+            !account?.secret_access_key ||
+            !account?.region ||
+            !account?.endpoint_scheme
+          ) {
+            failed += 1;
+            continue;
+          }
+          const createdAccount = await createAwsAccount({
+            name: account.name || undefined,
+            access_key_id: account.access_key_id,
+            secret_access_key: account.secret_access_key,
+            region: account.region,
+            endpoint_scheme: account.endpoint_scheme,
+            endpoint_host: account.endpoint_host || null,
+            force_path_style: account.force_path_style,
+          });
+          const bucketEntries = Array.isArray(accountData.buckets) ? accountData.buckets : [];
+          if (bucketEntries.length > 0) {
+            await saveAwsBuckets(
+              createdAccount.id,
+              bucketEntries
+                .filter((bucket) => bucket?.name)
+                .map((bucket) => ({
+                  name: bucket.name,
+                  public_domain_scheme: bucket.public_domain_scheme ?? null,
+                  public_domain_host: bucket.public_domain_host ?? null,
+                }))
+            );
+          }
+          imported += 1;
+        } else if (accountData.provider === 'minio') {
+          const account = accountData.account;
+          if (
+            !account?.access_key_id ||
+            !account?.secret_access_key ||
+            !account?.endpoint_scheme ||
+            !account?.endpoint_host
+          ) {
+            failed += 1;
+            continue;
+          }
+          const createdAccount = await createMinioAccount({
+            name: account.name || undefined,
+            access_key_id: account.access_key_id,
+            secret_access_key: account.secret_access_key,
+            endpoint_scheme: account.endpoint_scheme,
+            endpoint_host: account.endpoint_host,
+            force_path_style: account.force_path_style,
+          });
+          const bucketEntries = Array.isArray(accountData.buckets) ? accountData.buckets : [];
+          if (bucketEntries.length > 0) {
+            await saveMinioBuckets(
+              createdAccount.id,
+              bucketEntries
+                .filter((bucket) => bucket?.name)
+                .map((bucket) => ({
+                  name: bucket.name,
+                  public_domain_scheme: bucket.public_domain_scheme ?? null,
+                  public_domain_host: bucket.public_domain_host ?? null,
+                }))
+            );
+          }
+          imported += 1;
+        } else if (accountData.provider === 'rustfs') {
+          const account = accountData.account;
+          if (
+            !account?.access_key_id ||
+            !account?.secret_access_key ||
+            !account?.endpoint_scheme ||
+            !account?.endpoint_host
+          ) {
+            failed += 1;
+            continue;
+          }
+          const createdAccount = await createRustfsAccount({
+            name: account.name || undefined,
+            access_key_id: account.access_key_id,
+            secret_access_key: account.secret_access_key,
+            endpoint_scheme: account.endpoint_scheme,
+            endpoint_host: account.endpoint_host,
+          });
+          const bucketEntries = Array.isArray(accountData.buckets) ? accountData.buckets : [];
+          if (bucketEntries.length > 0) {
+            await saveRustfsBuckets(
+              createdAccount.id,
+              bucketEntries
+                .filter((bucket) => bucket?.name)
+                .map((bucket) => ({
+                  name: bucket.name,
+                  public_domain_scheme: bucket.public_domain_scheme ?? null,
+                  public_domain_host: bucket.public_domain_host ?? null,
+                }))
+            );
+          }
+          imported += 1;
+        } else {
+          skipped += 1;
+        }
+      } catch (e) {
+        console.error('Failed to import account:', e);
+        failed += 1;
+      }
+    }
+
+    if (imported === 0 && skipped === 0 && failed === 0) {
+      message.warning('No valid accounts found to import');
+      return false;
+    }
+
+    if (failed > 0 || warnings > 0) {
+      message.warning(
+        `Imported ${imported} account${imported !== 1 ? 's' : ''}, ` +
+          `${skipped} skipped, ${failed} failed, ${warnings} warning${warnings !== 1 ? 's' : ''}`
+      );
+    } else {
+      message.success(
+        `Imported ${imported} account${imported !== 1 ? 's' : ''}` +
+          (skipped > 0 ? `, ${skipped} skipped` : '')
+      );
+    }
+    return imported > 0;
+  }
+
+  async function handleTriggerImport() {
+    try {
+      const filePath = await openDialog({
+        multiple: false,
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (!filePath || Array.isArray(filePath)) return;
+
+      const text = await readTextFile(filePath);
+      const parsed = JSON.parse(text);
+      const rawAccounts = extractAccountsFromPayload(parsed);
+      if (!rawAccounts) {
+        message.error('Invalid account export file');
+        return;
+      }
+      const didImport = await handleImportAccounts(rawAccounts);
+      if (didImport) {
+        onClose(true);
+      }
+    } catch (e) {
+      console.error('Failed to import accounts:', e);
+      message.error('Failed to import accounts');
     }
   }
 
@@ -646,7 +877,14 @@ export default function ConfigModal({
   }
 
   return (
-    <Modal open={open} onCancel={onClose} footer={null} width={480} centered destroyOnHidden>
+    <Modal
+      open={open}
+      onCancel={() => onClose()}
+      footer={null}
+      width={480}
+      centered
+      destroyOnHidden
+    >
       <div style={{ textAlign: 'center', marginBottom: 16 }}>
         {getIcon()}
         <h3 style={{ marginTop: 8, marginBottom: 0 }}>{getTitle()}</h3>
@@ -1000,6 +1238,17 @@ export default function ConfigModal({
             {isEditMode ? 'Save Changes' : 'Add'}
           </Button>
         </Form.Item>
+
+        {showImportOption && (
+          <>
+            <Divider plain style={{ margin: '12px 0 8px' }}>
+              <span style={{ fontSize: 12 }}>Or import</span>
+            </Divider>
+            <Button block icon={<SwapOutlined />} onClick={handleTriggerImport}>
+              Import JSON
+            </Button>
+          </>
+        )}
       </Form>
     </Modal>
   );

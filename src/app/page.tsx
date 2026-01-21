@@ -1080,7 +1080,11 @@ export default function Home() {
 
           <ConfigModal
             open={configModalOpen}
-            onClose={() => currentConfig && setConfigModalOpen(false)}
+            onClose={(force) => {
+              if (force || currentConfig || hasAccounts()) {
+                setConfigModalOpen(false);
+              }
+            }}
             mode={configModalMode}
             editAccount={editAccount}
             editToken={editToken}

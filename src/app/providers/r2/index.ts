@@ -10,7 +10,7 @@ import type {
   SyncResult,
   MoveOperation,
   StorageProviderAdapter,
-} from '../types';
+} from '@/app/providers/types';
 
 function requireR2Credentials(config: R2StorageConfig) {
   if (!config.accessKeyId || !config.secretAccessKey) {
