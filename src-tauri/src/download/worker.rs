@@ -33,6 +33,7 @@ lazy_static::lazy_static! {
 }
 
 /// Download a single file with streaming and progress (internal)
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn download_file_internal(
     client: &Client,
     config: &DownloadConfig,

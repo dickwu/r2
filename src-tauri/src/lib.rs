@@ -120,7 +120,7 @@ pub fn run() {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
             let app_handle = app.handle();
             let init_result =
-                rt.block_on(async { init_db_with_recovery(&app_handle, &db_path).await });
+                rt.block_on(async { init_db_with_recovery(app_handle, &db_path).await });
 
             if let Err(err) = init_result {
                 let exit_handle = app_handle.clone();

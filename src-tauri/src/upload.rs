@@ -165,6 +165,7 @@ fn generate_presigned_url(
 }
 
 /// Upload a single file using PUT (for files < 100MB)
+#[allow(clippy::too_many_arguments)]
 async fn upload_single_part(
     client: &Client,
     config: &R2Config,
@@ -234,6 +235,7 @@ async fn upload_single_part(
 }
 
 /// Multipart upload for large files with resume support
+#[allow(clippy::too_many_arguments)]
 async fn upload_multipart(
     client: &Client,
     config: &R2Config,
@@ -258,7 +260,7 @@ async fn upload_multipart(
         })
         .unwrap_or(0);
 
-    let total_parts = ((file_size + PART_SIZE - 1) / PART_SIZE) as usize;
+    let total_parts = file_size.div_ceil(PART_SIZE) as usize;
     let file_path_str = file_path.to_string_lossy().to_string();
 
     // Check for existing resumable session
@@ -629,6 +631,7 @@ async fn upload_multipart(
 
 /// Main upload command - called from frontend
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_file(
     app: AppHandle,
     task_id: String,

@@ -159,6 +159,7 @@ pub async fn upload_rustfs_content(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_rustfs_file(
     app: tauri::AppHandle,
     task_id: String,

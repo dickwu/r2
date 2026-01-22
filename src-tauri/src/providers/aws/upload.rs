@@ -211,7 +211,7 @@ pub async fn upload_file_multipart(
     }
 
     let upload_id = initiate_multipart_upload(config, key, content_type).await?;
-    let total_parts = ((file_size + part_size - 1) / part_size) as usize;
+    let total_parts = file_size.div_ceil(part_size) as usize;
 
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let uploaded_bytes = Arc::new(AtomicU64::new(0));

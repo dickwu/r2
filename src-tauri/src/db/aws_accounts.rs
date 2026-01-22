@@ -117,6 +117,7 @@ pub async fn list_aws_accounts() -> DbResult<Vec<AwsAccount>> {
     Ok(accounts)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_aws_account(
     id: &str,
     name: Option<&str>,

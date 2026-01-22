@@ -24,6 +24,7 @@ pub struct UploadResult {
 
 /// Tauri command: Upload file using AWS SDK (clean implementation)
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_file_sdk(
     app: AppHandle,
     task_id: String,

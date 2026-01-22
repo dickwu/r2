@@ -1,12 +1,11 @@
 'use client';
 
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { Button, Breadcrumb, Space, App, Spin, Empty, Segmented, Input } from 'antd';
+import { Button, Space, App, Spin, Empty, Segmented, Input } from 'antd';
 import {
   SettingOutlined,
   ReloadOutlined,
   UploadOutlined,
-  HomeOutlined,
   SunOutlined,
   MoonOutlined,
   AppstoreOutlined,
@@ -27,6 +26,7 @@ import FileRenameModal from '@/app/components/FileRenameModal';
 import FileGridView from '@/app/components/FileGridView';
 import FileListView from '@/app/components/FileListView';
 import AccountSidebar from '@/app/components/AccountSidebar';
+import PathBreadcrumb from '@/app/components/PathBreadcrumb';
 import StatusBar from '@/app/components/StatusBar';
 import BatchDeleteModal from '@/app/components/BatchDeleteModal';
 import BatchMoveModal from '@/app/components/BatchMoveModal';
@@ -43,6 +43,7 @@ import {
   StorageConfig,
 } from '@/app/lib/r2cache';
 import { useFolderSizeStore } from '@/app/stores/folderSizeStore';
+import { useCurrentPathStore } from '@/app/stores/currentPathStore';
 import { useSyncStore } from '@/app/stores/syncStore';
 import { useBatchOperationStore } from '@/app/stores/batchOperationStore';
 import { useDownloadStore } from '@/app/stores/downloadStore';
@@ -72,7 +73,9 @@ export default function Home() {
   const [dropQueue, setDropQueue] = useState<string[][]>([]);
   const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
   const [renameFile, setRenameFile] = useState<FileItem | null>(null);
-  const [currentPath, setCurrentPath] = useState('');
+  const currentPath = useCurrentPathStore((state) => state.currentPath);
+  const setCurrentPath = useCurrentPathStore((state) => state.setCurrentPath);
+  const resetCurrentPath = useCurrentPathStore((state) => state.reset);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [searchQuery, setSearchQuery] = useState('');
   const [nameSort, setNameSort] = useState<SortOrder>(null);
@@ -135,7 +138,7 @@ export default function Home() {
 
   // Reset path to root when bucket changes
   useEffect(() => {
-    setCurrentPath('');
+    resetCurrentPath();
     setSearchQuery('');
     resetBatchOperation();
   }, [
@@ -143,6 +146,7 @@ export default function Home() {
     currentConfig?.account_id,
     currentConfig?.provider,
     resetBatchOperation,
+    resetCurrentPath,
   ]);
 
   // Load download tasks from database when bucket changes
@@ -929,11 +933,6 @@ export default function Home() {
     [renameFile, config, isConfigReady, previewFile, refresh, refreshSync]
   );
 
-  function navigateToPath(path: string) {
-    setCurrentPath(path);
-    setSearchQuery('');
-  }
-
   function toggleSizeSort() {
     setSizeSort((prev) => {
       if (prev === null) return 'desc';
@@ -966,24 +965,6 @@ export default function Home() {
     setModifiedSort(null);
   }
 
-  // Build breadcrumb items
-  const pathParts = currentPath ? currentPath.replace(/\/$/, '').split('/') : [];
-  const breadcrumbItems = [
-    {
-      title: (
-        <a onClick={() => navigateToPath('')}>
-          <HomeOutlined /> {currentConfig?.bucket || 'Root'}
-        </a>
-      ),
-    },
-    ...pathParts.map((part, index) => {
-      const fullPath = pathParts.slice(0, index + 1).join('/') + '/';
-      return {
-        title: <a onClick={() => navigateToPath(fullPath)}>{part}</a>,
-      };
-    }),
-  ];
-
   if (loading) {
     return (
       <div className="center-container">
@@ -1008,7 +989,10 @@ export default function Home() {
           {/* Toolbar */}
           <div className="toolbar">
             <Space>
-              <Breadcrumb items={breadcrumbItems} />
+              <PathBreadcrumb
+                bucketName={currentConfig?.bucket || 'Root'}
+                onNavigate={() => setSearchQuery('')}
+              />
               {selectedKeys.size > 0 && (
                 <>
                   <span style={{ color: 'var(--text-secondary)' }}>

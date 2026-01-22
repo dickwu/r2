@@ -1,5 +1,6 @@
 use crate::commands::cache_events::{get_unique_parent_paths, CacheUpdatedEvent};
 use crate::commands::delete_cache::{update_cache_after_batch_delete, update_cache_after_delete};
+use crate::commands::move_cache::{update_cache_after_batch_move, update_cache_after_move};
 use crate::commands::upload_cache::update_cache_after_upload;
 use crate::db::{self, CachedFile};
 use crate::providers::minio;
@@ -343,30 +344,8 @@ pub async fn rename_minio_object(
         .await
         .map_err(|e| format!("Failed to rename object: {}", e))?;
 
-    if let Some((size, last_modified)) =
-        db::move_cached_file(&bucket, &account_id, &old_key, &new_key)
-            .await
-            .map_err(|e| format!("Failed to update file cache: {}", e))?
-    {
-        db::update_directory_tree_for_move(
-            &bucket,
-            &account_id,
-            &old_key,
-            &new_key,
-            size,
-            &last_modified,
-        )
-        .await
-        .map_err(|e| format!("Failed to update directory tree: {}", e))?;
-    }
-
-    let _ = app.emit(
-        "cache-updated",
-        CacheUpdatedEvent {
-            action: "move".to_string(),
-            affected_paths: get_unique_parent_paths(&[old_key, new_key]),
-        },
-    );
+    // Update cache and emit events (including paths-created/removed)
+    update_cache_after_move(&app, &bucket, &account_id, &old_key, &new_key).await?;
 
     Ok(())
 }
@@ -451,34 +430,19 @@ pub async fn batch_move_minio_objects(
         let _ = handle.await;
     }
 
-    let moves = successful_moves.lock().await;
-    let mut affected_keys: Vec<String> = Vec::new();
-    for op in moves.iter() {
-        if let Ok(Some((size, last_modified))) =
-            db::move_cached_file(&bucket, &account_id, &op.old_key, &op.new_key).await
+    let operations: Vec<(String, String)> = {
+        let moves = successful_moves.lock().await;
+        moves
+            .iter()
+            .map(|op| (op.old_key.clone(), op.new_key.clone()))
+            .collect()
+    };
+    if !operations.is_empty() {
+        if let Err(e) = update_cache_after_batch_move(&app, &bucket, &account_id, &operations).await
         {
-            let _ = db::update_directory_tree_for_move(
-                &bucket,
-                &account_id,
-                &op.old_key,
-                &op.new_key,
-                size,
-                &last_modified,
-            )
-            .await;
-            affected_keys.push(op.old_key.clone());
-            affected_keys.push(op.new_key.clone());
+            let mut errs = errors.lock().await;
+            errs.push(e);
         }
-    }
-
-    if !affected_keys.is_empty() {
-        let _ = app.emit(
-            "cache-updated",
-            CacheUpdatedEvent {
-                action: "move".to_string(),
-                affected_paths: get_unique_parent_paths(&affected_keys),
-            },
-        );
     }
 
     let final_completed = completed.load(Ordering::SeqCst);
@@ -571,6 +535,7 @@ pub struct UploadResult {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_minio_file(
     app: tauri::AppHandle,
     task_id: String,

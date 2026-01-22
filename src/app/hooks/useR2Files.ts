@@ -1,16 +1,11 @@
 import { useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getFolderContents, StoredFile } from '@/app/lib/r2cache';
 import { StorageConfig } from '@/app/lib/r2cache';
 import { useSyncStore } from '@/app/stores/syncStore';
+import { useCurrentPathStore } from '@/app/stores/currentPathStore';
 
 // Event emitted by backend when cache is updated
-interface CacheUpdatedEvent {
-  action: 'delete' | 'move' | 'update';
-  affected_paths: string[];
-}
-
 export interface FileItem {
   name: string;
   key: string;
@@ -24,6 +19,14 @@ const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 
 function extractName(key: string, prefix: string): string {
   const relativePath = prefix ? key.slice(prefix.length) : key;
   return relativePath.replace(/\/$/, '');
+}
+
+function getParentPath(path: string): string {
+  if (!path) return '';
+  const withoutTrailing = path.endsWith('/') ? path.slice(0, -1) : path;
+  const lastSlash = withoutTrailing.lastIndexOf('/');
+  if (lastSlash === -1) return '';
+  return `${withoutTrailing.slice(0, lastSlash + 1)}`;
 }
 
 function buildFileItems(files: StoredFile[], folders: string[], prefix: string): FileItem[] {
@@ -110,32 +113,44 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
     useSyncStore.getState().setIsFolderLoading(query.isFetching);
   }, [query.isFetching]);
 
-  // Listen for cache-updated events from backend to auto-refresh affected folders
+  const cacheUpdatedPaths = useCurrentPathStore((state) => state.cacheUpdatedPaths);
+  const removedPaths = useCurrentPathStore((state) => state.removedPaths);
+  const createdPaths = useCurrentPathStore((state) => state.createdPaths);
+
+  // Auto-refresh affected folders when cache changes
   useEffect(() => {
     if (!config?.bucket) return;
 
-    let unlisten: UnlistenFn | undefined;
-
-    const setupListener = async () => {
-      unlisten = await listen<CacheUpdatedEvent>('cache-updated', (event) => {
-        const { affected_paths } = event.payload;
-        console.log('Cache updated:', event.payload);
-
-        // Invalidate queries for affected paths
-        for (const path of affected_paths) {
-          queryClient.invalidateQueries({
-            queryKey: ['folder-contents', config.provider, config.accountId, config.bucket, path],
-          });
-        }
-      });
+    const invalidateFolderQueries = (paths: string[]) => {
+      for (const path of paths) {
+        queryClient.invalidateQueries({
+          queryKey: ['folder-contents', config.provider, config.accountId, config.bucket, path],
+        });
+      }
     };
 
-    setupListener();
-
-    return () => {
-      unlisten?.();
+    const invalidateParentQueries = (paths: string[]) => {
+      const parentPaths = new Set(paths.map(getParentPath));
+      invalidateFolderQueries(Array.from(parentPaths));
     };
-  }, [config?.bucket, config?.accountId, config?.provider, queryClient]);
+    if (cacheUpdatedPaths.length > 0) {
+      invalidateFolderQueries(cacheUpdatedPaths);
+    }
+    if (removedPaths.length > 0) {
+      invalidateParentQueries(removedPaths);
+    }
+    if (createdPaths.length > 0) {
+      invalidateParentQueries(createdPaths);
+    }
+  }, [
+    config?.bucket,
+    config?.accountId,
+    config?.provider,
+    queryClient,
+    cacheUpdatedPaths,
+    removedPaths,
+    createdPaths,
+  ]);
 
   async function refresh() {
     await queryClient.invalidateQueries({ queryKey });

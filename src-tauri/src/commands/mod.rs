@@ -9,6 +9,7 @@ mod cache_events;
 pub(crate) mod delete_cache;
 mod file_cache;
 mod minio_commands;
+pub(crate) mod move_cache;
 mod r2_commands;
 mod rustfs_commands;
 pub(crate) mod upload_cache;

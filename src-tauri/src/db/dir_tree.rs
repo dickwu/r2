@@ -43,6 +43,13 @@ pub struct ComputedNode {
     pub last_modified: Option<String>,
 }
 
+/// Result of updating directory tree for a move operation.
+#[derive(Debug, Clone)]
+pub struct MoveTreeResult {
+    pub removed_paths: Vec<String>,
+    pub created_paths: Vec<String>,
+}
+
 /// Helper to compute parent path from a folder path
 fn compute_parent_path(path: &str) -> String {
     // Path like "folder/" -> parent is ""
@@ -178,7 +185,7 @@ impl DirectoryTreeBuilder {
     ) -> Vec<ComputedNode> {
         // Sort by depth (deepest first)
         let mut sorted_paths: Vec<_> = self.dir_map.keys().cloned().collect();
-        sorted_paths.sort_by(|a, b| b.matches('/').count().cmp(&a.matches('/').count()));
+        sorted_paths.sort_by_key(|p| std::cmp::Reverse(p.matches('/').count()));
 
         let total = sorted_paths.len();
         let mut results: Vec<ComputedNode> = Vec::with_capacity(total);
@@ -498,6 +505,31 @@ pub async fn update_directory_tree_for_delete(
     remove_empty_paths(bucket, account_id, key).await
 }
 
+/// Detect which ancestor paths for a key do not yet exist in directory_tree.
+/// Returns the list of paths that would be newly created.
+async fn detect_new_paths(bucket: &str, account_id: &str, key: &str) -> DbResult<Vec<String>> {
+    let conn = get_connection()?.lock().await;
+    let (_, paths_to_check) = get_ancestor_paths(key);
+
+    let mut created_paths: Vec<String> = Vec::new();
+
+    for path in paths_to_check.iter().filter(|p| !p.is_empty()) {
+        let path_str = path.as_str();
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM directory_tree WHERE bucket = ?1 AND account_id = ?2 AND path = ?3",
+                turso::params![bucket, account_id, path_str],
+            )
+            .await?;
+
+        if rows.next().await?.is_none() {
+            created_paths.push(path.clone());
+        }
+    }
+
+    Ok(created_paths)
+}
+
 /// Check all ancestor paths and remove any that have become empty (total_file_count == 0).
 /// Returns the list of removed paths.
 async fn remove_empty_paths(bucket: &str, account_id: &str, key: &str) -> DbResult<Vec<String>> {
@@ -545,18 +577,27 @@ pub async fn update_directory_tree_for_move(
     new_key: &str,
     file_size: i64,
     last_modified: &str,
-) -> DbResult<()> {
+) -> DbResult<MoveTreeResult> {
     // Get parent paths to check if it's a same-folder rename
     let (old_parent, _) = get_ancestor_paths(old_key);
     let (new_parent, _) = get_ancestor_paths(new_key);
 
     // If moving within same folder, no directory tree changes needed
     if old_parent == new_parent {
-        return Ok(());
+        return Ok(MoveTreeResult {
+            removed_paths: Vec::new(),
+            created_paths: Vec::new(),
+        });
     }
+
+    // Detect which paths will be newly created for the new location
+    let created_paths = detect_new_paths(bucket, account_id, new_key).await?;
 
     // Decrease in old location
     apply_directory_delta(bucket, account_id, old_key, -1, -file_size, None).await?;
+
+    // Remove empty paths left behind
+    let removed_paths = remove_empty_paths(bucket, account_id, old_key).await?;
 
     // Increase in new location
     apply_directory_delta(
@@ -567,7 +608,12 @@ pub async fn update_directory_tree_for_move(
         file_size,
         Some(last_modified),
     )
-    .await
+    .await?;
+
+    Ok(MoveTreeResult {
+        removed_paths,
+        created_paths,
+    })
 }
 
 /// Update directory tree when a file is uploaded or updated.

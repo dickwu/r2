@@ -13,6 +13,12 @@ pub(crate) struct PathsRemovedEvent {
     pub removed_paths: Vec<String>,
 }
 
+/// Event emitted when new folder paths are created
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PathsCreatedEvent {
+    pub created_paths: Vec<String>,
+}
+
 /// Get all unique parent paths (including ancestors) for a list of keys.
 /// This ensures that when a file is uploaded to "a/b/file.txt", the affected paths
 /// include "", "a/", and "a/b/" so that all ancestor folder views are refreshed.
