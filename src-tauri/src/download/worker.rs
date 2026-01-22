@@ -58,26 +58,18 @@ pub(crate) async fn download_file_internal(
 
     // Generate presigned URL for the object (fresh URL every time)
     let presigned_url: String = match config {
-        DownloadConfig::R2(cfg) => {
-            crate::r2::generate_presigned_url(cfg, key, 3600)
-                .await
-                .map_err(|e| format!("Failed to generate presigned URL: {}", e))?
-        }
-        DownloadConfig::Aws(cfg) => {
-            aws::generate_presigned_url(cfg, key, 3600)
-                .await
-                .map_err(|e| format!("Failed to generate presigned URL: {}", e))?
-        }
-        DownloadConfig::Minio(cfg) => {
-            minio::generate_presigned_url(cfg, key, 3600)
-                .await
-                .map_err(|e| format!("Failed to generate presigned URL: {}", e))?
-        }
-        DownloadConfig::Rustfs(cfg) => {
-            rustfs::generate_presigned_url(cfg, key, 3600)
-                .await
-                .map_err(|e| format!("Failed to generate presigned URL: {}", e))?
-        }
+        DownloadConfig::R2(cfg) => crate::r2::generate_presigned_url(cfg, key, 3600)
+            .await
+            .map_err(|e| format!("Failed to generate presigned URL: {}", e))?,
+        DownloadConfig::Aws(cfg) => aws::generate_presigned_url(cfg, key, 3600)
+            .await
+            .map_err(|e| format!("Failed to generate presigned URL: {}", e))?,
+        DownloadConfig::Minio(cfg) => minio::generate_presigned_url(cfg, key, 3600)
+            .await
+            .map_err(|e| format!("Failed to generate presigned URL: {}", e))?,
+        DownloadConfig::Rustfs(cfg) => rustfs::generate_presigned_url(cfg, key, 3600)
+            .await
+            .map_err(|e| format!("Failed to generate presigned URL: {}", e))?,
     };
 
     // Check if we should resume from existing partial file
@@ -168,7 +160,7 @@ pub(crate) async fn download_file_internal(
     // Stream the response body to the file with buffered writes
     let mut stream = response.bytes_stream();
     use futures_util::StreamExt;
-    
+
     // Write buffer to reduce I/O operations
     let mut write_buffer = Vec::with_capacity(WRITE_BUFFER_SIZE);
 
@@ -198,7 +190,7 @@ pub(crate) async fn download_file_internal(
                     .map_err(|e| format!("Failed to write buffer: {}", e))?;
                 write_buffer.clear();
             }
-            
+
             // Get current progress
             let current = downloaded_bytes.load(Ordering::SeqCst);
             let percent = if total_bytes > 0 {
@@ -206,11 +198,11 @@ pub(crate) async fn download_file_internal(
             } else {
                 0
             };
-            
+
             // Save progress to database
             let _ = db::update_download_progress(task_id, current as i64).await;
             let _ = db::update_download_status(task_id, "paused", None).await;
-            
+
             // Emit progress event so UI shows accurate progress when paused
             let _ = app.emit(
                 "download-progress",
@@ -222,7 +214,7 @@ pub(crate) async fn download_file_internal(
                     speed: 0.0, // Speed is 0 when paused
                 },
             );
-            
+
             // Emit status change event
             let _ = app.emit(
                 "download-status-changed",
@@ -236,10 +228,10 @@ pub(crate) async fn download_file_internal(
         }
 
         let chunk = chunk_result.map_err(|e| format!("Failed to read chunk: {}", e))?;
-        
+
         // Add to write buffer
         write_buffer.extend_from_slice(&chunk);
-        
+
         // Update progress counter atomically
         downloaded_bytes.fetch_add(chunk.len() as u64, Ordering::SeqCst);
 
@@ -252,10 +244,13 @@ pub(crate) async fn download_file_internal(
 
             // Get current downloaded bytes for accurate progress
             let current_downloaded = downloaded_bytes.load(Ordering::SeqCst);
-            
+
             // Calculate percent (ensure it's within 0-100)
             let percent = if total_bytes > 0 {
-                std::cmp::min(((current_downloaded as f64 / total_bytes as f64) * 100.0) as u32, 100)
+                std::cmp::min(
+                    ((current_downloaded as f64 / total_bytes as f64) * 100.0) as u32,
+                    100,
+                )
             } else {
                 0
             };
@@ -283,7 +278,7 @@ pub(crate) async fn download_file_internal(
             let _ = db::update_download_progress(task_id, current_downloaded as i64).await;
         }
     }
-    
+
     // Flush remaining buffer
     if !write_buffer.is_empty() {
         file.write_all(&write_buffer)
@@ -339,7 +334,11 @@ pub(crate) async fn download_file_internal(
 }
 
 /// Spawn a download task
-pub(crate) async fn spawn_download_task(app: AppHandle, session: DownloadSession, config: DownloadConfig) {
+pub(crate) async fn spawn_download_task(
+    app: AppHandle,
+    session: DownloadSession,
+    config: DownloadConfig,
+) {
     let task_id = session.id.clone();
 
     // Register cancel and pause flags

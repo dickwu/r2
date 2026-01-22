@@ -5,8 +5,8 @@
 //! - Batch database inserts for performance
 //! - Progress reporting during build
 
+use super::{get_connection, CachedFile, DbResult};
 use std::collections::{BTreeSet, HashMap};
-use super::{get_connection, DbResult, CachedFile};
 
 /// Batch size for database inserts
 const DB_BATCH_SIZE: usize = 500;
@@ -35,7 +35,7 @@ struct FileInfo {
 #[derive(Debug, Clone)]
 pub struct ComputedNode {
     pub path: String,
-    pub parent_path: String,  // Parent folder path for fast child lookup
+    pub parent_path: String, // Parent folder path for fast child lookup
     pub file_count: i32,
     pub total_file_count: i32,
     pub size: i64,
@@ -51,7 +51,7 @@ fn compute_parent_path(path: &str) -> String {
     if path.is_empty() {
         return String::new();
     }
-    
+
     // Remove trailing slash, find last slash, include it
     let without_trailing = path.trim_end_matches('/');
     if let Some(last_slash) = without_trailing.rfind('/') {
@@ -62,7 +62,7 @@ fn compute_parent_path(path: &str) -> String {
 }
 
 /// Builder for directory tree from file list.
-/// 
+///
 /// Usage:
 /// ```ignore
 /// let builder = DirectoryTreeBuilder::new();
@@ -89,7 +89,7 @@ impl DirectoryTreeBuilder {
     ) -> Vec<ComputedNode> {
         // Phase 1: Extract directory structure
         self.extract_directories(files).await;
-        
+
         // Phase 2: Compute aggregates bottom-up
         self.compute_aggregates(progress.as_mut()).await
     }
@@ -97,14 +97,17 @@ impl DirectoryTreeBuilder {
     /// Extract directory structure from file paths
     async fn extract_directories(&mut self, files: &[CachedFile]) {
         // Initialize root
-        self.dir_map.insert(String::new(), DirNode {
-            direct_files: Vec::new(),
-            subdirs: BTreeSet::new(),
-        });
+        self.dir_map.insert(
+            String::new(),
+            DirNode {
+                direct_files: Vec::new(),
+                subdirs: BTreeSet::new(),
+            },
+        );
 
         for (idx, file) in files.iter().enumerate() {
             self.process_file(file);
-            
+
             // Yield periodically to not starve runtime
             if idx > 0 && idx % YIELD_INTERVAL == 0 {
                 tokio::task::yield_now().await;
@@ -122,7 +125,11 @@ impl DirectoryTreeBuilder {
 
         // Root-level file
         if parts.len() == 1 {
-            self.dir_map.get_mut("").unwrap().direct_files.push(file_info);
+            self.dir_map
+                .get_mut("")
+                .unwrap()
+                .direct_files
+                .push(file_info);
             return;
         }
 
@@ -141,10 +148,12 @@ impl DirectoryTreeBuilder {
             };
 
             // Ensure directory exists
-            self.dir_map.entry(current_path.clone()).or_insert_with(|| DirNode {
-                direct_files: Vec::new(),
-                subdirs: BTreeSet::new(),
-            });
+            self.dir_map
+                .entry(current_path.clone())
+                .or_insert_with(|| DirNode {
+                    direct_files: Vec::new(),
+                    subdirs: BTreeSet::new(),
+                });
 
             // Link to parent
             if let Some(parent) = self.dir_map.get_mut(&parent_path) {
@@ -153,7 +162,11 @@ impl DirectoryTreeBuilder {
 
             // Add file to direct parent
             if i == parts.len() - 2 {
-                self.dir_map.get_mut(&current_path).unwrap().direct_files.push(file_info.clone());
+                self.dir_map
+                    .get_mut(&current_path)
+                    .unwrap()
+                    .direct_files
+                    .push(file_info.clone());
             }
         }
     }
@@ -165,9 +178,7 @@ impl DirectoryTreeBuilder {
     ) -> Vec<ComputedNode> {
         // Sort by depth (deepest first)
         let mut sorted_paths: Vec<_> = self.dir_map.keys().cloned().collect();
-        sorted_paths.sort_by(|a, b| {
-            b.matches('/').count().cmp(&a.matches('/').count())
-        });
+        sorted_paths.sort_by(|a, b| b.matches('/').count().cmp(&a.matches('/').count()));
 
         let total = sorted_paths.len();
         let mut results: Vec<ComputedNode> = Vec::with_capacity(total);
@@ -180,11 +191,12 @@ impl DirectoryTreeBuilder {
 
         for (idx, path) in sorted_paths.iter().enumerate() {
             let node = self.dir_map.get(path).unwrap();
-            
+
             // Direct stats
             let direct_count = node.direct_files.len() as i32;
             let direct_size: i64 = node.direct_files.iter().map(|f| f.size).sum();
-            let direct_last_mod: Option<&str> = node.direct_files
+            let direct_last_mod: Option<&str> = node
+                .direct_files
                 .iter()
                 .map(|f| f.last_modified.as_str())
                 .max();
@@ -220,7 +232,10 @@ impl DirectoryTreeBuilder {
             let total_size = direct_size + sub_size;
 
             // Store for parent aggregation
-            aggregates.insert(path.clone(), (total_count, total_size, last_modified.clone()));
+            aggregates.insert(
+                path.clone(),
+                (total_count, total_size, last_modified.clone()),
+            );
 
             results.push(ComputedNode {
                 path: path.clone(),
@@ -248,11 +263,7 @@ impl DirectoryTreeBuilder {
 
     /// Store computed nodes to database with batch inserts.
     /// Clears existing tree first.
-    pub async fn store(
-        bucket: &str,
-        account_id: &str,
-        nodes: &[ComputedNode],
-    ) -> DbResult<()> {
+    pub async fn store(bucket: &str, account_id: &str, nodes: &[ComputedNode]) -> DbResult<()> {
         let conn = get_connection()?.lock().await;
         let now = chrono::Utc::now().timestamp();
 
@@ -260,7 +271,8 @@ impl DirectoryTreeBuilder {
         conn.execute(
             "DELETE FROM directory_tree WHERE bucket = ?1 AND account_id = ?2",
             turso::params![bucket, account_id],
-        ).await?;
+        )
+        .await?;
 
         // Batch insert (10 columns now with parent_path)
         for chunk in nodes.chunks(DB_BATCH_SIZE) {
@@ -275,7 +287,16 @@ impl DirectoryTreeBuilder {
                     let b = i * 10;
                     format!(
                         "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
-                        b + 1, b + 2, b + 3, b + 4, b + 5, b + 6, b + 7, b + 8, b + 9, b + 10
+                        b + 1,
+                        b + 2,
+                        b + 3,
+                        b + 4,
+                        b + 5,
+                        b + 6,
+                        b + 7,
+                        b + 8,
+                        b + 9,
+                        b + 10
                     )
                 })
                 .collect();
@@ -297,7 +318,12 @@ impl DirectoryTreeBuilder {
                 params.push(node.total_file_count.into());
                 params.push(node.size.into());
                 params.push(node.total_size.into());
-                params.push(node.last_modified.clone().map(|s| s.into()).unwrap_or(turso::Value::Null));
+                params.push(
+                    node.last_modified
+                        .clone()
+                        .map(|s| s.into())
+                        .unwrap_or(turso::Value::Null),
+                );
                 params.push(now.into());
             }
 
@@ -324,8 +350,9 @@ pub async fn build_directory_tree<F>(
 where
     F: FnMut(usize, usize) + Send + 'static,
 {
-    let progress: Option<ProgressCallback> = progress_callback.map(|f| Box::new(f) as ProgressCallback);
-    
+    let progress: Option<ProgressCallback> =
+        progress_callback.map(|f| Box::new(f) as ProgressCallback);
+
     let builder = DirectoryTreeBuilder::new();
     let nodes = builder.build(files, progress).await;
     DirectoryTreeBuilder::store(bucket, account_id, &nodes).await
@@ -334,18 +361,18 @@ where
 /// Helper to get all ancestor paths for a file key (including root "")
 fn get_ancestor_paths(key: &str) -> (String, Vec<String>) {
     let mut paths: Vec<String> = Vec::new();
-    
+
     // Get the parent path of the file
     let parent_path = if let Some(last_slash) = key.rfind('/') {
         key[..=last_slash].to_string()
     } else {
         String::new() // Root level file
     };
-    
+
     // Add all ancestor paths
     let mut current = parent_path.clone();
     paths.push(current.clone());
-    
+
     while !current.is_empty() {
         let without_trailing = current.trim_end_matches('/');
         if let Some(last_slash) = without_trailing.rfind('/') {
@@ -355,7 +382,7 @@ fn get_ancestor_paths(key: &str) -> (String, Vec<String>) {
         }
         paths.push(current.clone());
     }
-    
+
     (parent_path, paths)
 }
 
@@ -363,6 +390,7 @@ fn get_ancestor_paths(key: &str) -> (String, Vec<String>) {
 
 /// Apply a delta to directory tree for a single file operation.
 /// This is the core function used by delete, move, and update operations.
+/// Uses UPSERT to create directory nodes if they don't exist (for new file uploads).
 ///
 /// - `file_count_delta`: -1 for delete, +1 for add, 0 for size-only change
 /// - `size_delta`: negative for delete/move-from, positive for add/move-to/size-increase
@@ -377,73 +405,78 @@ async fn apply_directory_delta(
 ) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
-    
+
     let (parent_path, paths_to_update) = get_ancestor_paths(key);
-    
+
     for path in &paths_to_update {
         let is_direct_parent = path == &parent_path;
         let path_str = path.as_str();
-        
+        let node_parent_path = compute_parent_path(path_str);
+
         match (is_direct_parent, last_modified) {
-            // Direct parent with last_modified update
+            // Direct parent with last_modified update (add/update file)
             (true, Some(lm)) => {
                 conn.execute(
-                    "UPDATE directory_tree 
-                     SET file_count = file_count + ?1,
-                         total_file_count = total_file_count + ?1,
-                         size = size + ?2,
-                         total_size = total_size + ?2,
-                         last_modified = CASE 
-                             WHEN last_modified IS NULL OR ?3 > last_modified THEN ?3 
-                             ELSE last_modified 
-                         END,
-                         last_updated = ?4
-                     WHERE bucket = ?5 AND account_id = ?6 AND path = ?7",
-                    turso::params![file_count_delta, size_delta, lm, now, bucket, account_id, path_str],
+                    "INSERT INTO directory_tree (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?6, ?7, ?8)
+                     ON CONFLICT (bucket, account_id, path) DO UPDATE SET
+                       file_count = file_count + ?5,
+                       total_file_count = total_file_count + ?5,
+                       size = size + ?6,
+                       total_size = total_size + ?6,
+                       last_modified = CASE 
+                           WHEN directory_tree.last_modified IS NULL OR ?7 > directory_tree.last_modified THEN ?7 
+                           ELSE directory_tree.last_modified 
+                       END,
+                       last_updated = ?8",
+                    turso::params![bucket, account_id, path_str, node_parent_path, file_count_delta, size_delta, lm, now],
                 ).await?;
             }
             // Direct parent without last_modified update (delete)
             (true, None) => {
                 conn.execute(
-                    "UPDATE directory_tree 
-                     SET file_count = file_count + ?1,
-                         total_file_count = total_file_count + ?1,
-                         size = size + ?2,
-                         total_size = total_size + ?2,
-                         last_updated = ?3
-                     WHERE bucket = ?4 AND account_id = ?5 AND path = ?6",
-                    turso::params![file_count_delta, size_delta, now, bucket, account_id, path_str],
+                    "INSERT INTO directory_tree (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?6, NULL, ?7)
+                     ON CONFLICT (bucket, account_id, path) DO UPDATE SET
+                       file_count = file_count + ?5,
+                       total_file_count = total_file_count + ?5,
+                       size = size + ?6,
+                       total_size = total_size + ?6,
+                       last_updated = ?7",
+                    turso::params![bucket, account_id, path_str, node_parent_path, file_count_delta, size_delta, now],
                 ).await?;
             }
-            // Ancestor with last_modified update
+            // Ancestor with last_modified update (add/update file)
             (false, Some(lm)) => {
                 conn.execute(
-                    "UPDATE directory_tree 
-                     SET total_file_count = total_file_count + ?1,
-                         total_size = total_size + ?2,
-                         last_modified = CASE 
-                             WHEN last_modified IS NULL OR ?3 > last_modified THEN ?3 
-                             ELSE last_modified 
-                         END,
-                         last_updated = ?4
-                     WHERE bucket = ?5 AND account_id = ?6 AND path = ?7",
-                    turso::params![file_count_delta, size_delta, lm, now, bucket, account_id, path_str],
+                    "INSERT INTO directory_tree (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated)
+                     VALUES (?1, ?2, ?3, ?4, 0, ?5, 0, ?6, ?7, ?8)
+                     ON CONFLICT (bucket, account_id, path) DO UPDATE SET
+                       total_file_count = total_file_count + ?5,
+                       total_size = total_size + ?6,
+                       last_modified = CASE 
+                           WHEN directory_tree.last_modified IS NULL OR ?7 > directory_tree.last_modified THEN ?7 
+                           ELSE directory_tree.last_modified 
+                       END,
+                       last_updated = ?8",
+                    turso::params![bucket, account_id, path_str, node_parent_path, file_count_delta, size_delta, lm, now],
                 ).await?;
             }
             // Ancestor without last_modified update (delete)
             (false, None) => {
                 conn.execute(
-                    "UPDATE directory_tree 
-                     SET total_file_count = total_file_count + ?1,
-                         total_size = total_size + ?2,
-                         last_updated = ?3
-                     WHERE bucket = ?4 AND account_id = ?5 AND path = ?6",
-                    turso::params![file_count_delta, size_delta, now, bucket, account_id, path_str],
+                    "INSERT INTO directory_tree (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated)
+                     VALUES (?1, ?2, ?3, ?4, 0, ?5, 0, ?6, NULL, ?7)
+                     ON CONFLICT (bucket, account_id, path) DO UPDATE SET
+                       total_file_count = total_file_count + ?5,
+                       total_size = total_size + ?6,
+                       last_updated = ?7",
+                    turso::params![bucket, account_id, path_str, node_parent_path, file_count_delta, size_delta, now],
                 ).await?;
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -451,13 +484,56 @@ async fn apply_directory_delta(
 
 /// Update directory tree when a file is deleted.
 /// Decreases file_count and sizes for the file's parent and all ancestors.
+/// Returns a list of paths that were removed because they became empty.
 pub async fn update_directory_tree_for_delete(
     bucket: &str,
     account_id: &str,
     key: &str,
     file_size: i64,
-) -> DbResult<()> {
-    apply_directory_delta(bucket, account_id, key, -1, -file_size, None).await
+) -> DbResult<Vec<String>> {
+    // Apply the delta first
+    apply_directory_delta(bucket, account_id, key, -1, -file_size, None).await?;
+
+    // Check for and remove empty paths
+    remove_empty_paths(bucket, account_id, key).await
+}
+
+/// Check all ancestor paths and remove any that have become empty (total_file_count == 0).
+/// Returns the list of removed paths.
+async fn remove_empty_paths(bucket: &str, account_id: &str, key: &str) -> DbResult<Vec<String>> {
+    let conn = get_connection()?.lock().await;
+    let (_, paths_to_check) = get_ancestor_paths(key);
+
+    let mut removed_paths: Vec<String> = Vec::new();
+
+    // Check each path from deepest to shallowest (skip root "")
+    for path in paths_to_check.iter().filter(|p| !p.is_empty()) {
+        let path_str = path.as_str();
+
+        // Check if this path is now empty
+        let mut rows = conn
+            .query(
+                "SELECT total_file_count FROM directory_tree WHERE bucket = ?1 AND account_id = ?2 AND path = ?3",
+                turso::params![bucket, account_id, path_str],
+            )
+            .await?;
+
+        if let Some(row) = rows.next().await? {
+            let total_count: i32 = row.get(0)?;
+
+            if total_count <= 0 {
+                // Remove this empty directory node
+                conn.execute(
+                    "DELETE FROM directory_tree WHERE bucket = ?1 AND account_id = ?2 AND path = ?3",
+                    turso::params![bucket, account_id, path_str],
+                ).await?;
+
+                removed_paths.push(path.clone());
+            }
+        }
+    }
+
+    Ok(removed_paths)
 }
 
 /// Update directory tree for a file move/rename operation.
@@ -473,27 +549,49 @@ pub async fn update_directory_tree_for_move(
     // Get parent paths to check if it's a same-folder rename
     let (old_parent, _) = get_ancestor_paths(old_key);
     let (new_parent, _) = get_ancestor_paths(new_key);
-    
+
     // If moving within same folder, no directory tree changes needed
     if old_parent == new_parent {
         return Ok(());
     }
-    
+
     // Decrease in old location
     apply_directory_delta(bucket, account_id, old_key, -1, -file_size, None).await?;
-    
+
     // Increase in new location
-    apply_directory_delta(bucket, account_id, new_key, 1, file_size, Some(last_modified)).await
+    apply_directory_delta(
+        bucket,
+        account_id,
+        new_key,
+        1,
+        file_size,
+        Some(last_modified),
+    )
+    .await
 }
 
-/// Update directory tree when a single file's size changes.
-/// Updates the file's parent folder and all ancestor folders.
+/// Update directory tree when a file is uploaded or updated.
+/// For new files: increments file counts AND updates sizes.
+/// For existing files: only updates sizes (delta).
+///
+/// - `is_new_file`: true if the file was just created, false if overwriting existing
+/// - `size_delta`: size change (new_size - old_size, or new_size if new file)
 pub async fn update_directory_tree_for_file(
     bucket: &str,
     account_id: &str,
     key: &str,
     size_delta: i64,
     last_modified: &str,
+    is_new_file: bool,
 ) -> DbResult<()> {
-    apply_directory_delta(bucket, account_id, key, 0, size_delta, Some(last_modified)).await
+    let file_count_delta = if is_new_file { 1 } else { 0 };
+    apply_directory_delta(
+        bucket,
+        account_id,
+        key,
+        file_count_delta,
+        size_delta,
+        Some(last_modified),
+    )
+    .await
 }

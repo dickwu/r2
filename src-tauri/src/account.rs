@@ -5,22 +5,30 @@ use serde::{Deserialize, Serialize};
 
 #[tauri::command]
 pub async fn list_accounts() -> Result<Vec<db::Account>, String> {
-    db::list_accounts().await.map_err(|e| format!("Failed to list accounts: {}", e))
+    db::list_accounts()
+        .await
+        .map_err(|e| format!("Failed to list accounts: {}", e))
 }
 
 #[tauri::command]
 pub async fn create_account(id: String, name: Option<String>) -> Result<db::Account, String> {
-    db::create_account(&id, name.as_deref()).await.map_err(|e| format!("Failed to create account: {}", e))
+    db::create_account(&id, name.as_deref())
+        .await
+        .map_err(|e| format!("Failed to create account: {}", e))
 }
 
 #[tauri::command]
 pub async fn update_account(id: String, name: Option<String>) -> Result<(), String> {
-    db::update_account(&id, name.as_deref()).await.map_err(|e| format!("Failed to update account: {}", e))
+    db::update_account(&id, name.as_deref())
+        .await
+        .map_err(|e| format!("Failed to update account: {}", e))
 }
 
 #[tauri::command]
 pub async fn delete_account(id: String) -> Result<(), String> {
-    db::delete_account(&id).await.map_err(|e| format!("Failed to delete account: {}", e))
+    db::delete_account(&id)
+        .await
+        .map_err(|e| format!("Failed to delete account: {}", e))
 }
 
 // ============ Token Commands ============
@@ -36,7 +44,9 @@ pub struct CreateTokenInput {
 
 #[tauri::command]
 pub async fn list_tokens(account_id: String) -> Result<Vec<db::Token>, String> {
-    db::list_tokens_by_account(&account_id).await.map_err(|e| format!("Failed to list tokens: {}", e))
+    db::list_tokens_by_account(&account_id)
+        .await
+        .map_err(|e| format!("Failed to list tokens: {}", e))
 }
 
 #[tauri::command]
@@ -76,19 +86,25 @@ pub async fn update_token(input: UpdateTokenInput) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn delete_token(id: i64) -> Result<(), String> {
-    db::delete_token(id).await.map_err(|e| format!("Failed to delete token: {}", e))
+    db::delete_token(id)
+        .await
+        .map_err(|e| format!("Failed to delete token: {}", e))
 }
 
 #[tauri::command]
 pub async fn get_token(id: i64) -> Result<Option<db::Token>, String> {
-    db::get_token(id).await.map_err(|e| format!("Failed to get token: {}", e))
+    db::get_token(id)
+        .await
+        .map_err(|e| format!("Failed to get token: {}", e))
 }
 
 // ============ Bucket Commands ============
 
 #[tauri::command]
 pub async fn list_buckets(token_id: i64) -> Result<Vec<db::Bucket>, String> {
-    db::list_buckets_by_token(token_id).await.map_err(|e| format!("Failed to list buckets: {}", e))
+    db::list_buckets_by_token(token_id)
+        .await
+        .map_err(|e| format!("Failed to list buckets: {}", e))
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,12 +115,15 @@ pub struct BucketInput {
 }
 
 #[tauri::command]
-pub async fn save_buckets(token_id: i64, buckets: Vec<BucketInput>) -> Result<Vec<db::Bucket>, String> {
+pub async fn save_buckets(
+    token_id: i64,
+    buckets: Vec<BucketInput>,
+) -> Result<Vec<db::Bucket>, String> {
     let bucket_data: Vec<(String, Option<String>, Option<String>)> = buckets
         .into_iter()
         .map(|b| (b.name, b.public_domain, b.public_domain_scheme))
         .collect();
-    
+
     db::save_buckets_for_token(token_id, &bucket_data)
         .await
         .map_err(|e| format!("Failed to save buckets: {}", e))
@@ -116,14 +135,20 @@ pub async fn update_bucket(
     public_domain: Option<String>,
     public_domain_scheme: Option<String>,
 ) -> Result<(), String> {
-    db::update_bucket(id, public_domain.as_deref(), public_domain_scheme.as_deref())
-        .await
-        .map_err(|e| format!("Failed to update bucket: {}", e))
+    db::update_bucket(
+        id,
+        public_domain.as_deref(),
+        public_domain_scheme.as_deref(),
+    )
+    .await
+    .map_err(|e| format!("Failed to update bucket: {}", e))
 }
 
 #[tauri::command]
 pub async fn delete_bucket(id: i64) -> Result<(), String> {
-    db::delete_bucket(id).await.map_err(|e| format!("Failed to delete bucket: {}", e))
+    db::delete_bucket(id)
+        .await
+        .map_err(|e| format!("Failed to delete bucket: {}", e))
 }
 
 // ============ AWS Account Commands ============
@@ -141,7 +166,9 @@ pub struct CreateAwsAccountInput {
 
 #[tauri::command]
 pub async fn list_aws_accounts() -> Result<Vec<db::AwsAccount>, String> {
-    db::list_aws_accounts().await.map_err(|e| format!("Failed to list AWS accounts: {}", e))
+    db::list_aws_accounts()
+        .await
+        .map_err(|e| format!("Failed to list AWS accounts: {}", e))
 }
 
 #[tauri::command]
@@ -237,11 +264,15 @@ pub struct CreateMinioAccountInput {
 
 #[tauri::command]
 pub async fn list_minio_accounts() -> Result<Vec<db::MinioAccount>, String> {
-    db::list_minio_accounts().await.map_err(|e| format!("Failed to list MinIO accounts: {}", e))
+    db::list_minio_accounts()
+        .await
+        .map_err(|e| format!("Failed to list MinIO accounts: {}", e))
 }
 
 #[tauri::command]
-pub async fn create_minio_account(input: CreateMinioAccountInput) -> Result<db::MinioAccount, String> {
+pub async fn create_minio_account(
+    input: CreateMinioAccountInput,
+) -> Result<db::MinioAccount, String> {
     db::create_minio_account(
         input.name.as_deref(),
         &input.access_key_id,
@@ -329,7 +360,9 @@ pub struct CreateRustfsAccountInput {
 
 #[tauri::command]
 pub async fn list_rustfs_accounts() -> Result<Vec<db::RustfsAccount>, String> {
-    db::list_rustfs_accounts().await.map_err(|e| format!("Failed to list RustFS accounts: {}", e))
+    db::list_rustfs_accounts()
+        .await
+        .map_err(|e| format!("Failed to list RustFS accounts: {}", e))
 }
 
 #[tauri::command]
@@ -415,7 +448,9 @@ pub async fn save_rustfs_bucket_configs(
 
 #[tauri::command]
 pub async fn get_current_config() -> Result<Option<db::CurrentConfig>, String> {
-    db::get_current_config().await.map_err(|e| format!("Failed to get current config: {}", e))
+    db::get_current_config()
+        .await
+        .map_err(|e| format!("Failed to get current config: {}", e))
 }
 
 #[tauri::command]
@@ -433,14 +468,20 @@ pub async fn set_current_aws_bucket(account_id: String, bucket_name: String) -> 
 }
 
 #[tauri::command]
-pub async fn set_current_minio_bucket(account_id: String, bucket_name: String) -> Result<(), String> {
+pub async fn set_current_minio_bucket(
+    account_id: String,
+    bucket_name: String,
+) -> Result<(), String> {
     db::set_current_minio_selection(&account_id, &bucket_name)
         .await
         .map_err(|e| format!("Failed to set current MinIO bucket: {}", e))
 }
 
 #[tauri::command]
-pub async fn set_current_rustfs_bucket(account_id: String, bucket_name: String) -> Result<(), String> {
+pub async fn set_current_rustfs_bucket(
+    account_id: String,
+    bucket_name: String,
+) -> Result<(), String> {
     db::set_current_rustfs_selection(&account_id, &bucket_name)
         .await
         .map_err(|e| format!("Failed to set current RustFS bucket: {}", e))
@@ -455,7 +496,9 @@ pub async fn set_current_bucket(bucket_name: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn has_accounts() -> Result<bool, String> {
-    db::has_accounts().await.map_err(|e| format!("Failed to check accounts: {}", e))
+    db::has_accounts()
+        .await
+        .map_err(|e| format!("Failed to check accounts: {}", e))
 }
 
 // ============ Full Account Data (for sidebar) ============
@@ -492,14 +535,16 @@ pub struct RustfsAccountWithBuckets {
 
 #[tauri::command]
 pub async fn get_all_accounts_with_tokens() -> Result<Vec<AccountWithTokens>, String> {
-    let accounts = db::list_accounts().await.map_err(|e| format!("Failed to list accounts: {}", e))?;
-    
+    let accounts = db::list_accounts()
+        .await
+        .map_err(|e| format!("Failed to list accounts: {}", e))?;
+
     let mut result = Vec::new();
     for account in accounts {
         let tokens = db::list_tokens_by_account(&account.id)
             .await
             .map_err(|e| format!("Failed to list tokens: {}", e))?;
-        
+
         let mut tokens_with_buckets = Vec::new();
         for token in tokens {
             let buckets = db::list_buckets_by_token(token.id)
@@ -507,19 +552,21 @@ pub async fn get_all_accounts_with_tokens() -> Result<Vec<AccountWithTokens>, St
                 .map_err(|e| format!("Failed to list buckets: {}", e))?;
             tokens_with_buckets.push(TokenWithBuckets { token, buckets });
         }
-        
+
         result.push(AccountWithTokens {
             account,
             tokens: tokens_with_buckets,
         });
     }
-    
+
     Ok(result)
 }
 
 #[tauri::command]
 pub async fn get_all_aws_accounts_with_buckets() -> Result<Vec<AwsAccountWithBuckets>, String> {
-    let accounts = db::list_aws_accounts().await.map_err(|e| format!("Failed to list AWS accounts: {}", e))?;
+    let accounts = db::list_aws_accounts()
+        .await
+        .map_err(|e| format!("Failed to list AWS accounts: {}", e))?;
 
     let mut result = Vec::new();
     for account in accounts {
@@ -534,7 +581,9 @@ pub async fn get_all_aws_accounts_with_buckets() -> Result<Vec<AwsAccountWithBuc
 
 #[tauri::command]
 pub async fn get_all_minio_accounts_with_buckets() -> Result<Vec<MinioAccountWithBuckets>, String> {
-    let accounts = db::list_minio_accounts().await.map_err(|e| format!("Failed to list MinIO accounts: {}", e))?;
+    let accounts = db::list_minio_accounts()
+        .await
+        .map_err(|e| format!("Failed to list MinIO accounts: {}", e))?;
 
     let mut result = Vec::new();
     for account in accounts {
@@ -548,8 +597,11 @@ pub async fn get_all_minio_accounts_with_buckets() -> Result<Vec<MinioAccountWit
 }
 
 #[tauri::command]
-pub async fn get_all_rustfs_accounts_with_buckets() -> Result<Vec<RustfsAccountWithBuckets>, String> {
-    let accounts = db::list_rustfs_accounts().await.map_err(|e| format!("Failed to list RustFS accounts: {}", e))?;
+pub async fn get_all_rustfs_accounts_with_buckets() -> Result<Vec<RustfsAccountWithBuckets>, String>
+{
+    let accounts = db::list_rustfs_accounts()
+        .await
+        .map_err(|e| format!("Failed to list RustFS accounts: {}", e))?;
 
     let mut result = Vec::new();
     for account in accounts {

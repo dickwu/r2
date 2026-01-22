@@ -1,4 +1,6 @@
-use super::types::{create_aws_client, AwsBucket, AwsConfig, AwsObject, AwsResult, ListObjectsResult};
+use super::types::{
+    create_aws_client, AwsBucket, AwsConfig, AwsObject, AwsResult, ListObjectsResult,
+};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -15,7 +17,10 @@ pub async fn list_buckets(config: &AwsConfig) -> AwsResult<Vec<AwsBucket>> {
                 .creation_date()
                 .map(|dt| dt.to_string())
                 .unwrap_or_default();
-            Some(AwsBucket { name, creation_date })
+            Some(AwsBucket {
+                name,
+                creation_date,
+            })
         })
         .collect();
 

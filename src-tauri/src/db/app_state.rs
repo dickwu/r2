@@ -16,8 +16,13 @@ pub fn get_table_sql() -> &'static str {
 #[allow(dead_code)]
 pub async fn get_app_state(key: &str) -> DbResult<Option<String>> {
     let conn = get_connection()?.lock().await;
-    let mut rows = conn.query("SELECT value FROM app_state WHERE key = ?1", turso::params![key]).await?;
-    
+    let mut rows = conn
+        .query(
+            "SELECT value FROM app_state WHERE key = ?1",
+            turso::params![key],
+        )
+        .await?;
+
     if let Some(row) = rows.next().await? {
         Ok(Some(row.get(0)?))
     } else {
@@ -32,7 +37,8 @@ pub async fn set_app_state(key: &str, value: &str) -> DbResult<()> {
         "INSERT INTO app_state (key, value) VALUES (?1, ?2)
          ON CONFLICT (key) DO UPDATE SET value = ?2",
         turso::params![key, value],
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -40,6 +46,7 @@ pub async fn set_app_state(key: &str, value: &str) -> DbResult<()> {
 #[allow(dead_code)]
 pub async fn delete_app_state(key: &str) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
-    conn.execute("DELETE FROM app_state WHERE key = ?1", turso::params![key]).await?;
+    conn.execute("DELETE FROM app_state WHERE key = ?1", turso::params![key])
+        .await?;
     Ok(())
 }

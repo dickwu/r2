@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::{get_connection, DbResult};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AwsAccount {
@@ -35,9 +35,7 @@ pub fn get_table_sql() -> &'static str {
 }
 
 async fn generate_id(conn: &turso::Connection) -> DbResult<String> {
-    let mut rows = conn
-        .query("SELECT lower(hex(randomblob(16)))", ())
-        .await?;
+    let mut rows = conn.query("SELECT lower(hex(randomblob(16)))", ()).await?;
     if let Some(row) = rows.next().await? {
         Ok(row.get(0)?)
     } else {
@@ -149,7 +147,8 @@ pub async fn update_aws_account(
             now,
             id
         ],
-    ).await?;
+    )
+    .await?;
 
     Ok(())
 }
@@ -160,12 +159,11 @@ pub async fn delete_aws_account(id: &str) -> DbResult<()> {
     conn.execute(
         "DELETE FROM aws_buckets WHERE account_id = ?1",
         turso::params![id],
-    ).await?;
+    )
+    .await?;
 
-    conn.execute(
-        "DELETE FROM aws_accounts WHERE id = ?1",
-        turso::params![id],
-    ).await?;
+    conn.execute("DELETE FROM aws_accounts WHERE id = ?1", turso::params![id])
+        .await?;
 
     Ok(())
 }

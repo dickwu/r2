@@ -18,6 +18,7 @@ import {
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useThemeStore } from '@/app/stores/themeStore';
 import ConfigModal, { ModalMode } from '@/app/components/ConfigModal';
 import UploadModal from '@/app/components/UploadModal';
@@ -68,6 +69,7 @@ export default function Home() {
   const [parentAccountId, setParentAccountId] = useState<string | undefined>();
 
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [dropQueue, setDropQueue] = useState<string[][]>([]);
   const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
   const [renameFile, setRenameFile] = useState<FileItem | null>(null);
   const [currentPath, setCurrentPath] = useState('');
@@ -77,6 +79,11 @@ export default function Home() {
   const [sizeSort, setSizeSort] = useState<SortOrder>(null);
   const [modifiedSort, setModifiedSort] = useState<SortOrder>(null);
   const [searchResults, setSearchResults] = useState<FileItem[]>([]);
+  const mainContentRef = useRef<HTMLDivElement | null>(null);
+
+  const handleDropHandled = useCallback(() => {
+    setDropQueue((prev) => prev.slice(1));
+  }, []);
 
   // Batch operation store
   const selectedKeys = useBatchOperationStore((state) => state.selectedKeys);
@@ -318,6 +325,43 @@ export default function Home() {
   // Initialize store on mount
   useEffect(() => {
     initialize();
+  }, []);
+
+  useEffect(() => {
+    let unlistenDragDrop: UnlistenFn | undefined;
+
+    const setupDragDropListener = async () => {
+      try {
+        unlistenDragDrop = await getCurrentWindow().onDragDropEvent((event) => {
+          if (event.payload.type !== 'drop') return;
+          const { paths, position } = event.payload;
+          if (!paths || paths.length === 0) return;
+
+          const target = mainContentRef.current;
+          if (!target) return;
+
+          const rect = target.getBoundingClientRect();
+          const scale = window.devicePixelRatio || 1;
+          const x = position.x / scale;
+          const y = position.y / scale;
+
+          const isInside =
+            x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+          if (!isInside) return;
+
+          setDropQueue((prev) => [...prev, paths]);
+          setUploadModalOpen(true);
+        });
+      } catch (error) {
+        console.error('Failed to listen for drag-drop events:', error);
+      }
+    };
+
+    setupDragDropListener();
+
+    return () => {
+      unlistenDragDrop?.();
+    };
   }, []);
 
   // Start download queue via Rust backend
@@ -959,7 +1003,7 @@ export default function Home() {
       />
 
       {/* Main Content */}
-      <div className="main-content">
+      <div className="main-content" ref={mainContentRef}>
         <div className="file-manager">
           {/* Toolbar */}
           <div className="toolbar">
@@ -1127,6 +1171,8 @@ export default function Home() {
             onClose={() => setUploadModalOpen(false)}
             currentPath={currentPath}
             config={config}
+            dropQueue={dropQueue}
+            onDropHandled={handleDropHandled}
             onUploadComplete={() => {
               Promise.all([refresh(), refreshSync()]);
             }}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useCallback, useState } from 'react';
+import { useEffect, useCallback, useState, useRef } from 'react';
 import { Modal, Typography, Button, App } from 'antd';
 import { FolderOutlined, FileAddOutlined, SwapOutlined } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -71,6 +71,8 @@ interface UploadModalProps {
   onClose: () => void;
   currentPath: string;
   config: StorageConfig | null;
+  dropQueue: string[][];
+  onDropHandled: () => void;
   onUploadComplete: () => void;
   onCredentialsUpdate: () => void;
 }
@@ -80,14 +82,18 @@ export default function UploadModal({
   onClose,
   currentPath,
   config,
+  dropQueue,
+  onDropHandled,
   onUploadComplete,
 }: UploadModalProps) {
   const { message } = App.useApp();
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const isProcessingDropRef = useRef(false);
   const uploadPath = useUploadStore((s) => s.uploadPath);
   const setUploadPath = useUploadStore((s) => s.setUploadPath);
   const setConfig = useUploadStore((s) => s.setConfig);
   const addTasks = useUploadStore((s) => s.addTasks);
+  const existingTasks = useUploadStore((s) => s.tasks);
   const clearAll = useUploadStore((s) => s.clearAll);
   const hasActiveUploads = useUploadStore(selectHasActiveUploads);
   const hasSuccessfulUploads = useUploadStore(selectHasSuccessfulUploads);
@@ -98,6 +104,27 @@ export default function UploadModal({
     (config.provider !== 'aws' || !!config.region) &&
     (config.provider !== 'minio' || (!!config.endpointHost && !!config.endpointScheme)) &&
     (config.provider !== 'rustfs' || (!!config.endpointHost && !!config.endpointScheme));
+
+  const addUniqueTasks = useCallback(
+    (tasks: Array<{ filePath: string; fileName: string; fileSize: number; contentType: string }>) => {
+      if (tasks.length === 0) return;
+
+      const existingPaths = new Set(existingTasks.map((task) => task.filePath));
+      const seen = new Set<string>();
+      const uniqueTasks = tasks.filter((task) => {
+        if (existingPaths.has(task.filePath) || seen.has(task.filePath)) {
+          return false;
+        }
+        seen.add(task.filePath);
+        return true;
+      });
+
+      if (uniqueTasks.length > 0) {
+        addTasks(uniqueTasks);
+      }
+    },
+    [addTasks, existingTasks]
+  );
 
   // Sync config to store
   useEffect(() => {
@@ -110,6 +137,102 @@ export default function UploadModal({
       setUploadPath(currentPath);
     }
   }, [isOpen, currentPath, setUploadPath]);
+
+  useEffect(() => {
+    if (!isOpen || dropQueue.length === 0 || isProcessingDropRef.current) {
+      return;
+    }
+
+    if (!hasS3Credentials) {
+      message.warning('S3 credentials required. Please configure them in Account Settings.');
+      onDropHandled();
+      return;
+    }
+
+    if (hasActiveUploads) {
+      message.info('Uploads are currently in progress. Please wait before adding more files.');
+      onDropHandled();
+      return;
+    }
+
+    const droppedPaths = dropQueue[0];
+    if (!droppedPaths || droppedPaths.length === 0) {
+      onDropHandled();
+      return;
+    }
+
+    isProcessingDropRef.current = true;
+
+    const processDrop = async () => {
+      const tasks: Array<{
+        filePath: string;
+        fileName: string;
+        fileSize: number;
+        contentType: string;
+      }> = [];
+
+      for (const filePath of droppedPaths) {
+        try {
+          const folderFiles = await invoke<
+            Array<{ file_path: string; relative_path: string; file_size: number }>
+          >('get_folder_files', { folderPath: filePath });
+
+          if (folderFiles.length === 0) {
+            continue;
+          }
+
+          for (const file of folderFiles) {
+            tasks.push({
+              filePath: file.file_path,
+              fileName: file.relative_path,
+              fileSize: file.file_size,
+              contentType: getContentType(file.relative_path),
+            });
+          }
+        } catch (error) {
+          const messageText = error instanceof Error ? error.message : String(error);
+          if (messageText.includes('Not a directory')) {
+            try {
+              const [fileSize, fileName] = await invoke<[number, string]>('get_file_info', {
+                filePath,
+              });
+              tasks.push({
+                filePath,
+                fileName,
+                fileSize,
+                contentType: getContentType(fileName),
+              });
+            } catch (fileError) {
+              console.error('Failed to read dropped file:', fileError);
+              message.error(`Failed to read dropped file: ${filePath}`);
+            }
+          } else {
+            console.error('Failed to read dropped folder:', error);
+            message.error(`Failed to read dropped folder: ${filePath}`);
+          }
+        }
+      }
+
+      addUniqueTasks(tasks);
+    };
+
+    processDrop()
+      .catch((error) => {
+        console.error('Failed to process dropped items:', error);
+      })
+      .finally(() => {
+        isProcessingDropRef.current = false;
+        onDropHandled();
+      });
+  }, [
+    addUniqueTasks,
+    dropQueue,
+    hasActiveUploads,
+    hasS3Credentials,
+    isOpen,
+    message,
+    onDropHandled,
+  ]);
 
   const handleSelectFiles = useCallback(async () => {
     if (!hasS3Credentials) {
@@ -138,12 +261,12 @@ export default function UploadModal({
             };
           })
         );
-        addTasks(tasks);
+        addUniqueTasks(tasks);
       }
     } catch (e) {
       console.error('Failed to select files:', e);
     }
-  }, [hasS3Credentials, addTasks, message]);
+  }, [hasS3Credentials, addUniqueTasks, message]);
 
   const handleSelectFolder = useCallback(async () => {
     if (!hasS3Credentials) {
@@ -170,13 +293,13 @@ export default function UploadModal({
             fileSize: file.file_size,
             contentType: getContentType(file.relative_path),
           }));
-          addTasks(tasks);
+          addUniqueTasks(tasks);
         }
       }
     } catch (e) {
       console.error('Failed to select folder:', e);
     }
-  }, [hasS3Credentials, addTasks, message]);
+  }, [hasS3Credentials, addUniqueTasks, message]);
 
   function handleClose() {
     if (!hasActiveUploads) {

@@ -36,4 +36,3 @@ pub struct DownloadBatchOperation {
     pub bucket: String,
     pub account_id: String,
 }
-

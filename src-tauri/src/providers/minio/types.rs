@@ -1,6 +1,6 @@
+use crate::providers::s3_client::{create_s3_client, S3ClientConfig, S3Result};
 use aws_sdk_s3::Client;
 use serde::{Deserialize, Serialize};
-use crate::providers::s3_client::{create_s3_client, S3ClientConfig, S3Result};
 
 pub type MinioResult<T> = S3Result<T>;
 

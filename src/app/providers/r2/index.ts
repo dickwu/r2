@@ -9,6 +9,8 @@ import type {
   StorageObject,
   SyncResult,
   MoveOperation,
+  UploadFileInput,
+  UploadFileResult,
   StorageProviderAdapter,
 } from '@/app/providers/types';
 
@@ -98,6 +100,20 @@ export const r2Provider: StorageProviderAdapter<R2StorageConfig> = {
       config: toR2ConfigInput(config),
       key,
       expiresIn,
+    });
+  },
+
+  uploadFile: async (config, input: UploadFileInput) => {
+    requireR2Credentials(config);
+    return invoke<UploadFileResult>('upload_file', {
+      taskId: input.taskId,
+      filePath: input.filePath,
+      key: input.key,
+      contentType: input.contentType,
+      accountId: config.accountId,
+      bucket: config.bucket,
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
     });
   },
 

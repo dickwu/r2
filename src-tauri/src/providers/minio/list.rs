@@ -1,4 +1,6 @@
-use super::types::{create_minio_client, ListObjectsResult, MinioBucket, MinioConfig, MinioObject, MinioResult};
+use super::types::{
+    create_minio_client, ListObjectsResult, MinioBucket, MinioConfig, MinioObject, MinioResult,
+};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -15,7 +17,10 @@ pub async fn list_buckets(config: &MinioConfig) -> MinioResult<Vec<MinioBucket>>
                 .creation_date()
                 .map(|dt| dt.to_string())
                 .unwrap_or_default();
-            Some(MinioBucket { name, creation_date })
+            Some(MinioBucket {
+                name,
+                creation_date,
+            })
         })
         .collect();
 

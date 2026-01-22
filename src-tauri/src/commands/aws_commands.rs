@@ -1,11 +1,14 @@
+use crate::commands::cache_events::{get_unique_parent_paths, CacheUpdatedEvent};
+use crate::commands::delete_cache::{update_cache_after_batch_delete, update_cache_after_delete};
+use crate::commands::upload_cache::update_cache_after_upload;
 use crate::db::{self, CachedFile};
 use crate::providers::aws;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::Semaphore;
-use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
 pub struct AwsConfigInput {
@@ -58,27 +61,6 @@ struct IndexingProgress {
 pub struct FolderLoadProgress {
     pub pages: usize,
     pub items: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CacheUpdatedEvent {
-    pub action: String,
-    pub affected_paths: Vec<String>,
-}
-
-fn get_unique_parent_paths(keys: &[String]) -> Vec<String> {
-    let mut paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for key in keys {
-        let parent = if let Some(last_slash) = key.rfind('/') {
-            key[..=last_slash].to_string()
-        } else {
-            String::new()
-        };
-        paths.insert(parent);
-    }
-
-    paths.into_iter().collect()
 }
 
 #[tauri::command]
@@ -240,20 +222,8 @@ pub async fn delete_aws_object(
         .await
         .map_err(|e| format!("Failed to delete object: {}", e))?;
 
-    let file_size = db::delete_cached_file(&bucket, &account_id, &key)
-        .await
-        .map_err(|e| format!("Failed to update file cache: {}", e))?;
-
-    if file_size > 0 {
-        db::update_directory_tree_for_delete(&bucket, &account_id, &key, file_size)
-            .await
-            .map_err(|e| format!("Failed to update directory tree: {}", e))?;
-    }
-
-    let _ = app.emit("cache-updated", CacheUpdatedEvent {
-        action: "delete".to_string(),
-        affected_paths: get_unique_parent_paths(&[key]),
-    });
+    // Update cache and emit events (including paths-removed if any folders became empty)
+    update_cache_after_delete(&app, &bucket, &account_id, &key).await?;
 
     Ok(())
 }
@@ -291,10 +261,6 @@ pub async fn batch_delete_aws_objects(
         });
     }
 
-    let file_sizes = db::delete_cached_files_batch(&bucket, &account_id, &keys)
-        .await
-        .unwrap_or_default();
-
     let mut completed = 0;
     let mut failed = 0;
     let mut errors: Vec<String> = vec![];
@@ -327,17 +293,13 @@ pub async fn batch_delete_aws_objects(
         );
     }
 
-    for key in &deleted_keys {
-        if let Some(&size) = file_sizes.get(key) {
-            let _ = db::update_directory_tree_for_delete(&bucket, &account_id, key, size).await;
-        }
-    }
-
+    // Update cache and emit events (including paths-removed if any folders became empty)
     if !deleted_keys.is_empty() {
-        let _ = app.emit("cache-updated", CacheUpdatedEvent {
-            action: "delete".to_string(),
-            affected_paths: get_unique_parent_paths(&deleted_keys),
-        });
+        if let Err(e) =
+            update_cache_after_batch_delete(&app, &bucket, &account_id, &deleted_keys).await
+        {
+            errors.push(e);
+        }
     }
 
     Ok(BatchDeleteResult {
@@ -382,19 +344,30 @@ pub async fn rename_aws_object(
         .await
         .map_err(|e| format!("Failed to rename object: {}", e))?;
 
-    if let Some((size, last_modified)) = db::move_cached_file(&bucket, &account_id, &old_key, &new_key)
-        .await
-        .map_err(|e| format!("Failed to update file cache: {}", e))?
-    {
-        db::update_directory_tree_for_move(&bucket, &account_id, &old_key, &new_key, size, &last_modified)
+    if let Some((size, last_modified)) =
+        db::move_cached_file(&bucket, &account_id, &old_key, &new_key)
             .await
-            .map_err(|e| format!("Failed to update directory tree: {}", e))?;
+            .map_err(|e| format!("Failed to update file cache: {}", e))?
+    {
+        db::update_directory_tree_for_move(
+            &bucket,
+            &account_id,
+            &old_key,
+            &new_key,
+            size,
+            &last_modified,
+        )
+        .await
+        .map_err(|e| format!("Failed to update directory tree: {}", e))?;
     }
 
-    let _ = app.emit("cache-updated", CacheUpdatedEvent {
-        action: "move".to_string(),
-        affected_paths: get_unique_parent_paths(&[old_key, new_key]),
-    });
+    let _ = app.emit(
+        "cache-updated",
+        CacheUpdatedEvent {
+            action: "move".to_string(),
+            affected_paths: get_unique_parent_paths(&[old_key, new_key]),
+        },
+    );
 
     Ok(())
 }
@@ -486,18 +459,27 @@ pub async fn batch_move_aws_objects(
             db::move_cached_file(&bucket, &account_id, &op.old_key, &op.new_key).await
         {
             let _ = db::update_directory_tree_for_move(
-                &bucket, &account_id, &op.old_key, &op.new_key, size, &last_modified
-            ).await;
+                &bucket,
+                &account_id,
+                &op.old_key,
+                &op.new_key,
+                size,
+                &last_modified,
+            )
+            .await;
             affected_keys.push(op.old_key.clone());
             affected_keys.push(op.new_key.clone());
         }
     }
 
     if !affected_keys.is_empty() {
-        let _ = app.emit("cache-updated", CacheUpdatedEvent {
-            action: "move".to_string(),
-            affected_paths: get_unique_parent_paths(&affected_keys),
-        });
+        let _ = app.emit(
+            "cache-updated",
+            CacheUpdatedEvent {
+                action: "move".to_string(),
+                affected_paths: get_unique_parent_paths(&affected_keys),
+            },
+        );
     }
 
     let final_completed = completed.load(Ordering::SeqCst);
@@ -540,29 +522,35 @@ pub async fn upload_aws_content(
     let content_bytes = content.into_bytes();
     let new_size = content_bytes.len() as i64;
 
-    let etag = aws::upload_content(
-        &aws_config,
-        &key,
-        content_bytes,
-        content_type.as_deref(),
-    )
-    .await
-    .map_err(|e| format!("Failed to upload content: {}", e))?;
+    let etag = aws::upload_content(&aws_config, &key, content_bytes, content_type.as_deref())
+        .await
+        .map_err(|e| format!("Failed to upload content: {}", e))?;
 
     let last_modified = chrono::Utc::now().to_rfc3339();
 
-    let size_delta = db::update_cached_file(&bucket, &account_id, &key, new_size, &last_modified)
-        .await
-        .map_err(|e| format!("Failed to update file cache: {}", e))?;
+    let (size_delta, is_new_file) =
+        db::update_cached_file(&bucket, &account_id, &key, new_size, &last_modified)
+            .await
+            .map_err(|e| format!("Failed to update file cache: {}", e))?;
 
-    db::update_directory_tree_for_file(&bucket, &account_id, &key, size_delta, &last_modified)
-        .await
-        .map_err(|e| format!("Failed to update directory tree: {}", e))?;
+    db::update_directory_tree_for_file(
+        &bucket,
+        &account_id,
+        &key,
+        size_delta,
+        &last_modified,
+        is_new_file,
+    )
+    .await
+    .map_err(|e| format!("Failed to update directory tree: {}", e))?;
 
-    let _ = app.emit("cache-updated", CacheUpdatedEvent {
-        action: "update".to_string(),
-        affected_paths: get_unique_parent_paths(&[key]),
-    });
+    let _ = app.emit(
+        "cache-updated",
+        CacheUpdatedEvent {
+            action: "update".to_string(),
+            affected_paths: get_unique_parent_paths(&[key]),
+        },
+    );
 
     Ok(etag)
 }
@@ -590,7 +578,7 @@ pub async fn upload_aws_file(
     file_path: String,
     key: String,
     content_type: Option<String>,
-    _account_id: String,
+    account_id: String,
     bucket: String,
     access_key_id: String,
     secret_access_key: String,
@@ -664,6 +652,20 @@ pub async fn upload_aws_file(
                     total_bytes: file_size,
                 },
             );
+
+            let last_modified = chrono::Utc::now().to_rfc3339();
+            if let Err(err) = update_cache_after_upload(
+                &app,
+                &config.bucket,
+                &account_id,
+                &key,
+                file_size as i64,
+                &last_modified,
+            )
+            .await
+            {
+                log::warn!("Failed to update cache after upload: {}", err);
+            }
 
             Ok(UploadResult {
                 task_id,

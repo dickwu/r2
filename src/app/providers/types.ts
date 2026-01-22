@@ -85,6 +85,20 @@ export interface MoveOperation {
   new_key: string;
 }
 
+export interface UploadFileInput {
+  taskId: string;
+  filePath: string;
+  key: string;
+  contentType?: string;
+}
+
+export interface UploadFileResult {
+  task_id: string;
+  success: boolean;
+  error?: string;
+  upload_id?: string;
+}
+
 export interface BatchDeleteResult {
   deleted: number;
   failed: number;
@@ -107,6 +121,7 @@ export interface StorageProviderAdapter<TConfig extends StorageConfig = StorageC
   renameObject: (config: TConfig, oldKey: string, newKey: string) => Promise<void>;
   batchMoveObjects: (config: TConfig, operations: MoveOperation[]) => Promise<BatchMoveResult>;
   generateSignedUrl: (config: TConfig, key: string, expiresIn?: number) => Promise<string>;
+  uploadFile: (config: TConfig, input: UploadFileInput) => Promise<UploadFileResult>;
   uploadContent: (
     config: TConfig,
     key: string,

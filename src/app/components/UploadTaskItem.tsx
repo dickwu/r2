@@ -10,6 +10,7 @@ import {
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { uploadFile } from '@/app/lib/r2cache';
 import { useUploadStore, type UploadTask } from '@/app/stores/uploadStore';
 
 const { Text } = Typography;
@@ -20,12 +21,6 @@ interface UploadProgress {
   uploaded_bytes: number;
   total_bytes: number;
   speed: number;
-}
-
-interface UploadResult {
-  task_id: string;
-  success: boolean;
-  error?: string;
 }
 
 interface UploadTaskItemProps {
@@ -74,42 +69,11 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
       unlistenRef.current = unlisten;
     });
 
-    // Call Rust upload function
-    const command =
-      config.provider === 'r2'
-        ? 'upload_file'
-        : config.provider === 'aws'
-          ? 'upload_aws_file'
-          : config.provider === 'minio'
-            ? 'upload_minio_file'
-            : 'upload_rustfs_file';
-
-    const endpointScheme =
-      config.provider === 'minio' || config.provider === 'rustfs'
-        ? config.endpointScheme
-        : config.provider === 'aws'
-          ? (config.endpointScheme ?? undefined)
-          : undefined;
-    const endpointHost =
-      config.provider === 'minio' || config.provider === 'rustfs'
-        ? config.endpointHost
-        : config.provider === 'aws'
-          ? (config.endpointHost ?? undefined)
-          : undefined;
-
-    invoke<UploadResult>(command, {
+    uploadFile(config, {
       taskId: task.id,
       filePath: task.filePath,
       key,
       contentType: task.contentType,
-      accountId: config.accountId,
-      bucket: config.bucket,
-      accessKeyId: config.accessKeyId,
-      secretAccessKey: config.secretAccessKey,
-      region: config.provider === 'aws' ? config.region : undefined,
-      endpointScheme,
-      endpointHost,
-      forcePathStyle: config.provider === 'r2' ? undefined : config.forcePathStyle,
     })
       .then((result) => {
         if (result.success) {

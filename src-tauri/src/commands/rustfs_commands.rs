@@ -70,7 +70,9 @@ pub async fn list_rustfs_buckets(
 }
 
 #[tauri::command]
-pub async fn list_rustfs_objects(input: ListObjectsInput) -> Result<rustfs::ListObjectsResult, String> {
+pub async fn list_rustfs_objects(
+    input: ListObjectsInput,
+) -> Result<rustfs::ListObjectsResult, String> {
     minio_commands::list_minio_objects(to_minio_list_input(input)).await
 }
 

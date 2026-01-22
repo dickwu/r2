@@ -1,8 +1,8 @@
 //! R2 types and client creation
 
+use crate::providers::s3_client::{create_s3_client, S3ClientConfig};
 use aws_sdk_s3::Client;
 use serde::{Deserialize, Serialize};
-use crate::providers::s3_client::{create_s3_client, S3ClientConfig};
 
 pub type R2Result<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 

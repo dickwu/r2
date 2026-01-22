@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::{get_connection, DbResult};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RustfsBucket {
@@ -65,7 +65,8 @@ pub async fn save_rustfs_buckets_for_account(
     conn.execute(
         "DELETE FROM rustfs_buckets WHERE account_id = ?1",
         turso::params![account_id],
-    ).await?;
+    )
+    .await?;
 
     let mut result = Vec::new();
     for (name, public_domain_scheme, public_domain_host) in buckets {

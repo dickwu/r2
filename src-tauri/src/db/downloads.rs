@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::{get_connection, DbResult};
+use serde::{Deserialize, Serialize};
 
 /// Download session status (for future type-safe status handling)
 #[allow(dead_code)]
@@ -108,7 +108,8 @@ pub async fn create_download_session(session: &DownloadSession) -> DbResult<()> 
             session.created_at,
             session.updated_at,
         ],
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -119,7 +120,8 @@ pub async fn update_download_progress(session_id: &str, downloaded_bytes: i64) -
     conn.execute(
         "UPDATE download_sessions SET downloaded_bytes = ?1, updated_at = ?2 WHERE id = ?3",
         turso::params![downloaded_bytes, now, session_id],
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -130,18 +132,24 @@ pub async fn update_download_file_size(session_id: &str, file_size: i64) -> DbRe
     conn.execute(
         "UPDATE download_sessions SET file_size = ?1, updated_at = ?2 WHERE id = ?3",
         turso::params![file_size, now, session_id],
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
 /// Update download session status
-pub async fn update_download_status(session_id: &str, status: &str, error: Option<&str>) -> DbResult<()> {
+pub async fn update_download_status(
+    session_id: &str,
+    status: &str,
+    error: Option<&str>,
+) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
         "UPDATE download_sessions SET status = ?1, error = ?2, updated_at = ?3 WHERE id = ?4",
         turso::params![status, error, now, session_id],
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -149,13 +157,15 @@ pub async fn update_download_status(session_id: &str, status: &str, error: Optio
 #[allow(dead_code)]
 pub async fn get_download_session(session_id: &str) -> DbResult<Option<DownloadSession>> {
     let conn = get_connection()?.lock().await;
-    let mut rows = conn.query(
-        "SELECT id, object_key, file_name, file_size, downloaded_bytes, local_path,
+    let mut rows = conn
+        .query(
+            "SELECT id, object_key, file_name, file_size, downloaded_bytes, local_path,
                 bucket, account_id, status, error, created_at, updated_at
          FROM download_sessions WHERE id = ?1",
-        turso::params![session_id]
-    ).await?;
-    
+            turso::params![session_id],
+        )
+        .await?;
+
     if let Some(row) = rows.next().await? {
         Ok(Some(DownloadSession {
             id: row.get(0)?,
@@ -177,17 +187,22 @@ pub async fn get_download_session(session_id: &str) -> DbResult<Option<DownloadS
 }
 
 /// Get all download sessions for a specific bucket
-pub async fn get_download_sessions_for_bucket(bucket: &str, account_id: &str) -> DbResult<Vec<DownloadSession>> {
+pub async fn get_download_sessions_for_bucket(
+    bucket: &str,
+    account_id: &str,
+) -> DbResult<Vec<DownloadSession>> {
     let conn = get_connection()?.lock().await;
-    let mut rows = conn.query(
-        "SELECT id, object_key, file_name, file_size, downloaded_bytes, local_path,
+    let mut rows = conn
+        .query(
+            "SELECT id, object_key, file_name, file_size, downloaded_bytes, local_path,
                 bucket, account_id, status, error, created_at, updated_at
          FROM download_sessions 
          WHERE bucket = ?1 AND account_id = ?2
          ORDER BY updated_at DESC",
-        turso::params![bucket, account_id]
-    ).await?;
-    
+            turso::params![bucket, account_id],
+        )
+        .await?;
+
     let mut sessions = Vec::new();
     while let Some(row) = rows.next().await? {
         sessions.push(DownloadSession {
@@ -211,23 +226,33 @@ pub async fn get_download_sessions_for_bucket(bucket: &str, account_id: &str) ->
 /// Delete a download session
 pub async fn delete_download_session(session_id: &str) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
-    conn.execute("DELETE FROM download_sessions WHERE id = ?1", turso::params![session_id]).await?;
+    conn.execute(
+        "DELETE FROM download_sessions WHERE id = ?1",
+        turso::params![session_id],
+    )
+    .await?;
     Ok(())
 }
 
 /// Get pending download sessions for a bucket (ordered by created_at)
-pub async fn get_pending_downloads(bucket: &str, account_id: &str, limit: i64) -> DbResult<Vec<DownloadSession>> {
+pub async fn get_pending_downloads(
+    bucket: &str,
+    account_id: &str,
+    limit: i64,
+) -> DbResult<Vec<DownloadSession>> {
     let conn = get_connection()?.lock().await;
-    let mut rows = conn.query(
-        "SELECT id, object_key, file_name, file_size, downloaded_bytes, local_path,
+    let mut rows = conn
+        .query(
+            "SELECT id, object_key, file_name, file_size, downloaded_bytes, local_path,
                 bucket, account_id, status, error, created_at, updated_at
          FROM download_sessions 
          WHERE bucket = ?1 AND account_id = ?2 AND status = 'pending'
          ORDER BY created_at ASC
          LIMIT ?3",
-        turso::params![bucket, account_id, limit]
-    ).await?;
-    
+            turso::params![bucket, account_id, limit],
+        )
+        .await?;
+
     let mut sessions = Vec::new();
     while let Some(row) = rows.next().await? {
         sessions.push(DownloadSession {
@@ -251,12 +276,14 @@ pub async fn get_pending_downloads(bucket: &str, account_id: &str, limit: i64) -
 /// Count active (downloading) sessions for a bucket
 pub async fn count_active_downloads(bucket: &str, account_id: &str) -> DbResult<i64> {
     let conn = get_connection()?.lock().await;
-    let mut rows = conn.query(
-        "SELECT COUNT(*) FROM download_sessions 
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM download_sessions 
          WHERE bucket = ?1 AND account_id = ?2 AND status = 'downloading'",
-        turso::params![bucket, account_id]
-    ).await?;
-    
+            turso::params![bucket, account_id],
+        )
+        .await?;
+
     if let Some(row) = rows.next().await? {
         Ok(row.get(0)?)
     } else {
@@ -272,8 +299,9 @@ pub async fn pause_all_downloads(bucket: &str, account_id: &str) -> DbResult<i64
         "UPDATE download_sessions SET status = 'paused', updated_at = ?1
          WHERE bucket = ?2 AND account_id = ?3 AND status IN ('downloading', 'pending')",
         turso::params![now, bucket, account_id],
-    ).await?;
-    
+    )
+    .await?;
+
     // Return count of updated rows
     let mut rows = conn.query("SELECT changes()", turso::params![]).await?;
     if let Some(row) = rows.next().await? {
@@ -291,8 +319,9 @@ pub async fn resume_all_downloads(bucket: &str, account_id: &str) -> DbResult<i6
         "UPDATE download_sessions SET status = 'pending', updated_at = ?1 
          WHERE bucket = ?2 AND account_id = ?3 AND status = 'paused'",
         turso::params![now, bucket, account_id],
-    ).await?;
-    
+    )
+    .await?;
+
     // Return count of updated rows
     let mut rows = conn.query("SELECT changes()", turso::params![]).await?;
     if let Some(row) = rows.next().await? {
@@ -310,8 +339,9 @@ pub async fn delete_finished_downloads(bucket: &str, account_id: &str) -> DbResu
          WHERE bucket = ?1 AND account_id = ?2 
          AND status IN ('completed', 'failed', 'cancelled')",
         turso::params![bucket, account_id],
-    ).await?;
-    
+    )
+    .await?;
+
     let mut rows = conn.query("SELECT changes()", turso::params![]).await?;
     if let Some(row) = rows.next().await? {
         Ok(row.get(0)?)
@@ -326,8 +356,9 @@ pub async fn delete_all_downloads(bucket: &str, account_id: &str) -> DbResult<i6
     conn.execute(
         "DELETE FROM download_sessions WHERE bucket = ?1 AND account_id = ?2",
         turso::params![bucket, account_id],
-    ).await?;
-    
+    )
+    .await?;
+
     let mut rows = conn.query("SELECT changes()", turso::params![]).await?;
     if let Some(row) = rows.next().await? {
         Ok(row.get(0)?)
@@ -341,27 +372,30 @@ pub async fn delete_all_downloads(bucket: &str, account_id: &str) -> DbResult<i6
 pub async fn cleanup_old_download_sessions() -> DbResult<usize> {
     let conn = get_connection()?.lock().await;
     let cutoff = chrono::Utc::now().timestamp() - (7 * 24 * 60 * 60);
-    
+
     // Query session IDs to delete
-    let mut rows = conn.query(
-        "SELECT id FROM download_sessions 
+    let mut rows = conn
+        .query(
+            "SELECT id FROM download_sessions 
          WHERE (status = 'completed' OR status = 'cancelled')
          AND updated_at < ?1",
-        turso::params![cutoff]
-    ).await?;
-    
+            turso::params![cutoff],
+        )
+        .await?;
+
     let mut session_ids: Vec<String> = Vec::new();
     while let Some(row) = rows.next().await? {
         session_ids.push(row.get(0)?);
     }
-    
+
     // Delete the sessions
     for session_id in &session_ids {
         conn.execute(
             "DELETE FROM download_sessions WHERE id = ?1",
             turso::params![session_id.clone()],
-        ).await?;
+        )
+        .await?;
     }
-    
+
     Ok(session_ids.len())
 }

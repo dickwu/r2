@@ -1,8 +1,8 @@
 use std::path::Path;
 use tauri::{
-    Manager,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
@@ -27,11 +27,14 @@ fn show_about_dialog<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         "{}\n\nVersion: {}\nAuthor: {}\nLicense: {}\n{}",
         APP_DESCRIPTION, APP_VERSION, APP_AUTHOR, APP_LICENSE, APP_COPYRIGHT
     );
-    
+
     app.dialog()
         .message(&about_message)
         .title(APP_NAME)
-        .buttons(MessageDialogButtons::OkCancelCustom("OK".to_string(), "View on GitHub".to_string()))
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "OK".to_string(),
+            "View on GitHub".to_string(),
+        ))
         .show(move |result| {
             // If Cancel (View on GitHub) was clicked, open the website
             if !result {
@@ -106,18 +109,23 @@ pub fn run() {
         .plugin(tauri_plugin_video_thumbnail::init())
         .setup(|app| {
             // Initialize database in app data directory
-            let app_data_dir = app.path().app_data_dir().expect("Failed to get app data dir");
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .expect("Failed to get app data dir");
             std::fs::create_dir_all(&app_data_dir).expect("Failed to create app data dir");
-            
+
             let db_path = app_data_dir.join("uploads-turso.db");
 
             let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
             let app_handle = app.handle();
-            let init_result = rt.block_on(async { init_db_with_recovery(&app_handle, &db_path).await });
+            let init_result =
+                rt.block_on(async { init_db_with_recovery(&app_handle, &db_path).await });
 
             if let Err(err) = init_result {
                 let exit_handle = app_handle.clone();
-                app_handle.dialog()
+                app_handle
+                    .dialog()
                     .message(&err)
                     .title(APP_NAME)
                     .buttons(MessageDialogButtons::OkCancelCustom(
@@ -137,25 +145,33 @@ pub fn run() {
                 }
             });
 
-
             // Setup custom application menu (macOS menu bar)
             #[cfg(target_os = "macos")]
             {
-                let app_menu_about = MenuItem::with_id(app, "app_about", "About R2 Uploader", true, None::<&str>)?;
+                let app_menu_about =
+                    MenuItem::with_id(app, "app_about", "About R2 Uploader", true, None::<&str>)?;
                 let separator = PredefinedMenuItem::separator(app)?;
                 let hide = PredefinedMenuItem::hide(app, Some("Hide"))?;
                 let hide_others = PredefinedMenuItem::hide_others(app, Some("Hide Others"))?;
                 let show_all = PredefinedMenuItem::show_all(app, Some("Show All"))?;
                 let separator2 = PredefinedMenuItem::separator(app)?;
                 let quit = PredefinedMenuItem::quit(app, Some("Quit"))?;
-                
+
                 let app_submenu = Submenu::with_items(
                     app,
                     "R2 Uploader",
                     true,
-                    &[&app_menu_about, &separator, &hide, &hide_others, &show_all, &separator2, &quit],
+                    &[
+                        &app_menu_about,
+                        &separator,
+                        &hide,
+                        &hide_others,
+                        &show_all,
+                        &separator2,
+                        &quit,
+                    ],
                 )?;
-                
+
                 let edit_menu = Submenu::with_items(
                     app,
                     "Edit",
@@ -170,7 +186,7 @@ pub fn run() {
                         &PredefinedMenuItem::select_all(app, Some("Select All"))?,
                     ],
                 )?;
-                
+
                 let window_menu = Submenu::with_items(
                     app,
                     "Window",
@@ -182,10 +198,10 @@ pub fn run() {
                         &PredefinedMenuItem::close_window(app, Some("Close"))?,
                     ],
                 )?;
-                
+
                 let app_menu = Menu::with_items(app, &[&app_submenu, &edit_menu, &window_menu])?;
                 app.set_menu(app_menu)?;
-                
+
                 app.on_menu_event(|app, event| {
                     if event.id.as_ref() == "app_about" {
                         show_about_dialog(app);
@@ -202,16 +218,14 @@ pub fn run() {
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| {
-                    match event.id.as_ref() {
-                        "about" => {
-                            show_about_dialog(app);
-                        }
-                        "quit" => {
-                            app.exit(0);
-                        }
-                        _ => {}
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "about" => {
+                        show_about_dialog(app);
                     }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
@@ -228,7 +242,7 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-            
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -1,7 +1,7 @@
-use turso::{Builder, Connection};
 use std::path::Path;
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
+use turso::{Builder, Connection};
 
 // Wrap Connection in Mutex to serialize database access
 // turso 0.4.0-pre.19 has race conditions in its page cache when accessed concurrently
@@ -12,19 +12,19 @@ pub(crate) type DbResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>
 
 // Re-export submodules
 pub mod accounts;
+pub mod app_state;
 pub mod aws_accounts;
 pub mod aws_buckets;
 pub mod buckets;
+pub mod dir_tree;
 pub mod downloads;
-pub mod sessions;
-pub mod tokens;
+pub mod file_cache;
 pub mod minio_accounts;
 pub mod minio_buckets;
 pub mod rustfs_accounts;
 pub mod rustfs_buckets;
-pub mod file_cache;
-pub mod app_state;
-pub mod dir_tree;
+pub mod sessions;
+pub mod tokens;
 
 // Re-export types
 pub use accounts::Account;
@@ -32,33 +32,36 @@ pub use aws_accounts::AwsAccount;
 pub use aws_buckets::AwsBucket;
 pub use buckets::Bucket;
 pub use downloads::DownloadSession;
-pub use sessions::UploadSession;
-pub use tokens::{Token, CurrentConfig};
+pub use file_cache::{CachedDirectoryNode, CachedFile};
 pub use minio_accounts::MinioAccount;
 pub use minio_buckets::MinioBucket;
 pub use rustfs_accounts::RustfsAccount;
 pub use rustfs_buckets::RustfsBucket;
-pub use file_cache::{CachedFile, CachedDirectoryNode};
+pub use sessions::UploadSession;
+pub use tokens::{CurrentConfig, Token};
 
 // ============ Connection and Initialization ============
 
 pub(crate) fn get_connection() -> DbResult<&'static Mutex<Connection>> {
-    DB_CONNECTION.get().ok_or_else(|| "Database not initialized".into())
+    DB_CONNECTION
+        .get()
+        .ok_or_else(|| "Database not initialized".into())
 }
 
 /// Initialize the database with required tables
 pub async fn init_db(db_path: &Path) -> DbResult<()> {
-    let db = Builder::new_local(db_path.to_str().unwrap()).build().await?;
+    let db = Builder::new_local(db_path.to_str().unwrap())
+        .build()
+        .await?;
     let conn = db.connect()?;
-    
+
     // Enable foreign keys
     conn.execute("PRAGMA foreign_keys = ON;", ()).await?;
-    
-    conn.execute_batch(
-        &format!(
-            "{}{}{}",
-            sessions::get_table_sql(),
-            "
+
+    conn.execute_batch(&format!(
+        "{}{}{}",
+        sessions::get_table_sql(),
+        "
         -- Multi-account tables
         CREATE TABLE IF NOT EXISTS accounts (
             id TEXT PRIMARY KEY,
@@ -67,10 +70,10 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
             updated_at INTEGER NOT NULL
         );
         ",
-            tokens::get_table_sql()
-        )
-    ).await?;
-    
+        tokens::get_table_sql()
+    ))
+    .await?;
+
     // Create buckets and app_state tables
     conn.execute_batch(
         "
@@ -87,12 +90,16 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
 
         CREATE INDEX IF NOT EXISTS idx_buckets_token ON buckets(token_id);
         CREATE INDEX IF NOT EXISTS idx_buckets_unique ON buckets(token_id, name);
-        "
-    ).await?;
+        ",
+    )
+    .await?;
 
     // Backfill public_domain_scheme for existing R2 buckets (idempotent)
     let _ = conn
-        .execute("ALTER TABLE buckets ADD COLUMN public_domain_scheme TEXT", ())
+        .execute(
+            "ALTER TABLE buckets ADD COLUMN public_domain_scheme TEXT",
+            (),
+        )
         .await;
     let _ = conn
         .execute(
@@ -102,65 +109,64 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
         .await;
 
     // Provider-specific tables
-    conn.execute_batch(
-        &format!(
-            "{}{}",
-            aws_accounts::get_table_sql(),
-            aws_buckets::get_table_sql()
-        )
-    ).await?;
+    conn.execute_batch(&format!(
+        "{}{}",
+        aws_accounts::get_table_sql(),
+        aws_buckets::get_table_sql()
+    ))
+    .await?;
 
-    conn.execute_batch(
-        &format!(
-            "{}{}",
-            minio_accounts::get_table_sql(),
-            minio_buckets::get_table_sql()
-        )
-    ).await?;
+    conn.execute_batch(&format!(
+        "{}{}",
+        minio_accounts::get_table_sql(),
+        minio_buckets::get_table_sql()
+    ))
+    .await?;
 
-    conn.execute_batch(
-        &format!(
-            "{}{}",
-            rustfs_accounts::get_table_sql(),
-            rustfs_buckets::get_table_sql()
-        )
-    ).await?;
-    
+    conn.execute_batch(&format!(
+        "{}{}",
+        rustfs_accounts::get_table_sql(),
+        rustfs_buckets::get_table_sql()
+    ))
+    .await?;
+
     // Create app_state table
     conn.execute_batch(app_state::get_table_sql()).await?;
-    
+
     // Create file cache tables
     conn.execute_batch(file_cache::get_table_sql()).await?;
 
     // Create download sessions table
     conn.execute_batch(downloads::get_table_sql()).await?;
 
-    DB_CONNECTION.set(Mutex::new(conn)).map_err(|_| "Database already initialized")?;
-    
+    DB_CONNECTION
+        .set(Mutex::new(conn))
+        .map_err(|_| "Database already initialized")?;
+
     Ok(())
 }
 
 // Re-export session functions
 pub use sessions::{
-    create_session, update_session_status, find_resumable_session, get_session,
-    save_completed_part, get_completed_parts, delete_session, get_pending_sessions,
-    cleanup_old_sessions,
+    cleanup_old_sessions, create_session, delete_session, find_resumable_session,
+    get_completed_parts, get_pending_sessions, get_session, save_completed_part,
+    update_session_status,
 };
 
 // Re-export token functions
 pub use tokens::{
-    create_token, get_token, list_tokens_by_account, update_token, delete_token,
-    get_current_config, set_current_selection, set_current_aws_selection, set_current_minio_selection,
-    set_current_rustfs_selection,
+    create_token, delete_token, get_current_config, get_token, list_tokens_by_account,
+    set_current_aws_selection, set_current_minio_selection, set_current_rustfs_selection,
+    set_current_selection, update_token,
 };
 
 // Re-export app_state functions
 pub use app_state::set_app_state;
 
 // Re-export account functions
-pub use accounts::{create_account, delete_account, list_accounts, update_account, has_accounts};
+pub use accounts::{create_account, delete_account, has_accounts, list_accounts, update_account};
 // Re-export bucket functions
-pub use buckets::{delete_bucket, list_buckets_by_token, update_bucket, save_buckets_for_token};
+pub use buckets::{delete_bucket, list_buckets_by_token, save_buckets_for_token, update_bucket};
 // Re-export AWS provider functions
 pub use aws_accounts::{
     create_aws_account, delete_aws_account, list_aws_accounts, update_aws_account,
@@ -178,19 +184,20 @@ pub use rustfs_accounts::{
 pub use rustfs_buckets::{list_rustfs_buckets_by_account, save_rustfs_buckets_for_account};
 // Re-export file cache functions
 pub use file_cache::{
-    store_all_files, get_all_cached_files, get_cached_file_size, search_cached_files, calculate_folder_size, 
-    get_directory_node, get_all_directory_nodes, clear_file_cache, get_folder_contents, update_cached_file,
-    delete_cached_file, delete_cached_files_batch, move_cached_file,
+    calculate_folder_size, clear_file_cache, delete_cached_file, delete_cached_files_batch,
+    get_all_cached_files, get_all_directory_nodes, get_cached_file_size, get_directory_node,
+    get_folder_contents, move_cached_file, search_cached_files, store_all_files,
+    update_cached_file,
 };
 // Re-export directory tree builder
 pub use dir_tree::{
-    build_directory_tree, update_directory_tree_for_file, 
-    update_directory_tree_for_delete, update_directory_tree_for_move,
+    build_directory_tree, update_directory_tree_for_delete, update_directory_tree_for_file,
+    update_directory_tree_for_move,
 };
 // Re-export download session functions
 pub use downloads::{
-    create_download_session, update_download_progress, update_download_status, update_download_file_size,
-    get_download_sessions_for_bucket, delete_download_session,
-    get_pending_downloads, count_active_downloads,
-    pause_all_downloads, resume_all_downloads, delete_finished_downloads, delete_all_downloads,
+    count_active_downloads, create_download_session, delete_all_downloads, delete_download_session,
+    delete_finished_downloads, get_download_sessions_for_bucket, get_pending_downloads,
+    pause_all_downloads, resume_all_downloads, update_download_file_size, update_download_progress,
+    update_download_status,
 };

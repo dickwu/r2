@@ -1,5 +1,7 @@
 //! R2 API commands for Tauri frontend
 
+use crate::commands::cache_events::{get_unique_parent_paths, CacheUpdatedEvent};
+use crate::commands::delete_cache::{update_cache_after_batch_delete, update_cache_after_delete};
 use crate::db::{self, CachedFile};
 use crate::r2;
 use serde::{Deserialize, Serialize};
@@ -36,32 +38,6 @@ pub struct ListObjectsInput {
     pub delimiter: Option<String>,
     pub continuation_token: Option<String>,
     pub max_keys: Option<i32>,
-}
-
-// ============ Cache Update Event ============
-
-/// Event emitted when local cache is updated after R2 operations.
-/// Frontend can listen to this to refresh affected views.
-#[derive(Debug, Clone, Serialize)]
-pub struct CacheUpdatedEvent {
-    pub action: String,              // "delete" | "move" | "update"
-    pub affected_paths: Vec<String>, // Parent folder paths that changed
-}
-
-/// Extract unique parent paths from a list of file keys
-fn get_unique_parent_paths(keys: &[String]) -> Vec<String> {
-    let mut paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    
-    for key in keys {
-        let parent = if let Some(last_slash) = key.rfind('/') {
-            key[..=last_slash].to_string()
-        } else {
-            String::new() // Root
-        };
-        paths.insert(parent);
-    }
-    
-    paths.into_iter().collect()
 }
 
 // ============ List Commands ============
@@ -249,22 +225,8 @@ pub async fn delete_r2_object(
         .await
         .map_err(|e| format!("Failed to delete object: {}", e))?;
 
-    // Update local database cache
-    let file_size = db::delete_cached_file(&bucket, &account_id, &key)
-        .await
-        .map_err(|e| format!("Failed to update file cache: {}", e))?;
-
-    if file_size > 0 {
-        db::update_directory_tree_for_delete(&bucket, &account_id, &key, file_size)
-            .await
-            .map_err(|e| format!("Failed to update directory tree: {}", e))?;
-    }
-
-    // Emit cache-updated event
-    let _ = app.emit("cache-updated", CacheUpdatedEvent {
-        action: "delete".to_string(),
-        affected_paths: get_unique_parent_paths(&[key]),
-    });
+    // Update cache and emit events (including paths-removed if any folders became empty)
+    update_cache_after_delete(&app, &bucket, &account_id, &key).await?;
 
     Ok(())
 }
@@ -302,11 +264,6 @@ pub async fn batch_delete_r2_objects(
         });
     }
 
-    // Get file sizes before deleting (for directory tree updates)
-    let file_sizes = db::delete_cached_files_batch(&bucket, &account_id, &keys)
-        .await
-        .unwrap_or_default();
-
     let mut completed = 0;
     let mut failed = 0;
     let mut errors: Vec<String> = vec![];
@@ -339,19 +296,13 @@ pub async fn batch_delete_r2_objects(
         );
     }
 
-    // Update directory tree for successfully deleted files
-    for key in &deleted_keys {
-        if let Some(&size) = file_sizes.get(key) {
-            let _ = db::update_directory_tree_for_delete(&bucket, &account_id, key, size).await;
-        }
-    }
-
-    // Emit cache-updated event
+    // Update cache and emit events (including paths-removed if any folders became empty)
     if !deleted_keys.is_empty() {
-        let _ = app.emit("cache-updated", CacheUpdatedEvent {
-            action: "delete".to_string(),
-            affected_paths: get_unique_parent_paths(&deleted_keys),
-        });
+        if let Err(e) =
+            update_cache_after_batch_delete(&app, &bucket, &account_id, &deleted_keys).await
+        {
+            errors.push(e);
+        }
     }
 
     Ok(BatchDeleteResult {
@@ -380,20 +331,31 @@ pub async fn rename_r2_object(
         .map_err(|e| format!("Failed to rename object: {}", e))?;
 
     // Update local database cache
-    if let Some((size, last_modified)) = db::move_cached_file(&bucket, &account_id, &old_key, &new_key)
-        .await
-        .map_err(|e| format!("Failed to update file cache: {}", e))?
-    {
-        db::update_directory_tree_for_move(&bucket, &account_id, &old_key, &new_key, size, &last_modified)
+    if let Some((size, last_modified)) =
+        db::move_cached_file(&bucket, &account_id, &old_key, &new_key)
             .await
-            .map_err(|e| format!("Failed to update directory tree: {}", e))?;
+            .map_err(|e| format!("Failed to update file cache: {}", e))?
+    {
+        db::update_directory_tree_for_move(
+            &bucket,
+            &account_id,
+            &old_key,
+            &new_key,
+            size,
+            &last_modified,
+        )
+        .await
+        .map_err(|e| format!("Failed to update directory tree: {}", e))?;
     }
 
     // Emit cache-updated event
-    let _ = app.emit("cache-updated", CacheUpdatedEvent {
-        action: "move".to_string(),
-        affected_paths: get_unique_parent_paths(&[old_key, new_key]),
-    });
+    let _ = app.emit(
+        "cache-updated",
+        CacheUpdatedEvent {
+            action: "move".to_string(),
+            affected_paths: get_unique_parent_paths(&[old_key, new_key]),
+        },
+    );
 
     Ok(())
 }
@@ -503,12 +465,18 @@ pub async fn batch_move_r2_objects(
     let moves = successful_moves.lock().await;
     let mut affected_keys: Vec<String> = Vec::new();
     for op in moves.iter() {
-        if let Ok(Some((size, last_modified))) = 
+        if let Ok(Some((size, last_modified))) =
             db::move_cached_file(&bucket, &account_id, &op.old_key, &op.new_key).await
         {
             let _ = db::update_directory_tree_for_move(
-                &bucket, &account_id, &op.old_key, &op.new_key, size, &last_modified
-            ).await;
+                &bucket,
+                &account_id,
+                &op.old_key,
+                &op.new_key,
+                size,
+                &last_modified,
+            )
+            .await;
             affected_keys.push(op.old_key.clone());
             affected_keys.push(op.new_key.clone());
         }
@@ -516,10 +484,13 @@ pub async fn batch_move_r2_objects(
 
     // Emit cache-updated event
     if !affected_keys.is_empty() {
-        let _ = app.emit("cache-updated", CacheUpdatedEvent {
-            action: "move".to_string(),
-            affected_paths: get_unique_parent_paths(&affected_keys),
-        });
+        let _ = app.emit(
+            "cache-updated",
+            CacheUpdatedEvent {
+                action: "move".to_string(),
+                affected_paths: get_unique_parent_paths(&affected_keys),
+            },
+        );
     }
 
     let final_completed = completed.load(Ordering::SeqCst);
@@ -568,33 +539,39 @@ pub async fn upload_r2_content(
     let new_size = content_bytes.len() as i64;
 
     // Upload to R2
-    let etag = r2::upload_content(
-        &r2_config,
-        &key,
-        content_bytes,
-        content_type.as_deref(),
-    )
-    .await
-    .map_err(|e| format!("Failed to upload content: {}", e))?;
+    let etag = r2::upload_content(&r2_config, &key, content_bytes, content_type.as_deref())
+        .await
+        .map_err(|e| format!("Failed to upload content: {}", e))?;
 
     // Update local database cache
     let last_modified = chrono::Utc::now().to_rfc3339();
 
-    // Update the file record and get size delta
-    let size_delta = db::update_cached_file(&bucket, &account_id, &key, new_size, &last_modified)
-        .await
-        .map_err(|e| format!("Failed to update file cache: {}", e))?;
+    // Update the file record and get (size_delta, is_new_file)
+    let (size_delta, is_new_file) =
+        db::update_cached_file(&bucket, &account_id, &key, new_size, &last_modified)
+            .await
+            .map_err(|e| format!("Failed to update file cache: {}", e))?;
 
     // Update directory tree (all ancestor folders)
-    db::update_directory_tree_for_file(&bucket, &account_id, &key, size_delta, &last_modified)
-        .await
-        .map_err(|e| format!("Failed to update directory tree: {}", e))?;
+    db::update_directory_tree_for_file(
+        &bucket,
+        &account_id,
+        &key,
+        size_delta,
+        &last_modified,
+        is_new_file,
+    )
+    .await
+    .map_err(|e| format!("Failed to update directory tree: {}", e))?;
 
     // Emit cache-updated event
-    let _ = app.emit("cache-updated", CacheUpdatedEvent {
-        action: "update".to_string(),
-        affected_paths: get_unique_parent_paths(&[key]),
-    });
+    let _ = app.emit(
+        "cache-updated",
+        CacheUpdatedEvent {
+            action: "update".to_string(),
+            affected_paths: get_unique_parent_paths(&[key]),
+        },
+    );
 
     Ok(etag)
 }

@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::{get_connection, DbResult};
+use serde::{Deserialize, Serialize};
 
 // ============ Upload Session Structs ============
 
@@ -85,7 +85,8 @@ pub async fn create_session(session: &UploadSession) -> DbResult<()> {
             session.updated_at,
             session.status.clone(),
         ],
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -96,7 +97,8 @@ pub async fn update_session_status(session_id: &str, status: &str) -> DbResult<(
     conn.execute(
         "UPDATE upload_sessions SET status = ?1, updated_at = ?2 WHERE id = ?3",
         turso::params![status, now, session_id],
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -110,16 +112,18 @@ pub async fn find_resumable_session(
     account_id: &str,
 ) -> DbResult<Option<UploadSession>> {
     let conn = get_connection()?.lock().await;
-    let mut rows = conn.query(
-        "SELECT id, file_path, file_size, file_mtime, object_key, bucket, account_id,
+    let mut rows = conn
+        .query(
+            "SELECT id, file_path, file_size, file_mtime, object_key, bucket, account_id,
                 upload_id, content_type, total_parts, created_at, updated_at, status
          FROM upload_sessions 
          WHERE file_path = ?1 AND file_size = ?2 AND file_mtime = ?3 
                AND object_key = ?4 AND bucket = ?5 AND account_id = ?6
                AND status = 'uploading' AND upload_id IS NOT NULL",
-        turso::params![file_path, file_size, file_mtime, object_key, bucket, account_id]
-    ).await?;
-    
+            turso::params![file_path, file_size, file_mtime, object_key, bucket, account_id],
+        )
+        .await?;
+
     if let Some(row) = rows.next().await? {
         Ok(Some(UploadSession {
             id: row.get(0)?,
@@ -144,13 +148,15 @@ pub async fn find_resumable_session(
 /// Get session by ID
 pub async fn get_session(session_id: &str) -> DbResult<Option<UploadSession>> {
     let conn = get_connection()?.lock().await;
-    let mut rows = conn.query(
-        "SELECT id, file_path, file_size, file_mtime, object_key, bucket, account_id,
+    let mut rows = conn
+        .query(
+            "SELECT id, file_path, file_size, file_mtime, object_key, bucket, account_id,
                 upload_id, content_type, total_parts, created_at, updated_at, status
          FROM upload_sessions WHERE id = ?1",
-        turso::params![session_id]
-    ).await?;
-    
+            turso::params![session_id],
+        )
+        .await?;
+
     if let Some(row) = rows.next().await? {
         Ok(Some(UploadSession {
             id: row.get(0)?,
@@ -180,27 +186,31 @@ pub async fn save_completed_part(session_id: &str, part_number: i32, etag: &str)
          VALUES (?1, ?2, ?3)
          ON CONFLICT (session_id, part_number) DO UPDATE SET etag = ?3",
         turso::params![session_id, part_number, etag],
-    ).await?;
-    
+    )
+    .await?;
+
     // Update session timestamp
     let now = chrono::Utc::now().timestamp();
     conn.execute(
         "UPDATE upload_sessions SET updated_at = ?1 WHERE id = ?2",
         turso::params![now, session_id],
-    ).await?;
-    
+    )
+    .await?;
+
     Ok(())
 }
 
 /// Get all completed parts for a session
 pub async fn get_completed_parts(session_id: &str) -> DbResult<Vec<CompletedPart>> {
     let conn = get_connection()?.lock().await;
-    let mut rows = conn.query(
-        "SELECT session_id, part_number, etag FROM completed_parts 
+    let mut rows = conn
+        .query(
+            "SELECT session_id, part_number, etag FROM completed_parts 
          WHERE session_id = ?1 ORDER BY part_number",
-        turso::params![session_id]
-    ).await?;
-    
+            turso::params![session_id],
+        )
+        .await?;
+
     let mut parts = Vec::new();
     while let Some(row) = rows.next().await? {
         parts.push(CompletedPart {
@@ -215,23 +225,33 @@ pub async fn get_completed_parts(session_id: &str) -> DbResult<Vec<CompletedPart
 /// Delete session and its parts
 pub async fn delete_session(session_id: &str) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
-    conn.execute("DELETE FROM completed_parts WHERE session_id = ?1", turso::params![session_id]).await?;
-    conn.execute("DELETE FROM upload_sessions WHERE id = ?1", turso::params![session_id]).await?;
+    conn.execute(
+        "DELETE FROM completed_parts WHERE session_id = ?1",
+        turso::params![session_id],
+    )
+    .await?;
+    conn.execute(
+        "DELETE FROM upload_sessions WHERE id = ?1",
+        turso::params![session_id],
+    )
+    .await?;
     Ok(())
 }
 
 /// Get all pending/uploading sessions (for UI to show resumable uploads)
 pub async fn get_pending_sessions() -> DbResult<Vec<UploadSession>> {
     let conn = get_connection()?.lock().await;
-    let mut rows = conn.query(
-        "SELECT id, file_path, file_size, file_mtime, object_key, bucket, account_id,
+    let mut rows = conn
+        .query(
+            "SELECT id, file_path, file_size, file_mtime, object_key, bucket, account_id,
                 upload_id, content_type, total_parts, created_at, updated_at, status
          FROM upload_sessions 
          WHERE status IN ('pending', 'uploading')
          ORDER BY updated_at DESC",
-        ()
-    ).await?;
-    
+            (),
+        )
+        .await?;
+
     let mut sessions = Vec::new();
     while let Some(row) = rows.next().await? {
         sessions.push(UploadSession {
@@ -257,35 +277,39 @@ pub async fn get_pending_sessions() -> DbResult<Vec<UploadSession>> {
 pub async fn cleanup_old_sessions() -> DbResult<usize> {
     let conn = get_connection()?.lock().await;
     let cutoff = chrono::Utc::now().timestamp() - (7 * 24 * 60 * 60);
-    
+
     // Step 1: Query session IDs to delete (libsql doesn't support subqueries in WHERE)
-    let mut rows = conn.query(
-        "SELECT id FROM upload_sessions 
+    let mut rows = conn
+        .query(
+            "SELECT id FROM upload_sessions 
          WHERE (status = 'completed' OR status = 'failed' OR status = 'cancelled')
          AND updated_at < ?1",
-        turso::params![cutoff]
-    ).await?;
-    
+            turso::params![cutoff],
+        )
+        .await?;
+
     let mut session_ids: Vec<String> = Vec::new();
     while let Some(row) = rows.next().await? {
         session_ids.push(row.get(0)?);
     }
-    
+
     // Step 2: Delete parts for each session
     for session_id in &session_ids {
         conn.execute(
             "DELETE FROM completed_parts WHERE session_id = ?1",
             turso::params![session_id.clone()],
-        ).await?;
+        )
+        .await?;
     }
-    
+
     // Step 3: Delete the sessions
     for session_id in &session_ids {
         conn.execute(
             "DELETE FROM upload_sessions WHERE id = ?1",
             turso::params![session_id.clone()],
-        ).await?;
+        )
+        .await?;
     }
-    
+
     Ok(session_ids.len())
 }

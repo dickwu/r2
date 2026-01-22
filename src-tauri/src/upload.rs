@@ -1,3 +1,4 @@
+use crate::commands::upload_cache::update_cache_after_upload;
 use crate::db::{self, UploadSession};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
@@ -64,7 +65,10 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 }
 
 fn get_signing_key(secret_key: &str, date_stamp: &str, region: &str, service: &str) -> Vec<u8> {
-    let k_date = hmac_sha256(format!("AWS4{}", secret_key).as_bytes(), date_stamp.as_bytes());
+    let k_date = hmac_sha256(
+        format!("AWS4{}", secret_key).as_bytes(),
+        date_stamp.as_bytes(),
+    );
     let k_region = hmac_sha256(&k_date, region.as_bytes());
     let k_service = hmac_sha256(&k_region, service.as_bytes());
     hmac_sha256(&k_service, b"aws4_request")
@@ -100,10 +104,14 @@ fn generate_presigned_url(
 
     // Build query string
     let mut query_parts: Vec<(String, String)> = vec![
-        ("X-Amz-Algorithm".to_string(), "AWS4-HMAC-SHA256".to_string()),
+        (
+            "X-Amz-Algorithm".to_string(),
+            "AWS4-HMAC-SHA256".to_string(),
+        ),
         (
             "X-Amz-Credential".to_string(),
-            urlencoding::encode(&format!("{}/{}", config.access_key_id, credential_scope)).to_string(),
+            urlencoding::encode(&format!("{}/{}", config.access_key_id, credential_scope))
+                .to_string(),
         ),
         ("X-Amz-Date".to_string(), amz_date.clone()),
         ("X-Amz-Expires".to_string(), expires_in.to_string()),
@@ -132,7 +140,12 @@ fn generate_presigned_url(
 
     let canonical_request = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
-        method, canonical_uri, canonical_query_string, canonical_headers, signed_headers, payload_hash
+        method,
+        canonical_uri,
+        canonical_query_string,
+        canonical_headers,
+        signed_headers,
+        payload_hash
     );
 
     let string_to_sign = format!(
@@ -234,11 +247,15 @@ async fn upload_multipart(
     let metadata = tokio::fs::metadata(file_path)
         .await
         .map_err(|e| format!("Failed to get file metadata: {}", e))?;
-    
+
     let file_size = metadata.len();
     let file_mtime = metadata
         .modified()
-        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+        })
         .unwrap_or(0);
 
     let total_parts = ((file_size + PART_SIZE - 1) / PART_SIZE) as usize;
@@ -252,21 +269,30 @@ async fn upload_multipart(
         key,
         &config.bucket,
         &config.account_id,
-    ).await {
+    )
+    .await
+    {
         Ok(Some(session)) => {
             // Found existing session - verify upload_id is still valid on R2
             let upload_id = session.upload_id.clone().unwrap();
-            
+
             // Get completed parts from DB
             let parts = db::get_completed_parts(&session.id)
                 .await
                 .map_err(|e| format!("Failed to get completed parts: {}", e))?;
-            
+
             let part_set: HashSet<i32> = parts.iter().map(|p| p.part_number).collect();
-            let part_map: HashMap<i32, String> = parts.iter().map(|p| (p.part_number, p.etag.clone())).collect();
-            
-            log::info!("Resuming upload {} with {} completed parts", session.id, part_set.len());
-            
+            let part_map: HashMap<i32, String> = parts
+                .iter()
+                .map(|p| (p.part_number, p.etag.clone()))
+                .collect();
+
+            log::info!(
+                "Resuming upload {} with {} completed parts",
+                session.id,
+                part_set.len()
+            );
+
             (upload_id, Some((part_set, part_map)), session.id)
         }
         _ => {
@@ -289,7 +315,10 @@ async fn upload_multipart(
             if !create_response.status().is_success() {
                 let status = create_response.status();
                 let text = create_response.text().await.unwrap_or_default();
-                return Err(format!("Failed to initiate multipart upload: {} - {}", status, text));
+                return Err(format!(
+                    "Failed to initiate multipart upload: {} - {}",
+                    status, text
+                ));
             }
 
             let create_xml = create_response
@@ -331,12 +360,16 @@ async fn upload_multipart(
     };
 
     // Calculate already uploaded bytes for progress
-    let (completed_part_set, completed_part_map) = existing_parts.unwrap_or((HashSet::new(), HashMap::new()));
-    let already_uploaded: u64 = completed_part_set.iter().map(|&part_num| {
-        let start = (part_num as u64 - 1) * PART_SIZE;
-        let end = std::cmp::min(start + PART_SIZE, file_size);
-        end - start
-    }).sum();
+    let (completed_part_set, completed_part_map) =
+        existing_parts.unwrap_or((HashSet::new(), HashMap::new()));
+    let already_uploaded: u64 = completed_part_set
+        .iter()
+        .map(|&part_num| {
+            let start = (part_num as u64 - 1) * PART_SIZE;
+            let end = std::cmp::min(start + PART_SIZE, file_size);
+            end - start
+        })
+        .sum();
 
     // Track progress
     let uploaded_bytes = Arc::new(AtomicU64::new(already_uploaded));
@@ -344,7 +377,10 @@ async fn upload_multipart(
 
     // Store completed parts (include already completed ones)
     let completed_parts: Arc<Mutex<Vec<(usize, String)>>> = Arc::new(Mutex::new(
-        completed_part_map.iter().map(|(&n, e)| (n as usize, e.clone())).collect()
+        completed_part_map
+            .iter()
+            .map(|(&n, e)| (n as usize, e.clone()))
+            .collect(),
     ));
 
     // Filter out already completed parts
@@ -440,7 +476,10 @@ async fn upload_multipart(
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
-                return Err(format!("Failed to upload part {}: {} - {}", part_number, status, text));
+                return Err(format!(
+                    "Failed to upload part {}: {} - {}",
+                    part_number, status, text
+                ));
             }
 
             let etag = response
@@ -506,7 +545,7 @@ async fn upload_multipart(
     if cancelled.load(Ordering::SeqCst) {
         // Mark session as cancelled but don't delete (can be resumed later)
         let _ = db::update_session_status(&session_id, "cancelled").await;
-        
+
         // Note: We don't abort the multipart upload on R2 so it can be resumed
         return Err("Upload cancelled".to_string());
     }
@@ -523,10 +562,18 @@ async fn upload_multipart(
 
     let parts_xml = parts
         .iter()
-        .map(|(n, etag)| format!("<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>", n, etag))
+        .map(|(n, etag)| {
+            format!(
+                "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
+                n, etag
+            )
+        })
         .collect::<Vec<_>>()
         .join("");
-    let complete_xml = format!("<CompleteMultipartUpload>{}</CompleteMultipartUpload>", parts_xml);
+    let complete_xml = format!(
+        "<CompleteMultipartUpload>{}</CompleteMultipartUpload>",
+        parts_xml
+    );
 
     let complete_url = generate_presigned_url(
         config,
@@ -548,7 +595,10 @@ async fn upload_multipart(
     if !complete_response.status().is_success() {
         let status = complete_response.status();
         let text = complete_response.text().await.unwrap_or_default();
-        return Err(format!("Failed to complete multipart upload: {} - {}", status, text));
+        return Err(format!(
+            "Failed to complete multipart upload: {} - {}",
+            status, text
+        ));
     }
 
     // Mark session as completed and clean up
@@ -623,9 +673,29 @@ pub async fn upload_file(
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     let result = if file_size < MULTIPART_THRESHOLD {
-        upload_single_part(&client, &config, &key, &path, &content_type, &task_id, &app, &cancelled).await
+        upload_single_part(
+            &client,
+            &config,
+            &key,
+            &path,
+            &content_type,
+            &task_id,
+            &app,
+            &cancelled,
+        )
+        .await
     } else {
-        upload_multipart(&client, &config, &key, &path, &content_type, &task_id, &app, &cancelled).await
+        upload_multipart(
+            &client,
+            &config,
+            &key,
+            &path,
+            &content_type,
+            &task_id,
+            &app,
+            &cancelled,
+        )
+        .await
     };
 
     // Cleanup cancel flag
@@ -635,11 +705,27 @@ pub async fn upload_file(
     }
 
     match result {
-        Ok(()) => Ok(UploadResult {
-            task_id,
-            success: true,
-            error: None,
-        }),
+        Ok(()) => {
+            let last_modified = chrono::Utc::now().to_rfc3339();
+            if let Err(err) = update_cache_after_upload(
+                &app,
+                &config.bucket,
+                &config.account_id,
+                &key,
+                file_size as i64,
+                &last_modified,
+            )
+            .await
+            {
+                log::warn!("Failed to update cache after upload: {}", err);
+            }
+
+            Ok(UploadResult {
+                task_id,
+                success: true,
+                error: None,
+            })
+        }
         Err(e) => Ok(UploadResult {
             task_id,
             success: false,
@@ -678,7 +764,7 @@ pub async fn get_file_info(file_path: String) -> Result<(u64, String), String> {
 #[derive(Debug, Clone, Serialize)]
 pub struct FolderFileInfo {
     pub file_path: String,
-    pub relative_path: String,  // Path relative to selected folder
+    pub relative_path: String, // Path relative to selected folder
     pub file_size: u64,
 }
 
@@ -698,9 +784,13 @@ pub async fn get_folder_files(folder_path: String) -> Result<Vec<FolderFileInfo>
             .await
             .map_err(|e| format!("Failed to read directory {}: {}", current.display(), e))?;
 
-        while let Some(entry) = entries.next_entry().await.map_err(|e| format!("Failed to read entry: {}", e))? {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| format!("Failed to read entry: {}", e))?
+        {
             let path = entry.path();
-            
+
             // Skip hidden files/directories
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with('.') {
@@ -713,7 +803,8 @@ pub async fn get_folder_files(folder_path: String) -> Result<Vec<FolderFileInfo>
                 .map_err(|e| format!("Failed to get metadata for {}: {}", path.display(), e))?;
 
             if metadata.is_file() {
-                let relative = path.strip_prefix(&root)
+                let relative = path
+                    .strip_prefix(&root)
                     .map_err(|e| format!("Failed to get relative path: {}", e))?;
 
                 files.push(FolderFileInfo {
@@ -729,20 +820,24 @@ pub async fn get_folder_files(folder_path: String) -> Result<Vec<FolderFileInfo>
 
     // Sort files by relative path for consistent ordering
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    
+
     Ok(files)
 }
 
 /// Get all pending/uploading sessions (for showing resumable uploads in UI)
 #[tauri::command]
 pub async fn get_pending_uploads() -> Result<Vec<db::UploadSession>, String> {
-    db::get_pending_sessions().await.map_err(|e| format!("Failed to get pending sessions: {}", e))
+    db::get_pending_sessions()
+        .await
+        .map_err(|e| format!("Failed to get pending sessions: {}", e))
 }
 
 /// Get upload session by ID
 #[tauri::command]
 pub async fn get_upload_session(session_id: String) -> Result<Option<db::UploadSession>, String> {
-    db::get_session(&session_id).await.map_err(|e| format!("Failed to get session: {}", e))
+    db::get_session(&session_id)
+        .await
+        .map_err(|e| format!("Failed to get session: {}", e))
 }
 
 /// Get completed parts count for a session (for progress display)
@@ -752,24 +847,28 @@ pub async fn get_session_progress(session_id: String) -> Result<(i32, i32), Stri
         .await
         .map_err(|e| format!("Failed to get session: {}", e))?
         .ok_or("Session not found")?;
-    
+
     let parts = db::get_completed_parts(&session_id)
         .await
         .map_err(|e| format!("Failed to get parts: {}", e))?;
-    
+
     Ok((parts.len() as i32, session.total_parts))
 }
 
 /// Delete an upload session (e.g., user wants to restart from scratch)
 #[tauri::command]
 pub async fn delete_upload_session(session_id: String) -> Result<(), String> {
-    db::delete_session(&session_id).await.map_err(|e| format!("Failed to delete session: {}", e))
+    db::delete_session(&session_id)
+        .await
+        .map_err(|e| format!("Failed to delete session: {}", e))
 }
 
 /// Clean up old sessions
 #[tauri::command]
 pub async fn cleanup_old_sessions() -> Result<usize, String> {
-    db::cleanup_old_sessions().await.map_err(|e| format!("Failed to cleanup: {}", e))
+    db::cleanup_old_sessions()
+        .await
+        .map_err(|e| format!("Failed to cleanup: {}", e))
 }
 
 /// Check if a file has a resumable upload session
@@ -784,14 +883,27 @@ pub async fn check_resumable_upload(
     let metadata = tokio::fs::metadata(&path)
         .await
         .map_err(|e| format!("Failed to get file metadata: {}", e))?;
-    
+
     let file_size = metadata.len() as i64;
     let file_mtime = metadata
         .modified()
-        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+        })
         .unwrap_or(0);
-    
-    match db::find_resumable_session(&file_path, file_size, file_mtime, &object_key, &bucket, &account_id).await {
+
+    match db::find_resumable_session(
+        &file_path,
+        file_size,
+        file_mtime,
+        &object_key,
+        &bucket,
+        &account_id,
+    )
+    .await
+    {
         Ok(result) => Ok(result),
         Err(e) => Err(format!("Failed to check resumable session: {}", e)),
     }

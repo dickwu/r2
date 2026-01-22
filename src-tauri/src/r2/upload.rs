@@ -257,12 +257,16 @@ pub async fn upload_file_multipart(
             let etag = upload_part(&config, &key, &upload_id, part_number as i32, buffer).await?;
 
             // Update progress
-            let new_total = uploaded_bytes.fetch_add(part_data_size, Ordering::SeqCst) + part_data_size;
+            let new_total =
+                uploaded_bytes.fetch_add(part_data_size, Ordering::SeqCst) + part_data_size;
             if let Some(ref cb) = *callback {
                 cb(new_total, file_size);
             }
 
-            Ok::<(i32, String), Box<dyn std::error::Error + Send + Sync>>((part_number as i32, etag))
+            Ok::<(i32, String), Box<dyn std::error::Error + Send + Sync>>((
+                part_number as i32,
+                etag,
+            ))
         });
 
         handles.push(handle);

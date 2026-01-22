@@ -10,6 +10,8 @@ import type {
   StorageConfig,
   StorageObject,
   SyncResult,
+  UploadFileInput,
+  UploadFileResult,
 } from '@/app/providers/types';
 
 export type {
@@ -27,6 +29,8 @@ export type {
   AwsStorageConfig,
   MinioStorageConfig,
   RustfsStorageConfig,
+  UploadFileInput,
+  UploadFileResult,
 } from '@/app/providers/types';
 
 export interface StoredFile {
@@ -118,6 +122,13 @@ export async function generateSignedUrl(
   expiresIn: number = 3600
 ): Promise<string> {
   return getProviderAdapter(config).generateSignedUrl(config, key, expiresIn);
+}
+
+export async function uploadFile(
+  config: StorageConfig,
+  input: UploadFileInput
+): Promise<UploadFileResult> {
+  return getProviderAdapter(config).uploadFile(config, input);
 }
 
 export async function uploadContent(

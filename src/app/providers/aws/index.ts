@@ -9,6 +9,8 @@ import type {
   StorageObject,
   SyncResult,
   MoveOperation,
+  UploadFileInput,
+  UploadFileResult,
   StorageProviderAdapter,
 } from '@/app/providers/types';
 
@@ -106,6 +108,24 @@ export const awsProvider: StorageProviderAdapter<AwsStorageConfig> = {
       config: toAwsConfigInput(config),
       key,
       expiresIn,
+    });
+  },
+
+  uploadFile: async (config, input: UploadFileInput) => {
+    requireAwsFields(config);
+    return invoke<UploadFileResult>('upload_aws_file', {
+      taskId: input.taskId,
+      filePath: input.filePath,
+      key: input.key,
+      contentType: input.contentType ?? null,
+      accountId: config.accountId,
+      bucket: config.bucket,
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      region: config.region,
+      endpointScheme: config.endpointScheme ?? null,
+      endpointHost: config.endpointHost ?? null,
+      forcePathStyle: config.forcePathStyle,
     });
   },
 

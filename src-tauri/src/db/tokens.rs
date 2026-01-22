@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::{get_connection, DbResult};
+use serde::{Deserialize, Serialize};
 
 // ============ Token Struct ============
 
@@ -100,7 +100,7 @@ pub async fn get_token(id: i64) -> DbResult<Option<Token>> {
          FROM tokens WHERE id = ?1",
         turso::params![id]
     ).await?;
-    
+
     if let Some(row) = rows.next().await? {
         Ok(Some(Token {
             id: row.get(0)?,
@@ -125,7 +125,7 @@ pub async fn list_tokens_by_account(account_id: &str) -> DbResult<Vec<Token>> {
          FROM tokens WHERE account_id = ?1 ORDER BY created_at",
         turso::params![account_id]
     ).await?;
-    
+
     let mut tokens = Vec::new();
     while let Some(row) = rows.next().await? {
         tokens.push(Token {
@@ -164,9 +164,14 @@ pub async fn update_token(
 pub async fn delete_token(id: i64) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
     // Delete buckets first
-    conn.execute("DELETE FROM buckets WHERE token_id = ?1", turso::params![id]).await?;
+    conn.execute(
+        "DELETE FROM buckets WHERE token_id = ?1",
+        turso::params![id],
+    )
+    .await?;
     // Then delete token
-    conn.execute("DELETE FROM tokens WHERE id = ?1", turso::params![id]).await?;
+    conn.execute("DELETE FROM tokens WHERE id = ?1", turso::params![id])
+        .await?;
     Ok(())
 }
 
@@ -176,7 +181,10 @@ pub async fn delete_token(id: i64) -> DbResult<()> {
 pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
     let conn = get_connection()?.lock().await;
     let mut rows = conn
-        .query("SELECT value FROM app_state WHERE key = 'current_provider'", ())
+        .query(
+            "SELECT value FROM app_state WHERE key = 'current_provider'",
+            (),
+        )
         .await?;
 
     let provider = if let Some(row) = rows.next().await? {
@@ -195,7 +203,10 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
         StorageProvider::R2 => {
             // Get current token ID
             let mut rows = conn
-                .query("SELECT value FROM app_state WHERE key = 'current_token_id'", ())
+                .query(
+                    "SELECT value FROM app_state WHERE key = 'current_token_id'",
+                    (),
+                )
                 .await?;
 
             let token_id: i64 = if let Some(row) = rows.next().await? {
@@ -207,7 +218,10 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
 
             // Get current bucket
             let mut rows = conn
-                .query("SELECT value FROM app_state WHERE key = 'current_bucket'", ())
+                .query(
+                    "SELECT value FROM app_state WHERE key = 'current_bucket'",
+                    (),
+                )
                 .await?;
 
             let bucket_name: String = if let Some(row) = rows.next().await? {
@@ -266,7 +280,10 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
         }
         StorageProvider::Aws => {
             let mut rows = conn
-                .query("SELECT value FROM app_state WHERE key = 'current_aws_account_id'", ())
+                .query(
+                    "SELECT value FROM app_state WHERE key = 'current_aws_account_id'",
+                    (),
+                )
                 .await?;
             let account_id: String = if let Some(row) = rows.next().await? {
                 row.get(0)?
@@ -275,7 +292,10 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
             };
 
             let mut rows = conn
-                .query("SELECT value FROM app_state WHERE key = 'current_aws_bucket'", ())
+                .query(
+                    "SELECT value FROM app_state WHERE key = 'current_aws_bucket'",
+                    (),
+                )
                 .await?;
             let bucket_name: String = if let Some(row) = rows.next().await? {
                 row.get(0)?
@@ -329,7 +349,10 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
         }
         StorageProvider::Minio => {
             let mut rows = conn
-                .query("SELECT value FROM app_state WHERE key = 'current_minio_account_id'", ())
+                .query(
+                    "SELECT value FROM app_state WHERE key = 'current_minio_account_id'",
+                    (),
+                )
                 .await?;
             let account_id: String = if let Some(row) = rows.next().await? {
                 row.get(0)?
@@ -338,7 +361,10 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
             };
 
             let mut rows = conn
-                .query("SELECT value FROM app_state WHERE key = 'current_minio_bucket'", ())
+                .query(
+                    "SELECT value FROM app_state WHERE key = 'current_minio_bucket'",
+                    (),
+                )
                 .await?;
             let bucket_name: String = if let Some(row) = rows.next().await? {
                 row.get(0)?
@@ -392,7 +418,10 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
         }
         StorageProvider::Rustfs => {
             let mut rows = conn
-                .query("SELECT value FROM app_state WHERE key = 'current_rustfs_account_id'", ())
+                .query(
+                    "SELECT value FROM app_state WHERE key = 'current_rustfs_account_id'",
+                    (),
+                )
                 .await?;
             let account_id: String = if let Some(row) = rows.next().await? {
                 row.get(0)?
@@ -401,7 +430,10 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
             };
 
             let mut rows = conn
-                .query("SELECT value FROM app_state WHERE key = 'current_rustfs_bucket'", ())
+                .query(
+                    "SELECT value FROM app_state WHERE key = 'current_rustfs_bucket'",
+                    (),
+                )
                 .await?;
             let bucket_name: String = if let Some(row) = rows.next().await? {
                 row.get(0)?
@@ -463,17 +495,20 @@ pub async fn set_current_selection(token_id: i64, bucket_name: &str) -> DbResult
         "INSERT INTO app_state (key, value) VALUES ('current_provider', 'r2')
          ON CONFLICT (key) DO UPDATE SET value = 'r2'",
         (),
-    ).await?;
+    )
+    .await?;
     conn.execute(
         "INSERT INTO app_state (key, value) VALUES ('current_token_id', ?1)
          ON CONFLICT (key) DO UPDATE SET value = ?1",
         turso::params![token_id.to_string()],
-    ).await?;
+    )
+    .await?;
     conn.execute(
         "INSERT INTO app_state (key, value) VALUES ('current_bucket', ?1)
          ON CONFLICT (key) DO UPDATE SET value = ?1",
         turso::params![bucket_name],
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -483,17 +518,20 @@ pub async fn set_current_aws_selection(account_id: &str, bucket_name: &str) -> D
         "INSERT INTO app_state (key, value) VALUES ('current_provider', 'aws')
          ON CONFLICT (key) DO UPDATE SET value = 'aws'",
         (),
-    ).await?;
+    )
+    .await?;
     conn.execute(
         "INSERT INTO app_state (key, value) VALUES ('current_aws_account_id', ?1)
          ON CONFLICT (key) DO UPDATE SET value = ?1",
         turso::params![account_id],
-    ).await?;
+    )
+    .await?;
     conn.execute(
         "INSERT INTO app_state (key, value) VALUES ('current_aws_bucket', ?1)
          ON CONFLICT (key) DO UPDATE SET value = ?1",
         turso::params![bucket_name],
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -503,17 +541,20 @@ pub async fn set_current_minio_selection(account_id: &str, bucket_name: &str) ->
         "INSERT INTO app_state (key, value) VALUES ('current_provider', 'minio')
          ON CONFLICT (key) DO UPDATE SET value = 'minio'",
         (),
-    ).await?;
+    )
+    .await?;
     conn.execute(
         "INSERT INTO app_state (key, value) VALUES ('current_minio_account_id', ?1)
          ON CONFLICT (key) DO UPDATE SET value = ?1",
         turso::params![account_id],
-    ).await?;
+    )
+    .await?;
     conn.execute(
         "INSERT INTO app_state (key, value) VALUES ('current_minio_bucket', ?1)
          ON CONFLICT (key) DO UPDATE SET value = ?1",
         turso::params![bucket_name],
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -523,16 +564,19 @@ pub async fn set_current_rustfs_selection(account_id: &str, bucket_name: &str) -
         "INSERT INTO app_state (key, value) VALUES ('current_provider', 'rustfs')
          ON CONFLICT (key) DO UPDATE SET value = 'rustfs'",
         (),
-    ).await?;
+    )
+    .await?;
     conn.execute(
         "INSERT INTO app_state (key, value) VALUES ('current_rustfs_account_id', ?1)
          ON CONFLICT (key) DO UPDATE SET value = ?1",
         turso::params![account_id],
-    ).await?;
+    )
+    .await?;
     conn.execute(
         "INSERT INTO app_state (key, value) VALUES ('current_rustfs_bucket', ?1)
          ON CONFLICT (key) DO UPDATE SET value = ?1",
         turso::params![bucket_name],
-    ).await?;
+    )
+    .await?;
     Ok(())
 }

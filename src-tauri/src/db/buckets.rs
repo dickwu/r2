@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::{get_connection, DbResult};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bucket {
@@ -47,7 +47,7 @@ pub async fn get_bucket(id: i64) -> DbResult<Option<Bucket>> {
         "SELECT id, token_id, name, public_domain, public_domain_scheme, created_at, updated_at FROM buckets WHERE id = ?1",
         turso::params![id]
     ).await?;
-    
+
     if let Some(row) = rows.next().await? {
         Ok(Some(Bucket {
             id: row.get(0)?,
@@ -66,12 +66,14 @@ pub async fn get_bucket(id: i64) -> DbResult<Option<Bucket>> {
 /// List buckets by token
 pub async fn list_buckets_by_token(token_id: i64) -> DbResult<Vec<Bucket>> {
     let conn = get_connection()?.lock().await;
-    let mut rows = conn.query(
-        "SELECT id, token_id, name, public_domain, public_domain_scheme, created_at, updated_at
+    let mut rows = conn
+        .query(
+            "SELECT id, token_id, name, public_domain, public_domain_scheme, created_at, updated_at
          FROM buckets WHERE token_id = ?1 ORDER BY name",
-        turso::params![token_id]
-    ).await?;
-    
+            turso::params![token_id],
+        )
+        .await?;
+
     let mut buckets = Vec::new();
     while let Some(row) = rows.next().await? {
         buckets.push(Bucket {
@@ -105,7 +107,8 @@ pub async fn update_bucket(
 /// Delete bucket
 pub async fn delete_bucket(id: i64) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
-    conn.execute("DELETE FROM buckets WHERE id = ?1", turso::params![id]).await?;
+    conn.execute("DELETE FROM buckets WHERE id = ?1", turso::params![id])
+        .await?;
     Ok(())
 }
 
@@ -116,10 +119,14 @@ pub async fn save_buckets_for_token(
 ) -> DbResult<Vec<Bucket>> {
     let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
-    
+
     // Delete existing buckets for this token
-    conn.execute("DELETE FROM buckets WHERE token_id = ?1", turso::params![token_id]).await?;
-    
+    conn.execute(
+        "DELETE FROM buckets WHERE token_id = ?1",
+        turso::params![token_id],
+    )
+    .await?;
+
     // Insert new buckets
     let mut result = Vec::new();
     for (name, public_domain, public_domain_scheme) in buckets {

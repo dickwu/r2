@@ -36,7 +36,11 @@ pub async fn delete_objects(config: &MinioConfig, keys: Vec<String>) -> MinioRes
     Ok(())
 }
 
-pub async fn copy_object(config: &MinioConfig, source_key: &str, dest_key: &str) -> MinioResult<()> {
+pub async fn copy_object(
+    config: &MinioConfig,
+    source_key: &str,
+    dest_key: &str,
+) -> MinioResult<()> {
     let client = create_minio_client(config).await?;
     let copy_source = format!("{}/{}", config.bucket, source_key);
 

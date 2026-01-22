@@ -9,6 +9,8 @@ import type {
   StorageObject,
   SyncResult,
   MoveOperation,
+  UploadFileInput,
+  UploadFileResult,
   StorageProviderAdapter,
 } from '@/app/providers/types';
 
@@ -104,6 +106,23 @@ export const minioProvider: StorageProviderAdapter<MinioStorageConfig> = {
       config: toMinioConfigInput(config),
       key,
       expiresIn,
+    });
+  },
+
+  uploadFile: async (config, input: UploadFileInput) => {
+    requireMinioFields(config);
+    return invoke<UploadFileResult>('upload_minio_file', {
+      taskId: input.taskId,
+      filePath: input.filePath,
+      key: input.key,
+      contentType: input.contentType ?? null,
+      accountId: config.accountId,
+      bucket: config.bucket,
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+      endpointScheme: config.endpointScheme,
+      endpointHost: config.endpointHost,
+      forcePathStyle: config.forcePathStyle,
     });
   },
 

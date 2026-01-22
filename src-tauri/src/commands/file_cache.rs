@@ -85,7 +85,10 @@ async fn get_current_bucket_info() -> Result<(String, String), String> {
 // ============ Commands ============
 
 #[tauri::command]
-pub async fn store_all_files(files: Vec<r2::R2Object>, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn store_all_files(
+    files: Vec<r2::R2Object>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     let (bucket, account_id) = get_current_bucket_info().await?;
     let now = chrono::Utc::now().timestamp();
 
@@ -231,7 +234,7 @@ pub async fn get_folder_contents(prefix: Option<String>) -> Result<FolderContent
 #[tauri::command]
 pub async fn fetch_url_bytes(url: String) -> Result<String, String> {
     let client = reqwest::Client::new();
-    
+
     let response = client
         .get(&url)
         .send()
@@ -242,7 +245,10 @@ pub async fn fetch_url_bytes(url: String) -> Result<String, String> {
         return Err(format!(
             "HTTP {}: {}",
             response.status().as_u16(),
-            response.status().canonical_reason().unwrap_or("Unknown error")
+            response
+                .status()
+                .canonical_reason()
+                .unwrap_or("Unknown error")
         ));
     }
 
