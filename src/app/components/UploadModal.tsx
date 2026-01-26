@@ -106,7 +106,9 @@ export default function UploadModal({
     (config.provider !== 'rustfs' || (!!config.endpointHost && !!config.endpointScheme));
 
   const addUniqueTasks = useCallback(
-    (tasks: Array<{ filePath: string; fileName: string; fileSize: number; contentType: string }>) => {
+    (
+      tasks: Array<{ filePath: string; fileName: string; fileSize: number; contentType: string }>
+    ) => {
       if (tasks.length === 0) return;
 
       const existingPaths = new Set(existingTasks.map((task) => task.filePath));

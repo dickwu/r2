@@ -23,6 +23,7 @@ import ConfigModal, { ModalMode } from '@/app/components/ConfigModal';
 import UploadModal from '@/app/components/UploadModal';
 import FilePreviewModal from '@/app/components/FilePreviewModal';
 import FileRenameModal from '@/app/components/FileRenameModal';
+import FolderRenameModal from '@/app/components/FolderRenameModal';
 import FileGridView from '@/app/components/FileGridView';
 import FileListView from '@/app/components/FileListView';
 import AccountSidebar from '@/app/components/AccountSidebar';
@@ -73,6 +74,7 @@ export default function Home() {
   const [dropQueue, setDropQueue] = useState<string[][]>([]);
   const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
   const [renameFile, setRenameFile] = useState<FileItem | null>(null);
+  const [renameFolder, setRenameFolder] = useState<FileItem | null>(null);
   const currentPath = useCurrentPathStore((state) => state.currentPath);
   const setCurrentPath = useCurrentPathStore((state) => state.setCurrentPath);
   const resetCurrentPath = useCurrentPathStore((state) => state.reset);
@@ -349,8 +351,7 @@ export default function Home() {
           const x = position.x / scale;
           const y = position.y / scale;
 
-          const isInside =
-            x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+          const isInside = x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
           if (!isInside) return;
 
           setDropQueue((prev) => [...prev, paths]);
@@ -787,6 +788,12 @@ export default function Home() {
     setRenameFile(item);
   }, []);
 
+  const handleFolderRenameClick = useCallback((item: FileItem) => {
+    if (item.isFolder) {
+      setRenameFolder(item);
+    }
+  }, []);
+
   // Download single file
   const handleDownload = useCallback(
     async (item: FileItem) => {
@@ -932,6 +939,10 @@ export default function Home() {
     },
     [renameFile, config, isConfigReady, previewFile, refresh, refreshSync]
   );
+
+  const handleFolderRenameSuccess = useCallback(async () => {
+    await Promise.all([refresh(), refreshSync()]);
+  }, [refresh, refreshSync]);
 
   function toggleSizeSort() {
     setSizeSort((prev) => {
@@ -1108,6 +1119,7 @@ export default function Home() {
                 onDownload={handleDownload}
                 onFolderDelete={handleFolderDelete}
                 onFolderDownload={handleFolderDownload}
+                onFolderRename={handleFolderRenameClick}
               />
             ) : (
               <FileGridView
@@ -1118,6 +1130,7 @@ export default function Home() {
                 onDownload={handleDownload}
                 onFolderDelete={handleFolderDelete}
                 onFolderDownload={handleFolderDownload}
+                onFolderRename={handleFolderRenameClick}
                 storageConfig={config}
                 folderSizes={metadata}
                 selectedKeys={selectedKeys}
@@ -1183,6 +1196,15 @@ export default function Home() {
             fileName={renameFile?.name || ''}
             filePath={renameFile?.key || ''}
             onRename={handleRename}
+          />
+
+          <FolderRenameModal
+            open={!!renameFolder}
+            onClose={() => setRenameFolder(null)}
+            folder={renameFolder}
+            folderMetadata={renameFolder ? metadata[renameFolder.key] : undefined}
+            config={config}
+            onSuccess={handleFolderRenameSuccess}
           />
 
           <BatchDeleteModal

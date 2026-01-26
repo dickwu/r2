@@ -43,6 +43,7 @@ interface FileListViewProps {
   onDownload?: (item: FileItem) => void;
   onFolderDelete?: (item: FileItem) => void;
   onFolderDownload?: (item: FileItem) => void;
+  onFolderRename?: (item: FileItem) => void;
 }
 
 function formatDate(date: string): string {
@@ -73,6 +74,7 @@ export default function FileListView({
   onDownload,
   onFolderDelete,
   onFolderDownload,
+  onFolderRename,
 }: FileListViewProps) {
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -203,6 +205,16 @@ export default function FileListView({
                           size="small"
                           icon={<DownloadOutlined />}
                           onClick={() => onFolderDownload(item)}
+                        />
+                      </Tooltip>
+                    )}
+                    {onFolderRename && (
+                      <Tooltip title="Rename folder">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<EditOutlined />}
+                          onClick={() => onFolderRename(item)}
                         />
                       </Tooltip>
                     )}
