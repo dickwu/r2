@@ -67,6 +67,13 @@ If the app doesn't appear in Privacy & Security settings, run:
 sudo xattr -d com.apple.quarantine /Applications/r2.app/
 ```
 
+if you are getting error that can not run, try to run:
+```bash
+rm -rf ~/Library/Application\ Support/com.lifefarmer.r2/
+rm -rf ~/Library/Caches/com.lifefarmer.r2/
+rm -rf ~/Library/Saved\ Application\ State/com.lifefarmer.r2.savedState/
+```
+
 ## Development
 
 ```bash

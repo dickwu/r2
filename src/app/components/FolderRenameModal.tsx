@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Modal, Input, Progress, Button, App, Spin } from 'antd';
+import { Modal, Input, Progress, Button, App, Spin, InputNumber } from 'antd';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import {
   batchMoveObjects,
@@ -264,15 +264,18 @@ export default function FolderRenameModal({
             onChange={(e) => setNewName(e.target.value)}
             placeholder="New folder name"
             autoFocus
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
             disabled={isLoading}
           />
           <p style={{ marginTop: 16 }}>
             This folder contains <strong>{confirmTarget}</strong> file
             {confirmCount !== 1 ? 's' : ''}. Type <strong>{confirmTarget}</strong> to confirm:
           </p>
-          <Input
-            value={confirmInput}
-            onChange={(e) => setConfirmInput(e.target.value)}
+          <InputNumber
+            value={Number(confirmInput)}
+            onChange={(value) => setConfirmInput(value?.toString() ?? '')}
             placeholder={`Type ${confirmTarget} to confirm`}
             disabled={isLoading}
             onPressEnter={() => {
