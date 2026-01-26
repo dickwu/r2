@@ -23,6 +23,7 @@ A desktop application for managing S3-compatible storage (Cloudflare R2, AWS S3,
   - **Batch Download** - Download multiple files with progress tracking, pause/resume support
   - **Batch Move** - Move files to different folders with folder tree picker
   - **Batch Delete** - Delete multiple files with confirmation and progress indicator
+  - **Batch Rename for files in folder** - Rename files in a folder with confirmation and progress indicator
 - Video thumbnail generation (via ffmpeg)
 - Copy signed or public URLs to clipboard (provider-aware link building)
 - Dark mode support
