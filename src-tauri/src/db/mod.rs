@@ -21,6 +21,7 @@ pub mod downloads;
 pub mod file_cache;
 pub mod minio_accounts;
 pub mod minio_buckets;
+pub mod move_sessions;
 pub mod rustfs_accounts;
 pub mod rustfs_buckets;
 pub mod sessions;
@@ -35,6 +36,7 @@ pub use downloads::DownloadSession;
 pub use file_cache::{CachedDirectoryNode, CachedFile};
 pub use minio_accounts::MinioAccount;
 pub use minio_buckets::MinioBucket;
+pub use move_sessions::MoveSession;
 pub use rustfs_accounts::RustfsAccount;
 pub use rustfs_buckets::RustfsBucket;
 pub use sessions::UploadSession;
@@ -139,6 +141,9 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
     // Create download sessions table
     conn.execute_batch(downloads::get_table_sql()).await?;
 
+    // Create move sessions table
+    conn.execute_batch(move_sessions::get_table_sql()).await?;
+
     DB_CONNECTION
         .set(Mutex::new(conn))
         .map_err(|_| "Database already initialized")?;
@@ -191,8 +196,8 @@ pub use file_cache::{
 };
 // Re-export directory tree builder
 pub use dir_tree::{
-    build_directory_tree, update_directory_tree_for_delete, update_directory_tree_for_file,
-    update_directory_tree_for_move,
+    build_directory_tree, update_directory_tree_for_delete, update_directory_tree_for_delete_batch,
+    update_directory_tree_for_file, update_directory_tree_for_move,
 };
 // Re-export download session functions
 pub use downloads::{
@@ -200,4 +205,13 @@ pub use downloads::{
     delete_finished_downloads, get_download_sessions_for_bucket, get_pending_downloads,
     pause_all_downloads, resume_all_downloads, update_download_file_size, update_download_progress,
     update_download_status,
+};
+// Re-export move session functions
+pub use move_sessions::{
+    count_active_moves, count_in_progress_moves, create_move_sessions_batch, delete_all_moves,
+    delete_finished_moves, delete_move_session, delete_move_upload_parts,
+    delete_move_upload_session, get_all_active_move_sessions, get_move_sessions_for_source,
+    get_move_upload_parts, get_move_upload_session, get_pending_moves_for_source, pause_all_moves,
+    resume_all_moves, save_move_upload_part, save_move_upload_session, update_move_progress,
+    update_move_status, update_move_status_and_progress,
 };

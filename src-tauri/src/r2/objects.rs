@@ -57,6 +57,26 @@ pub async fn copy_object(config: &R2Config, source_key: &str, dest_key: &str) ->
     Ok(())
 }
 
+pub async fn copy_object_between_buckets(
+    config: &R2Config,
+    source_bucket: &str,
+    source_key: &str,
+    dest_key: &str,
+) -> R2Result<()> {
+    let client = create_r2_client(config).await?;
+    let copy_source = format!("{}/{}", source_bucket, source_key);
+
+    client
+        .copy_object()
+        .bucket(&config.bucket)
+        .copy_source(copy_source)
+        .key(dest_key)
+        .send()
+        .await?;
+
+    Ok(())
+}
+
 /// Rename an object (copy then delete)
 pub async fn rename_object(config: &R2Config, old_key: &str, new_key: &str) -> R2Result<()> {
     copy_object(config, old_key, new_key).await?;

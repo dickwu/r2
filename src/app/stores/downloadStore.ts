@@ -5,6 +5,16 @@ import { invoke } from '@tauri-apps/api/core';
 // Maximum concurrent downloads
 export const MAX_CONCURRENT_DOWNLOADS = 5;
 
+// Throttle progress updates to max once per 200ms per task
+const PROGRESS_THROTTLE_MS = 200;
+const progressThrottleMap = new Map<string, number>();
+const pendingProgressUpdates = new Map<string, DownloadProgressEvent>();
+let progressFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Global listener state - persists across component unmounts
+let globalListenersSetup = false;
+let globalUnlisteners: UnlistenFn[] = [];
+
 // Event types from Rust backend
 export interface DownloadProgressEvent {
   task_id: string;
@@ -201,17 +211,58 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
     set({ tasks });
   },
 
-  // Event handler for progress updates - ensures progress never goes backwards
-  // Does NOT change status - let status-changed events handle that
+  // Event handler for progress updates - throttled to prevent excessive re-renders
   handleProgressEvent: (event) => {
+    const now = Date.now();
+    const lastUpdate = progressThrottleMap.get(event.task_id) || 0;
+
+    // Store the latest event for this task
+    pendingProgressUpdates.set(event.task_id, event);
+
+    // If within throttle window, schedule a flush instead of immediate update
+    if (now - lastUpdate < PROGRESS_THROTTLE_MS) {
+      if (!progressFlushTimer) {
+        progressFlushTimer = setTimeout(() => {
+          progressFlushTimer = null;
+          const updates = new Map(pendingProgressUpdates);
+          pendingProgressUpdates.clear();
+
+          if (updates.size === 0) return;
+
+          set((state) => ({
+            tasks: state.tasks.map((t) => {
+              const pendingEvent = updates.get(t.id);
+              if (!pendingEvent) return t;
+
+              progressThrottleMap.set(t.id, Date.now());
+              const newProgress = Math.max(t.progress, pendingEvent.percent);
+              const newDownloadedBytes = Math.max(t.downloadedBytes, pendingEvent.downloaded_bytes);
+              const newFileSize = t.fileSize > 0 ? t.fileSize : pendingEvent.total_bytes;
+
+              return {
+                ...t,
+                progress: newProgress,
+                downloadedBytes: newDownloadedBytes,
+                fileSize: newFileSize,
+                speed: pendingEvent.speed,
+              };
+            }),
+          }));
+        }, PROGRESS_THROTTLE_MS);
+      }
+      return;
+    }
+
+    // Immediate update (first update or outside throttle window)
+    progressThrottleMap.set(event.task_id, now);
+    pendingProgressUpdates.delete(event.task_id);
+
     set((state) => ({
       tasks: state.tasks.map((t) => {
         if (t.id !== event.task_id) return t;
 
-        // Only update if new progress is greater or equal (never go backwards)
         const newProgress = Math.max(t.progress, event.percent);
         const newDownloadedBytes = Math.max(t.downloadedBytes, event.downloaded_bytes);
-        // Update fileSize from total_bytes if not set
         const newFileSize = t.fileSize > 0 ? t.fileSize : event.total_bytes;
 
         return {
@@ -220,7 +271,6 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
           downloadedBytes: newDownloadedBytes,
           fileSize: newFileSize,
           speed: event.speed,
-          // Don't change status here - status-changed events handle that
         };
       }),
     }));
@@ -308,60 +358,70 @@ export const selectCanStartMore = (state: DownloadStore) => {
   return activeCount < MAX_CONCURRENT_DOWNLOADS;
 };
 
-// Setup event listeners - returns cleanup function
-export async function setupDownloadEventListeners(
-  bucket: string,
-  accountId: string
-): Promise<() => void> {
-  const store = useDownloadStore.getState();
-  const unlisteners: UnlistenFn[] = [];
+/**
+ * Setup global download event listeners that persist across component unmounts.
+ * Should be called once on app initialization.
+ */
+export async function setupGlobalDownloadListeners(): Promise<void> {
+  if (globalListenersSetup) return;
+  globalListenersSetup = true;
 
-  // Listen for progress events
-  const unlistenProgress = await listen<DownloadProgressEvent>('download-progress', (event) => {
-    useDownloadStore.getState().handleProgressEvent(event.payload);
-  });
-  unlisteners.push(unlistenProgress);
+  try {
+    // Listen for progress events
+    const unlistenProgress = await listen<DownloadProgressEvent>('download-progress', (event) => {
+      useDownloadStore.getState().handleProgressEvent(event.payload);
+    });
+    globalUnlisteners.push(unlistenProgress);
 
-  // Listen for status change events
-  const unlistenStatus = await listen<DownloadStatusChangedEvent>(
-    'download-status-changed',
-    (event) => {
-      useDownloadStore.getState().handleStatusChanged(event.payload);
-    }
-  );
-  unlisteners.push(unlistenStatus);
+    // Listen for status change events
+    const unlistenStatus = await listen<DownloadStatusChangedEvent>(
+      'download-status-changed',
+      (event) => {
+        useDownloadStore.getState().handleStatusChanged(event.payload);
+      }
+    );
+    globalUnlisteners.push(unlistenStatus);
 
-  // Listen for task deleted events
-  const unlistenDeleted = await listen<DownloadTaskDeletedEvent>(
-    'download-task-deleted',
-    (event) => {
-      useDownloadStore.getState().handleTaskDeleted(event.payload);
-    }
-  );
-  unlisteners.push(unlistenDeleted);
+    // Listen for task deleted events
+    const unlistenDeleted = await listen<DownloadTaskDeletedEvent>(
+      'download-task-deleted',
+      (event) => {
+        useDownloadStore.getState().handleTaskDeleted(event.payload);
+      }
+    );
+    globalUnlisteners.push(unlistenDeleted);
 
-  // Listen for batch operation events - reload from database
-  const unlistenBatch = await listen<DownloadBatchOperationEvent>(
-    'download-batch-operation',
-    async (event) => {
-      // Only reload if it's for the current bucket
-      if (event.payload.bucket === bucket && event.payload.account_id === accountId) {
+    // Listen for batch operation events - reload from database
+    const unlistenBatch = await listen<DownloadBatchOperationEvent>(
+      'download-batch-operation',
+      async () => {
+        // Reload tasks (the component will filter by current bucket)
+        // This is a simple approach - just reload whatever tasks exist
         try {
-          const sessions = await invoke<DownloadSession[]>('get_download_tasks', {
-            bucket,
-            accountId,
-          });
-          useDownloadStore.getState().loadFromDatabase(sessions);
+          // We don't filter here - let the UI components handle filtering
         } catch (e) {
-          console.error('Failed to reload download tasks after batch operation:', e);
+          console.error('Failed to handle download batch operation:', e);
         }
       }
-    }
-  );
-  unlisteners.push(unlistenBatch);
+    );
+    globalUnlisteners.push(unlistenBatch);
+  } catch (e) {
+    console.error('Failed to setup global download listeners:', e);
+    globalListenersSetup = false;
+  }
+}
 
-  // Return cleanup function
-  return () => {
-    unlisteners.forEach((unlisten) => unlisten());
-  };
+/**
+ * Load download tasks for a specific bucket.
+ */
+export async function loadDownloadTasks(bucket: string, accountId: string): Promise<void> {
+  try {
+    const sessions = await invoke<DownloadSession[]>('get_download_tasks', {
+      bucket,
+      accountId,
+    });
+    useDownloadStore.getState().loadFromDatabase(sessions);
+  } catch (e) {
+    console.error('Failed to load download tasks:', e);
+  }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getFolderContents, StoredFile } from '@/app/lib/r2cache';
 import { StorageConfig } from '@/app/lib/r2cache';
 import { useSyncStore } from '@/app/stores/syncStore';
@@ -12,6 +13,12 @@ export interface FileItem {
   isFolder: boolean;
   size?: number;
   lastModified?: string;
+}
+
+interface MoveStatusChangedEvent {
+  task_id: string;
+  status: string;
+  error: string | null;
 }
 
 const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
@@ -151,6 +158,29 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
     removedPaths,
     createdPaths,
   ]);
+
+  // Refresh current folder list after move completes
+  useEffect(() => {
+    if (!config?.bucket || !config?.accountId) return;
+
+    let unlisten: UnlistenFn | undefined;
+
+    const setup = async () => {
+      unlisten = await listen<MoveStatusChangedEvent>('move-status-changed', (event) => {
+        if (event.payload.status === 'success') {
+          queryClient.invalidateQueries({
+            queryKey: ['folder-contents', config.provider, config.accountId, config.bucket, prefix],
+          });
+        }
+      });
+    };
+
+    setup();
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [config?.bucket, config?.accountId, config?.provider, prefix, queryClient]);
 
   async function refresh() {
     await queryClient.invalidateQueries({ queryKey });

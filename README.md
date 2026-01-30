@@ -24,6 +24,16 @@ A desktop application for managing S3-compatible storage (Cloudflare R2, AWS S3,
   - **Batch Move** - Move files to different folders with folder tree picker
   - **Batch Delete** - Delete multiple files with confirmation and progress indicator
   - **Batch Rename for files in folder** - Rename files in a folder with confirmation and progress indicator
+- **Cross-Account Transfer** - High-performance file transfer between different accounts/providers:
+  - Transfer files between R2, AWS S3, MinIO, and RustFS
+  - Server-side copy when possible (same provider)
+  - Streaming transfer with no temp files for cross-provider moves
+  - Parallel multipart uploads for large files (4 concurrent parts)
+  - Up to 5 concurrent transfers
+  - Real-time progress tracking with speed display
+  - Pause/Resume/Cancel individual or all transfers
+  - Background processing - queue continues even when modal is closed
+  - Automatic queue continuation after each transfer completes
 - Video thumbnail generation (via ffmpeg)
 - Copy signed or public URLs to clipboard (provider-aware link building)
 - Dark mode support
@@ -158,6 +168,21 @@ bun run tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
 - **Click bucket** - Switches to that bucket
 - **Context menu** - Edit or delete accounts/tokens
 - **Collapse sidebar** - Click the collapse icon to minimize to icon-only view
+
+### Sync to a Different Account (Move/Copy)
+
+Use the Batch Move workflow to sync files between accounts/providers:
+
+1. Add both the source and destination accounts.
+2. Switch to the **source** bucket in the sidebar.
+3. Select files/folders -> **Batch Move**.
+4. Choose the destination account + bucket, and an optional target folder.
+5. Toggle **Delete original**:
+   - **On** = move (source files removed after transfer)
+   - **Off** = copy (source files preserved)
+6. Start the transfer and track progress in the Move modal/status bar.
+
+Transfers are queued (up to 5 concurrent), and same-provider transfers prefer server-side copy.
 
 ### Getting API Credentials
 

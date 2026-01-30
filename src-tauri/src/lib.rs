@@ -10,6 +10,7 @@ mod account;
 mod commands;
 mod db;
 mod download;
+mod move_transfer;
 mod providers;
 mod r2;
 mod upload;
@@ -388,6 +389,19 @@ pub fn run() {
             download::commands::clear_finished_downloads,
             download::commands::clear_all_downloads,
             download::commands::select_download_folder,
+            // Move transfer commands
+            move_transfer::commands::start_batch_move,
+            move_transfer::commands::start_move_queue,
+            move_transfer::commands::pause_all_moves,
+            move_transfer::commands::resume_all_moves,
+            move_transfer::commands::pause_move,
+            move_transfer::commands::resume_move,
+            move_transfer::commands::cancel_move,
+            move_transfer::commands::delete_move_task,
+            move_transfer::commands::get_move_tasks,
+            move_transfer::commands::get_all_active_move_tasks,
+            move_transfer::commands::clear_finished_moves,
+            move_transfer::commands::clear_all_moves,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

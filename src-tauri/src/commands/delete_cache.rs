@@ -2,7 +2,29 @@ use crate::commands::cache_events::{
     get_unique_parent_paths, CacheUpdatedEvent, PathsRemovedEvent,
 };
 use crate::db;
+use log::{error, info};
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::Mutex;
+use tokio::time::sleep;
+
+struct DeleteCacheQueueState {
+    pending: HashMap<(String, String), HashSet<String>>,
+    scheduled: bool,
+}
+
+static DELETE_CACHE_QUEUE: OnceLock<Mutex<DeleteCacheQueueState>> = OnceLock::new();
+
+fn delete_cache_queue() -> &'static Mutex<DeleteCacheQueueState> {
+    DELETE_CACHE_QUEUE.get_or_init(|| {
+        Mutex::new(DeleteCacheQueueState {
+            pending: HashMap::new(),
+            scheduled: false,
+        })
+    })
+}
 
 /// Update cache after a single file deletion.
 /// Handles file cache, directory tree updates, and emits appropriate events.
@@ -59,28 +81,24 @@ pub(crate) async fn update_cache_after_batch_delete(
         .await
         .map_err(|e| format!("Failed to update file cache: {}", e))?;
 
-    // Collect all removed paths
-    let mut all_removed_paths: Vec<String> = Vec::new();
+    let deleted_entries: Vec<(String, i64)> = deleted_keys
+        .iter()
+        .filter_map(|key| file_sizes.get(key).map(|size| (key.clone(), *size)))
+        .collect();
 
-    // Update directory tree for each deleted file
-    for key in deleted_keys {
-        if let Some(&size) = file_sizes.get(key) {
-            match db::update_directory_tree_for_delete(bucket, account_id, key, size).await {
-                Ok(removed_paths) => {
-                    // Add paths that haven't been added yet
-                    for path in removed_paths {
-                        if !all_removed_paths.contains(&path) {
-                            all_removed_paths.push(path);
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Log but don't fail the entire operation
-                    eprintln!("Failed to update directory tree for {}: {}", key, e);
-                }
-            }
+    let all_removed_paths = match db::update_directory_tree_for_delete_batch(
+        bucket,
+        account_id,
+        &deleted_entries,
+    )
+    .await
+    {
+        Ok(paths) => paths,
+        Err(e) => {
+            error!("delete_cache_batch: dir_tree update failed: {}", e);
+            Vec::new()
         }
-    }
+    };
 
     // Emit paths-removed event if any paths were removed
     if !all_removed_paths.is_empty() {
@@ -102,4 +120,60 @@ pub(crate) async fn update_cache_after_batch_delete(
     );
 
     Ok(())
+}
+
+/// Queue cache updates for deletes to avoid duplicated directory calculations.
+pub(crate) async fn queue_cache_after_delete(
+    app: AppHandle,
+    bucket: String,
+    account_id: String,
+    key: String,
+) {
+    let should_schedule = {
+        let queue = delete_cache_queue();
+        let mut state = queue.lock().await;
+        state
+            .pending
+            .entry((bucket.clone(), account_id.clone()))
+            .or_insert_with(HashSet::new)
+            .insert(key);
+        if state.scheduled {
+            false
+        } else {
+            state.scheduled = true;
+            true
+        }
+    };
+
+    if !should_schedule {
+        return;
+    }
+
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(300)).await;
+        let batch = {
+            let queue = delete_cache_queue();
+            let mut state = queue.lock().await;
+            state.scheduled = false;
+            std::mem::take(&mut state.pending)
+        };
+
+        for ((bucket, account_id), keys) in batch {
+            let key_list: Vec<String> = keys.into_iter().collect();
+            info!(
+                "delete_cache_batch: flushing {} keys for {}/{}",
+                key_list.len(),
+                account_id,
+                bucket
+            );
+            if let Err(e) =
+                update_cache_after_batch_delete(&app, &bucket, &account_id, &key_list).await
+            {
+                error!(
+                    "delete_cache_batch: failed for {}/{}: {}",
+                    account_id, bucket, e
+                );
+            }
+        }
+    });
 }

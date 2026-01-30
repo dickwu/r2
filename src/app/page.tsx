@@ -33,6 +33,7 @@ import BatchDeleteModal from '@/app/components/BatchDeleteModal';
 import BatchMoveModal from '@/app/components/BatchMoveModal';
 import SyncOverlay from '@/app/components/SyncOverlay';
 import DownloadTaskModal from '@/app/components/DownloadTaskModal';
+import MoveTaskModal from '@/app/components/MoveTaskModal';
 import { useAccountStore, ProviderAccount, Token } from '@/app/stores/accountStore';
 import { useR2Files, FileItem } from '@/app/hooks/useR2Files';
 import { useFilesSync } from '@/app/hooks/useFilesSync';
@@ -1225,6 +1226,7 @@ export default function Home() {
             onMovingChange={setMoving}
           />
 
+          <MoveTaskModal storageConfig={config} />
           <DownloadTaskModal storageConfig={config} />
         </div>
       </div>

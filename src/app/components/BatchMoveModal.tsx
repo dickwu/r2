@@ -1,16 +1,31 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { Modal, App, Progress, Button } from 'antd';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Modal, App, Button, Select, Input, Checkbox } from 'antd';
 import { FolderOutlined, SwapOutlined } from '@ant-design/icons';
-import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { batchMoveObjects, MoveOperation, StorageConfig } from '@/app/lib/r2cache';
+import { invoke } from '@tauri-apps/api/core';
+import type { StorageConfig, StorageProvider } from '@/app/lib/r2cache';
 import FolderPickerModal from '@/app/components/folder/FolderPickerModal';
+import { useAccountStore } from '@/app/stores/accountStore';
 
-interface BatchMoveProgress {
-  completed: number;
-  total: number;
-  failed: number;
+interface DestinationBucket {
+  name: string;
+}
+
+interface DestinationOption {
+  id: string;
+  provider: StorageProvider;
+  accountId: string;
+  accountLabel: string;
+  tokenId?: number;
+  tokenLabel?: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  region?: string;
+  endpointScheme?: string;
+  endpointHost?: string;
+  forcePathStyle?: boolean;
+  buckets: DestinationBucket[];
 }
 
 interface BatchMoveModalProps {
@@ -28,12 +43,14 @@ export default function BatchMoveModal({
   config,
   onClose,
   onSuccess,
-  onMovingChange,
 }: BatchMoveModalProps) {
   const [targetDirectory, setTargetDirectory] = useState('');
-  const [isMoving, setIsMoving] = useState(false);
-  const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [deleteOriginal, setDeleteOriginal] = useState(true);
+  const [selectedDestinationId, setSelectedDestinationId] = useState<string | null>(null);
+  const [selectedBucket, setSelectedBucket] = useState('');
+  const accounts = useAccountStore((state) => state.accounts);
+  const loadAccounts = useAccountStore((state) => state.loadAccounts);
   const { message } = App.useApp();
 
   const selectedCount = selectedKeys.size;
@@ -42,139 +59,301 @@ export default function BatchMoveModal({
   useEffect(() => {
     if (!open) {
       setTargetDirectory('');
-      setProgress({ current: 0, total: 0 });
+      setDeleteOriginal(true);
+      setSelectedDestinationId(null);
+      setSelectedBucket('');
     }
   }, [open]);
 
-  // Notify parent of moving state changes
   useEffect(() => {
-    onMovingChange?.(isMoving);
-  }, [isMoving, onMovingChange]);
+    if (!open) return;
+    loadAccounts().catch((e) => {
+      console.error('Failed to load accounts:', e);
+    });
+  }, [open, loadAccounts]);
+
+  const destinationOptions = useMemo<DestinationOption[]>(() => {
+    const options: DestinationOption[] = [];
+    accounts.forEach((account) => {
+      if (account.provider === 'r2') {
+        account.tokens.forEach((token) => {
+          options.push({
+            id: `r2:${account.account.id}:${token.token.id}`,
+            provider: 'r2',
+            accountId: account.account.id,
+            accountLabel: account.account.name || account.account.id,
+            tokenId: token.token.id,
+            tokenLabel: token.token.name || `Token ${token.token.id}`,
+            accessKeyId: token.token.access_key_id,
+            secretAccessKey: token.token.secret_access_key,
+            buckets: token.buckets.map((bucket) => ({ name: bucket.name })),
+          });
+        });
+        return;
+      }
+      if (account.provider === 'aws') {
+        options.push({
+          id: `aws:${account.account.id}`,
+          provider: 'aws',
+          accountId: account.account.id,
+          accountLabel: account.account.name || account.account.id,
+          accessKeyId: account.account.access_key_id,
+          secretAccessKey: account.account.secret_access_key,
+          region: account.account.region,
+          endpointScheme: account.account.endpoint_scheme,
+          endpointHost: account.account.endpoint_host || undefined,
+          forcePathStyle: account.account.force_path_style,
+          buckets: account.buckets.map((bucket) => ({ name: bucket.name })),
+        });
+        return;
+      }
+      if (account.provider === 'minio') {
+        options.push({
+          id: `minio:${account.account.id}`,
+          provider: 'minio',
+          accountId: account.account.id,
+          accountLabel: account.account.name || account.account.id,
+          accessKeyId: account.account.access_key_id,
+          secretAccessKey: account.account.secret_access_key,
+          endpointScheme: account.account.endpoint_scheme,
+          endpointHost: account.account.endpoint_host,
+          forcePathStyle: account.account.force_path_style,
+          buckets: account.buckets.map((bucket) => ({ name: bucket.name })),
+        });
+        return;
+      }
+      options.push({
+        id: `rustfs:${account.account.id}`,
+        provider: 'rustfs',
+        accountId: account.account.id,
+        accountLabel: account.account.name || account.account.id,
+        accessKeyId: account.account.access_key_id,
+        secretAccessKey: account.account.secret_access_key,
+        endpointScheme: account.account.endpoint_scheme,
+        endpointHost: account.account.endpoint_host,
+        forcePathStyle: true,
+        buckets: account.buckets.map((bucket) => ({ name: bucket.name })),
+      });
+    });
+    return options;
+  }, [accounts]);
+
+  const selectedDestination = useMemo(
+    () => destinationOptions.find((option) => option.id === selectedDestinationId) || null,
+    [destinationOptions, selectedDestinationId]
+  );
+
+  useEffect(() => {
+    if (!open || !config || destinationOptions.length === 0) return;
+
+    const initialOption =
+      destinationOptions.find((option) => {
+        if (option.provider !== config.provider) return false;
+        if (option.accountId !== config.accountId) return false;
+        if (option.provider === 'r2') {
+          return option.accessKeyId === config.accessKeyId;
+        }
+        return true;
+      }) || null;
+
+    if (initialOption) {
+      setSelectedDestinationId(initialOption.id);
+      setSelectedBucket(config.bucket);
+    }
+  }, [open, config, destinationOptions]);
+
+  useEffect(() => {
+    if (!selectedDestination) return;
+    if (!selectedBucket || !selectedDestination.buckets.some((b) => b.name === selectedBucket)) {
+      setSelectedBucket(selectedDestination.buckets[0]?.name || '');
+    }
+  }, [selectedDestination, selectedBucket]);
+
+  const isSameDestination =
+    !!config &&
+    !!selectedDestination &&
+    selectedDestination.provider === config.provider &&
+    selectedDestination.accountId === config.accountId &&
+    selectedBucket === config.bucket;
 
   const handleMove = useCallback(async () => {
-    if (!config || selectedKeys.size === 0) return;
+    if (!config || selectedKeys.size === 0 || !selectedDestination || !selectedBucket) return;
+    if (!config.accessKeyId || !config.secretAccessKey) {
+      message.error('Source credentials are required to move files');
+      return;
+    }
+    if (config.provider === 'aws' && !config.region) {
+      message.error('AWS region is required to move files');
+      return;
+    }
+    if (
+      (config.provider === 'minio' || config.provider === 'rustfs') &&
+      (!config.endpointScheme || !config.endpointHost)
+    ) {
+      message.error('Endpoint configuration is required to move files');
+      return;
+    }
 
     const keys = Array.from(selectedKeys);
-    const total = keys.length;
-
-    // Build move operations
-    const operations: MoveOperation[] = keys.map((key) => {
+    const operations = keys.map((key) => {
       const filename = key.split('/').pop() || key;
       const newPath = targetDirectory ? `${targetDirectory}/${filename}` : filename;
-      return { old_key: key, new_key: newPath };
+      return { source_key: key, dest_key: newPath };
     });
 
-    setIsMoving(true);
-    setProgress({ current: 0, total });
+    // Close modal immediately - operation runs in background
+    onClose();
 
-    // Listen for progress events from Rust backend
-    let unlisten: UnlistenFn | undefined;
+    const actionLabel = deleteOriginal ? 'Move' : 'Copy';
+    message.loading({ content: `Queuing ${operations.length} file${operations.length > 1 ? 's' : ''} for ${actionLabel.toLowerCase()}...`, key: 'batch-move' });
+
     try {
-      unlisten = await listen<BatchMoveProgress>('batch-move-progress', (event) => {
-        setProgress({ current: event.payload.completed, total: event.payload.total });
+      await invoke('start_batch_move', {
+        sourceConfig: {
+          provider: config.provider,
+          account_id: config.accountId,
+          bucket: config.bucket,
+          access_key_id: config.accessKeyId,
+          secret_access_key: config.secretAccessKey,
+          region: config.provider === 'aws' ? config.region : null,
+          endpoint_scheme: config.provider === 'r2' ? null : config.endpointScheme,
+          endpoint_host: config.provider === 'r2' ? null : config.endpointHost,
+          force_path_style: config.provider === 'r2' ? null : config.forcePathStyle,
+        },
+        destConfig: {
+          provider: selectedDestination.provider,
+          account_id: selectedDestination.accountId,
+          bucket: selectedBucket,
+          access_key_id: selectedDestination.accessKeyId,
+          secret_access_key: selectedDestination.secretAccessKey,
+          region: selectedDestination.provider === 'aws' ? selectedDestination.region : null,
+          endpoint_scheme: selectedDestination.provider === 'r2' ? null : selectedDestination.endpointScheme,
+          endpoint_host: selectedDestination.provider === 'r2' ? null : selectedDestination.endpointHost,
+          force_path_style:
+            selectedDestination.provider === 'r2' ? null : selectedDestination.forcePathStyle,
+        },
+        operations,
+        deleteOriginal,
       });
 
-      // Use Rust batch move API (6 concurrent operations)
-      const result = await batchMoveObjects(config, operations);
-
-      // Cleanup listener
-      unlisten?.();
-
-      setIsMoving(false);
-      setProgress({ current: 0, total: 0 });
-      onMovingChange?.(false);
-      onClose();
-
-      if (result.failed === 0) {
-        message.success(`Moved ${result.moved} file${result.moved > 1 ? 's' : ''}`);
-      } else if (result.moved > 0) {
-        message.warning(
-          `Moved ${result.moved} file${result.moved > 1 ? 's' : ''}, ${result.failed} failed`
-        );
-        if (result.errors.length > 0) {
-          console.error('Batch move errors:', result.errors);
-        }
-      } else {
-        message.error(`Failed to move files`);
-      }
+      message.success({ content: `${actionLabel} started for ${operations.length} file${operations.length > 1 ? 's' : ''}`, key: 'batch-move' });
       onSuccess();
     } catch (e) {
-      unlisten?.();
       console.error('Batch move error:', e);
-      setIsMoving(false);
-      setProgress({ current: 0, total: 0 });
-      onMovingChange?.(false);
-      onClose();
-      message.error(`Failed to move files: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      message.error({ content: `Failed to start move: ${e instanceof Error ? e.message : 'Unknown error'}`, key: 'batch-move' });
     }
-  }, [config, selectedKeys, targetDirectory, message, onClose, onSuccess, onMovingChange]);
-
-  const percent = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
+  }, [
+    config,
+    selectedKeys,
+    targetDirectory,
+    selectedDestination,
+    selectedBucket,
+    deleteOriginal,
+    message,
+    onClose,
+    onSuccess,
+  ]);
 
   return (
     <>
       <Modal
-        title={isMoving ? 'Moving Files...' : 'Move Files'}
+        title="Move Files"
         open={open}
-        onCancel={isMoving ? undefined : onClose}
+        onCancel={onClose}
         onOk={handleMove}
         okText="Move"
-        okButtonProps={{ disabled: isMoving }}
-        cancelButtonProps={{ disabled: isMoving }}
-        closable={!isMoving}
-        maskClosable={!isMoving}
-        footer={isMoving ? null : undefined}
+        okButtonProps={{ disabled: !selectedDestination || !selectedBucket }}
         width={480}
         centered
       >
-        {isMoving ? (
-          <div style={{ padding: '24px 0' }}>
-            <Progress percent={percent} status="active" />
-            <p style={{ marginTop: 12, textAlign: 'center', color: '#666' }}>
-              {progress.current} / {progress.total} files moved
-            </p>
-          </div>
-        ) : (
-          <div>
-            <p style={{ marginBottom: 16 }}>
-              Move <strong>{selectedCount}</strong> file{selectedCount > 1 ? 's' : ''} to:
-            </p>
+        <div>
+          <p style={{ marginBottom: 16 }}>
+            Move <strong>{selectedCount}</strong> file{selectedCount > 1 ? 's' : ''} to:
+          </p>
 
-            {/* Current target display */}
-            <div
-              style={{
-                padding: '8px 12px',
-                background: 'var(--bg-secondary)',
-                borderRadius: 6,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 8,
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
-                <FolderOutlined style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
-                <span
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div>
+              <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>Destination account</div>
+              <Select
+                value={selectedDestinationId ?? undefined}
+                onChange={(value) => setSelectedDestinationId(value)}
+                placeholder="Select destination account"
+                style={{ width: '100%' }}
+                options={destinationOptions.map((option) => ({
+                  value: option.id,
+                  label:
+                    option.provider === 'r2'
+                      ? `R2 · ${option.accountLabel} · ${option.tokenLabel}`
+                      : `${option.provider.toUpperCase()} · ${option.accountLabel}`,
+                }))}
+              />
+            </div>
+
+            <div>
+              <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>Destination bucket</div>
+              <Select
+                value={selectedBucket || undefined}
+                onChange={(value) => setSelectedBucket(value)}
+                placeholder="Select destination bucket"
+                style={{ width: '100%' }}
+                disabled={!selectedDestination}
+                options={(selectedDestination?.buckets || []).map((bucket) => ({
+                  value: bucket.name,
+                  label: bucket.name,
+                }))}
+              />
+            </div>
+
+            <div>
+              <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>Destination folder</div>
+              {isSameDestination ? (
+                <div
                   style={{
-                    fontFamily: 'monospace',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
+                    padding: '8px 12px',
+                    background: 'var(--bg-secondary)',
+                    borderRadius: 6,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
                   }}
                 >
-                  {targetDirectory ? `/${targetDirectory}/` : '/ (root)'}
-                </span>
-              </div>
-              <Button
-                size="small"
-                icon={<SwapOutlined />}
-                onClick={() => setFolderPickerOpen(true)}
-              >
-                Change...
-              </Button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+                    <FolderOutlined style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
+                    <span
+                      style={{
+                        fontFamily: 'monospace',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {targetDirectory ? `/${targetDirectory}/` : '/ (root)'}
+                    </span>
+                  </div>
+                  <Button
+                    size="small"
+                    icon={<SwapOutlined />}
+                    onClick={() => setFolderPickerOpen(true)}
+                  >
+                    Change...
+                  </Button>
+                </div>
+              ) : (
+                <Input
+                  placeholder="Enter destination folder (optional)"
+                  value={targetDirectory}
+                  onChange={(event) => setTargetDirectory(event.target.value.replace(/^\/+/, ''))}
+                  allowClear
+                />
+              )}
             </div>
+
+            <Checkbox checked={deleteOriginal} onChange={(event) => setDeleteOriginal(event.target.checked)}>
+              Delete original after move
+            </Checkbox>
           </div>
-        )}
+        </div>
       </Modal>
 
       {/* Folder Picker Modal */}

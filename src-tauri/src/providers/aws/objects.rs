@@ -51,6 +51,26 @@ pub async fn copy_object(config: &AwsConfig, source_key: &str, dest_key: &str) -
     Ok(())
 }
 
+pub async fn copy_object_between_buckets(
+    config: &AwsConfig,
+    source_bucket: &str,
+    source_key: &str,
+    dest_key: &str,
+) -> AwsResult<()> {
+    let client = create_aws_client(config).await?;
+    let copy_source = format!("{}/{}", source_bucket, source_key);
+
+    client
+        .copy_object()
+        .bucket(&config.bucket)
+        .copy_source(copy_source)
+        .key(dest_key)
+        .send()
+        .await?;
+
+    Ok(())
+}
+
 pub async fn rename_object(config: &AwsConfig, old_key: &str, new_key: &str) -> AwsResult<()> {
     copy_object(config, old_key, new_key).await?;
     delete_object(config, old_key).await?;

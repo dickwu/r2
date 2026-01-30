@@ -55,6 +55,26 @@ pub async fn copy_object(
     Ok(())
 }
 
+pub async fn copy_object_between_buckets(
+    config: &MinioConfig,
+    source_bucket: &str,
+    source_key: &str,
+    dest_key: &str,
+) -> MinioResult<()> {
+    let client = create_minio_client(config).await?;
+    let copy_source = format!("{}/{}", source_bucket, source_key);
+
+    client
+        .copy_object()
+        .bucket(&config.bucket)
+        .copy_source(copy_source)
+        .key(dest_key)
+        .send()
+        .await?;
+
+    Ok(())
+}
+
 pub async fn rename_object(config: &MinioConfig, old_key: &str, new_key: &str) -> MinioResult<()> {
     copy_object(config, old_key, new_key).await?;
     delete_object(config, old_key).await?;

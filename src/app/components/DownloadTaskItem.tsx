@@ -1,5 +1,6 @@
 'use client';
 
+import { memo } from 'react';
 import { Button, Progress, Typography, Space, Tooltip } from 'antd';
 import {
   CheckCircleOutlined,
@@ -20,7 +21,7 @@ interface DownloadTaskItemProps {
   onResume?: () => void;
 }
 
-export default function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
+function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
   // Pause download - UI will update via download-status-changed event
   async function handlePause() {
     try {
@@ -297,3 +298,18 @@ function formatTimeLeft(seconds: number): string {
   const mins = Math.floor((seconds % 3600) / 60);
   return mins > 0 ? `${hours}h ${mins}m left` : `${hours}h left`;
 }
+
+// Memoize to prevent unnecessary re-renders in the list
+export default memo(DownloadTaskItem, (prevProps, nextProps) => {
+  const prev = prevProps.task;
+  const next = nextProps.task;
+  // Only re-render if task data that affects display has changed
+  return (
+    prev.id === next.id &&
+    prev.status === next.status &&
+    prev.progress === next.progress &&
+    prev.speed === next.speed &&
+    prev.downloadedBytes === next.downloadedBytes &&
+    prev.error === next.error
+  );
+});

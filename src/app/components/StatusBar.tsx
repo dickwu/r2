@@ -9,6 +9,7 @@ import {
   DomainInfo,
   ItemsCount,
   DownloadProgress,
+  MoveProgress,
 } from '@/app/components/status-bar-parts';
 
 import type { StorageConfig } from '@/app/lib/r2cache';
@@ -50,6 +51,7 @@ export default function StatusBar({
           accountId={storageConfig?.accountId}
           bucket={storageConfig?.bucket}
         />
+        <MoveProgress sourceBucket={storageConfig?.bucket} sourceAccountId={storageConfig?.accountId} />
         {!isLoadingFiles && (
           <DownloadProgress bucket={storageConfig?.bucket} accountId={storageConfig?.accountId} />
         )}

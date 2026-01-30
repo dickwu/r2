@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { Modal, Button, Empty, App, Tabs, Badge, Spin } from 'antd';
+import { Modal, Button, Empty, App, Tabs, Badge } from 'antd';
 import { invoke } from '@tauri-apps/api/core';
 import { Virtuoso } from 'react-virtuoso';
 import {
@@ -34,7 +34,6 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
   const hasActiveDownloads = useDownloadStore(selectHasActiveDownloads);
 
   const [activeTab, setActiveTab] = useState<'pending' | 'finished'>('pending');
-  const [loading, setLoading] = useState(false);
 
   const { message } = App.useApp();
 
@@ -61,30 +60,24 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
   // Count for tabs (pending tab = pending + downloading + paused)
   const pendingTabCount = pendingCount + downloadingCount + pausedCount;
 
-  // Reload tasks from database (only used on modal open for initial sync)
-  const reloadTasksFromDatabase = useCallback(
-    async (showLoading = false) => {
-      if (!storageConfig?.bucket || !storageConfig?.accountId) return;
-      if (showLoading) setLoading(true);
-      try {
-        const sessions = await invoke<DownloadSession[]>('get_download_tasks', {
-          bucket: storageConfig.bucket,
-          accountId: storageConfig.accountId,
-        });
-        loadFromDatabase(sessions);
-      } catch (e) {
-        console.error('Failed to reload download tasks:', e);
-      } finally {
-        if (showLoading) setLoading(false);
-      }
-    },
-    [storageConfig?.bucket, storageConfig?.accountId, loadFromDatabase]
-  );
+  // Refresh tasks from database (background, no loading spinner)
+  const reloadTasksFromDatabase = useCallback(async () => {
+    if (!storageConfig?.bucket || !storageConfig?.accountId) return;
+    try {
+      const sessions = await invoke<DownloadSession[]>('get_download_tasks', {
+        bucket: storageConfig.bucket,
+        accountId: storageConfig.accountId,
+      });
+      loadFromDatabase(sessions);
+    } catch (e) {
+      console.error('Failed to reload download tasks:', e);
+    }
+  }, [storageConfig?.bucket, storageConfig?.accountId, loadFromDatabase]);
 
-  // Reload tasks from database when modal opens
+  // Refresh tasks in background when modal opens (no loading spinner - show existing data immediately)
   useEffect(() => {
     if (modalOpen && storageConfig?.bucket && storageConfig?.accountId) {
-      reloadTasksFromDatabase(true);
+      reloadTasksFromDatabase();
     }
   }, [modalOpen, reloadTasksFromDatabase, storageConfig?.bucket, storageConfig?.accountId]);
 
@@ -225,15 +218,6 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
 
   // Render task list for a tab using Virtuoso
   const renderTaskList = (taskList: DownloadTask[]) => {
-    if (loading) {
-      return (
-        <div
-          style={{ height: 350, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-        >
-          <Spin tip="Loading..." fullscreen />
-        </div>
-      );
-    }
     if (taskList.length === 0) {
       return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No downloads" />;
     }
@@ -288,6 +272,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
       title="Downloads"
       open={modalOpen}
       onCancel={handleClose}
+      destroyOnHidden={false}
       footer={
         tasks.length > 0 ? (
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>

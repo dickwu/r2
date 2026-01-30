@@ -6,7 +6,7 @@
 //! - Progress reporting during build
 
 use super::{get_connection, CachedFile, DbResult};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Batch size for database inserts
 const DB_BATCH_SIZE: usize = 500;
@@ -271,15 +271,17 @@ impl DirectoryTreeBuilder {
     /// Store computed nodes to database with batch inserts.
     /// Clears existing tree first.
     pub async fn store(bucket: &str, account_id: &str, nodes: &[ComputedNode]) -> DbResult<()> {
-        let conn = get_connection()?.lock().await;
         let now = chrono::Utc::now().timestamp();
 
         // Clear existing
-        conn.execute(
-            "DELETE FROM directory_tree WHERE bucket = ?1 AND account_id = ?2",
-            turso::params![bucket, account_id],
-        )
-        .await?;
+        {
+            let conn = get_connection()?.lock().await;
+            conn.execute(
+                "DELETE FROM directory_tree WHERE bucket = ?1 AND account_id = ?2",
+                turso::params![bucket, account_id],
+            )
+            .await?;
+        }
 
         // Batch insert (10 columns now with parent_path)
         for chunk in nodes.chunks(DB_BATCH_SIZE) {
@@ -334,7 +336,12 @@ impl DirectoryTreeBuilder {
                 params.push(now.into());
             }
 
-            conn.execute(&sql, params).await?;
+            {
+                let conn = get_connection()?.lock().await;
+                conn.execute(&sql, params).await?;
+            }
+
+            tokio::task::yield_now().await;
         }
 
         Ok(())
@@ -503,6 +510,87 @@ pub async fn update_directory_tree_for_delete(
 
     // Check for and remove empty paths
     remove_empty_paths(bucket, account_id, key).await
+}
+
+/// Update directory tree for a batch of file deletions.
+/// Applies deltas for all files, then removes empty paths once for all affected ancestors.
+pub async fn update_directory_tree_for_delete_batch(
+    bucket: &str,
+    account_id: &str,
+    deleted: &[(String, i64)],
+) -> DbResult<Vec<String>> {
+    if deleted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut affected_paths: HashSet<String> = HashSet::new();
+
+    for (key, file_size) in deleted {
+        apply_directory_delta(bucket, account_id, key, -1, -file_size, None).await?;
+
+        let (_, paths) = get_ancestor_paths(key);
+        for path in paths.into_iter().filter(|p| !p.is_empty()) {
+            affected_paths.insert(path);
+        }
+    }
+
+    if affected_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut paths: Vec<String> = affected_paths.into_iter().collect();
+    paths.sort_by_key(|path| std::cmp::Reverse(path.len()));
+
+    let conn = get_connection()?.lock().await;
+
+    let placeholders: Vec<String> = (0..paths.len()).map(|i| format!("?{}", i + 3)).collect();
+    let select_sql = format!(
+        "SELECT path, total_file_count FROM directory_tree
+         WHERE bucket = ?1 AND account_id = ?2 AND path IN ({})",
+        placeholders.join(", ")
+    );
+
+    let mut params: Vec<turso::Value> = Vec::with_capacity(paths.len() + 2);
+    params.push(bucket.to_string().into());
+    params.push(account_id.to_string().into());
+    for path in &paths {
+        params.push(path.clone().into());
+    }
+
+    let mut rows = conn.query(&select_sql, params).await?;
+    let mut removed_paths: Vec<String> = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let path: String = row.get(0)?;
+        let total_count: i32 = row.get(1)?;
+        if total_count <= 0 {
+            removed_paths.push(path);
+        }
+    }
+    drop(rows);
+
+    if removed_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let delete_placeholders: Vec<String> = (0..removed_paths.len())
+        .map(|i| format!("?{}", i + 3))
+        .collect();
+    let delete_sql = format!(
+        "DELETE FROM directory_tree
+         WHERE bucket = ?1 AND account_id = ?2 AND path IN ({})",
+        delete_placeholders.join(", ")
+    );
+
+    let mut delete_params: Vec<turso::Value> = Vec::with_capacity(removed_paths.len() + 2);
+    delete_params.push(bucket.to_string().into());
+    delete_params.push(account_id.to_string().into());
+    for path in &removed_paths {
+        delete_params.push(path.clone().into());
+    }
+
+    conn.execute(&delete_sql, delete_params).await?;
+
+    Ok(removed_paths)
 }
 
 /// Detect which ancestor paths for a key do not yet exist in directory_tree.

@@ -95,17 +95,14 @@ pub fn get_table_sql() -> &'static str {
 
 /// Store all files for a bucket (clears existing) - optimized with batch inserts
 pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile]) -> DbResult<()> {
-    let conn = get_connection()?.lock().await;
-
-    // Begin transaction for atomicity and performance
-    conn.execute("BEGIN TRANSACTION", ()).await?;
-
-    // Clear existing files for this bucket
-    conn.execute(
-        "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2",
-        turso::params![bucket, account_id],
-    )
-    .await?;
+    {
+        let conn = get_connection()?.lock().await;
+        conn.execute(
+            "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2",
+            turso::params![bucket, account_id],
+        )
+        .await?;
+    }
 
     // Batch insert files - SQLite supports multi-row INSERT
     // Process in chunks of 500 to avoid hitting limits
@@ -157,21 +154,31 @@ pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile
             params.push(file.synced_at.into());
         }
 
-        conn.execute(&sql, params).await?;
+        {
+            let conn = get_connection()?.lock().await;
+            conn.execute("BEGIN TRANSACTION", ()).await?;
+            if let Err(err) = conn.execute(&sql, params).await {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                return Err(err.into());
+            }
+            conn.execute("COMMIT", ()).await?;
+        }
+
+        tokio::task::yield_now().await;
     }
 
     // Update sync metadata
     let now = chrono::Utc::now().timestamp();
-    conn.execute(
-        "INSERT INTO sync_meta (bucket, account_id, last_sync, file_count)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (bucket, account_id) DO UPDATE SET last_sync = ?3, file_count = ?4",
-        turso::params![bucket, account_id, now, files.len() as i32],
-    )
-    .await?;
-
-    // Commit transaction
-    conn.execute("COMMIT", ()).await?;
+    {
+        let conn = get_connection()?.lock().await;
+        conn.execute(
+            "INSERT INTO sync_meta (bucket, account_id, last_sync, file_count)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (bucket, account_id) DO UPDATE SET last_sync = ?3, file_count = ?4",
+            turso::params![bucket, account_id, now, files.len() as i32],
+        )
+        .await?;
+    }
 
     Ok(())
 }

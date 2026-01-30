@@ -4,3 +4,4 @@ export { default as BucketStats } from '@/app/components/status-bar-parts/Bucket
 export { default as DomainInfo } from '@/app/components/status-bar-parts/DomainInfo';
 export { default as ItemsCount } from '@/app/components/status-bar-parts/ItemsCount';
 export { default as DownloadProgress } from '@/app/components/status-bar-parts/DownloadProgress';
+export { default as MoveProgress } from '@/app/components/status-bar-parts/MoveProgress';

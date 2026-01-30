@@ -8,7 +8,6 @@ import {
   PauseCircleOutlined,
   ClockCircleOutlined,
 } from '@ant-design/icons';
-import { invoke } from '@tauri-apps/api/core';
 import {
   useDownloadStore,
   selectDownloadingCount,
@@ -17,8 +16,8 @@ import {
   selectFinishedCount,
   selectHasActiveDownloads,
   MAX_CONCURRENT_DOWNLOADS,
-  DownloadSession,
-  setupDownloadEventListeners,
+  setupGlobalDownloadListeners,
+  loadDownloadTasks,
 } from '@/app/stores/downloadStore';
 import { formatBytes } from '@/app/utils/formatBytes';
 
@@ -37,36 +36,17 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
   const finishedCount = useDownloadStore(selectFinishedCount);
   const hasActiveDownloads = useDownloadStore(selectHasActiveDownloads);
   const setModalOpen = useDownloadStore((state) => state.setModalOpen);
-  const loadFromDatabase = useDownloadStore((state) => state.loadFromDatabase);
 
-  // Load tasks from database and setup event listeners on mount
+  // Setup global listeners once (persists even when component unmounts)
+  useEffect(() => {
+    setupGlobalDownloadListeners();
+  }, []);
+
+  // Load tasks for current bucket when bucket changes
   useEffect(() => {
     if (!bucket || !accountId) return;
-
-    let cleanup: (() => void) | undefined;
-
-    const initialize = async () => {
-      try {
-        // Load initial tasks from database
-        const sessions = await invoke<DownloadSession[]>('get_download_tasks', {
-          bucket,
-          accountId,
-        });
-        loadFromDatabase(sessions);
-
-        // Setup event listeners for real-time updates
-        cleanup = await setupDownloadEventListeners(bucket, accountId);
-      } catch (e) {
-        console.error('Failed to initialize download tasks:', e);
-      }
-    };
-
-    initialize();
-
-    return () => {
-      if (cleanup) cleanup();
-    };
-  }, [bucket, accountId, loadFromDatabase]);
+    loadDownloadTasks(bucket, accountId);
+  }, [bucket, accountId]);
 
   // Don't show if no tasks
   if (tasks.length === 0) {
