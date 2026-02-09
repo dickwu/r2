@@ -28,7 +28,7 @@ tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Upload dependencies
-reqwest = { version = "0.13", features = ["stream", "multipart"] }
+reqwest = { version = "0.13.2", features = ["stream", "multipart"] }
 tokio = { version = "1", features = ["fs", "io-util", "sync", "rt-multi-thread"] }
 tokio-util = { version = "0.7", features = ["io"] }
 sha2 = "0.10"
@@ -38,12 +38,11 @@ base64 = "0.22"
 chrono = "0.4"
 urlencoding = "2"
 lazy_static = "1.4"
-turso = "0.4.4-pre"
+turso = "0.5.0-pre"
 log = "0.4"
 tauri-plugin-video-thumbnail = { git = "https://github.com/dickwu/tauri-plugin-video-thumbnail" }
 # AWS S3 SDK for R2 operations
 aws-config = "1.8"
-aws-sdk-s3 = { version = "1.120", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.122.0", features = ["behavior-version-latest"] }
 aws-credential-types = "1.2"
 futures-util = "0.3"
-

@@ -27,6 +27,10 @@ import {
 import { formatBytes } from '@/app/utils/formatBytes';
 
 const { Text } = Typography;
+const SPEED_WINDOW_MS = 3000;
+const MIN_WINDOW_SPAN_MS = 800;
+const SPEED_SMOOTHING_ALPHA = 0.2;
+const MAX_SPEED_SPIKE_MULTIPLIER = 3;
 
 interface MoveProgressProps {
   sourceBucket?: string;
@@ -47,7 +51,8 @@ export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProg
   const loadFromDatabase = useMoveStore((state) => state.loadFromDatabase);
   const [syncSpeed, setSyncSpeed] = useState(0);
   const lastUpdateRef = useRef(0);
-  const speedSamplesRef = useRef(new Map<string, { bytes: number; time: number; speed: number }>());
+  const speedSamplesRef = useRef<Array<{ bytes: number; time: number }>>([]);
+  const smoothedSpeedRef = useRef(0);
 
   // Setup global listeners once (persists even when component unmounts)
   useEffect(() => {
@@ -89,44 +94,61 @@ export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProg
     if (activeTransferTasks.length === 0) {
       setSyncSpeed(0);
       lastUpdateRef.current = 0;
-      speedSamplesRef.current.clear();
+      speedSamplesRef.current = [];
+      smoothedSpeedRef.current = 0;
       return;
     }
 
     const now = Date.now();
-    const activeIds = new Set(activeTransferTasks.map((task) => task.id));
-    for (const taskId of speedSamplesRef.current.keys()) {
-      if (!activeIds.has(taskId)) {
-        speedSamplesRef.current.delete(taskId);
+    const totalTransferredBytes = activeTransferTasks.reduce(
+      (sum, task) => sum + Math.max(0, task.transferredBytes || 0),
+      0
+    );
+
+    const samples = speedSamplesRef.current;
+    if (samples.length > 0 && totalTransferredBytes < samples[samples.length - 1].bytes) {
+      // Task list/state reloaded and counters moved backward; restart the window.
+      speedSamplesRef.current = [];
+    }
+
+    speedSamplesRef.current.push({ bytes: totalTransferredBytes, time: now });
+
+    while (
+      speedSamplesRef.current.length > 0 &&
+      now - speedSamplesRef.current[0].time > SPEED_WINDOW_MS
+    ) {
+      speedSamplesRef.current.shift();
+    }
+
+    let rawSpeed = 0;
+    if (speedSamplesRef.current.length >= 2) {
+      const oldest = speedSamplesRef.current[0];
+      const deltaBytes = totalTransferredBytes - oldest.bytes;
+      const deltaMs = now - oldest.time;
+      if (deltaBytes >= 0 && deltaMs >= MIN_WINDOW_SPAN_MS) {
+        rawSpeed = deltaBytes / (deltaMs / 1000);
       }
     }
 
-    let totalSpeed = 0;
-    for (const task of activeTransferTasks) {
-      const prevSample = speedSamplesRef.current.get(task.id);
-      if (prevSample && now > prevSample.time) {
-        const deltaBytes = Math.max(0, task.transferredBytes - prevSample.bytes);
-        const deltaSeconds = (now - prevSample.time) / 1000;
-        const calculatedSpeed = deltaSeconds > 0 ? deltaBytes / deltaSeconds : 0;
-        const nextSpeed = calculatedSpeed > 0 ? calculatedSpeed : task.speed || prevSample.speed || 0;
-        speedSamplesRef.current.set(task.id, {
-          bytes: task.transferredBytes,
-          time: now,
-          speed: nextSpeed,
-        });
-        totalSpeed += nextSpeed;
-      } else {
-        const seededSpeed = task.speed || 0;
-        speedSamplesRef.current.set(task.id, {
-          bytes: task.transferredBytes,
-          time: now,
-          speed: seededSpeed,
-        });
-        totalSpeed += seededSpeed;
-      }
+    if (rawSpeed <= 0) {
+      // Fallback to backend-reported task speeds when the local window is not yet stable.
+      rawSpeed = activeTransferTasks.reduce((sum, task) => sum + Math.max(0, task.speed || 0), 0);
     }
 
-    setSyncSpeed(totalSpeed);
+    if (!Number.isFinite(rawSpeed) || rawSpeed < 0) {
+      rawSpeed = 0;
+    }
+
+    const previous = smoothedSpeedRef.current;
+    const cappedRaw =
+      previous > 0 ? Math.min(rawSpeed, previous * MAX_SPEED_SPIKE_MULTIPLIER) : rawSpeed;
+    const nextSpeed =
+      previous > 0
+        ? previous * (1 - SPEED_SMOOTHING_ALPHA) + cappedRaw * SPEED_SMOOTHING_ALPHA
+        : cappedRaw;
+
+    smoothedSpeedRef.current = nextSpeed;
+    setSyncSpeed(nextSpeed);
     lastUpdateRef.current = now;
   }, [activeTransferTasks]);
 
@@ -146,7 +168,10 @@ export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProg
   return (
     <span
       className="move-progress"
-      onClick={() => setModalOpen(true)}
+      onClick={() => {
+        void loadAllActiveMoves();
+        setModalOpen(true);
+      }}
       style={{ cursor: 'pointer' }}
       title="Click to view move details"
     >

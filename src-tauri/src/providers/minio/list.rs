@@ -1,8 +1,6 @@
 use super::types::{
     create_minio_client, ListObjectsResult, MinioBucket, MinioConfig, MinioObject, MinioResult,
 };
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
 
 pub async fn list_buckets(config: &MinioConfig) -> MinioResult<Vec<MinioBucket>> {
     let client = create_minio_client(config).await?;
@@ -92,24 +90,7 @@ pub async fn list_all_objects_recursive(
     progress_callback: Option<Box<dyn Fn(usize) + Send + Sync>>,
 ) -> MinioResult<Vec<MinioObject>> {
     let client = create_minio_client(config).await?;
-    let all_objects = Arc::new(Mutex::new(Vec::new()));
-    let (tx, mut rx) = mpsc::channel::<Vec<MinioObject>>(4);
-
-    let all_objects_clone = all_objects.clone();
-    let callback = Arc::new(progress_callback);
-
-    let aggregator = tokio::spawn(async move {
-        while let Some(objects) = rx.recv().await {
-            let mut all = all_objects_clone.lock().unwrap();
-            all.extend(objects);
-            let count = all.len();
-            drop(all);
-
-            if let Some(ref cb) = *callback {
-                cb(count);
-            }
-        }
-    });
+    let mut all_objects: Vec<MinioObject> = Vec::new();
 
     let mut continuation_token: Option<String> = None;
 
@@ -147,8 +128,9 @@ pub async fn list_all_objects_recursive(
             })
             .collect();
 
-        if tx.send(objects).await.is_err() {
-            break;
+        all_objects.extend(objects);
+        if let Some(ref cb) = progress_callback {
+            cb(all_objects.len());
         }
 
         if !is_truncated {
@@ -158,15 +140,7 @@ pub async fn list_all_objects_recursive(
         continuation_token = next_token;
     }
 
-    drop(tx);
-    let _ = aggregator.await;
-
-    let result = match Arc::try_unwrap(all_objects) {
-        Ok(mutex) => mutex.into_inner().unwrap(),
-        Err(arc) => arc.lock().unwrap().clone(),
-    };
-
-    Ok(result)
+    Ok(all_objects)
 }
 
 pub async fn list_folder_objects(

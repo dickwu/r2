@@ -9,7 +9,8 @@ use super::{get_connection, CachedFile, DbResult};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Batch size for database inserts
-const DB_BATCH_SIZE: usize = 500;
+const DB_BATCH_SIZE: usize = 1000;
+const DB_YIELD_EVERY_BATCHES: usize = 8;
 
 /// Yield to runtime every N directories during computation
 const YIELD_INTERVAL: usize = 1000;
@@ -272,78 +273,86 @@ impl DirectoryTreeBuilder {
     /// Clears existing tree first.
     pub async fn store(bucket: &str, account_id: &str, nodes: &[ComputedNode]) -> DbResult<()> {
         let now = chrono::Utc::now().timestamp();
+        let conn = get_connection()?.lock().await;
+        conn.execute("BEGIN TRANSACTION", ()).await?;
 
-        // Clear existing
-        {
-            let conn = get_connection()?.lock().await;
+        let tx_result = async {
             conn.execute(
                 "DELETE FROM directory_tree WHERE bucket = ?1 AND account_id = ?2",
                 turso::params![bucket, account_id],
             )
             .await?;
-        }
 
-        // Batch insert (10 columns now with parent_path)
-        for chunk in nodes.chunks(DB_BATCH_SIZE) {
-            if chunk.is_empty() {
-                continue;
-            }
+            // Batch insert (10 columns with parent_path)
+            for (batch_idx, chunk) in nodes.chunks(DB_BATCH_SIZE).enumerate() {
+                if chunk.is_empty() {
+                    continue;
+                }
 
-            let placeholders: Vec<String> = chunk
-                .iter()
-                .enumerate()
-                .map(|(i, _)| {
-                    let b = i * 10;
-                    format!(
-                        "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
-                        b + 1,
-                        b + 2,
-                        b + 3,
-                        b + 4,
-                        b + 5,
-                        b + 6,
-                        b + 7,
-                        b + 8,
-                        b + 9,
-                        b + 10
-                    )
-                })
-                .collect();
+                let placeholders: Vec<String> = chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        let b = i * 10;
+                        format!(
+                            "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+                            b + 1,
+                            b + 2,
+                            b + 3,
+                            b + 4,
+                            b + 5,
+                            b + 6,
+                            b + 7,
+                            b + 8,
+                            b + 9,
+                            b + 10
+                        )
+                    })
+                    .collect();
 
-            let sql = format!(
-                "INSERT INTO directory_tree 
-                 (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated)
-                 VALUES {}",
-                placeholders.join(", ")
-            );
-
-            let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 10);
-            for node in chunk {
-                params.push(bucket.to_string().into());
-                params.push(account_id.to_string().into());
-                params.push(node.path.clone().into());
-                params.push(node.parent_path.clone().into());
-                params.push(node.file_count.into());
-                params.push(node.total_file_count.into());
-                params.push(node.size.into());
-                params.push(node.total_size.into());
-                params.push(
-                    node.last_modified
-                        .clone()
-                        .map(|s| s.into())
-                        .unwrap_or(turso::Value::Null),
+                let sql = format!(
+                    "INSERT INTO directory_tree 
+                     (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated)
+                     VALUES {}",
+                    placeholders.join(", ")
                 );
-                params.push(now.into());
-            }
 
-            {
-                let conn = get_connection()?.lock().await;
+                let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 10);
+                for node in chunk {
+                    params.push(bucket.to_string().into());
+                    params.push(account_id.to_string().into());
+                    params.push(node.path.clone().into());
+                    params.push(node.parent_path.clone().into());
+                    params.push(node.file_count.into());
+                    params.push(node.total_file_count.into());
+                    params.push(node.size.into());
+                    params.push(node.total_size.into());
+                    params.push(
+                        node.last_modified
+                            .clone()
+                            .map(|s| s.into())
+                            .unwrap_or(turso::Value::Null),
+                    );
+                    params.push(now.into());
+                }
+
                 conn.execute(&sql, params).await?;
+
+                if (batch_idx + 1) % DB_YIELD_EVERY_BATCHES == 0 {
+                    tokio::task::yield_now().await;
+                }
             }
 
-            tokio::task::yield_now().await;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        }
+        .await;
+
+        if let Err(err) = tx_result {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(err);
         }
 
+        conn.execute("COMMIT", ()).await?;
         Ok(())
     }
 }

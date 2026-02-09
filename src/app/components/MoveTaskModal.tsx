@@ -17,7 +17,7 @@ import {
   MoveSession,
   MoveTask,
 } from '@/app/stores/moveStore';
-import { useAccountStore } from '@/app/stores/accountStore';
+import { useAccountStore, type ProviderAccount } from '@/app/stores/accountStore';
 import MoveTaskItem from '@/app/components/MoveTaskItem';
 import type { StorageConfig } from '@/app/lib/r2cache';
 
@@ -35,6 +35,102 @@ interface MoveConfigInput {
   endpoint_scheme?: string | null;
   endpoint_host?: string | null;
   force_path_style?: boolean | null;
+}
+
+function buildMoveConfigFromAccounts(
+  provider: string,
+  accountId: string,
+  bucket: string,
+  accounts: ProviderAccount[]
+): MoveConfigInput | null {
+  const accountEntry = accounts.find(
+    (account) => account.provider === provider && account.account.id === accountId
+  );
+  if (!accountEntry) return null;
+
+  if (accountEntry.provider === 'r2') {
+    const tokenEntry = accountEntry.tokens.find((token) =>
+      token.buckets.some((item) => item.name === bucket)
+    );
+    if (!tokenEntry) return null;
+    return {
+      provider: 'r2',
+      account_id: accountEntry.account.id,
+      bucket,
+      access_key_id: tokenEntry.token.access_key_id,
+      secret_access_key: tokenEntry.token.secret_access_key,
+      region: null,
+      endpoint_scheme: null,
+      endpoint_host: null,
+      force_path_style: null,
+    };
+  }
+
+  if (accountEntry.provider === 'aws') {
+    return {
+      provider: 'aws',
+      account_id: accountEntry.account.id,
+      bucket,
+      access_key_id: accountEntry.account.access_key_id,
+      secret_access_key: accountEntry.account.secret_access_key,
+      region: accountEntry.account.region,
+      endpoint_scheme: accountEntry.account.endpoint_scheme,
+      endpoint_host: accountEntry.account.endpoint_host,
+      force_path_style: accountEntry.account.force_path_style,
+    };
+  }
+
+  if (accountEntry.provider === 'minio') {
+    return {
+      provider: 'minio',
+      account_id: accountEntry.account.id,
+      bucket,
+      access_key_id: accountEntry.account.access_key_id,
+      secret_access_key: accountEntry.account.secret_access_key,
+      endpoint_scheme: accountEntry.account.endpoint_scheme,
+      endpoint_host: accountEntry.account.endpoint_host,
+      force_path_style: accountEntry.account.force_path_style,
+    };
+  }
+
+  if (accountEntry.provider === 'rustfs') {
+    return {
+      provider: 'rustfs',
+      account_id: accountEntry.account.id,
+      bucket,
+      access_key_id: accountEntry.account.access_key_id,
+      secret_access_key: accountEntry.account.secret_access_key,
+      endpoint_scheme: accountEntry.account.endpoint_scheme,
+      endpoint_host: accountEntry.account.endpoint_host,
+      force_path_style: true,
+    };
+  }
+
+  return null;
+}
+
+function buildDestinationConfigFromAccounts(
+  task: MoveTask,
+  accounts: ProviderAccount[]
+): MoveConfigInput | null {
+  return buildMoveConfigFromAccounts(
+    task.destProvider,
+    task.destAccountId,
+    task.destBucket,
+    accounts
+  );
+}
+
+function buildSourceConfigFromAccounts(
+  task: MoveTask,
+  accounts: ProviderAccount[]
+): MoveConfigInput | null {
+  return buildMoveConfigFromAccounts(
+    task.sourceProvider,
+    task.sourceAccountId,
+    task.sourceBucket,
+    accounts
+  );
 }
 
 export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
@@ -96,7 +192,10 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
   }, [tasks]);
 
   const finishedTasks = useMemo(
-    () => tasks.filter((t) => t.status === 'success' || t.status === 'error' || t.status === 'cancelled'),
+    () =>
+      tasks.filter(
+        (t) => t.status === 'success' || t.status === 'error' || t.status === 'cancelled'
+      ),
     [tasks]
   );
 
@@ -104,13 +203,29 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
   const inProgressTabCount = pendingCount + activeCount + pausedCount;
 
   const reloadTasksFromDatabase = useCallback(async () => {
-    if (!storageConfig?.bucket || !storageConfig?.accountId) return;
     try {
-      const sessions = await invoke<MoveSession[]>('get_move_tasks', {
-        sourceBucket: storageConfig.bucket,
-        sourceAccountId: storageConfig.accountId,
-      });
-      loadFromDatabase(sessions);
+      // Always load global active tasks because status bar progress is global.
+      // Then merge current source history (includes finished/error/cancelled) when available.
+      const activeSessions = await invoke<MoveSession[]>('get_all_active_move_tasks');
+
+      let mergedSessions = activeSessions;
+      if (storageConfig?.bucket && storageConfig?.accountId) {
+        const sourceSessions = await invoke<MoveSession[]>('get_move_tasks', {
+          sourceBucket: storageConfig.bucket,
+          sourceAccountId: storageConfig.accountId,
+        });
+
+        const byId = new Map<string, MoveSession>();
+        for (const session of activeSessions) {
+          byId.set(session.id, session);
+        }
+        for (const session of sourceSessions) {
+          byId.set(session.id, session);
+        }
+        mergedSessions = Array.from(byId.values()).sort((a, b) => b.updated_at - a.updated_at);
+      }
+
+      loadFromDatabase(mergedSessions);
     } catch (e) {
       console.error('Failed to reload move tasks:', e);
     }
@@ -128,107 +243,57 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
     setModalOpen(false);
   };
 
-  const buildSourceConfig = (): MoveConfigInput | null => {
-    if (!storageConfig?.accountId || !storageConfig.bucket) return null;
-    if (!storageConfig.accessKeyId || !storageConfig.secretAccessKey) return null;
-    if (storageConfig.provider === 'aws' && !storageConfig.region) return null;
-    if (
-      (storageConfig.provider === 'minio' || storageConfig.provider === 'rustfs') &&
-      (!storageConfig.endpointScheme || !storageConfig.endpointHost)
-    ) {
-      return null;
-    }
-
-    return {
-      provider: storageConfig.provider,
-      account_id: storageConfig.accountId,
-      bucket: storageConfig.bucket,
-      access_key_id: storageConfig.accessKeyId,
-      secret_access_key: storageConfig.secretAccessKey,
-      region: storageConfig.provider === 'aws' ? storageConfig.region : null,
-      endpoint_scheme: storageConfig.provider === 'r2' ? null : storageConfig.endpointScheme,
-      endpoint_host: storageConfig.provider === 'r2' ? null : storageConfig.endpointHost,
-      force_path_style: storageConfig.provider === 'r2' ? null : storageConfig.forcePathStyle,
-    };
-  };
-
-  const buildDestinationConfig = (task: MoveTask): MoveConfigInput | null => {
-    const accountEntry = accounts.find(
-      (account) => account.provider === task.destProvider && account.account.id === task.destAccountId
-    );
-    if (!accountEntry) return null;
-
-    if (accountEntry.provider === 'r2') {
-      const tokenEntry = accountEntry.tokens.find((token) =>
-        token.buckets.some((bucket) => bucket.name === task.destBucket)
-      );
-      if (!tokenEntry) return null;
-      return {
-        provider: 'r2',
-        account_id: accountEntry.account.id,
-        bucket: task.destBucket,
-        access_key_id: tokenEntry.token.access_key_id,
-        secret_access_key: tokenEntry.token.secret_access_key,
-        region: null,
-        endpoint_scheme: null,
-        endpoint_host: null,
-        force_path_style: null,
-      };
-    }
-
-    if (accountEntry.provider === 'aws') {
-      return {
-        provider: 'aws',
-        account_id: accountEntry.account.id,
-        bucket: task.destBucket,
-        access_key_id: accountEntry.account.access_key_id,
-        secret_access_key: accountEntry.account.secret_access_key,
-        region: accountEntry.account.region,
-        endpoint_scheme: accountEntry.account.endpoint_scheme,
-        endpoint_host: accountEntry.account.endpoint_host,
-        force_path_style: accountEntry.account.force_path_style,
-      };
-    }
-
-    if (accountEntry.provider === 'minio') {
-      return {
-        provider: 'minio',
-        account_id: accountEntry.account.id,
-        bucket: task.destBucket,
-        access_key_id: accountEntry.account.access_key_id,
-        secret_access_key: accountEntry.account.secret_access_key,
-        endpoint_scheme: accountEntry.account.endpoint_scheme,
-        endpoint_host: accountEntry.account.endpoint_host,
-        force_path_style: accountEntry.account.force_path_style,
-      };
-    }
-
-    if (accountEntry.provider === 'rustfs') {
-      return {
-        provider: 'rustfs',
-        account_id: accountEntry.account.id,
-        bucket: task.destBucket,
-        access_key_id: accountEntry.account.access_key_id,
-        secret_access_key: accountEntry.account.secret_access_key,
-        endpoint_scheme: accountEntry.account.endpoint_scheme,
-        endpoint_host: accountEntry.account.endpoint_host,
-        force_path_style: true,
-      };
-    }
-
-    return null;
-  };
-
   const handlePauseAll = async () => {
-    if (!storageConfig?.bucket || !storageConfig?.accountId) return;
+    const pauseTargets = new Map<string, { sourceBucket: string; sourceAccountId: string }>();
+    for (const task of inProgressTasks) {
+      const shouldPause =
+        task.status === 'pending' ||
+        task.status === 'downloading' ||
+        (task.status === 'uploading' && task.progress < 100);
+
+      if (!shouldPause) continue;
+
+      const key = `${task.sourceAccountId}:${task.sourceBucket}`;
+      if (!pauseTargets.has(key)) {
+        pauseTargets.set(key, {
+          sourceBucket: task.sourceBucket,
+          sourceAccountId: task.sourceAccountId,
+        });
+      }
+    }
+
+    if (pauseTargets.size === 0) {
+      message.info('No active moves to pause');
+      return;
+    }
 
     try {
-      const count = await invoke<number>('pause_all_moves', {
-        sourceBucket: storageConfig.bucket,
-        sourceAccountId: storageConfig.accountId,
-      });
+      const results = await Promise.allSettled(
+        Array.from(pauseTargets.values()).map((target) => invoke<number>('pause_all_moves', target))
+      );
+
+      let pausedCount = 0;
+      let failedQueues = 0;
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          pausedCount += result.value;
+        } else {
+          failedQueues += 1;
+        }
+      }
+
       await reloadTasksFromDatabase();
-      message.success(`Paused ${count} moves`);
+
+      if (failedQueues > 0) {
+        message.warning(`Paused ${pausedCount} moves (${failedQueues} queue(s) failed)`);
+        return;
+      }
+
+      if (pausedCount > 0) {
+        message.success(`Paused ${pausedCount} moves`);
+      } else {
+        message.info('No moves were paused');
+      }
     } catch (e) {
       console.error('Failed to pause moves:', e);
       message.error('Failed to pause moves');
@@ -236,85 +301,116 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
   };
 
   const handleStartAll = async () => {
-    const sourceConfig = buildSourceConfig();
-    if (!sourceConfig) {
-      message.error('Source credentials are required to start moves');
-      return;
-    }
-
     try {
-      // Resume paused tasks first (changes DB status from 'paused' to 'pending')
-      if (pausedCount > 0) {
-        await invoke('resume_all_moves', {
-          sourceBucket: sourceConfig.bucket,
-          sourceAccountId: sourceConfig.account_id,
-        });
-      }
-
       // Get tasks to start (pending or paused in local state)
       const pendingTargets = inProgressTasks.filter(
         (task) => task.status === 'pending' || task.status === 'paused'
       );
-
-      // Group by destination
-      const groups = new Map<string, { config: MoveConfigInput; tasks: MoveTask[] }>();
-      for (const task of pendingTargets) {
-        const destConfig = buildDestinationConfig(task);
-        if (!destConfig) {
-          console.warn('Could not build dest config for task:', task.id, task.destProvider, task.destAccountId);
-          continue;
-        }
-        const groupKey = `${destConfig.provider}:${destConfig.account_id}:${destConfig.bucket}`;
-        const existing = groups.get(groupKey);
-        if (existing) {
-          existing.tasks.push(task);
-        } else {
-          groups.set(groupKey, { config: destConfig, tasks: [task] });
-        }
+      if (pendingTargets.length === 0) {
+        message.info('No queued moves to start');
+        return;
       }
 
-      if (groups.size === 0) {
-        // No groups found - try to reload accounts and retry
-        await loadAccounts();
-        
-        // Re-check with fresh accounts
-        const freshGroups = new Map<string, { config: MoveConfigInput; tasks: MoveTask[] }>();
+      const buildStartGroups = (snapshot: ProviderAccount[]) => {
+        const groups = new Map<
+          string,
+          { sourceConfig: MoveConfigInput; destConfig: MoveConfigInput }
+        >();
+        let unresolvedTasks = 0;
+
         for (const task of pendingTargets) {
-          const destConfig = buildDestinationConfig(task);
-          if (!destConfig) continue;
-          const groupKey = `${destConfig.provider}:${destConfig.account_id}:${destConfig.bucket}`;
-          const existing = freshGroups.get(groupKey);
-          if (existing) {
-            existing.tasks.push(task);
-          } else {
-            freshGroups.set(groupKey, { config: destConfig, tasks: [task] });
+          const sourceConfig = buildSourceConfigFromAccounts(task, snapshot);
+          const destConfig = buildDestinationConfigFromAccounts(task, snapshot);
+
+          if (!sourceConfig || !destConfig) {
+            unresolvedTasks += 1;
+            console.warn(
+              'Could not build move configs for task:',
+              task.id,
+              task.sourceProvider,
+              task.sourceAccountId,
+              '->',
+              task.destProvider,
+              task.destAccountId
+            );
+            continue;
+          }
+
+          const groupKey = `${sourceConfig.provider}:${sourceConfig.account_id}:${sourceConfig.bucket}|${destConfig.provider}:${destConfig.account_id}:${destConfig.bucket}`;
+          if (!groups.has(groupKey)) {
+            groups.set(groupKey, { sourceConfig, destConfig });
           }
         }
 
-        if (freshGroups.size === 0) {
-          message.error('No destination credentials available. Please add the destination account first.');
-          return;
-        }
+        return { groups, unresolvedTasks };
+      };
 
-        // Use fresh groups
-        for (const group of freshGroups.values()) {
-          await invoke('start_move_queue', {
-            sourceConfig,
-            destConfig: group.config,
+      let { groups, unresolvedTasks } = buildStartGroups(accounts);
+
+      if (groups.size === 0 || unresolvedTasks > 0) {
+        // Account store may still be stale (async load + render lag), force a fresh read.
+        await loadAccounts();
+        const refreshedAccounts = useAccountStore.getState().accounts;
+        const rebuilt = buildStartGroups(refreshedAccounts);
+        groups = rebuilt.groups;
+        unresolvedTasks = rebuilt.unresolvedTasks;
+      }
+
+      if (groups.size === 0) {
+        message.error('No source/destination credentials available. Please check your accounts.');
+        return;
+      }
+
+      // Resume paused tasks for all source queues in view.
+      const resumeTargets = new Map<string, { sourceBucket: string; sourceAccountId: string }>();
+      for (const task of pendingTargets) {
+        if (task.status !== 'paused') continue;
+        const key = `${task.sourceAccountId}:${task.sourceBucket}`;
+        if (!resumeTargets.has(key)) {
+          resumeTargets.set(key, {
+            sourceBucket: task.sourceBucket,
+            sourceAccountId: task.sourceAccountId,
           });
         }
-      } else {
-        // Start each group
-        for (const group of groups.values()) {
+      }
+
+      if (resumeTargets.size > 0) {
+        await Promise.allSettled(
+          Array.from(resumeTargets.values()).map((target) =>
+            invoke<number>('resume_all_moves', target)
+          )
+        );
+      }
+
+      let startedGroups = 0;
+      let failedGroups = 0;
+      for (const group of groups.values()) {
+        try {
           await invoke('start_move_queue', {
-            sourceConfig,
-            destConfig: group.config,
+            sourceConfig: group.sourceConfig,
+            destConfig: group.destConfig,
           });
+          startedGroups += 1;
+        } catch (error) {
+          failedGroups += 1;
+          console.error('Failed to start move queue group:', error);
         }
       }
 
       await reloadTasksFromDatabase();
-      message.success('Starting moves');
+
+      if (failedGroups > 0) {
+        message.warning(
+          `Started ${startedGroups} queue group(s), ${failedGroups} failed` +
+            (unresolvedTasks > 0 ? `, ${unresolvedTasks} task(s) missing credentials` : '')
+        );
+      } else if (unresolvedTasks > 0) {
+        message.warning(
+          `Starting moves (${unresolvedTasks} task(s) skipped due to missing credentials)`
+        );
+      } else {
+        message.success('Starting moves');
+      }
     } catch (e) {
       console.error('Failed to start moves:', e);
       message.error('Failed to start moves');
@@ -322,19 +418,34 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
   };
 
   const handleResume = async (taskId: string) => {
-    const sourceConfig = buildSourceConfig();
-    if (!sourceConfig) {
-      message.error('Source credentials are required to resume moves');
-      return;
-    }
-
     const task = tasks.find((item) => item.id === taskId);
     if (!task) return;
 
-    const destConfig = buildDestinationConfig(task);
-    if (!destConfig) {
-      message.error('Destination credentials are required to resume this move');
-      return;
+    const sourceConfig = buildSourceConfigFromAccounts(task, accounts);
+    const destConfig = buildDestinationConfigFromAccounts(task, accounts);
+    if (!sourceConfig || !destConfig) {
+      await loadAccounts();
+      const refreshedAccounts = useAccountStore.getState().accounts;
+      const refreshedSourceConfig = buildSourceConfigFromAccounts(task, refreshedAccounts);
+      const refreshedDestConfig = buildDestinationConfigFromAccounts(task, refreshedAccounts);
+
+      if (!refreshedSourceConfig || !refreshedDestConfig) {
+        message.error('Source/destination credentials are required to resume this move');
+        return;
+      }
+
+      try {
+        await invoke('resume_move', { taskId });
+        await invoke('start_move_queue', {
+          sourceConfig: refreshedSourceConfig,
+          destConfig: refreshedDestConfig,
+        });
+        return;
+      } catch (e) {
+        console.error('Failed to resume move:', e);
+        message.error('Failed to resume move');
+        return;
+      }
     }
 
     try {

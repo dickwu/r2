@@ -4,7 +4,8 @@ use crate::db::{self, MoveSession};
 use chrono::Utc;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
 use super::config::MoveConfig;
@@ -254,13 +255,14 @@ pub async fn pause_all_moves(
         .map(|s| s.id.clone())
         .collect();
 
-    // Only set pause flags for tasks belonging to this bucket/account
+    // Pre-create/set pause flags so tasks that are pending or starting can still observe pause.
     {
-        let registry = MOVE_PAUSE_REGISTRY.lock().unwrap();
+        let mut registry = MOVE_PAUSE_REGISTRY.lock().unwrap();
         for task_id in &active_ids {
-            if let Some(paused) = registry.get(task_id) {
-                paused.store(true, Ordering::SeqCst);
-            }
+            let paused = registry
+                .entry(task_id.clone())
+                .or_insert_with(|| Arc::new(AtomicBool::new(true)));
+            paused.store(true, Ordering::SeqCst);
         }
     }
 
@@ -315,9 +317,10 @@ pub async fn resume_all_moves(
     let resumed_count = db::resume_all_moves(&source_bucket, &source_account_id)
         .await
         .map_err(|e| format!("Failed to resume moves: {}", e))?;
+    let started_count = request_queue_run(&app, &source_bucket, &source_account_id).await;
     info!(
-        "resume_all_moves: resumed {} for {}/{}",
-        resumed_count, source_bucket, source_account_id
+        "resume_all_moves: resumed {} for {}/{} started={}",
+        resumed_count, source_bucket, source_account_id, started_count
     );
 
     let _ = app.emit(

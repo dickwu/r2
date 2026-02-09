@@ -12,9 +12,9 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
-    "@aws-sdk/client-s3": "^3.981.0",
-    "@aws-sdk/lib-storage": "^3.981.0",
-    "@aws-sdk/s3-request-presigner": "^3.981.0",
+    "@aws-sdk/client-s3": "^3.986.0",
+    "@aws-sdk/lib-storage": "^3.986.0",
+    "@aws-sdk/s3-request-presigner": "^3.986.0",
     "@monaco-editor/react": "^4.7.0",
     "@smithy/fetch-http-handler": "^5.3.9",
     "@tailwindcss/postcss": "^4.1.18",
@@ -41,8 +41,8 @@
   "devDependencies": {
     "@tanstack/react-query-devtools": "^5.91.3",
     "@tauri-apps/cli": "^2.10.0",
-    "@types/node": "^25.2.0",
-    "@types/react": "^19.2.10",
+    "@types/node": "^25.2.2",
+    "@types/react": "^19.2.13",
     "@types/react-dom": "^19.2.3",
     "prettier": "^3.8.1",
     "prettier-plugin-tailwindcss": "^0.7.2",

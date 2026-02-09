@@ -95,82 +95,78 @@ pub fn get_table_sql() -> &'static str {
 
 /// Store all files for a bucket (clears existing) - optimized with batch inserts
 pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile]) -> DbResult<()> {
-    {
-        let conn = get_connection()?.lock().await;
+    // Batch insert files - SQLite supports multi-row INSERT.
+    // Keep well below SQLite parameter limits: 1000 * 8 = 8000 params.
+    const BATCH_SIZE: usize = 1000;
+    const YIELD_EVERY_BATCHES: usize = 8;
+
+    let now = chrono::Utc::now().timestamp();
+    let conn = get_connection()?.lock().await;
+    conn.execute("BEGIN TRANSACTION", ()).await?;
+
+    let tx_result = async {
         conn.execute(
             "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2",
             turso::params![bucket, account_id],
         )
         .await?;
-    }
 
-    // Batch insert files - SQLite supports multi-row INSERT
-    // Process in chunks of 500 to avoid hitting limits
-    const BATCH_SIZE: usize = 500;
-
-    for chunk in files.chunks(BATCH_SIZE) {
-        if chunk.is_empty() {
-            continue;
-        }
-
-        // Build multi-value INSERT statement (8 columns now)
-        let placeholders: Vec<String> = chunk
-            .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                let base = i * 8;
-                format!(
-                    "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
-                    base + 1,
-                    base + 2,
-                    base + 3,
-                    base + 4,
-                    base + 5,
-                    base + 6,
-                    base + 7,
-                    base + 8
-                )
-            })
-            .collect();
-
-        let sql = format!(
-            "INSERT INTO cached_files (bucket, account_id, key, parent_path, name, size, last_modified, synced_at) VALUES {}",
-            placeholders.join(", ")
-        );
-
-        // Build parameters array
-        let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 8);
-        for file in chunk {
-            // Compute parent_path and name from key
-            let (parent_path, name) = parse_key(&file.key);
-
-            params.push(bucket.to_string().into());
-            params.push(account_id.to_string().into());
-            params.push(file.key.clone().into());
-            params.push(parent_path.into());
-            params.push(name.into());
-            params.push(file.size.into());
-            params.push(file.last_modified.clone().into());
-            params.push(file.synced_at.into());
-        }
-
-        {
-            let conn = get_connection()?.lock().await;
-            conn.execute("BEGIN TRANSACTION", ()).await?;
-            if let Err(err) = conn.execute(&sql, params).await {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(err.into());
+        for (batch_idx, chunk) in files.chunks(BATCH_SIZE).enumerate() {
+            if chunk.is_empty() {
+                continue;
             }
-            conn.execute("COMMIT", ()).await?;
+
+            // Build multi-value INSERT statement (8 columns)
+            let placeholders: Vec<String> = chunk
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    let base = i * 8;
+                    format!(
+                        "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+                        base + 1,
+                        base + 2,
+                        base + 3,
+                        base + 4,
+                        base + 5,
+                        base + 6,
+                        base + 7,
+                        base + 8
+                    )
+                })
+                .collect();
+
+            let sql = format!(
+                "INSERT INTO cached_files (bucket, account_id, key, parent_path, name, size, last_modified, synced_at) VALUES {}",
+                placeholders.join(", ")
+            );
+
+            let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 8);
+            for file in chunk {
+                // Reuse precomputed parent_path/name when provided.
+                let (parent_path, name) = if file.name.is_empty() {
+                    parse_key(&file.key)
+                } else {
+                    (file.parent_path.clone(), file.name.clone())
+                };
+
+                params.push(bucket.to_string().into());
+                params.push(account_id.to_string().into());
+                params.push(file.key.clone().into());
+                params.push(parent_path.into());
+                params.push(name.into());
+                params.push(file.size.into());
+                params.push(file.last_modified.clone().into());
+                params.push(file.synced_at.into());
+            }
+
+            conn.execute(&sql, params).await?;
+
+            if (batch_idx + 1) % YIELD_EVERY_BATCHES == 0 {
+                tokio::task::yield_now().await;
+            }
         }
 
-        tokio::task::yield_now().await;
-    }
-
-    // Update sync metadata
-    let now = chrono::Utc::now().timestamp();
-    {
-        let conn = get_connection()?.lock().await;
         conn.execute(
             "INSERT INTO sync_meta (bucket, account_id, last_sync, file_count)
              VALUES (?1, ?2, ?3, ?4)
@@ -178,8 +174,17 @@ pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile
             turso::params![bucket, account_id, now, files.len() as i32],
         )
         .await?;
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    if let Err(err) = tx_result {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        return Err(err);
     }
 
+    conn.execute("COMMIT", ()).await?;
     Ok(())
 }
 

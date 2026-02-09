@@ -214,18 +214,21 @@ pub(crate) async fn spawn_move_task(
         task_id, session.source_key, session.dest_key, session.delete_original, session.file_size
     );
 
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let paused = Arc::new(AtomicBool::new(false));
-
-    // Register cancel/pause flags
-    {
+    // Reuse any pre-existing flags set by pause/cancel commands to avoid races.
+    let cancelled = {
         let mut cancel_registry = MOVE_CANCEL_REGISTRY.lock().unwrap();
-        cancel_registry.insert(task_id.clone(), cancelled.clone());
-    }
-    {
+        cancel_registry
+            .entry(task_id.clone())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    };
+    let paused = {
         let mut pause_registry = MOVE_PAUSE_REGISTRY.lock().unwrap();
-        pause_registry.insert(task_id.clone(), paused.clone());
-    }
+        pause_registry
+            .entry(task_id.clone())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    };
 
     let client = match Client::builder().build() {
         Ok(c) => c,
@@ -436,9 +439,9 @@ async fn continue_move_queue(app: &AppHandle, source_bucket: &str, source_accoun
         "continue_move_queue: {}/{}",
         source_account_id, source_bucket
     );
-    match get_pending_sessions_to_start(app, source_bucket, source_account_id).await {
-        Ok(next_sessions) => {
-            if next_sessions.is_empty() {
+    match get_pending_sessions_to_start(source_bucket, source_account_id).await {
+        Ok((next_sessions, slots_available)) => {
+            if next_sessions.is_empty() || slots_available <= 0 {
                 debug!(
                     "continue_move_queue: no pending sessions for {}/{}",
                     source_account_id, source_bucket
@@ -446,7 +449,12 @@ async fn continue_move_queue(app: &AppHandle, source_bucket: &str, source_accoun
                 return 0;
             }
             let mut started = 0;
+            let mut blocked_missing_source = 0;
+            let mut blocked_missing_dest = 0;
             for next_session in next_sessions {
+                if started >= slots_available {
+                    break;
+                }
                 let source_config = match get_move_config(
                     &next_session.source_provider,
                     &next_session.source_account_id,
@@ -454,13 +462,14 @@ async fn continue_move_queue(app: &AppHandle, source_bucket: &str, source_accoun
                 ) {
                     Some(cfg) => cfg,
                     None => {
-                        update_move_status(
-                            app,
-                            &next_session.id,
-                            "error",
-                            Some("Missing source credentials".to_string()),
-                        )
-                        .await;
+                        blocked_missing_source += 1;
+                        warn!(
+                            "queue_blocked_missing_source: task={} {}/{} provider={}",
+                            next_session.id,
+                            next_session.source_account_id,
+                            next_session.source_bucket,
+                            next_session.source_provider
+                        );
                         continue;
                     }
                 };
@@ -471,21 +480,51 @@ async fn continue_move_queue(app: &AppHandle, source_bucket: &str, source_accoun
                 ) {
                     Some(cfg) => cfg,
                     None => {
-                        update_move_status(
-                            app,
-                            &next_session.id,
-                            "error",
-                            Some("Missing destination credentials".to_string()),
-                        )
-                        .await;
+                        blocked_missing_dest += 1;
+                        warn!(
+                            "queue_blocked_missing_dest: task={} {}/{} provider={}",
+                            next_session.id,
+                            next_session.dest_account_id,
+                            next_session.dest_bucket,
+                            next_session.dest_provider
+                        );
                         continue;
                     }
                 };
+
+                if let Err(e) = db::update_move_status(&next_session.id, "downloading", None).await
+                {
+                    error!(
+                        "queue_start_failed_status_update: task={} error={}",
+                        next_session.id, e
+                    );
+                    continue;
+                }
+                let _ = app.emit(
+                    "move-status-changed",
+                    MoveStatusChanged {
+                        task_id: next_session.id.clone(),
+                        status: "downloading".to_string(),
+                        error: None,
+                    },
+                );
+
                 let app_clone = app.clone();
                 tokio::spawn(async move {
                     spawn_move_task(app_clone, next_session, source_config, dest_config).await;
                 });
                 started += 1;
+            }
+
+            if blocked_missing_source > 0 || blocked_missing_dest > 0 {
+                info!(
+                    "queue_waiting_for_configs: {}/{} started={} blocked_source={} blocked_dest={}",
+                    source_account_id,
+                    source_bucket,
+                    started,
+                    blocked_missing_source,
+                    blocked_missing_dest
+                );
             }
             started
         }
@@ -499,12 +538,11 @@ async fn continue_move_queue(app: &AppHandle, source_bucket: &str, source_accoun
     }
 }
 
-/// Internal function to process move queue - returns sessions to start
+/// Internal queue helper - returns pending candidates plus available worker slots.
 pub(crate) async fn get_pending_sessions_to_start(
-    app: &AppHandle,
     source_bucket: &str,
     source_account_id: &str,
-) -> Result<Vec<MoveSession>, String> {
+) -> Result<(Vec<MoveSession>, i64), String> {
     let active_count = db::count_active_moves(source_bucket, source_account_id)
         .await
         .map_err(|e| format!("Failed to count active moves: {}", e))?;
@@ -519,42 +557,27 @@ pub(crate) async fn get_pending_sessions_to_start(
             "queue_check: no slots for {}/{}",
             source_account_id, source_bucket
         );
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
 
-    let pending =
-        db::get_pending_moves_for_source(source_bucket, source_account_id, slots_available)
-            .await
-            .map_err(|e| format!("Failed to get pending moves: {}", e))?;
+    // Scan ahead so tasks waiting for different destination account configs do not block
+    // other ready tasks at the front of the queue.
+    let scan_limit = std::cmp::max(slots_available * 20, slots_available);
+    let pending = db::get_pending_moves_for_source(source_bucket, source_account_id, scan_limit)
+        .await
+        .map_err(|e| format!("Failed to get pending moves: {}", e))?;
 
     if !pending.is_empty() {
         let ids: Vec<&str> = pending.iter().map(|s| s.id.as_str()).collect();
         debug!(
-            "queue_pick: {}/{} picked {} [{}]",
+            "queue_pick: {}/{} picked {} (slots={}) [{}]",
             source_account_id,
             source_bucket,
             pending.len(),
+            slots_available,
             ids.join(", ")
         );
     }
 
-    for session in &pending {
-        let _ = db::update_move_status(&session.id, "downloading", None).await;
-        let _ = app.emit(
-            "move-status-changed",
-            MoveStatusChanged {
-                task_id: session.id.clone(),
-                status: "downloading".to_string(),
-                error: None,
-            },
-        );
-    }
-    info!(
-        "queue_start: {}/{} starting {} pending",
-        source_account_id,
-        source_bucket,
-        pending.len()
-    );
-
-    Ok(pending)
+    Ok((pending, slots_available))
 }

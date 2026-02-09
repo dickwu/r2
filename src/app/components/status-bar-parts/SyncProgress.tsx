@@ -17,7 +17,11 @@ const phaseConfig: Record<SyncPhase, { icon: React.ReactNode; label: string }> =
   complete: { icon: <CheckCircleOutlined />, label: 'Complete' },
 };
 
-export default function SyncProgress() {
+interface SyncProgressProps {
+  onClick?: () => void;
+}
+
+export default function SyncProgress({ onClick }: SyncProgressProps) {
   const isSyncing = useSyncStore((state) => state.isSyncing);
   const phase = useSyncStore((state) => state.phase);
   const processedFiles = useSyncStore((state) => state.processedFiles);
@@ -47,7 +51,12 @@ export default function SyncProgress() {
   }
 
   return (
-    <span className="sync-progress">
+    <span
+      className="sync-progress"
+      onClick={onClick}
+      style={onClick ? { cursor: 'pointer' } : undefined}
+      title={onClick ? 'Click to view sync details' : undefined}
+    >
       <Spin size="small" />
       <span className="sync-phase">
         {icon} {label}

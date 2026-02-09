@@ -1,8 +1,6 @@
 //! R2 list operations (buckets, objects)
 
 use super::types::{create_r2_client, ListObjectsResult, R2Bucket, R2Config, R2Object, R2Result};
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
 
 /// List all buckets in the R2 account
 pub async fn list_buckets(config: &R2Config) -> R2Result<Vec<R2Bucket>> {
@@ -96,27 +94,7 @@ pub async fn list_all_objects_recursive(
     progress_callback: Option<Box<dyn Fn(usize) + Send + Sync>>,
 ) -> R2Result<Vec<R2Object>> {
     let client = create_r2_client(config).await?;
-    let all_objects = Arc::new(Mutex::new(Vec::new()));
-    let (tx, mut rx) = mpsc::channel::<Vec<R2Object>>(4); // Buffer up to 4 pages
-
-    let all_objects_clone = all_objects.clone();
-    let callback = Arc::new(progress_callback);
-
-    // Spawner task: aggregates results and reports progress
-    let aggregator = tokio::spawn(async move {
-        while let Some(objects) = rx.recv().await {
-            let mut all = all_objects_clone.lock().unwrap();
-            all.extend(objects);
-            let count = all.len();
-            drop(all); // Release lock before callback
-
-            if let Some(ref cb) = *callback {
-                cb(count);
-            }
-        }
-    });
-
-    // Fetcher: sequential fetch with pipelined processing
+    let mut all_objects: Vec<R2Object> = Vec::new();
     let mut continuation_token: Option<String> = None;
 
     loop {
@@ -133,7 +111,7 @@ pub async fn list_all_objects_recursive(
         let is_truncated = response.is_truncated().unwrap_or(false);
         let next_token = response.next_continuation_token().map(|s| s.to_string());
 
-        // Process response in parallel while we can fetch the next page
+        // Process current page objects and accumulate.
         let objects: Vec<R2Object> = response
             .contents()
             .iter()
@@ -155,9 +133,9 @@ pub async fn list_all_objects_recursive(
             })
             .collect();
 
-        // Send to aggregator (non-blocking if buffer has space)
-        if tx.send(objects).await.is_err() {
-            break; // Receiver dropped
+        all_objects.extend(objects);
+        if let Some(ref cb) = progress_callback {
+            cb(all_objects.len());
         }
 
         if !is_truncated {
@@ -167,17 +145,7 @@ pub async fn list_all_objects_recursive(
         continuation_token = next_token;
     }
 
-    // Close sender and wait for aggregator to finish
-    drop(tx);
-    let _ = aggregator.await;
-
-    // Extract final results
-    let result = match Arc::try_unwrap(all_objects) {
-        Ok(mutex) => mutex.into_inner().unwrap(),
-        Err(arc) => arc.lock().unwrap().clone(),
-    };
-
-    Ok(result)
+    Ok(all_objects)
 }
 
 /// List all objects under a prefix with delimiter (for folder listing)

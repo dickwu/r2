@@ -49,6 +49,7 @@ export default function BatchMoveModal({
   const [deleteOriginal, setDeleteOriginal] = useState(true);
   const [selectedDestinationId, setSelectedDestinationId] = useState<string | null>(null);
   const [selectedBucket, setSelectedBucket] = useState('');
+  const [isStartingQueue, setIsStartingQueue] = useState(false);
   const accounts = useAccountStore((state) => state.accounts);
   const loadAccounts = useAccountStore((state) => state.loadAccounts);
   const { message } = App.useApp();
@@ -62,6 +63,7 @@ export default function BatchMoveModal({
       setDeleteOriginal(true);
       setSelectedDestinationId(null);
       setSelectedBucket('');
+      setIsStartingQueue(false);
     }
   }, [open]);
 
@@ -177,6 +179,7 @@ export default function BatchMoveModal({
     selectedBucket === config.bucket;
 
   const handleMove = useCallback(async () => {
+    if (isStartingQueue) return;
     if (!config || selectedKeys.size === 0 || !selectedDestination || !selectedBucket) return;
     if (!config.accessKeyId || !config.secretAccessKey) {
       message.error('Source credentials are required to move files');
@@ -201,11 +204,12 @@ export default function BatchMoveModal({
       return { source_key: key, dest_key: newPath };
     });
 
-    // Close modal immediately - operation runs in background
-    onClose();
-
     const actionLabel = deleteOriginal ? 'Move' : 'Copy';
-    message.loading({ content: `Queuing ${operations.length} file${operations.length > 1 ? 's' : ''} for ${actionLabel.toLowerCase()}...`, key: 'batch-move' });
+    setIsStartingQueue(true);
+    message.loading({
+      content: `Queuing ${operations.length} file${operations.length > 1 ? 's' : ''} for ${actionLabel.toLowerCase()}...`,
+      key: 'batch-move',
+    });
 
     try {
       await invoke('start_batch_move', {
@@ -227,8 +231,10 @@ export default function BatchMoveModal({
           access_key_id: selectedDestination.accessKeyId,
           secret_access_key: selectedDestination.secretAccessKey,
           region: selectedDestination.provider === 'aws' ? selectedDestination.region : null,
-          endpoint_scheme: selectedDestination.provider === 'r2' ? null : selectedDestination.endpointScheme,
-          endpoint_host: selectedDestination.provider === 'r2' ? null : selectedDestination.endpointHost,
+          endpoint_scheme:
+            selectedDestination.provider === 'r2' ? null : selectedDestination.endpointScheme,
+          endpoint_host:
+            selectedDestination.provider === 'r2' ? null : selectedDestination.endpointHost,
           force_path_style:
             selectedDestination.provider === 'r2' ? null : selectedDestination.forcePathStyle,
         },
@@ -236,11 +242,20 @@ export default function BatchMoveModal({
         deleteOriginal,
       });
 
-      message.success({ content: `${actionLabel} started for ${operations.length} file${operations.length > 1 ? 's' : ''}`, key: 'batch-move' });
+      message.success({
+        content: `${actionLabel} started for ${operations.length} file${operations.length > 1 ? 's' : ''}`,
+        key: 'batch-move',
+      });
+      onClose();
       onSuccess();
     } catch (e) {
       console.error('Batch move error:', e);
-      message.error({ content: `Failed to start move: ${e instanceof Error ? e.message : 'Unknown error'}`, key: 'batch-move' });
+      message.error({
+        content: `Failed to start move: ${e instanceof Error ? e.message : 'Unknown error'}`,
+        key: 'batch-move',
+      });
+    } finally {
+      setIsStartingQueue(false);
     }
   }, [
     config,
@@ -249,6 +264,7 @@ export default function BatchMoveModal({
     selectedDestination,
     selectedBucket,
     deleteOriginal,
+    isStartingQueue,
     message,
     onClose,
     onSuccess,
@@ -262,7 +278,11 @@ export default function BatchMoveModal({
         onCancel={onClose}
         onOk={handleMove}
         okText="Move"
-        okButtonProps={{ disabled: !selectedDestination || !selectedBucket }}
+        okButtonProps={{
+          disabled: !selectedDestination || !selectedBucket || isStartingQueue,
+          loading: isStartingQueue,
+        }}
+        cancelButtonProps={{ disabled: isStartingQueue }}
         width={480}
         centered
       >
@@ -273,7 +293,9 @@ export default function BatchMoveModal({
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div>
-              <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>Destination account</div>
+              <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+                Destination account
+              </div>
               <Select
                 value={selectedDestinationId ?? undefined}
                 onChange={(value) => setSelectedDestinationId(value)}
@@ -318,7 +340,9 @@ export default function BatchMoveModal({
                     gap: 8,
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+                  <div
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}
+                  >
                     <FolderOutlined style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
                     <span
                       style={{
@@ -349,7 +373,10 @@ export default function BatchMoveModal({
               )}
             </div>
 
-            <Checkbox checked={deleteOriginal} onChange={(event) => setDeleteOriginal(event.target.checked)}>
+            <Checkbox
+              checked={deleteOriginal}
+              onChange={(event) => setDeleteOriginal(event.target.checked)}
+            >
               Delete original after move
             </Checkbox>
           </div>
