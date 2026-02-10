@@ -618,6 +618,25 @@ pub async fn pause_all_moves(source_bucket: &str, source_account_id: &str) -> Db
     }
 }
 
+/// On app startup, pause all non-terminal moves so queues default to paused.
+pub async fn pause_stale_moves_on_startup() -> DbResult<i64> {
+    let conn = get_connection()?.lock().await;
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "UPDATE move_sessions SET status = 'paused', updated_at = ?1
+         WHERE status IN ('pending', 'downloading', 'uploading', 'finishing', 'deleting')",
+        turso::params![now],
+    )
+    .await?;
+
+    let mut rows = conn.query("SELECT changes()", turso::params![]).await?;
+    if let Some(row) = rows.next().await? {
+        Ok(row.get(0)?)
+    } else {
+        Ok(0)
+    }
+}
+
 /// Resume all paused moves
 pub async fn resume_all_moves(source_bucket: &str, source_account_id: &str) -> DbResult<i64> {
     let conn = get_connection()?.lock().await;

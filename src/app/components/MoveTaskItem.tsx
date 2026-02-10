@@ -55,7 +55,8 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
 
   // Upload at 100% = finishing (post-sync)
   const isUploadFinishing = task.status === 'uploading' && task.progress >= 100;
-  const isFinishing = task.status === 'finishing' || task.status === 'deleting' || isUploadFinishing;
+  const isFinishing =
+    task.status === 'finishing' || task.status === 'deleting' || isUploadFinishing;
 
   const getActions = () => {
     switch (task.status) {
@@ -77,7 +78,12 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
         return (
           <Space size={4}>
             <Tooltip title="Pause">
-              <Button type="text" size="small" icon={<PauseCircleOutlined />} onClick={handlePause} />
+              <Button
+                type="text"
+                size="small"
+                icon={<PauseCircleOutlined />}
+                onClick={handlePause}
+              />
             </Tooltip>
             <Tooltip title="Cancel">
               <Button
@@ -110,7 +116,12 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
         return (
           <Space size={4}>
             <Tooltip title="Pause">
-              <Button type="text" size="small" icon={<PauseCircleOutlined />} onClick={handlePause} />
+              <Button
+                type="text"
+                size="small"
+                icon={<PauseCircleOutlined />}
+                onClick={handlePause}
+              />
             </Tooltip>
             <Tooltip title="Cancel">
               <Button
@@ -234,8 +245,9 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
 
 function StatusIcon({ status, progress }: { status: MoveTask['status']; progress: number }) {
   // Uploading at 100% = finishing (waiting for post-sync)
-  const isFinishing = status === 'finishing' || status === 'deleting' || (status === 'uploading' && progress >= 100);
-  
+  const isFinishing =
+    status === 'finishing' || status === 'deleting' || (status === 'uploading' && progress >= 100);
+
   switch (status) {
     case 'success':
       return <CheckCircleOutlined style={{ color: '#52c41a', fontSize: 16 }} />;
@@ -269,7 +281,7 @@ function StatusIcon({ status, progress }: { status: MoveTask['status']; progress
 function TaskDescription({ task }: { task: MoveTask }) {
   // Upload at 100% = finishing (post-sync), not actively uploading
   const isUploadFinishing = task.status === 'uploading' && task.progress >= 100;
-  
+
   switch (task.status) {
     case 'downloading':
     case 'uploading': {
@@ -293,9 +305,7 @@ function TaskDescription({ task }: { task: MoveTask }) {
           />
           <Text type="secondary" style={{ fontSize: 11 }}>
             {phaseLabel}
-            {task.speed > 0 && (
-              <span style={{ marginLeft: 8 }}>{formatBytes(task.speed)}/s</span>
-            )}
+            {task.speed > 0 && <span style={{ marginLeft: 8 }}>{formatBytes(task.speed)}/s</span>}
             {task.fileSize > 0 && (
               <span style={{ marginLeft: 8 }}>
                 {formatBytes(task.transferredBytes)} / {formatBytes(task.fileSize)}

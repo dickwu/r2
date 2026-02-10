@@ -144,6 +144,15 @@ pub fn run() {
                 if let Err(e) = db::cleanup_old_sessions().await {
                     eprintln!("Failed to cleanup old sessions: {}", e);
                 }
+
+                // Default queue behavior on restart: pause all in-progress download/move tasks.
+                if let Err(e) = db::downloads::pause_stale_downloads_on_startup().await {
+                    eprintln!("Failed to pause stale download tasks on startup: {}", e);
+                }
+
+                if let Err(e) = db::move_sessions::pause_stale_moves_on_startup().await {
+                    eprintln!("Failed to pause stale move tasks on startup: {}", e);
+                }
             });
 
             // Setup custom application menu (macOS menu bar)

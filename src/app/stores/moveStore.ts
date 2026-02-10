@@ -160,8 +160,7 @@ export const useMoveStore = create<MoveStore>((set, get) => ({
 
       // Determine if task just started (was pending, now active) - reset progress
       const taskJustStarted =
-        existing?.status === 'pending' &&
-        (dbStatus === 'downloading' || dbStatus === 'uploading');
+        existing?.status === 'pending' && (dbStatus === 'downloading' || dbStatus === 'uploading');
 
       // Use existing progress only if task was already active (not just started)
       const progress = taskJustStarted
@@ -230,7 +229,9 @@ export const useMoveStore = create<MoveStore>((set, get) => ({
               progressThrottleMap.set(t.id, Date.now());
               // Only use Math.max if task is already active, not if just starting
               const isActive = t.status === 'downloading' || t.status === 'uploading';
-              const newProgress = isActive ? Math.max(t.progress, pendingEvent.percent) : pendingEvent.percent;
+              const newProgress = isActive
+                ? Math.max(t.progress, pendingEvent.percent)
+                : pendingEvent.percent;
               const newTransferred = isActive
                 ? Math.max(t.transferredBytes, pendingEvent.transferred_bytes)
                 : pendingEvent.transferred_bytes;
@@ -243,7 +244,10 @@ export const useMoveStore = create<MoveStore>((set, get) => ({
                 speed: pendingEvent.speed,
                 phase: pendingEvent.phase || t.phase,
                 // Update status to match phase if task was pending
-                status: t.status === 'pending' && pendingEvent.phase ? mapStatus(pendingEvent.phase) : t.status,
+                status:
+                  t.status === 'pending' && pendingEvent.phase
+                    ? mapStatus(pendingEvent.phase)
+                    : t.status,
               };
             }),
           }));
@@ -348,9 +352,7 @@ export const selectUploadingCount = (state: MoveStore) =>
 // Active transfers - tasks actively downloading/uploading (not at 100%, not post-sync)
 export const selectActiveCount = (state: MoveStore) =>
   state.tasks.filter(
-    (t) =>
-      t.status === 'downloading' ||
-      (t.status === 'uploading' && t.progress < 100) // Uploading but not finished
+    (t) => t.status === 'downloading' || (t.status === 'uploading' && t.progress < 100) // Uploading but not finished
   ).length;
 
 // Tasks in finishing phase (uploading at 100% or deleting) - shouldn't block new tasks
@@ -369,15 +371,14 @@ export const selectPausedCount = (state: MoveStore) =>
   state.tasks.filter((t) => t.status === 'paused').length;
 
 export const selectFinishedCount = (state: MoveStore) =>
-  state.tasks.filter((t) => t.status === 'success' || t.status === 'error' || t.status === 'cancelled')
-    .length;
+  state.tasks.filter(
+    (t) => t.status === 'success' || t.status === 'error' || t.status === 'cancelled'
+  ).length;
 
 // Has active transfers (downloading or uploading below 100%) - used for display
 export const selectHasActiveMoves = (state: MoveStore) =>
   state.tasks.some(
-    (t) =>
-      t.status === 'downloading' ||
-      (t.status === 'uploading' && t.progress < 100) // Uploading but not finished
+    (t) => t.status === 'downloading' || (t.status === 'uploading' && t.progress < 100) // Uploading but not finished
   );
 
 // Has any in-progress work (including finishing/deleting) - used for safety checks like "Clear All"
@@ -416,14 +417,17 @@ export async function setupGlobalMoveListeners(): Promise<void> {
     globalUnlisteners.push(unlistenDeleted);
 
     // Reload all active tasks on batch operations (global, not filtered by account)
-    const unlistenBatch = await listen<MoveBatchOperationEvent>('move-batch-operation', async () => {
-      try {
-        const sessions = await invoke<MoveSession[]>('get_all_active_move_tasks');
-        useMoveStore.getState().loadFromDatabase(sessions);
-      } catch (e) {
-        console.error('Failed to reload move tasks after batch operation:', e);
+    const unlistenBatch = await listen<MoveBatchOperationEvent>(
+      'move-batch-operation',
+      async () => {
+        try {
+          const sessions = await invoke<MoveSession[]>('get_all_active_move_tasks');
+          useMoveStore.getState().loadFromDatabase(sessions);
+        } catch (e) {
+          console.error('Failed to reload move tasks after batch operation:', e);
+        }
       }
-    });
+    );
     globalUnlisteners.push(unlistenBatch);
   } catch (e) {
     console.error('Failed to setup global move listeners:', e);

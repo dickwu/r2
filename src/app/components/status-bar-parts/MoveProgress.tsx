@@ -84,8 +84,7 @@ export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProg
   const activeTransferTasks = useMemo(
     () =>
       tasks.filter(
-        (t) =>
-          t.status === 'downloading' || (t.status === 'uploading' && t.progress < 100)
+        (t) => t.status === 'downloading' || (t.status === 'uploading' && t.progress < 100)
       ),
     [tasks]
   );
