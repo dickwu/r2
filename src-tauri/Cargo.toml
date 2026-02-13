@@ -43,6 +43,6 @@ log = "0.4"
 tauri-plugin-video-thumbnail = { git = "https://github.com/dickwu/tauri-plugin-video-thumbnail" }
 # AWS S3 SDK for R2 operations
 aws-config = "1.8"
-aws-sdk-s3 = { version = "1.122.0", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.123.0", features = ["behavior-version-latest"] }
 aws-credential-types = "1.2"
 futures-util = "0.3"
