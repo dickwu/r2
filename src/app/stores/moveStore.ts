@@ -95,6 +95,8 @@ interface MoveStore {
 
   setModalOpen: (open: boolean) => void;
   loadFromDatabase: (sessions: MoveSession[]) => void;
+  clearAllTasks: () => void;
+  clearFinishedTasks: () => void;
   handleProgressEvent: (event: MoveProgressEvent) => void;
   handleStatusChanged: (event: MoveStatusChangedEvent) => void;
   handleTaskDeleted: (event: MoveTaskDeletedEvent) => void;
@@ -141,6 +143,10 @@ function derivePhase(status: MoveStatus, existingPhase?: string): string {
     default:
       return existingPhase || 'pending';
   }
+}
+
+function isFinishedStatus(status: MoveStatus): boolean {
+  return status === 'success' || status === 'error' || status === 'cancelled';
 }
 
 export const useMoveStore = create<MoveStore>((set, get) => ({
@@ -190,6 +196,16 @@ export const useMoveStore = create<MoveStore>((set, get) => ({
       };
     });
     set({ tasks });
+  },
+
+  clearAllTasks: () => {
+    set({ tasks: [] });
+  },
+
+  clearFinishedTasks: () => {
+    set((state) => ({
+      tasks: state.tasks.filter((task) => !isFinishedStatus(task.status)),
+    }));
   },
 
   handleProgressEvent: (event) => {
@@ -419,7 +435,31 @@ export async function setupGlobalMoveListeners(): Promise<void> {
     // Reload all active tasks on batch operations (global, not filtered by account)
     const unlistenBatch = await listen<MoveBatchOperationEvent>(
       'move-batch-operation',
-      async () => {
+      async (event) => {
+        const payload = event.payload;
+        if (payload.operation === 'clear_all') {
+          useMoveStore.setState((state) => ({
+            tasks: state.tasks.filter(
+              (task) =>
+                !(
+                  task.sourceBucket === payload.source_bucket &&
+                  task.sourceAccountId === payload.source_account_id
+                )
+            ),
+          }));
+          return;
+        } else if (payload.operation === 'clear_finished') {
+          useMoveStore.setState((state) => ({
+            tasks: state.tasks.filter((task) => {
+              const isSourceMatch =
+                task.sourceBucket === payload.source_bucket &&
+                task.sourceAccountId === payload.source_account_id;
+              return !(isSourceMatch && isFinishedStatus(task.status));
+            }),
+          }));
+          return;
+        }
+
         try {
           const sessions = await invoke<MoveSession[]>('get_all_active_move_tasks');
           useMoveStore.getState().loadFromDatabase(sessions);

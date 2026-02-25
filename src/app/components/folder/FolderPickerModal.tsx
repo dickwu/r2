@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Modal } from 'antd';
 import FolderTreePicker from '@/app/components/folder/FolderTreePicker';
 
@@ -20,13 +20,6 @@ export default function FolderPickerModal({
   title = 'Select Folder',
 }: FolderPickerModalProps) {
   const [tempPath, setTempPath] = useState(selectedPath);
-
-  // Sync temp path when modal opens or selectedPath changes
-  useEffect(() => {
-    if (open) {
-      setTempPath(selectedPath);
-    }
-  }, [open, selectedPath]);
 
   const handleOk = () => {
     onConfirm(tempPath);

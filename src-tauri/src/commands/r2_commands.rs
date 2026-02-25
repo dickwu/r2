@@ -90,9 +90,11 @@ pub async fn list_all_r2_objects(
         let _ = app_clone.emit("sync-progress", count);
     });
 
-    r2::list_all_objects_recursive(&r2_config, Some(progress_callback))
+    let result = r2::list_all_objects_recursive(&r2_config, Some(progress_callback))
         .await
-        .map_err(|e| format!("Failed to list all objects: {}", e))
+        .map_err(|e| format!("Failed to list all objects: {}", e))?;
+
+    Ok(result.objects)
 }
 
 // ============ Sync Command ============
@@ -128,24 +130,25 @@ pub async fn sync_bucket(
         let _ = app_clone.emit("sync-progress", count);
     });
 
-    let objects = r2::list_all_objects_recursive(&r2_config, Some(progress_callback))
+    let list_result = r2::list_all_objects_recursive(&r2_config, Some(progress_callback))
         .await
         .map_err(|e| format!("Failed to fetch objects: {}", e))?;
 
-    let count = objects.len() as i32;
+    let count = list_result.objects.len() as i32;
 
     // Phase 2: Store files in SQLite cache
     let _ = app.emit("sync-phase", "storing");
 
     let now = chrono::Utc::now().timestamp();
-    let cached_files: Vec<CachedFile> = objects
+    let cached_files: Vec<CachedFile> = list_result
+        .objects
         .into_iter()
         .map(|obj| CachedFile {
             bucket: bucket.clone(),
             account_id: account_id.clone(),
             key: obj.key,
-            parent_path: String::new(), // Computed in store_all_files from key
-            name: String::new(),        // Computed in store_all_files from key
+            parent_path: String::new(),
+            name: String::new(),
             size: obj.size,
             last_modified: obj.last_modified,
             synced_at: now,
@@ -156,7 +159,7 @@ pub async fn sync_bucket(
         .await
         .map_err(|e| format!("Failed to store files: {}", e))?;
 
-    // Phase 3: Build directory tree
+    // Phase 3: Build directory tree (including empty folder markers)
     let _ = app.emit("sync-phase", "indexing");
 
     let app_clone = app.clone();
@@ -164,9 +167,15 @@ pub async fn sync_bucket(
         let _ = app_clone.emit("indexing-progress", IndexingProgress { current, total });
     };
 
-    db::build_directory_tree(&bucket, &account_id, &cached_files, Some(indexing_callback))
-        .await
-        .map_err(|e| format!("Failed to build directory tree: {}", e))?;
+    db::build_directory_tree(
+        &bucket,
+        &account_id,
+        &cached_files,
+        &list_result.folder_keys,
+        Some(indexing_callback),
+    )
+    .await
+    .map_err(|e| format!("Failed to build directory tree: {}", e))?;
 
     // Phase 4: Complete
     let _ = app.emit("sync-phase", "complete");

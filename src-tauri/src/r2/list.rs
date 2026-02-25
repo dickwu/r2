@@ -1,6 +1,9 @@
 //! R2 list operations (buckets, objects)
 
-use super::types::{create_r2_client, ListObjectsResult, R2Bucket, R2Config, R2Object, R2Result};
+use super::types::{
+    create_r2_client, ListObjectsResult, R2Bucket, R2Config, R2Object, R2Result,
+    RecursiveListResult,
+};
 
 /// List all buckets in the R2 account
 pub async fn list_buckets(config: &R2Config) -> R2Result<Vec<R2Bucket>> {
@@ -92,9 +95,10 @@ pub async fn list_objects(
 pub async fn list_all_objects_recursive(
     config: &R2Config,
     progress_callback: Option<Box<dyn Fn(usize) + Send + Sync>>,
-) -> R2Result<Vec<R2Object>> {
+) -> R2Result<RecursiveListResult> {
     let client = create_r2_client(config).await?;
     let mut all_objects: Vec<R2Object> = Vec::new();
+    let mut all_folder_keys: Vec<String> = Vec::new();
     let mut continuation_token: Option<String> = None;
 
     loop {
@@ -111,29 +115,25 @@ pub async fn list_all_objects_recursive(
         let is_truncated = response.is_truncated().unwrap_or(false);
         let next_token = response.next_continuation_token().map(|s| s.to_string());
 
-        // Process current page objects and accumulate.
-        let objects: Vec<R2Object> = response
-            .contents()
-            .iter()
-            .filter_map(|obj| {
-                let key = obj.key()?.to_string();
-                // Skip directory markers
+        for obj in response.contents() {
+            if let Some(key) = obj.key() {
+                let key = key.to_string();
                 if key.ends_with('/') {
-                    return None;
+                    all_folder_keys.push(key);
+                } else {
+                    all_objects.push(R2Object {
+                        key,
+                        size: obj.size().unwrap_or(0),
+                        last_modified: obj
+                            .last_modified()
+                            .map(|dt| dt.to_string())
+                            .unwrap_or_default(),
+                        etag: obj.e_tag().unwrap_or_default().to_string(),
+                    });
                 }
-                Some(R2Object {
-                    key,
-                    size: obj.size().unwrap_or(0),
-                    last_modified: obj
-                        .last_modified()
-                        .map(|dt| dt.to_string())
-                        .unwrap_or_default(),
-                    etag: obj.e_tag().unwrap_or_default().to_string(),
-                })
-            })
-            .collect();
+            }
+        }
 
-        all_objects.extend(objects);
         if let Some(ref cb) = progress_callback {
             cb(all_objects.len());
         }
@@ -145,7 +145,10 @@ pub async fn list_all_objects_recursive(
         continuation_token = next_token;
     }
 
-    Ok(all_objects)
+    Ok(RecursiveListResult {
+        objects: all_objects,
+        folder_keys: all_folder_keys,
+    })
 }
 
 /// List all objects under a prefix with delimiter (for folder listing)

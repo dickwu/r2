@@ -1,47 +1,35 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Modal, Input, Form, App, Button } from 'antd';
 import { FolderOutlined, SwapOutlined } from '@ant-design/icons';
 import FolderPickerModal from '@/app/components/folder/FolderPickerModal';
+import { renameObject, StorageConfig } from '@/app/lib/r2cache';
+import type { FileItem } from '@/app/hooks/useR2Files';
 
 export interface FileRenameModalProps {
   open: boolean;
   onClose: () => void;
-  fileName: string;
-  filePath: string; // Full key/path
-  onRename: (newPath: string) => Promise<void>;
+  file: FileItem;
+  config: StorageConfig;
+  onSuccess?: () => void;
 }
 
 export default function FileRenameModal({
   open,
   onClose,
-  fileName,
-  filePath,
-  onRename,
+  file,
+  config,
+  onSuccess,
 }: FileRenameModalProps) {
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
-  const [directory, setDirectory] = useState('');
   const { message } = App.useApp();
 
-  // Extract current directory and filename
-  const currentDir = filePath.substring(0, filePath.lastIndexOf('/') + 1);
-  const currentName = fileName;
-
-  // Directory path without trailing slash for display
+  const currentDir = file.key.substring(0, file.key.lastIndexOf('/') + 1);
   const currentDirDisplay = currentDir ? currentDir.replace(/\/$/, '') : '';
-
-  // Reset form when modal opens
-  useEffect(() => {
-    if (open) {
-      form.setFieldsValue({
-        filename: currentName,
-      });
-      setDirectory(currentDirDisplay);
-    }
-  }, [open, currentDirDisplay, currentName, form]);
+  const [directory, setDirectory] = useState(currentDirDisplay);
 
   const handleOk = async () => {
     try {
@@ -54,26 +42,23 @@ export default function FileRenameModal({
         return;
       }
 
-      // Auto-add trailing slash if directory is not empty and doesn't end with /
       if (dir && !dir.endsWith('/')) {
         dir += '/';
       }
 
-      // Build new path
       const newPath = dir ? `${dir}${filename}` : filename;
 
-      // Check if path changed
-      if (newPath === filePath) {
+      if (newPath === file.key) {
         message.info('No changes made');
         onClose();
         return;
       }
 
       setLoading(true);
-      await onRename(newPath);
+      await renameObject(config, file.key, newPath);
       message.success('File renamed/moved successfully');
+      onSuccess?.();
       onClose();
-      form.resetFields();
     } catch (error) {
       if (error instanceof Error) {
         message.error(`Failed to rename/move: ${error.message}`);
@@ -85,13 +70,8 @@ export default function FileRenameModal({
 
   const handleCancel = () => {
     if (!loading) {
-      form.resetFields();
       onClose();
     }
-  };
-
-  const handleFolderSelect = (path: string) => {
-    setDirectory(path);
   };
 
   return (
@@ -107,8 +87,7 @@ export default function FileRenameModal({
         width={480}
         centered
       >
-        <Form form={form} layout="vertical">
-          {/* File Name - at the top */}
+        <Form form={form} layout="vertical" initialValues={{ filename: file.name }}>
           <Form.Item
             label="File Name"
             name="filename"
@@ -166,14 +145,15 @@ export default function FileRenameModal({
         </Form>
       </Modal>
 
-      {/* Folder Picker Modal */}
-      <FolderPickerModal
-        open={folderPickerOpen}
-        onClose={() => setFolderPickerOpen(false)}
-        selectedPath={directory}
-        onConfirm={handleFolderSelect}
-        title="Move to Folder"
-      />
+      {folderPickerOpen && (
+        <FolderPickerModal
+          open={true}
+          onClose={() => setFolderPickerOpen(false)}
+          selectedPath={directory}
+          onConfirm={(path: string) => setDirectory(path)}
+          title="Move to Folder"
+        />
+      )}
     </>
   );
 }

@@ -36,6 +36,12 @@ pub struct ListObjectsResult {
     pub continuation_token: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RecursiveListResult {
+    pub objects: Vec<MinioObject>,
+    pub folder_keys: Vec<String>,
+}
+
 fn build_endpoint_url(config: &MinioConfig) -> String {
     format!("{}://{}", config.endpoint_scheme, config.endpoint_host)
 }

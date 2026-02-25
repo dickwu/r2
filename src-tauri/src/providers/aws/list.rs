@@ -1,5 +1,6 @@
 use super::types::{
     create_aws_client, AwsBucket, AwsConfig, AwsObject, AwsResult, ListObjectsResult,
+    RecursiveListResult,
 };
 
 pub async fn list_buckets(config: &AwsConfig) -> AwsResult<Vec<AwsBucket>> {
@@ -88,9 +89,10 @@ pub async fn list_objects(
 pub async fn list_all_objects_recursive(
     config: &AwsConfig,
     progress_callback: Option<Box<dyn Fn(usize) + Send + Sync>>,
-) -> AwsResult<Vec<AwsObject>> {
+) -> AwsResult<RecursiveListResult> {
     let client = create_aws_client(config).await?;
     let mut all_objects: Vec<AwsObject> = Vec::new();
+    let mut all_folder_keys: Vec<String> = Vec::new();
 
     let mut continuation_token: Option<String> = None;
 
@@ -108,27 +110,25 @@ pub async fn list_all_objects_recursive(
         let is_truncated = response.is_truncated().unwrap_or(false);
         let next_token = response.next_continuation_token().map(|s| s.to_string());
 
-        let objects: Vec<AwsObject> = response
-            .contents()
-            .iter()
-            .filter_map(|obj| {
-                let key = obj.key()?.to_string();
+        for obj in response.contents() {
+            if let Some(key) = obj.key() {
+                let key = key.to_string();
                 if key.ends_with('/') {
-                    return None;
+                    all_folder_keys.push(key);
+                } else {
+                    all_objects.push(AwsObject {
+                        key,
+                        size: obj.size().unwrap_or(0),
+                        last_modified: obj
+                            .last_modified()
+                            .map(|dt| dt.to_string())
+                            .unwrap_or_default(),
+                        etag: obj.e_tag().unwrap_or_default().to_string(),
+                    });
                 }
-                Some(AwsObject {
-                    key,
-                    size: obj.size().unwrap_or(0),
-                    last_modified: obj
-                        .last_modified()
-                        .map(|dt| dt.to_string())
-                        .unwrap_or_default(),
-                    etag: obj.e_tag().unwrap_or_default().to_string(),
-                })
-            })
-            .collect();
+            }
+        }
 
-        all_objects.extend(objects);
         if let Some(ref cb) = progress_callback {
             cb(all_objects.len());
         }
@@ -140,7 +140,10 @@ pub async fn list_all_objects_recursive(
         continuation_token = next_token;
     }
 
-    Ok(all_objects)
+    Ok(RecursiveListResult {
+        objects: all_objects,
+        folder_keys: all_folder_keys,
+    })
 }
 
 pub async fn list_folder_objects(

@@ -93,13 +93,55 @@ impl DirectoryTreeBuilder {
     pub async fn build(
         mut self,
         files: &[CachedFile],
+        folder_keys: &[String],
         mut progress: Option<ProgressCallback>,
     ) -> Vec<ComputedNode> {
-        // Phase 1: Extract directory structure
+        // Phase 1: Extract directory structure from files
         self.extract_directories(files).await;
 
-        // Phase 2: Compute aggregates bottom-up
+        // Phase 2: Register empty folders (S3 folder marker objects)
+        self.register_empty_folders(folder_keys);
+
+        // Phase 3: Compute aggregates bottom-up
         self.compute_aggregates(progress.as_mut()).await
+    }
+
+    /// Register folders that exist as S3 folder marker objects (keys ending with "/")
+    /// but may not contain any files. Ensures empty folders appear in the tree.
+    fn register_empty_folders(&mut self, folder_keys: &[String]) {
+        for key in folder_keys {
+            let key_trimmed = key.trim_end_matches('/');
+            let parts: Vec<&str> = key_trimmed.split('/').collect();
+
+            for i in 0..parts.len() {
+                let current_path = format!("{}/", parts[0..=i].join("/"));
+                let parent_path = if i > 0 {
+                    format!("{}/", parts[0..i].join("/"))
+                } else {
+                    String::new()
+                };
+
+                self.dir_map
+                    .entry(current_path.clone())
+                    .or_insert_with(|| DirNode {
+                        direct_files: Vec::new(),
+                        subdirs: BTreeSet::new(),
+                    });
+
+                self.dir_map
+                    .entry(parent_path.clone())
+                    .or_insert_with(|| DirNode {
+                        direct_files: Vec::new(),
+                        subdirs: BTreeSet::new(),
+                    });
+
+                self.dir_map
+                    .get_mut(&parent_path)
+                    .unwrap()
+                    .subdirs
+                    .insert(current_path);
+            }
+        }
     }
 
     /// Extract directory structure from file paths
@@ -368,6 +410,7 @@ pub async fn build_directory_tree<F>(
     bucket: &str,
     account_id: &str,
     files: &[CachedFile],
+    folder_keys: &[String],
     progress_callback: Option<F>,
 ) -> DbResult<()>
 where
@@ -377,7 +420,7 @@ where
         progress_callback.map(|f| Box::new(f) as ProgressCallback);
 
     let builder = DirectoryTreeBuilder::new();
-    let nodes = builder.build(files, progress).await;
+    let nodes = builder.build(files, folder_keys, progress).await;
     DirectoryTreeBuilder::store(bucket, account_id, &nodes).await
 }
 

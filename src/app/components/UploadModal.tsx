@@ -324,7 +324,7 @@ export default function UploadModal({
         width={520}
         centered
         destroyOnHidden
-        maskClosable={!hasActiveUploads}
+        mask={{ closable: !hasActiveUploads }}
         closable={!hasActiveUploads}
       >
         <div style={{ marginBottom: 16 }}>
@@ -447,14 +447,15 @@ export default function UploadModal({
         <UploadTaskList />
       </Modal>
 
-      {/* Folder Picker Modal */}
-      <FolderPickerModal
-        open={folderPickerOpen}
-        onClose={() => setFolderPickerOpen(false)}
-        selectedPath={uploadPath}
-        onConfirm={setUploadPath}
-        title="Select Upload Folder"
-      />
+      {folderPickerOpen && (
+        <FolderPickerModal
+          open={true}
+          onClose={() => setFolderPickerOpen(false)}
+          selectedPath={uploadPath}
+          onConfirm={setUploadPath}
+          title="Select Upload Folder"
+        />
+      )}
     </>
   );
 }

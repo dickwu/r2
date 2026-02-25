@@ -162,7 +162,7 @@ pub async fn build_directory_tree(app: tauri::AppHandle) -> Result<(), String> {
         let _ = app_clone.emit("indexing-progress", IndexingProgress { current, total });
     };
 
-    db::build_directory_tree(&bucket, &account_id, &files, Some(progress_callback))
+    db::build_directory_tree(&bucket, &account_id, &files, &[], Some(progress_callback))
         .await
         .map_err(|e| format!("Failed to build directory tree: {}", e))?;
 

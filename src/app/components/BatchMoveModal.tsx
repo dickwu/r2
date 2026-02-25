@@ -56,19 +56,7 @@ export default function BatchMoveModal({
 
   const selectedCount = selectedKeys.size;
 
-  // Reset state when modal opens/closes
   useEffect(() => {
-    if (!open) {
-      setTargetDirectory('');
-      setDeleteOriginal(true);
-      setSelectedDestinationId(null);
-      setSelectedBucket('');
-      setIsStartingQueue(false);
-    }
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
     loadAccounts().catch((e) => {
       console.error('Failed to load accounts:', e);
     });
@@ -383,14 +371,15 @@ export default function BatchMoveModal({
         </div>
       </Modal>
 
-      {/* Folder Picker Modal */}
-      <FolderPickerModal
-        open={folderPickerOpen}
-        onClose={() => setFolderPickerOpen(false)}
-        selectedPath={targetDirectory}
-        onConfirm={setTargetDirectory}
-        title="Select Target Folder"
-      />
+      {folderPickerOpen && (
+        <FolderPickerModal
+          open={true}
+          onClose={() => setFolderPickerOpen(false)}
+          selectedPath={targetDirectory}
+          onConfirm={setTargetDirectory}
+          title="Select Target Folder"
+        />
+      )}
     </>
   );
 }

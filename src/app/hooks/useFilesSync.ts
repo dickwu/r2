@@ -84,6 +84,13 @@ export function useFilesSync(config: StorageConfig | null) {
       useSyncStore.getState().setTotalFiles(result.count);
       useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, result.timestamp);
 
+      // Invalidate folder-contents queries so useR2Files refetches from updated cache.
+      // This is necessary because the enabled transition (lastSyncTime null→non-null)
+      // depends on React render timing and may not reliably trigger a refetch.
+      await queryClient.invalidateQueries({
+        queryKey: ['folder-contents', config.provider, config.accountId, config.bucket],
+      });
+
       return {
         count: result.count,
         timestamp: result.timestamp,
@@ -119,7 +126,14 @@ export function useFilesSync(config: StorageConfig | null) {
     await queryClient.invalidateQueries({
       queryKey: ['storage-all-files', config?.provider, config?.accountId, config?.bucket],
     });
-  }, [queryClient, config?.accountId, config?.bucket, clearSizes, query.isFetching]);
+  }, [
+    queryClient,
+    config?.provider,
+    config?.accountId,
+    config?.bucket,
+    clearSizes,
+    query.isFetching,
+  ]);
 
   return {
     isSyncing: query.isFetching,

@@ -39,7 +39,6 @@ import { useR2Files, FileItem } from '@/app/hooks/useR2Files';
 import { useFilesSync } from '@/app/hooks/useFilesSync';
 import {
   deleteObject,
-  renameObject,
   searchFiles,
   listAllObjectsUnderPrefix,
   StorageConfig,
@@ -610,14 +609,14 @@ export default function Home() {
     [config]
   );
 
-  const handleRefresh = useCallback(() => {
-    Promise.all([refresh(), refreshSync()])
-      .then(() => {
-        message.success('Files refreshed');
-      })
-      .catch(() => {
-        message.error('Failed to refresh files');
-      });
+  const handleRefresh = useCallback(async () => {
+    try {
+      await refreshSync();
+      await refresh();
+      message.success('Files refreshed');
+    } catch {
+      message.error('Failed to refresh files');
+    }
   }, [refresh, refreshSync, message]);
 
   const handleDelete = useCallback(
@@ -626,8 +625,8 @@ export default function Home() {
       try {
         await deleteObject(config, item.key);
         message.success(`Deleted "${item.name}"`);
-        // Refresh file list after deletion
-        await Promise.all([refresh(), refreshSync()]);
+        await refreshSync();
+        await refresh();
       } catch (e) {
         console.error('Delete error:', e);
         message.error(`Failed to delete: ${e instanceof Error ? e.message : 'Unknown error'}`);
@@ -924,22 +923,12 @@ export default function Home() {
     startDownloadQueue,
   ]);
 
-  const handleRename = useCallback(
-    async (newPath: string) => {
-      if (!renameFile || !config || !isConfigReady) return;
-
-      await renameObject(config, renameFile.key, newPath);
-
-      // Close preview modal if the renamed file is currently being previewed
-      if (previewFile?.key === renameFile.key) {
-        setPreviewFile(null);
-      }
-
-      // Refresh file list
-      await Promise.all([refresh(), refreshSync()]);
-    },
-    [renameFile, config, isConfigReady, previewFile, refresh, refreshSync]
-  );
+  const handleRenameSuccess = useCallback(() => {
+    if (previewFile?.key === renameFile?.key) {
+      setPreviewFile(null);
+    }
+    Promise.all([refresh(), refreshSync()]);
+  }, [renameFile, previewFile, refresh, refreshSync]);
 
   const handleFolderRenameSuccess = useCallback(async () => {
     await Promise.all([refresh(), refreshSync()]);
@@ -1151,80 +1140,92 @@ export default function Home() {
             storageConfig={config}
           />
 
-          <ConfigModal
-            open={configModalOpen}
-            onClose={(force) => {
-              if (force || currentConfig || hasAccounts()) {
-                setConfigModalOpen(false);
-              }
-            }}
-            mode={configModalMode}
-            editAccount={editAccount}
-            editToken={editToken}
-            parentAccountId={parentAccountId}
-          />
+          {configModalOpen && (
+            <ConfigModal
+              open={true}
+              onClose={(force) => {
+                if (force || currentConfig || hasAccounts()) {
+                  setConfigModalOpen(false);
+                }
+              }}
+              mode={configModalMode}
+              editAccount={editAccount}
+              editToken={editToken}
+              parentAccountId={parentAccountId}
+            />
+          )}
 
-          <UploadModal
-            open={uploadModalOpen}
-            onClose={() => setUploadModalOpen(false)}
-            currentPath={currentPath}
-            config={config}
-            dropQueue={dropQueue}
-            onDropHandled={handleDropHandled}
-            onUploadComplete={() => {
-              Promise.all([refresh(), refreshSync()]);
-            }}
-            onCredentialsUpdate={() => {
-              // Credentials are now managed through the store
-              initialize();
-            }}
-          />
+          {uploadModalOpen && (
+            <UploadModal
+              open={true}
+              onClose={() => setUploadModalOpen(false)}
+              currentPath={currentPath}
+              config={config}
+              dropQueue={dropQueue}
+              onDropHandled={handleDropHandled}
+              onUploadComplete={() => {
+                Promise.all([refresh(), refreshSync()]);
+              }}
+              onCredentialsUpdate={() => {
+                initialize();
+              }}
+            />
+          )}
 
-          <FilePreviewModal
-            open={!!previewFile}
-            onClose={() => setPreviewFile(null)}
-            file={previewFile}
-            config={config}
-            onCredentialsUpdate={() => {
-              // Credentials are now managed through the store
-              initialize();
-            }}
-          />
+          {previewFile && (
+            <FilePreviewModal
+              open={true}
+              onClose={() => setPreviewFile(null)}
+              file={previewFile}
+              config={config}
+              onCredentialsUpdate={() => {
+                initialize();
+              }}
+            />
+          )}
 
-          <FileRenameModal
-            open={!!renameFile}
-            onClose={() => setRenameFile(null)}
-            fileName={renameFile?.name || ''}
-            filePath={renameFile?.key || ''}
-            onRename={handleRename}
-          />
+          {renameFile && config && (
+            <FileRenameModal
+              open={true}
+              onClose={() => setRenameFile(null)}
+              file={renameFile}
+              config={config}
+              onSuccess={handleRenameSuccess}
+            />
+          )}
 
-          <FolderRenameModal
-            open={!!renameFolder}
-            onClose={() => setRenameFolder(null)}
-            folder={renameFolder}
-            folderMetadata={renameFolder ? metadata[renameFolder.key] : undefined}
-            config={config}
-            onSuccess={handleFolderRenameSuccess}
-          />
+          {renameFolder && (
+            <FolderRenameModal
+              open={true}
+              onClose={() => setRenameFolder(null)}
+              folder={renameFolder}
+              folderMetadata={metadata[renameFolder.key]}
+              config={config}
+              onSuccess={handleFolderRenameSuccess}
+            />
+          )}
 
-          <BatchDeleteModal
-            open={deleteModalOpen}
-            selectedKeys={keysToDelete}
-            config={config}
-            onClose={closeDeleteModal}
-            onSuccess={handleBatchDeleteSuccess}
-            onDeletingChange={setDeleting}
-          />
+          {deleteModalOpen && (
+            <BatchDeleteModal
+              open={true}
+              selectedKeys={keysToDelete}
+              config={config}
+              onClose={closeDeleteModal}
+              onSuccess={handleBatchDeleteSuccess}
+              onDeletingChange={setDeleting}
+            />
+          )}
 
-          <BatchMoveModal
-            open={moveModalOpen}
-            selectedKeys={keysToMove}
-            config={config}
-            onClose={closeMoveModal}
-            onSuccess={handleBatchMoveSuccess}
-            onMovingChange={setMoving}
-          />
+          {moveModalOpen && (
+            <BatchMoveModal
+              open={true}
+              selectedKeys={keysToMove}
+              config={config}
+              onClose={closeMoveModal}
+              onSuccess={handleBatchMoveSuccess}
+              onMovingChange={setMoving}
+            />
+          )}
 
           <MoveTaskModal storageConfig={config} />
           <DownloadTaskModal storageConfig={config} />

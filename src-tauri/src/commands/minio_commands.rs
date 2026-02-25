@@ -116,9 +116,11 @@ pub async fn list_all_minio_objects(
         let _ = app_clone.emit("sync-progress", count);
     });
 
-    minio::list_all_objects_recursive(&minio_config, Some(progress_callback))
+    let result = minio::list_all_objects_recursive(&minio_config, Some(progress_callback))
         .await
-        .map_err(|e| format!("Failed to list all objects: {}", e))
+        .map_err(|e| format!("Failed to list all objects: {}", e))?;
+
+    Ok(result.objects)
 }
 
 #[tauri::command]
@@ -137,16 +139,17 @@ pub async fn sync_minio_bucket(
         let _ = app_clone.emit("sync-progress", count);
     });
 
-    let objects = minio::list_all_objects_recursive(&minio_config, Some(progress_callback))
+    let list_result = minio::list_all_objects_recursive(&minio_config, Some(progress_callback))
         .await
         .map_err(|e| format!("Failed to fetch objects: {}", e))?;
 
-    let count = objects.len() as i32;
+    let count = list_result.objects.len() as i32;
 
     let _ = app.emit("sync-phase", "storing");
 
     let now = chrono::Utc::now().timestamp();
-    let cached_files: Vec<CachedFile> = objects
+    let cached_files: Vec<CachedFile> = list_result
+        .objects
         .into_iter()
         .map(|obj| CachedFile {
             bucket: bucket.clone(),
@@ -171,9 +174,15 @@ pub async fn sync_minio_bucket(
         let _ = app_clone.emit("indexing-progress", IndexingProgress { current, total });
     };
 
-    db::build_directory_tree(&bucket, &account_id, &cached_files, Some(indexing_callback))
-        .await
-        .map_err(|e| format!("Failed to build directory tree: {}", e))?;
+    db::build_directory_tree(
+        &bucket,
+        &account_id,
+        &cached_files,
+        &list_result.folder_keys,
+        Some(indexing_callback),
+    )
+    .await
+    .map_err(|e| format!("Failed to build directory tree: {}", e))?;
 
     let _ = app.emit("sync-phase", "complete");
 

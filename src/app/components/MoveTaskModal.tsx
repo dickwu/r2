@@ -204,27 +204,81 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
 
   const reloadTasksFromDatabase = useCallback(async () => {
     try {
-      // Always load global active tasks because status bar progress is global.
-      // Then merge current source history (includes finished/error/cancelled) when available.
+      // Load global active tasks and merge source history for all known source queues.
       const activeSessions = await invoke<MoveSession[]>('get_all_active_move_tasks');
+      const currentTasksSnapshot = useMoveStore.getState().tasks;
+      const targets = new Map<string, { sourceBucket: string; sourceAccountId: string }>();
 
-      let mergedSessions = activeSessions;
       if (storageConfig?.bucket && storageConfig?.accountId) {
-        const sourceSessions = await invoke<MoveSession[]>('get_move_tasks', {
+        targets.set(`${storageConfig.accountId}:${storageConfig.bucket}`, {
           sourceBucket: storageConfig.bucket,
           sourceAccountId: storageConfig.accountId,
         });
-
-        const byId = new Map<string, MoveSession>();
-        for (const session of activeSessions) {
-          byId.set(session.id, session);
-        }
-        for (const session of sourceSessions) {
-          byId.set(session.id, session);
-        }
-        mergedSessions = Array.from(byId.values()).sort((a, b) => b.updated_at - a.updated_at);
       }
 
+      for (const task of useMoveStore.getState().tasks) {
+        const key = `${task.sourceAccountId}:${task.sourceBucket}`;
+        if (!targets.has(key)) {
+          targets.set(key, {
+            sourceBucket: task.sourceBucket,
+            sourceAccountId: task.sourceAccountId,
+          });
+        }
+      }
+
+      const targetList = Array.from(targets.values());
+      const sourceResults = await Promise.allSettled(
+        targetList.map((target) => invoke<MoveSession[]>('get_move_tasks', target))
+      );
+
+      const byId = new Map<string, MoveSession>();
+      for (const session of activeSessions) {
+        byId.set(session.id, session);
+      }
+      const failedSourceKeys = new Set<string>();
+      for (const [index, result] of sourceResults.entries()) {
+        if (result.status === 'fulfilled') {
+          for (const session of result.value) {
+            byId.set(session.id, session);
+          }
+          continue;
+        }
+
+        const failedTarget = targetList[index];
+        if (failedTarget) {
+          failedSourceKeys.add(`${failedTarget.sourceAccountId}:${failedTarget.sourceBucket}`);
+        }
+      }
+
+      // Preserve previously known tasks for sources that failed to reload,
+      // so transient per-source fetch failures do not make tasks disappear.
+      if (failedSourceKeys.size > 0) {
+        for (const task of currentTasksSnapshot) {
+          const sourceKey = `${task.sourceAccountId}:${task.sourceBucket}`;
+          if (!failedSourceKeys.has(sourceKey) || byId.has(task.id)) continue;
+
+          byId.set(task.id, {
+            id: task.id,
+            source_key: task.sourceKey,
+            dest_key: task.destKey,
+            source_bucket: task.sourceBucket,
+            source_account_id: task.sourceAccountId,
+            source_provider: task.sourceProvider,
+            dest_bucket: task.destBucket,
+            dest_account_id: task.destAccountId,
+            dest_provider: task.destProvider,
+            delete_original: task.deleteOriginal,
+            file_size: task.fileSize,
+            progress: Math.round(task.progress),
+            status: task.status,
+            error: task.error || null,
+            created_at: 0,
+            updated_at: Date.now(),
+          });
+        }
+      }
+
+      const mergedSessions = Array.from(byId.values()).sort((a, b) => b.updated_at - a.updated_at);
       loadFromDatabase(mergedSessions);
     } catch (e) {
       console.error('Failed to reload move tasks:', e);
@@ -242,6 +296,20 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
   const handleClose = () => {
     setModalOpen(false);
   };
+
+  const collectSourceTargets = useCallback((taskList: MoveTask[]) => {
+    const targets = new Map<string, { sourceBucket: string; sourceAccountId: string }>();
+    for (const task of taskList) {
+      const key = `${task.sourceAccountId}:${task.sourceBucket}`;
+      if (!targets.has(key)) {
+        targets.set(key, {
+          sourceBucket: task.sourceBucket,
+          sourceAccountId: task.sourceAccountId,
+        });
+      }
+    }
+    return Array.from(targets.values());
+  }, []);
 
   const handlePauseAll = async () => {
     const pauseTargets = new Map<string, { sourceBucket: string; sourceAccountId: string }>();
@@ -461,14 +529,25 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
   };
 
   const handleClearFinished = async () => {
-    if (!storageConfig?.bucket || !storageConfig?.accountId) return;
+    const targets = collectSourceTargets(finishedTasks);
+    if (targets.length === 0) return;
 
     try {
-      await invoke('clear_finished_moves', {
-        sourceBucket: storageConfig.bucket,
-        sourceAccountId: storageConfig.accountId,
-      });
+      const results = await Promise.allSettled(
+        targets.map((target) => invoke<number>('clear_finished_moves', target))
+      );
+
+      const failedCount = results.filter((result) => result.status === 'rejected').length;
       await reloadTasksFromDatabase();
+
+      if (failedCount === targets.length) {
+        message.error('Failed to clear finished moves');
+        return;
+      }
+
+      if (failedCount > 0) {
+        message.warning(`Cleared finished moves (${failedCount} source queue(s) failed)`);
+      }
     } catch (e) {
       console.error('Failed to clear finished moves:', e);
       message.error('Failed to clear finished moves');
@@ -478,14 +557,25 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
   const handleClearAll = async () => {
     // Don't clear if any tasks are in progress (including deleting phase)
     if (hasInProgressMoves) return;
-    if (!storageConfig?.bucket || !storageConfig?.accountId) return;
+    const targets = collectSourceTargets(tasks);
+    if (targets.length === 0) return;
 
     try {
-      await invoke('clear_all_moves', {
-        sourceBucket: storageConfig.bucket,
-        sourceAccountId: storageConfig.accountId,
-      });
+      const results = await Promise.allSettled(
+        targets.map((target) => invoke<number>('clear_all_moves', target))
+      );
+
+      const failedCount = results.filter((result) => result.status === 'rejected').length;
       await reloadTasksFromDatabase();
+
+      if (failedCount === targets.length) {
+        message.error('Failed to clear all moves');
+        return;
+      }
+
+      if (failedCount > 0) {
+        message.warning(`Cleared moves (${failedCount} source queue(s) failed)`);
+      }
     } catch (e) {
       console.error('Failed to clear all moves:', e);
       message.error('Failed to clear all moves');

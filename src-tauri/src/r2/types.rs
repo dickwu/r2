@@ -36,6 +36,12 @@ pub struct ListObjectsResult {
     pub continuation_token: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RecursiveListResult {
+    pub objects: Vec<R2Object>,
+    pub folder_keys: Vec<String>,
+}
+
 /// Create an S3 client configured for Cloudflare R2
 pub async fn create_r2_client(config: &R2Config) -> R2Result<Client> {
     let endpoint_url = format!("https://{}.r2.cloudflarestorage.com", config.account_id);

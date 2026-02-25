@@ -37,6 +37,12 @@ pub struct ListObjectsResult {
     pub continuation_token: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RecursiveListResult {
+    pub objects: Vec<AwsObject>,
+    pub folder_keys: Vec<String>,
+}
+
 fn build_endpoint_url(config: &AwsConfig) -> Option<String> {
     let host = config.endpoint_host.as_ref()?.trim();
     if host.is_empty() {

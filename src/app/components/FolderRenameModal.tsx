@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Modal, Input, Progress, Button, App, Spin, InputNumber } from 'antd';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import {
@@ -51,19 +51,18 @@ export default function FolderRenameModal({
   onSuccess,
 }: FolderRenameModalProps) {
   const { message } = App.useApp();
-  const [newName, setNewName] = useState('');
-  const [confirmInput, setConfirmInput] = useState('');
-  const [objectKeys, setObjectKeys] = useState<string[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isRenaming, setIsRenaming] = useState(false);
-  const [progress, setProgress] = useState({ completed: 0, total: 0 });
-  // Use ref instead of state to track if loaded, avoids useEffect dep array issues
-  const hasLoadedRef = useRef(false);
 
   const { parentPath, currentName } = useMemo(() => {
     if (!folder?.key) return { parentPath: '', currentName: '' };
     return splitFolderKey(folder.key);
   }, [folder?.key]);
+
+  const [newName, setNewName] = useState(currentName);
+  const [confirmInput, setConfirmInput] = useState('');
+  const [objectKeys, setObjectKeys] = useState<string[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [progress, setProgress] = useState({ completed: 0, total: 0 });
 
   const confirmCount = useMemo(() => {
     if (objectKeys.length > 0) return objectKeys.length;
@@ -73,24 +72,6 @@ export default function FolderRenameModal({
   }, [folderMetadata, objectKeys.length]);
 
   useEffect(() => {
-    if (!open) {
-      setNewName('');
-      setConfirmInput('');
-      setObjectKeys([]);
-      setProgress({ completed: 0, total: 0 });
-      setIsLoading(false);
-      setIsRenaming(false);
-      hasLoadedRef.current = false;
-      return;
-    }
-
-    // Skip if already loaded for this modal instance (prevents reload after rename)
-    if (hasLoadedRef.current) return;
-
-    setNewName(currentName);
-    setConfirmInput('');
-    setProgress({ completed: 0, total: 0 });
-
     if (!config || !folder?.key) return;
 
     const loadObjects = async () => {
@@ -99,7 +80,6 @@ export default function FolderRenameModal({
         const objects = await listAllObjectsUnderPrefix(config, folder.key);
         const keys = objects.map((obj) => obj.key);
         setObjectKeys(keys);
-        hasLoadedRef.current = true;
         if (keys.length === 0) {
           message.info('Folder is empty');
           onClose();
@@ -116,7 +96,7 @@ export default function FolderRenameModal({
     };
 
     loadObjects();
-  }, [open, config, folder?.key, currentName, message, onClose]);
+  }, [config, folder?.key, message, onClose]);
 
   const handleRename = useCallback(async () => {
     if (!config || !folder?.key || isRenaming || isLoading) return;
@@ -239,7 +219,7 @@ export default function FolderRenameModal({
       onCancel={isRenaming ? undefined : onClose}
       footer={footer}
       closable={!isRenaming}
-      maskClosable={!isRenaming}
+      mask={{ closable: !isRenaming }}
     >
       {isRenaming ? (
         <div style={{ padding: '16px 0' }}>

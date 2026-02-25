@@ -474,7 +474,9 @@ export default function AccountSidebar({
         )}
       </div>
 
-      <AccountTransferModal open={transferModalOpen} onClose={() => setTransferModalOpen(false)} />
+      {transferModalOpen && (
+        <AccountTransferModal open={true} onClose={() => setTransferModalOpen(false)} />
+      )}
 
       {/* Tokens & Buckets Drawer */}
       <Drawer

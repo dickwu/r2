@@ -35,14 +35,6 @@ export default function BatchDeleteModal({
 
   const selectedCount = selectedKeys.size;
 
-  // Reset state when modal opens/closes
-  useEffect(() => {
-    if (!open) {
-      setConfirmInput('');
-      setProgress({ completed: 0, total: 0 });
-    }
-  }, [open]);
-
   // Notify parent of deleting state changes
   useEffect(() => {
     onDeletingChange?.(isDeleting);
@@ -116,7 +108,7 @@ export default function BatchDeleteModal({
       onCancel={isDeleting ? undefined : onClose}
       footer={isDeleting ? null : confirmFooter}
       closable={!isDeleting}
-      maskClosable={!isDeleting}
+      mask={{ closable: !isDeleting }}
     >
       {isDeleting ? (
         <div style={{ padding: '16px 0' }}>
