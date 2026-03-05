@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Modal, Button, Space, Typography, App, Image, Spin } from 'antd';
 import {
   LinkOutlined,
@@ -11,12 +11,14 @@ import {
   SoundOutlined,
   FilePdfOutlined,
   FileTextOutlined,
+  LeftOutlined,
+  RightOutlined,
 } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import dynamic from 'next/dynamic';
-import { FileItem } from '@/app/hooks/useR2Files';
 import { generateSignedUrl, uploadContent, StorageConfig } from '@/app/lib/r2cache';
 import { TEXT_EXTENSIONS } from '@/app/components/preview/TextViewer';
+import { usePreviewStore } from '@/app/stores/previewStore';
 
 const PDFViewer = dynamic(() => import('@/app/components/preview/PDFViewer'), { ssr: false });
 const TextViewer = dynamic(() => import('@/app/components/preview/TextViewer'), { ssr: false });
@@ -86,22 +88,18 @@ function getContentType(filename: string): string {
 }
 
 interface FilePreviewModalProps {
-  open: boolean;
-  onClose: () => void;
-  file: FileItem | null;
   config?: StorageConfig | null;
   onCredentialsUpdate?: () => void;
   onFileUpdated?: () => void;
 }
 
 export default function FilePreviewModal({
-  open: isOpen,
-  onClose,
-  file,
   config,
   onFileUpdated,
 }: FilePreviewModalProps) {
   const { message } = App.useApp();
+  const { file, files, close, navigate } = usePreviewStore();
+  const isOpen = !!file;
   const [signedUrl, setSignedUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [windowSize, setWindowSize] = useState({ width: 0, height: 0 });
@@ -118,6 +116,38 @@ export default function FilePreviewModal({
     window.addEventListener('resize', updateSize);
     return () => window.removeEventListener('resize', updateSize);
   }, []);
+
+  // Previewable (non-folder) files for keyboard navigation
+  const previewableFiles = useMemo(
+    () => files.filter((f) => !f.isFolder),
+    [files]
+  );
+
+  const currentIndex = useMemo(
+    () => (file ? previewableFiles.findIndex((f) => f.key === file.key) : -1),
+    [file, previewableFiles]
+  );
+
+  // Keyboard navigation: arrow keys to switch files
+  useEffect(() => {
+    if (!isOpen || previewableFiles.length <= 1) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        navigate('prev');
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        navigate('next');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, previewableFiles.length, navigate]);
 
   const hasCredentials =
     !!config?.accessKeyId &&
@@ -147,14 +177,13 @@ export default function FilePreviewModal({
     [file, config, hasCredentials, message, onFileUpdated]
   );
 
-  // Generate signed URL when modal opens
+  // Generate signed URL when modal opens or file changes
   useEffect(() => {
     if (!isOpen || !file) {
       setSignedUrl(null);
       return;
     }
 
-    // If public domain is set, use it directly
     if (config?.publicDomain) {
       const domain = config.publicDomain.replace(/\/$/, '');
       const scheme = config.publicDomainScheme || 'https';
@@ -162,7 +191,6 @@ export default function FilePreviewModal({
       return;
     }
 
-    // If S3 credentials are available, generate signed URL
     if (config && hasCredentials) {
       setLoading(true);
       generateSignedUrl(config, file.key)
@@ -175,7 +203,6 @@ export default function FilePreviewModal({
       return;
     }
 
-    // Fallback: no URL available
     setSignedUrl(null);
   }, [isOpen, file, config, hasCredentials]);
 
@@ -216,25 +243,50 @@ export default function FilePreviewModal({
     }
   }
 
-  // Calculate responsive dimensions based on window size
   const getModalWidth = () => {
     const width = windowSize.width || (typeof window !== 'undefined' ? window.innerWidth : 1024);
-    if (width < 640) return '95%'; // Mobile
-    if (width < 1024) return '90%'; // Tablet
-    return '85%'; // Desktop
+    if (width < 640) return '95%';
+    if (width < 1024) return '90%';
+    return '85%';
   };
 
   const getPreviewMaxHeight = () => {
     const height = windowSize.height || (typeof window !== 'undefined' ? window.innerHeight : 768);
-    // Use 60% of viewport height, capped at 800px for very large screens
     return `${Math.min(height * 0.6, 800)}px`;
   };
 
   return (
     <Modal
       open={isOpen}
-      onCancel={onClose}
-      title={file.name}
+      onCancel={close}
+      title={
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {previewableFiles.length > 1 && (
+            <Button
+              type="text"
+              size="small"
+              icon={<LeftOutlined />}
+              onClick={() => navigate('prev')}
+            />
+          )}
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {file.name}
+          </span>
+          {previewableFiles.length > 1 && (
+            <>
+              <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
+                {currentIndex + 1} / {previewableFiles.length}
+              </Text>
+              <Button
+                type="text"
+                size="small"
+                icon={<RightOutlined />}
+                onClick={() => navigate('next')}
+              />
+            </>
+          )}
+        </div>
+      }
       footer={null}
       width={getModalWidth()}
       centered

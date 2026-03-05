@@ -19,6 +19,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useThemeStore } from '@/app/stores/themeStore';
+import { usePreviewStore } from '@/app/stores/previewStore';
 import ConfigModal, { ModalMode } from '@/app/components/ConfigModal';
 import UploadModal from '@/app/components/UploadModal';
 import FilePreviewModal from '@/app/components/FilePreviewModal';
@@ -72,7 +73,9 @@ export default function Home() {
 
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [dropQueue, setDropQueue] = useState<string[][]>([]);
-  const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
+  const previewFile = usePreviewStore((s) => s.file);
+  const openPreview = usePreviewStore((s) => s.open);
+  const closePreview = usePreviewStore((s) => s.close);
   const [renameFile, setRenameFile] = useState<FileItem | null>(null);
   const [renameFolder, setRenameFolder] = useState<FileItem | null>(null);
   const currentPath = useCurrentPathStore((state) => state.currentPath);
@@ -563,10 +566,10 @@ export default function Home() {
         setSearchQuery('');
         clearSelection();
       } else {
-        setPreviewFile(item);
+        openPreview(item, filteredItems);
       }
     },
-    [clearSelection]
+    [clearSelection, openPreview, filteredItems]
   );
 
   const selectAll = useCallback(() => {
@@ -925,10 +928,10 @@ export default function Home() {
 
   const handleRenameSuccess = useCallback(() => {
     if (previewFile?.key === renameFile?.key) {
-      setPreviewFile(null);
+      closePreview();
     }
     Promise.all([refresh(), refreshSync()]);
-  }, [renameFile, previewFile, refresh, refreshSync]);
+  }, [renameFile, previewFile, closePreview, refresh, refreshSync]);
 
   const handleFolderRenameSuccess = useCallback(async () => {
     await Promise.all([refresh(), refreshSync()]);
@@ -1174,9 +1177,6 @@ export default function Home() {
 
           {previewFile && (
             <FilePreviewModal
-              open={true}
-              onClose={() => setPreviewFile(null)}
-              file={previewFile}
               config={config}
               onCredentialsUpdate={() => {
                 initialize();
