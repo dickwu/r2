@@ -18,6 +18,7 @@ bun run format:check     # Check formatting
 ```
 
 Rust backend (from `src-tauri/`):
+
 ```bash
 cargo build              # Build Rust backend only
 cargo check              # Type-check Rust code
@@ -33,6 +34,7 @@ cargo check              # Type-check Rust code
 - **Entry**: `page.tsx` (main UI), `layout.tsx` (providers + global layout)
 
 Key directories:
+
 - `stores/` — Zustand stores: `accountStore`, `syncStore`, `uploadStore`, `downloadStore`, `moveStore`, `batchOperationStore`, `currentPathStore`, `themeStore`, `folderSizeStore`
 - `hooks/` — `useFilesSync.ts` (sync orchestration), `useR2Files.ts` (cached file listing)
 - `lib/` — `r2cache.ts` (routes sync to provider adapters)

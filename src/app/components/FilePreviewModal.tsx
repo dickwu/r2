@@ -93,10 +93,7 @@ interface FilePreviewModalProps {
   onFileUpdated?: () => void;
 }
 
-export default function FilePreviewModal({
-  config,
-  onFileUpdated,
-}: FilePreviewModalProps) {
+export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewModalProps) {
   const { message } = App.useApp();
   const { file, files, close, navigate } = usePreviewStore();
   const isOpen = !!file;
@@ -118,10 +115,7 @@ export default function FilePreviewModal({
   }, []);
 
   // Previewable (non-folder) files for keyboard navigation
-  const previewableFiles = useMemo(
-    () => files.filter((f) => !f.isFolder),
-    [files]
-  );
+  const previewableFiles = useMemo(() => files.filter((f) => !f.isFolder), [files]);
 
   const currentIndex = useMemo(
     () => (file ? previewableFiles.findIndex((f) => f.key === file.key) : -1),
@@ -142,6 +136,16 @@ export default function FilePreviewModal({
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
         navigate('next');
+      } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        const tag = (e.target as HTMLElement)?.tagName;
+        const isScrollable =
+          tag === 'PRE' ||
+          tag === 'CODE' ||
+          (e.target as HTMLElement)?.closest?.('[data-scrollable]');
+        if (!isScrollable) {
+          e.preventDefault();
+          navigate(e.key === 'ArrowUp' ? 'prev' : 'next');
+        }
       }
     };
 
@@ -261,29 +265,15 @@ export default function FilePreviewModal({
       onCancel={close}
       title={
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {previewableFiles.length > 1 && (
-            <Button
-              type="text"
-              size="small"
-              icon={<LeftOutlined />}
-              onClick={() => navigate('prev')}
-            />
-          )}
-          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <span
+            style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          >
             {file.name}
           </span>
           {previewableFiles.length > 1 && (
-            <>
-              <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
-                {currentIndex + 1} / {previewableFiles.length}
-              </Text>
-              <Button
-                type="text"
-                size="small"
-                icon={<RightOutlined />}
-                onClick={() => navigate('next')}
-              />
-            </>
+            <Text type="secondary" style={{ fontSize: 12, flexShrink: 0, marginRight: '30px', marginBottom: '30px' }}>
+              {currentIndex + 1} / {previewableFiles.length}
+            </Text>
           )}
         </div>
       }
@@ -329,17 +319,17 @@ export default function FilePreviewModal({
             onSave={handleSaveContent}
           />
         ) : isImage ? (
-          <FileImageOutlined style={{ fontSize: 40, color: '#f6821f' }} />
+          <FileImageOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
         ) : isVideo ? (
-          <PlaySquareOutlined style={{ fontSize: 40, color: '#f6821f' }} />
+          <PlaySquareOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
         ) : isAudio ? (
-          <SoundOutlined style={{ fontSize: 40, color: '#f6821f' }} />
+          <SoundOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
         ) : isPdf ? (
-          <FilePdfOutlined style={{ fontSize: 40, color: '#f6821f' }} />
+          <FilePdfOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
         ) : isText ? (
-          <FileTextOutlined style={{ fontSize: 40, color: '#f6821f' }} />
+          <FileTextOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
         ) : (
-          <FileOutlined style={{ fontSize: 40, color: '#f6821f' }} />
+          <FileOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
         )}
       </div>
 
@@ -367,14 +357,40 @@ export default function FilePreviewModal({
         </Paragraph>
       )}
 
-      <Space style={{ width: '100%', justifyContent: 'center' }}>
-        <Button icon={<LinkOutlined />} onClick={handleOpenUrl} disabled={!fileUrl}>
-          Open URL
-        </Button>
-        <Button type="primary" icon={<CopyOutlined />} onClick={handleCopyUrl} disabled={!fileUrl}>
-          Copy URL
-        </Button>
-      </Space>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ width: 80 }}>
+          {previewableFiles.length > 1 && (
+            <Button type="text" icon={<LeftOutlined />} onClick={() => navigate('prev')}>
+              Prev
+            </Button>
+          )}
+        </div>
+        <Space>
+          <Button icon={<LinkOutlined />} onClick={handleOpenUrl} disabled={!fileUrl}>
+            Open URL
+          </Button>
+          <Button
+            type="primary"
+            icon={<CopyOutlined />}
+            onClick={handleCopyUrl}
+            disabled={!fileUrl}
+          >
+            Copy URL
+          </Button>
+        </Space>
+        <div style={{ width: 80, textAlign: 'right' }}>
+          {previewableFiles.length > 1 && (
+            <Button
+              type="text"
+              icon={<RightOutlined />}
+              iconPlacement="end"
+              onClick={() => navigate('next')}
+            >
+              Next
+            </Button>
+          )}
+        </div>
+      </div>
     </Modal>
   );
 }

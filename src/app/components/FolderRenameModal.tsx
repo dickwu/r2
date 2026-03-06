@@ -224,14 +224,16 @@ export default function FolderRenameModal({
       {isRenaming ? (
         <div style={{ padding: '16px 0' }}>
           <Progress percent={percent} status="active" />
-          <p style={{ marginTop: 12, textAlign: 'center', color: '#666' }}>
+          <p style={{ marginTop: 12, textAlign: 'center', color: 'var(--color-text-secondary)' }}>
             {progress.completed} / {progress.total} files renamed
           </p>
         </div>
       ) : isLoading ? (
         <div style={{ padding: '16px 0', textAlign: 'center' }}>
           <Spin />
-          <p style={{ marginTop: 12, color: '#666' }}>Loading folder contents...</p>
+          <p style={{ marginTop: 12, color: 'var(--color-text-secondary)' }}>
+            Loading folder contents...
+          </p>
         </div>
       ) : (
         <>

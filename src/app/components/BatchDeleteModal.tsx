@@ -113,7 +113,7 @@ export default function BatchDeleteModal({
       {isDeleting ? (
         <div style={{ padding: '16px 0' }}>
           <Progress percent={percent} status="active" />
-          <p style={{ marginTop: 12, textAlign: 'center', color: '#666' }}>
+          <p style={{ marginTop: 12, textAlign: 'center', color: 'var(--color-text-secondary)' }}>
             {progress.completed} / {progress.total} files deleted
           </p>
         </div>

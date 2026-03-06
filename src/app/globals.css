@@ -1,5 +1,105 @@
 @import 'tailwindcss';
 
+/* ── Semantic Color Tokens ─────────────────────────────────────── */
+:root {
+  --color-bg-base: #fff;
+  --color-bg-surface: #fafafa;
+  --color-bg-elevated: #fff;
+  --color-bg-hover: #f9f9f9;
+  --color-bg-hover-folder: #fff7e6;
+  --color-bg-selected: #e6f7ff;
+  --color-bg-selected-accent: #1890ff;
+  --color-bg-preview: #f5f5f5;
+
+  --color-text-primary: #333;
+  --color-text-secondary: #666;
+  --color-text-tertiary: #777;
+  --color-text-body: inherit;
+
+  --color-border: #f0f0f0;
+  --color-border-subtle: #f5f5f5;
+  --color-border-control: #e8e8e8;
+  --color-border-control-hover: #d9d9d9;
+
+  --color-accent: #f6821f;
+  --color-accent-bg: #fff7e6;
+  --color-accent-border: #ffd591;
+  --color-link: #1890ff;
+  --color-success: #52c41a;
+  --color-image: #52c41a;
+  --color-video: #1890ff;
+  --color-icon-file: #999;
+
+  --color-scrollbar-track: #f1f1f1;
+  --color-scrollbar-thumb: #c1c1c1;
+  --color-scrollbar-thumb-hover: #a1a1a1;
+
+  --color-overlay-light: rgba(255, 255, 255, 0.9);
+  --color-shadow: rgba(0, 0, 0, 0.15);
+
+  /* Sync overlay */
+  --color-sync-title: #333;
+  --color-sync-description: #666;
+  --color-sync-label: #999;
+  --color-sync-bar-bg: #f0f0f0;
+
+  /* Sidebar collapsed */
+  --color-collapsed-bg: #fff;
+  --color-collapsed-text: #333;
+
+  /* Sidebar hover */
+  --color-sidebar-hover: rgba(0, 0, 0, 0.04);
+}
+
+html.dark {
+  --color-bg-base: #141414;
+  --color-bg-surface: #1f1f1f;
+  --color-bg-elevated: #1f1f1f;
+  --color-bg-hover: #1f1f1f;
+  --color-bg-hover-folder: #2a2000;
+  --color-bg-selected: #111d2c;
+  --color-bg-selected-accent: #1890ff;
+  --color-bg-preview: #252525;
+
+  --color-text-primary: #e0e0e0;
+  --color-text-secondary: #999;
+  --color-text-tertiary: #888;
+  --color-text-body: #e0e0e0;
+
+  --color-border: #303030;
+  --color-border-subtle: #252525;
+  --color-border-control: #404040;
+  --color-border-control-hover: #505050;
+
+  --color-accent: #f6821f;
+  --color-accent-bg: #3a2a10;
+  --color-accent-border: #5a4a00;
+  --color-link: #1890ff;
+  --color-success: #52c41a;
+  --color-icon-file: #666;
+
+  --color-scrollbar-track: #1a1a1a;
+  --color-scrollbar-thumb: #444;
+  --color-scrollbar-thumb-hover: #555;
+
+  --color-overlay-light: rgba(30, 30, 30, 0.9);
+  --color-shadow: rgba(0, 0, 0, 0.15);
+
+  /* Sync overlay */
+  --color-sync-title: #e0e0e0;
+  --color-sync-description: #888;
+  --color-sync-label: #666;
+  --color-sync-bar-bg: #303030;
+
+  /* Sidebar collapsed */
+  --color-collapsed-bg: #2a2a2a;
+  --color-collapsed-text: #e0e0e0;
+
+  /* Sidebar hover */
+  --color-sidebar-hover: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Reset ──────────────────────────────────────────────────────── */
 * {
   box-sizing: border-box;
   margin: 0;
@@ -14,7 +114,8 @@ body {
 }
 
 body {
-  background-color: #fff;
+  background-color: var(--color-bg-base);
+  color: var(--color-text-body);
 }
 
 .center-container {
@@ -25,34 +126,34 @@ body {
   padding: 16px;
 }
 
-/* File Manager Layout */
+/* ── File Manager Layout ────────────────────────────────────────── */
 .file-manager {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: #fff;
+  background: var(--color-bg-base);
 }
 
-/* Toolbar */
+/* ── Toolbar ────────────────────────────────────────────────────── */
 .toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  border-bottom: 1px solid #f0f0f0;
-  background: #fafafa;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-surface);
 }
 
 .toolbar .ant-breadcrumb a {
-  color: #666;
+  color: var(--color-text-secondary);
   cursor: pointer;
 }
 
 .toolbar .ant-breadcrumb a:hover {
-  color: #f6821f;
+  color: var(--color-accent);
 }
 
-/* File List */
+/* ── File List ──────────────────────────────────────────────────── */
 .file-list {
   flex: 1;
   overflow-y: auto;
@@ -69,11 +170,11 @@ body {
 .file-list-header {
   display: flex;
   padding: 8px 16px;
-  background: #fafafa;
-  border-bottom: 1px solid #f0f0f0;
+  background: var(--color-bg-surface);
+  border-bottom: 1px solid var(--color-border);
   font-size: 12px;
   font-weight: 500;
-  color: #999;
+  color: var(--color-text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -81,22 +182,22 @@ body {
 .file-item {
   display: flex;
   padding: 10px 16px;
-  border-bottom: 1px solid #f5f5f5;
+  border-bottom: 1px solid var(--color-border-subtle);
   cursor: pointer;
   transition: background 0.15s;
 }
 
 .file-item:hover {
-  background: #f9f9f9;
+  background: var(--color-bg-hover);
 }
 
 .file-item.folder:hover {
-  background: #fff7e6;
+  background: var(--color-bg-hover-folder);
 }
 
 .file-item.selected {
-  background: #e6f7ff;
-  border-left: 3px solid #1890ff;
+  background: var(--color-bg-selected);
+  border-left: 3px solid var(--color-bg-selected-accent);
   padding-left: 13px;
 }
 
@@ -122,7 +223,7 @@ body {
 }
 
 .file-list-header .col-name.sortable:hover {
-  color: #f6821f;
+  color: var(--color-accent);
 }
 
 .col-name .name {
@@ -134,7 +235,7 @@ body {
 .col-size {
   width: 80px;
   text-align: right;
-  color: #999;
+  color: var(--color-text-secondary);
   font-size: 13px;
 }
 
@@ -148,13 +249,13 @@ body {
 }
 
 .file-list-header .col-size.sortable:hover {
-  color: #f6821f;
+  color: var(--color-accent);
 }
 
 .col-date {
   width: 120px;
   text-align: right;
-  color: #999;
+  color: var(--color-text-secondary);
   font-size: 13px;
 }
 
@@ -168,15 +269,16 @@ body {
 }
 
 .file-list-header .col-date.sortable:hover {
-  color: #f6821f;
+  color: var(--color-accent);
 }
 
 .col-actions {
-  width: 60px;
+  width: 100px;
   text-align: center;
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 2px;
 }
 
 .file-item .icon {
@@ -185,30 +287,30 @@ body {
 }
 
 .file-item .folder-icon {
-  color: #f6821f;
+  color: var(--color-accent);
 }
 
 .file-item .file-icon {
-  color: #999;
+  color: var(--color-icon-file);
 }
 
-/* Status Bar */
+/* ── Status Bar ─────────────────────────────────────────────────── */
 .status-bar {
   display: flex;
   justify-content: space-between;
   padding: 8px 16px;
-  border-top: 1px solid #f0f0f0;
-  background: #fafafa;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg-surface);
   font-size: 12px;
-  color: #999;
+  color: var(--color-text-secondary);
 }
 
 .status-bar .domain {
-  color: #f6821f;
+  color: var(--color-accent);
 }
 
 .status-bar .bucket-stats {
-  color: #666;
+  color: var(--color-text-secondary);
   font-weight: 500;
 }
 
@@ -223,20 +325,20 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: #f6821f;
+  color: var(--color-accent);
   font-weight: 500;
 }
 
 .status-bar .sync-count {
-  color: #666;
+  color: var(--color-text-secondary);
 }
 
-/* Empty State */
+/* ── Empty State ────────────────────────────────────────────────── */
 .file-list .ant-empty {
   padding: 60px 0;
 }
 
-/* Sync Overlay - First Load Experience */
+/* ── Sync Overlay — First Load Experience ───────────────────────── */
 .sync-overlay {
   display: flex;
   align-items: center;
@@ -253,7 +355,7 @@ body {
 
 .sync-overlay-icon {
   font-size: 48px;
-  color: #f6821f;
+  color: var(--color-accent);
   margin-bottom: 16px;
   animation: pulse 2s ease-in-out infinite;
 }
@@ -273,13 +375,13 @@ body {
 .sync-overlay-title {
   font-size: 20px;
   font-weight: 600;
-  color: #333;
+  color: var(--color-sync-title);
   margin: 0 0 8px 0;
 }
 
 .sync-overlay-description {
   font-size: 14px;
-  color: #666;
+  color: var(--color-sync-description);
   margin: 0 0 20px 0;
 }
 
@@ -293,19 +395,19 @@ body {
 .sync-overlay-count {
   font-size: 32px;
   font-weight: 700;
-  color: #f6821f;
+  color: var(--color-accent);
   font-variant-numeric: tabular-nums;
 }
 
 .sync-overlay-label {
   font-size: 13px;
-  color: #999;
+  color: var(--color-sync-label);
 }
 
 .sync-overlay-bar {
   width: 200px;
   height: 6px;
-  background: #f0f0f0;
+  background: var(--color-sync-bar-bg);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -320,27 +422,10 @@ body {
 .sync-overlay-percentage {
   font-size: 14px;
   font-weight: 600;
-  color: #f6821f;
+  color: var(--color-accent);
 }
 
-/* Dark Mode Sync Overlay */
-html.dark .sync-overlay-title {
-  color: #e0e0e0;
-}
-
-html.dark .sync-overlay-description {
-  color: #888;
-}
-
-html.dark .sync-overlay-label {
-  color: #666;
-}
-
-html.dark .sync-overlay-bar {
-  background: #303030;
-}
-
-/* Grid View */
+/* ── Grid View ──────────────────────────────────────────────────── */
 .file-grid {
   padding: 16px;
 }
@@ -349,6 +434,12 @@ html.dark .sync-overlay-bar {
   cursor: pointer;
   text-align: center;
   position: relative;
+  background: var(--color-bg-elevated);
+  border-color: var(--color-border);
+}
+
+.grid-card:hover {
+  background: var(--color-bg-hover);
 }
 
 .grid-card .ant-card-body {
@@ -361,19 +452,19 @@ html.dark .sync-overlay-bar {
 }
 
 .grid-card-icon .folder-icon {
-  color: #f6821f;
+  color: var(--color-accent);
 }
 
 .grid-card-icon .file-icon {
-  color: #999;
+  color: var(--color-icon-file);
 }
 
 .grid-card-icon .image-icon {
-  color: #52c41a;
+  color: var(--color-image);
 }
 
 .grid-card-icon .video-icon {
-  color: #1890ff;
+  color: var(--color-video);
 }
 
 /* Grid Card Preview */
@@ -386,7 +477,7 @@ html.dark .sync-overlay-bar {
   width: 100%;
   aspect-ratio: 1;
   overflow: hidden;
-  background: #f5f5f5;
+  background: var(--color-bg-preview);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -424,7 +515,7 @@ html.dark .sync-overlay-bar {
 
 .video-thumbnail-loading {
   font-size: 24px;
-  color: #999;
+  color: var(--color-icon-file);
 }
 
 .video-thumbnail-fallback {
@@ -437,7 +528,7 @@ html.dark .sync-overlay-bar {
 
 .video-thumbnail-fallback .video-icon {
   font-size: 40px;
-  color: #1890ff;
+  color: var(--color-video);
 }
 
 .grid-card-name {
@@ -451,7 +542,7 @@ html.dark .sync-overlay-bar {
 
 .grid-card-meta {
   font-size: 11px;
-  color: #999;
+  color: var(--color-text-secondary);
 }
 
 .grid-card-actions {
@@ -462,18 +553,19 @@ html.dark .sync-overlay-bar {
   transition: opacity 0.2s;
 }
 
-.grid-card:hover .grid-card-actions {
+.grid-card:hover .grid-card-actions,
+.grid-card:focus-within .grid-card-actions {
   opacity: 1;
 }
 
 .grid-card-actions .ant-btn {
-  background: rgba(255, 255, 255, 0.9);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  background: var(--color-overlay-light);
+  box-shadow: 0 2px 8px var(--color-shadow);
 }
 
 .grid-card.folder:hover {
-  border-color: #f6821f;
-  background: #fff7e6;
+  border-color: var(--color-accent);
+  background: var(--color-bg-hover-folder);
 }
 
 .grid-card-checkbox {
@@ -483,13 +575,14 @@ html.dark .sync-overlay-bar {
   z-index: 10;
   opacity: 0;
   transition: opacity 0.2s;
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--color-overlay-light);
   border-radius: 4px;
   padding: 4px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 2px 8px var(--color-shadow);
 }
 
-.grid-card:hover .grid-card-checkbox {
+.grid-card:hover .grid-card-checkbox,
+.grid-card:focus-within .grid-card-checkbox {
   opacity: 1;
 }
 
@@ -497,144 +590,36 @@ html.dark .sync-overlay-bar {
   opacity: 1;
 }
 
+/* When any selection is active, always show all checkboxes */
+.file-grid.has-selection .grid-card-checkbox {
+  opacity: 1;
+}
+
 .grid-card.selected {
-  border-color: #1890ff;
+  border-color: var(--color-link);
   box-shadow: 0 0 0 2px rgba(24, 144, 255, 0.2);
 }
 
-/* Dark Mode */
-html.dark body {
-  background-color: #141414;
-  color: #e0e0e0;
-}
-
-html.dark .file-manager {
-  background: #141414;
-}
-
-html.dark .toolbar {
-  background: #1f1f1f;
-  border-color: #303030;
-}
-
-html.dark .toolbar .ant-breadcrumb a {
-  color: #aaa;
-}
-
-html.dark .file-list-header {
-  background: #1f1f1f;
-  border-color: #303030;
-  color: #666;
-}
-
-html.dark .file-item {
-  border-color: #252525;
-}
-
-html.dark .file-item:hover {
-  background: #1f1f1f;
-}
-
-html.dark .file-item.folder:hover {
-  background: #2a2000;
-}
-
-html.dark .file-item.selected {
-  background: #111d2c;
-  border-left-color: #1890ff;
-}
-
-html.dark .col-size,
-html.dark .col-date {
-  color: #666;
-}
-
-html.dark .file-list-header .col-size.sortable:hover {
-  color: #f6821f;
-}
-
-html.dark .file-list-header .col-name.sortable:hover {
-  color: #f6821f;
-}
-
-html.dark .file-item .file-icon {
-  color: #666;
-}
-
-html.dark .status-bar {
-  background: #1f1f1f;
-  border-color: #303030;
-  color: #666;
-}
-
-html.dark .status-bar .bucket-stats {
-  color: #999;
-}
-
-html.dark .status-bar .sync-phase {
-  color: #f6821f;
-}
-
-html.dark .status-bar .sync-count {
-  color: #888;
-}
-
-/* Dark Mode Grid */
-html.dark .grid-card {
-  background: #1f1f1f;
-  border-color: #303030;
-}
-
-html.dark .grid-card:hover {
-  background: #252525;
-}
-
-html.dark .grid-card.folder:hover {
-  background: #2a2000;
-  border-color: #f6821f;
-}
-
-html.dark .grid-card-icon .file-icon {
-  color: #666;
-}
-
-html.dark .grid-card-preview {
-  background: #252525;
-}
-
-html.dark .video-thumbnail-loading {
-  color: #666;
-}
-
-html.dark .grid-card-meta {
-  color: #666;
-}
-
-html.dark .grid-card-actions .ant-btn {
-  background: rgba(30, 30, 30, 0.9);
-}
-
-html.dark .grid-card-checkbox {
-  background: rgba(30, 30, 30, 0.9);
-}
-
 html.dark .grid-card.selected {
-  border-color: #1890ff;
   box-shadow: 0 0 0 2px rgba(24, 144, 255, 0.15);
 }
 
-/* Account Sidebar */
+/* ── Account Sidebar ────────────────────────────────────────────── */
 .account-sidebar {
   width: 260px;
   min-width: 260px;
-  border-right: 1px solid #f0f0f0;
+  border-right: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
-  background: #fafafa;
+  background: var(--color-bg-surface);
   height: 100%;
   transition:
     width 0.2s ease,
     min-width 0.2s ease;
+}
+
+html.dark .account-sidebar {
+  background: #1a1a1a;
 }
 
 .account-sidebar.collapsed {
@@ -657,7 +642,7 @@ html.dark .grid-card.selected {
 }
 
 .account-sidebar.collapsed .sidebar-header-icon:hover {
-  color: #f6821f;
+  color: var(--color-accent);
 }
 
 /* Collapsed account items */
@@ -674,41 +659,44 @@ html.dark .grid-card.selected {
 .collapsed-account-item {
   width: 36px;
   height: 36px;
+  margin-left: 6px;
+  margin-bottom: 8px;
   border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  background: #fff;
-  border: 1px solid #e8e8e8;
+  background: var(--color-collapsed-bg);
+  border: 1px solid var(--color-border-control);
   position: relative;
   transition: all 0.2s;
 }
 
 .collapsed-account-item:hover {
-  background: #f5f5f5;
-  border-color: #d9d9d9;
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-control-hover);
 }
 
 .collapsed-account-item.current {
-  border-color: #f6821f;
-  background: #fff7e6;
+  border-color: var(--color-accent);
+  background: var(--color-accent-bg);
+  box-shadow: 0 0 0 2px rgba(246, 130, 31, 0.15);
 }
 
 .collapsed-account-item.add {
   border-style: dashed;
-  color: #999;
+  color: var(--color-text-secondary);
 }
 
 .collapsed-account-item.add:hover {
-  color: #f6821f;
-  border-color: #f6821f;
+  color: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
 .collapsed-account-text {
   font-size: 11px;
   font-weight: 600;
-  color: #333;
+  color: var(--color-collapsed-text);
   letter-spacing: -0.5px;
 }
 
@@ -719,7 +707,7 @@ html.dark .grid-card.selected {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #52c41a;
+  background: var(--color-success);
 }
 
 .sidebar-header {
@@ -727,8 +715,8 @@ html.dark .grid-card.selected {
   align-items: center;
   justify-content: space-between;
   padding: 12px 16px;
-  border-bottom: 1px solid #f0f0f0;
-  background: #fff;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
 }
 
 .sidebar-header-title {
@@ -736,11 +724,11 @@ html.dark .grid-card.selected {
   align-items: center;
   gap: 8px;
   font-weight: 600;
-  color: #333;
+  color: var(--color-text-primary);
 }
 
 .sidebar-header-icon {
-  color: #f6821f;
+  color: var(--color-accent);
   font-size: 18px;
 }
 
@@ -751,8 +739,8 @@ html.dark .grid-card.selected {
 
 .sidebar-footer {
   padding: 12px 16px;
-  border-top: 1px solid #f0f0f0;
-  background: #fff;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
 }
 
 .sidebar-footer.collapsed {
@@ -780,22 +768,45 @@ html.dark .grid-card.selected {
   margin: 0;
 }
 
-/* Account Menu */
+/* ── Account Menu ───────────────────────────────────────────────── */
 .account-menu {
   background: transparent;
-  border: none;
+  padding: 4px 0;
 }
 
-.account-menu .ant-menu-item {
-  height: auto;
-  line-height: 1.4;
-  padding: 8px 16px !important;
-  margin: 0 !important;
+.account-menu-item-wrapper {
+  position: relative;
+  padding: 8px 16px;
+  cursor: pointer;
   border-radius: 0;
+  background: transparent;
 }
 
-.account-menu .ant-menu-item:hover {
-  background: #f5f5f5;
+.account-menu-item-wrapper .account-menu-action {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.account-menu-item-wrapper:hover .account-menu-action {
+  opacity: 1;
+}
+
+.account-menu-item-wrapper.selected {
+  background: var(--color-accent-bg);
+}
+
+html.dark .account-menu-item-wrapper.selected {
+  background: rgba(22, 119, 255, 0.08);
+}
+
+.selected-indicator-bar {
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--color-accent);
 }
 
 .account-menu-item {
@@ -807,7 +818,7 @@ html.dark .grid-card.selected {
 
 .account-menu-icon {
   font-size: 14px;
-  color: #666;
+  color: var(--color-text-secondary);
   flex-shrink: 0;
 }
 
@@ -824,6 +835,12 @@ html.dark .grid-card.selected {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--color-text-primary);
+}
+
+.account-menu-item-wrapper.selected .account-menu-name {
+  color: var(--color-accent);
+  font-weight: 600;
 }
 
 .account-menu-meta {
@@ -835,26 +852,27 @@ html.dark .grid-card.selected {
   transition: opacity 0.15s;
 }
 
-.account-menu .ant-menu-item:hover .account-menu-action {
-  opacity: 1;
-}
-
 .account-menu-arrow {
   font-size: 10px;
-  color: #999;
+  color: var(--color-text-secondary);
+  transition: transform 0.15s;
+}
+
+.account-menu-item-wrapper:hover .account-menu-arrow {
+  transform: translateX(2px);
 }
 
 .current-indicator {
-  color: #52c41a;
+  color: var(--color-success);
   font-size: 12px;
   flex-shrink: 0;
 }
 
 .current-indicator.active {
-  color: #f6821f;
+  color: var(--color-accent);
 }
 
-/* Drawer Token/Bucket Styles */
+/* ── Drawer Token/Bucket Styles ─────────────────────────────────── */
 .drawer-token-header {
   display: flex;
   align-items: center;
@@ -872,7 +890,7 @@ html.dark .grid-card.selected {
 }
 
 .drawer-token-icon {
-  color: #666;
+  color: var(--color-text-secondary);
   font-size: 14px;
 }
 
@@ -900,16 +918,16 @@ html.dark .grid-card.selected {
 }
 
 .drawer-bucket-item:hover {
-  background: #fff7e6;
+  background: var(--color-accent-bg);
 }
 
 .drawer-bucket-item.current {
-  background: #fff7e6;
-  border: 1px solid #ffd591;
+  background: var(--color-accent-bg);
+  border: 1px solid var(--color-accent-border);
 }
 
 .drawer-bucket-icon {
-  color: #f6821f;
+  color: var(--color-accent);
   font-size: 16px;
 }
 
@@ -921,7 +939,7 @@ html.dark .grid-card.selected {
   white-space: nowrap;
 }
 
-/* Main Layout with Sidebar */
+/* ── Main Layout with Sidebar ───────────────────────────────────── */
 .app-layout {
   display: flex;
   height: 100vh;
@@ -934,131 +952,52 @@ html.dark .grid-card.selected {
   min-width: 0;
 }
 
-/* Dark Mode Sidebar */
-html.dark .account-sidebar {
-  background: #1a1a1a;
-  border-color: #303030;
+/* ── Drag-and-Drop Visual Feedback ──────────────────────────────── */
+.main-content.drag-over {
+  position: relative;
 }
 
-html.dark .account-sidebar.collapsed .sidebar-header-icon:hover {
-  color: #f6821f;
+.main-content.drag-over::after {
+  content: 'Drop files to upload';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(246, 130, 31, 0.08);
+  border: 2px dashed var(--color-accent);
+  border-radius: 8px;
+  margin: 4px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-accent);
+  z-index: 100;
+  pointer-events: none;
 }
 
-html.dark .collapsed-account-item {
-  background: #2a2a2a;
-  border-color: #404040;
-}
-
-html.dark .collapsed-account-item:hover {
-  background: #333;
-  border-color: #505050;
-}
-
-html.dark .collapsed-account-item.current {
-  border-color: #f6821f;
-  background: #3a2a10;
-}
-
-html.dark .collapsed-account-item.add {
-  color: #666;
-}
-
-html.dark .collapsed-account-item.add:hover {
-  color: #f6821f;
-  border-color: #f6821f;
-}
-
-html.dark .collapsed-account-text {
-  color: #e0e0e0;
-}
-
-html.dark .sidebar-header {
-  background: #1f1f1f;
-  border-color: #303030;
-}
-
-html.dark .sidebar-footer {
-  background: #1f1f1f;
-  border-color: #303030;
-}
-
-html.dark .sidebar-header-title {
-  color: #e0e0e0;
-}
-
-html.dark .account-menu {
-  background: transparent;
-}
-
-html.dark .account-menu .ant-menu-item {
-  color: #e0e0e0;
-}
-
-html.dark .account-menu .ant-menu-item:hover {
-  background: #2a2a2a;
-}
-
-html.dark .account-menu-name {
-  color: #e0e0e0;
-}
-
-html.dark .account-menu-icon {
-  color: #888;
-}
-
-html.dark .drawer-token-icon {
-  color: #888;
-}
-
-html.dark .drawer-bucket-item:hover,
-html.dark .drawer-bucket-item.current {
-  background: #2a2000;
-}
-
-html.dark .drawer-bucket-item.current {
-  border-color: #5a4a00;
-}
-
-/* Scrollbar Styles */
+/* ── Scrollbar Styles ───────────────────────────────────────────── */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #f1f1f1;
+  background: var(--color-scrollbar-track);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
+  background: var(--color-scrollbar-thumb);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #a1a1a1;
-}
-
-/* Dark Mode Scrollbar */
-html.dark ::-webkit-scrollbar-track {
-  background: #1a1a1a;
-}
-
-html.dark ::-webkit-scrollbar-thumb {
-  background: #444;
-}
-
-html.dark ::-webkit-scrollbar-thumb:hover {
-  background: #555;
+  background: var(--color-scrollbar-thumb-hover);
 }
 
 /* Firefox scrollbar */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #c1c1c1 #f1f1f1;
-}
-
-html.dark * {
-  scrollbar-color: #444 #1a1a1a;
+  scrollbar-color: var(--color-scrollbar-thumb) var(--color-scrollbar-track);
 }
 
 /* Dark Mode Modal Scrollbar (Ant Design Modal portal + Virtuoso) */
@@ -1098,7 +1037,7 @@ html.dark [data-virtuoso-scroller] {
 .download-task-list,
 .download-task-list > div {
   scrollbar-width: thin;
-  scrollbar-color: #c1c1c1 #f1f1f1;
+  scrollbar-color: var(--color-scrollbar-thumb) var(--color-scrollbar-track);
 }
 
 .download-task-list::-webkit-scrollbar,
@@ -1108,12 +1047,12 @@ html.dark [data-virtuoso-scroller] {
 
 .download-task-list::-webkit-scrollbar-track,
 .download-task-list > div::-webkit-scrollbar-track {
-  background: #f1f1f1;
+  background: var(--color-scrollbar-track);
 }
 
 .download-task-list::-webkit-scrollbar-thumb,
 .download-task-list > div::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
+  background: var(--color-scrollbar-thumb);
   border-radius: 4px;
 }
 
@@ -1138,7 +1077,7 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   background: #555 !important;
 }
 
-/* File Rename Modal Tree Styles */
+/* ── File Rename Modal Tree Styles ──────────────────────────────── */
 .ant-tree .ant-tree-treenode {
   width: 100%;
 }

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { Button, Space, App, Spin, Empty, Segmented, Input } from 'antd';
+import { Button, Space, App, Spin, Empty, Segmented, Input, type InputRef } from 'antd';
 import {
   SettingOutlined,
   ReloadOutlined,
@@ -49,6 +49,7 @@ import { useCurrentPathStore } from '@/app/stores/currentPathStore';
 import { useSyncStore } from '@/app/stores/syncStore';
 import { useBatchOperationStore } from '@/app/stores/batchOperationStore';
 import { useDownloadStore } from '@/app/stores/downloadStore';
+import { useKeyboardShortcuts } from '@/app/hooks/useKeyboardShortcuts';
 
 type ViewMode = 'list' | 'grid';
 type SortOrder = 'asc' | 'desc' | null;
@@ -88,6 +89,8 @@ export default function Home() {
   const [modifiedSort, setModifiedSort] = useState<SortOrder>(null);
   const [searchResults, setSearchResults] = useState<FileItem[]>([]);
   const mainContentRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<InputRef | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
 
   const handleDropHandled = useCallback(() => {
     setDropQueue((prev) => prev.slice(1));
@@ -342,23 +345,38 @@ export default function Home() {
     const setupDragDropListener = async () => {
       try {
         unlistenDragDrop = await getCurrentWindow().onDragDropEvent((event) => {
-          if (event.payload.type !== 'drop') return;
-          const { paths, position } = event.payload;
-          if (!paths || paths.length === 0) return;
+          const { type } = event.payload;
 
-          const target = mainContentRef.current;
-          if (!target) return;
+          // Visual drag-over feedback
+          if (type === 'over') {
+            setIsDragOver(true);
+            return;
+          }
+          if (type === 'leave') {
+            setIsDragOver(false);
+            return;
+          }
 
-          const rect = target.getBoundingClientRect();
-          const scale = window.devicePixelRatio || 1;
-          const x = position.x / scale;
-          const y = position.y / scale;
+          // Handle drop
+          if (type === 'drop') {
+            setIsDragOver(false);
+            const { paths, position } = event.payload;
+            if (!paths || paths.length === 0) return;
 
-          const isInside = x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-          if (!isInside) return;
+            const target = mainContentRef.current;
+            if (!target) return;
 
-          setDropQueue((prev) => [...prev, paths]);
-          setUploadModalOpen(true);
+            const rect = target.getBoundingClientRect();
+            const scale = window.devicePixelRatio || 1;
+            const x = position.x / scale;
+            const y = position.y / scale;
+
+            const isInside = x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+            if (!isInside) return;
+
+            setDropQueue((prev) => [...prev, paths]);
+            setUploadModalOpen(true);
+          }
         });
       } catch (error) {
         console.error('Failed to listen for drag-drop events:', error);
@@ -926,6 +944,24 @@ export default function Home() {
     startDownloadQueue,
   ]);
 
+  // Keyboard shortcuts
+  useKeyboardShortcuts(
+    {
+      onSelectAll: selectAll,
+      onDelete: openBatchDeleteConfirm,
+      onRefresh: handleRefresh,
+      onEscape: () => {
+        if (selectedKeys.size > 0) {
+          clearSelection();
+        }
+      },
+      onFocusSearch: () => {
+        searchInputRef.current?.focus({ cursor: 'end' });
+      },
+    },
+    !!config && isConfigReady
+  );
+
   const handleRenameSuccess = useCallback(() => {
     if (previewFile?.key === renameFile?.key) {
       closePreview();
@@ -988,7 +1024,7 @@ export default function Home() {
       />
 
       {/* Main Content */}
-      <div className="main-content" ref={mainContentRef}>
+      <div className={`main-content${isDragOver ? 'drag-over' : ''}`} ref={mainContentRef}>
         <div className="file-manager">
           {/* Toolbar */}
           <div className="toolbar">
@@ -1030,6 +1066,7 @@ export default function Home() {
             </Space>
             <Space>
               <Input
+                ref={searchInputRef}
                 placeholder="Search all files in bucket..."
                 prefix={<SearchOutlined />}
                 value={searchQuery}

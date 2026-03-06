@@ -13,6 +13,7 @@ description: >
 # R2 Client Release Workflow
 
 The project has a `./publish.sh` script that handles the full release pipeline:
+
 1. Validates version argument (patch/minor/major or explicit x.y.z)
 2. Checks for clean working tree (uncommitted changes = error)
 3. Updates `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`
@@ -55,6 +56,7 @@ gh run list --limit 5
 ```
 
 Two workflows trigger per release:
+
 - **CI** (branch push on `main`) — cross-platform build validation
 - **Release** (tag push `v*`) — builds + signs artifacts + publishes GitHub draft release
 
@@ -75,6 +77,7 @@ Tauri cross-platform builds typically take **7-15 minutes**.
 ### Reporting Status
 
 When both runs reach `completed success`, report:
+
 - CI run: status + duration
 - Release run: status + duration
 - Release URL: `https://github.com/dickwu/r2/releases/tag/v<version>`
@@ -101,6 +104,7 @@ git diff --stat <prev-tag>..<new-tag> -- ':!src-tauri/Cargo.lock' ':!src-tauri/C
 ### Writing Notes
 
 Categorize commits using conventional-commit types:
+
 - **feat:** -> "New Features"
 - **fix:** -> "Bug Fixes"
 - **refactor/perf:** -> "Improvements"
@@ -112,12 +116,15 @@ Template:
 ## What's Changed
 
 ### New Features
+
 - <description from feat commits>
 
 ### Bug Fixes
+
 - <description from fix commits>
 
 ### Improvements / Maintenance
+
 - <description from chore/refactor commits>
 
 **Full Changelog**: https://github.com/dickwu/r2/compare/v<prev>...v<new>

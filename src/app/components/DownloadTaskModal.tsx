@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { Modal, Button, Empty, App, Tabs, Badge } from 'antd';
+import { Modal, Button, Empty, App, Tabs, Badge, Popconfirm } from 'antd';
 import { invoke } from '@tauri-apps/api/core';
 import { Virtuoso } from 'react-virtuoso';
 import {
@@ -244,7 +244,10 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
             count={pendingTabCount}
             showZero
             size="small"
-            style={{ backgroundColor: pendingTabCount > 0 ? '#1677ff' : '#d9d9d9' }}
+            style={{
+              backgroundColor:
+                pendingTabCount > 0 ? 'var(--color-link)' : 'var(--color-border-control-hover)',
+            }}
           />
         </span>
       ),
@@ -259,7 +262,10 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
             count={finishedCount}
             showZero
             size="small"
-            style={{ backgroundColor: finishedCount > 0 ? '#52c41a' : '#d9d9d9' }}
+            style={{
+              backgroundColor:
+                finishedCount > 0 ? 'var(--color-success)' : 'var(--color-border-control-hover)',
+            }}
           />
         </span>
       ),
@@ -295,9 +301,18 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
             </div>
             <div>
               {!hasActiveDownloads && tasks.length > 0 && (
-                <Button onClick={handleClearAll} size="small" danger>
-                  Clear All
-                </Button>
+                <Popconfirm
+                  title="Clear all downloads"
+                  description="Are you sure you want to clear all download tasks?"
+                  onConfirm={handleClearAll}
+                  okText="Clear All"
+                  cancelText="Cancel"
+                  okButtonProps={{ danger: true }}
+                >
+                  <Button size="small" danger>
+                    Clear All
+                  </Button>
+                </Popconfirm>
               )}
               <Button onClick={handleClose} style={{ marginLeft: 8 }}>
                 Close

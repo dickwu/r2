@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { Modal, Button, Empty, App, Tabs, Badge } from 'antd';
+import { Modal, Button, Empty, App, Tabs, Badge, Popconfirm } from 'antd';
 import { invoke } from '@tauri-apps/api/core';
 import { Virtuoso } from 'react-virtuoso';
 import {
@@ -608,10 +608,13 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
             count={inProgressTabCount}
             showZero
             size="small"
-            style={{ backgroundColor: inProgressTabCount > 0 ? '#1677ff' : '#d9d9d9' }}
+            style={{
+              backgroundColor:
+                inProgressTabCount > 0 ? 'var(--color-link)' : 'var(--color-border-control-hover)',
+            }}
           />
           {(downloadingCount > 0 || uploadingCount > 0) && (
-            <span style={{ marginLeft: 6, color: '#8c8c8c', fontSize: 12 }}>
+            <span style={{ marginLeft: 6, color: 'var(--color-text-secondary)', fontSize: 12 }}>
               ({downloadingCount} down, {uploadingCount} up)
             </span>
           )}
@@ -628,7 +631,10 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
             count={finishingCount}
             showZero
             size="small"
-            style={{ backgroundColor: finishingCount > 0 ? '#fa8c16' : '#d9d9d9' }}
+            style={{
+              backgroundColor:
+                finishingCount > 0 ? 'var(--color-accent)' : 'var(--color-border-control-hover)',
+            }}
           />
         </span>
       ),
@@ -643,7 +649,10 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
             count={finishedCount}
             showZero
             size="small"
-            style={{ backgroundColor: finishedCount > 0 ? '#52c41a' : '#d9d9d9' }}
+            style={{
+              backgroundColor:
+                finishedCount > 0 ? 'var(--color-success)' : 'var(--color-border-control-hover)',
+            }}
           />
         </span>
       ),
@@ -679,9 +688,18 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
             </div>
             <div>
               {!hasInProgressMoves && tasks.length > 0 && (
-                <Button onClick={handleClearAll} size="small" danger>
-                  Clear All
-                </Button>
+                <Popconfirm
+                  title="Clear all moves"
+                  description="Are you sure you want to clear all move tasks?"
+                  onConfirm={handleClearAll}
+                  okText="Clear All"
+                  cancelText="Cancel"
+                  okButtonProps={{ danger: true }}
+                >
+                  <Button size="small" danger>
+                    Clear All
+                  </Button>
+                </Popconfirm>
               )}
               <Button onClick={handleClose} style={{ marginLeft: 8 }}>
                 Close

@@ -281,7 +281,7 @@ export default function BatchMoveModal({
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div>
-              <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+              <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 6 }}>
                 Destination account
               </div>
               <Select
@@ -300,7 +300,9 @@ export default function BatchMoveModal({
             </div>
 
             <div>
-              <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>Destination bucket</div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 6 }}>
+                Destination bucket
+              </div>
               <Select
                 value={selectedBucket || undefined}
                 onChange={(value) => setSelectedBucket(value)}
@@ -315,7 +317,9 @@ export default function BatchMoveModal({
             </div>
 
             <div>
-              <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>Destination folder</div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 6 }}>
+                Destination folder
+              </div>
               {isSameDestination ? (
                 <div
                   style={{

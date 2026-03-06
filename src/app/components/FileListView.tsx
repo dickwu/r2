@@ -13,6 +13,7 @@ import dayjs from 'dayjs';
 import { FileItem } from '@/app/hooks/useR2Files';
 import { formatBytes } from '@/app/utils/formatBytes';
 import { getFileIcon } from '@/app/utils/fileIcon';
+import FileContextMenu from '@/app/components/FileContextMenu';
 
 type SortOrder = 'asc' | 'desc' | null;
 
@@ -141,127 +142,137 @@ export default function FileListView({
               : undefined;
 
           return (
-            <div
-              className={`file-item ${item.isFolder ? 'folder' : 'file'} ${selectedKeys.has(item.key) ? 'selected' : ''}`}
-              onClick={() => onItemClick(item)}
+            <FileContextMenu
+              item={item}
+              onDownload={onDownload}
+              onRename={onRename}
+              onDelete={onDelete}
+              onFolderDownload={onFolderDownload}
+              onFolderRename={onFolderRename}
+              onFolderDelete={onFolderDelete}
             >
-              <span className="col-checkbox" onClick={(e) => e.stopPropagation()}>
-                <Checkbox
-                  checked={selectedKeys.has(item.key)}
-                  onChange={() => onToggleSelection(item.key)}
-                />
-              </span>
-              <span className="col-name">
-                {item.isFolder ? (
-                  <FolderOutlined className="icon folder-icon" />
-                ) : (
-                  getFileIcon(item.name)
-                )}
-                <Tooltip title={showFullPath ? item.key : undefined}>
-                  <span className="name">{showFullPath ? item.key : item.name}</span>
-                </Tooltip>
-              </span>
-              <span className="col-size">
-                {item.isFolder ? (
-                  folderMeta?.size === 'loading' ? (
-                    '...'
-                  ) : folderMeta?.size === 'error' ? (
-                    'Error'
-                  ) : typeof folderMeta?.size === 'number' ? (
-                    <Tooltip title={folderCountTooltip}>
-                      <span>{formatBytes(folderMeta.size as number)}</span>
-                    </Tooltip>
+              <div
+                className={`file-item ${item.isFolder ? 'folder' : 'file'} ${selectedKeys.has(item.key) ? 'selected' : ''}`}
+                onClick={() => onItemClick(item)}
+              >
+                <span className="col-checkbox" onClick={(e) => e.stopPropagation()}>
+                  <Checkbox
+                    checked={selectedKeys.has(item.key)}
+                    onChange={() => onToggleSelection(item.key)}
+                  />
+                </span>
+                <span className="col-name">
+                  {item.isFolder ? (
+                    <FolderOutlined className="icon folder-icon" />
                   ) : (
-                    '--'
-                  )
-                ) : (
-                  formatBytes(item.size || 0)
-                )}
-              </span>
-              <span className="col-date">
-                {item.isFolder ? (
-                  folderMeta?.lastModified ? (
-                    <Tooltip title={formatDateTime(folderMeta.lastModified)}>
-                      <span>{formatDate(folderMeta.lastModified)}</span>
-                    </Tooltip>
-                  ) : (
-                    '--'
-                  )
-                ) : item.lastModified ? (
-                  <Tooltip title={formatDateTime(item.lastModified)}>
-                    <span>{formatDate(item.lastModified)}</span>
+                    getFileIcon(item.name)
+                  )}
+                  <Tooltip title={showFullPath ? item.key : undefined}>
+                    <span className="name">{showFullPath ? item.key : item.name}</span>
                   </Tooltip>
-                ) : (
-                  '--'
-                )}
-              </span>
-              <span className="col-actions" onClick={(e) => e.stopPropagation()}>
-                {item.isFolder ? (
-                  <>
-                    {onFolderDownload && (
-                      <Tooltip title="Download folder">
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<DownloadOutlined />}
-                          onClick={() => onFolderDownload(item)}
-                        />
+                </span>
+                <span className="col-size">
+                  {item.isFolder ? (
+                    folderMeta?.size === 'loading' ? (
+                      '...'
+                    ) : folderMeta?.size === 'error' ? (
+                      'Error'
+                    ) : typeof folderMeta?.size === 'number' ? (
+                      <Tooltip title={folderCountTooltip}>
+                        <span>{formatBytes(folderMeta.size as number)}</span>
                       </Tooltip>
-                    )}
-                    {onFolderRename && (
-                      <Tooltip title="Rename folder">
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<EditOutlined />}
-                          onClick={() => onFolderRename(item)}
-                        />
+                    ) : (
+                      '--'
+                    )
+                  ) : (
+                    formatBytes(item.size || 0)
+                  )}
+                </span>
+                <span className="col-date">
+                  {item.isFolder ? (
+                    folderMeta?.lastModified ? (
+                      <Tooltip title={formatDateTime(folderMeta.lastModified)}>
+                        <span>{formatDate(folderMeta.lastModified)}</span>
                       </Tooltip>
-                    )}
-                    {onFolderDelete && (
-                      <Tooltip title="Delete folder">
-                        <Button
-                          type="text"
-                          size="small"
-                          danger
-                          icon={<DeleteOutlined />}
-                          onClick={() => onFolderDelete(item)}
-                        />
-                      </Tooltip>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    {onDownload && (
-                      <Tooltip title="Download">
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<DownloadOutlined />}
-                          onClick={() => onDownload(item)}
-                        />
-                      </Tooltip>
-                    )}
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<EditOutlined />}
-                      onClick={() => onRename(item)}
-                    />
-                    <Popconfirm
-                      title="Delete file"
-                      description={`Are you sure you want to delete "${item.name}"?`}
-                      onConfirm={() => onDelete(item)}
-                      okText="Delete"
-                      cancelText="Cancel"
-                      okButtonProps={{ danger: true }}
-                    >
-                      <Button type="text" size="small" danger icon={<DeleteOutlined />} />
-                    </Popconfirm>
-                  </>
-                )}
-              </span>
-            </div>
+                    ) : (
+                      '--'
+                    )
+                  ) : item.lastModified ? (
+                    <Tooltip title={formatDateTime(item.lastModified)}>
+                      <span>{formatDate(item.lastModified)}</span>
+                    </Tooltip>
+                  ) : (
+                    '--'
+                  )}
+                </span>
+                <span className="col-actions" onClick={(e) => e.stopPropagation()}>
+                  {item.isFolder ? (
+                    <>
+                      {onFolderDownload && (
+                        <Tooltip title="Download folder">
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<DownloadOutlined />}
+                            onClick={() => onFolderDownload(item)}
+                          />
+                        </Tooltip>
+                      )}
+                      {onFolderRename && (
+                        <Tooltip title="Rename folder">
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<EditOutlined />}
+                            onClick={() => onFolderRename(item)}
+                          />
+                        </Tooltip>
+                      )}
+                      {onFolderDelete && (
+                        <Tooltip title="Delete folder">
+                          <Button
+                            type="text"
+                            size="small"
+                            danger
+                            icon={<DeleteOutlined />}
+                            onClick={() => onFolderDelete(item)}
+                          />
+                        </Tooltip>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {onDownload && (
+                        <Tooltip title="Download">
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<DownloadOutlined />}
+                            onClick={() => onDownload(item)}
+                          />
+                        </Tooltip>
+                      )}
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<EditOutlined />}
+                        onClick={() => onRename(item)}
+                      />
+                      <Popconfirm
+                        title="Delete file"
+                        description={`Are you sure you want to delete "${item.name}"?`}
+                        onConfirm={() => onDelete(item)}
+                        okText="Delete"
+                        cancelText="Cancel"
+                        okButtonProps={{ danger: true }}
+                      >
+                        <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+                      </Popconfirm>
+                    </>
+                  )}
+                </span>
+              </div>
+            </FileContextMenu>
           );
         }}
       />

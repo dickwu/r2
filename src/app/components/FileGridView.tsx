@@ -13,6 +13,7 @@ import { VirtuosoGrid } from 'react-virtuoso';
 import { FileItem } from '@/app/hooks/useR2Files';
 import { FolderMetadata } from '@/app/stores/folderSizeStore';
 import VideoThumbnail from '@/app/components/VideoThumbnail';
+import FileContextMenu from '@/app/components/FileContextMenu';
 import { formatBytes } from '@/app/utils/formatBytes';
 import { buildPublicUrl, StorageConfig } from '@/app/lib/r2cache';
 
@@ -132,130 +133,140 @@ const FileCard = memo(function FileCard({
   );
 
   return (
-    <Card
-      hoverable
-      className={`grid-card ${item.isFolder ? 'folder' : 'file'} ${hasPreview ? 'has-preview' : ''} ${isSelected ? 'selected' : ''}`}
-      onClick={handleClick}
-      cover={
-        hasPreview ? (
-          isImage ? (
-            <div className="grid-card-preview">
-              <img src={fileUrl} alt={item.name} loading="lazy" />
-            </div>
-          ) : (
-            <div className="grid-card-preview video">
-              <VideoThumbnail src={fileUrl} alt={item.name} />
+    <FileContextMenu
+      item={item}
+      onDownload={onDownload}
+      onRename={onRename}
+      onDelete={onDelete}
+      onFolderDownload={onFolderDownload}
+      onFolderRename={onFolderRename}
+      onFolderDelete={onFolderDelete}
+    >
+      <Card
+        hoverable
+        className={`grid-card ${item.isFolder ? 'folder' : 'file'} ${hasPreview ? 'has-preview' : ''} ${isSelected ? 'selected' : ''}`}
+        onClick={handleClick}
+        cover={
+          hasPreview ? (
+            isImage ? (
+              <div className="grid-card-preview">
+                <img src={fileUrl} alt={item.name} loading="lazy" />
+              </div>
+            ) : (
+              <div className="grid-card-preview video">
+                <VideoThumbnail src={fileUrl} alt={item.name} />
+              </div>
+            )
+          ) : undefined
+        }
+      >
+        {onToggleSelection && (
+          <div className="grid-card-checkbox" onClick={handleToggleSelection}>
+            <Checkbox checked={isSelected} />
+          </div>
+        )}
+        {!hasPreview && (
+          <div className="grid-card-icon">
+            {item.isFolder ? (
+              <FolderOutlined className="folder-icon" />
+            ) : isImage ? (
+              <FileImageOutlined className="image-icon" />
+            ) : isVideo ? (
+              <PlaySquareOutlined className="video-icon" />
+            ) : (
+              <FileOutlined className="file-icon" />
+            )}
+          </div>
+        )}
+        <div className="grid-card-name" title={showFullPath ? item.key : item.name}>
+          {showFullPath ? item.key : item.name}
+        </div>
+        <div className="grid-card-meta">
+          {item.isFolder
+            ? (() => {
+                if (folderMetadata?.size === 'loading') return '...';
+                if (folderMetadata?.size === 'error') return 'Error';
+
+                const sizeText =
+                  typeof folderMetadata?.size === 'number'
+                    ? formatBytes(folderMetadata.size)
+                    : 'Folder';
+
+                const count = folderMetadata?.totalFileCount ?? folderMetadata?.fileCount;
+                const countText =
+                  count != null ? `${count.toLocaleString()} file${count !== 1 ? 's' : ''}` : null;
+
+                return countText ? (
+                  <>
+                    <span>{sizeText}</span>
+                    <br />
+                    <span>{countText}</span>
+                  </>
+                ) : (
+                  sizeText
+                );
+              })()
+            : formatBytes(item.size || 0)}
+        </div>
+        {item.isFolder ? (
+          (onFolderDownload || onFolderRename || onFolderDelete) && (
+            <div className="grid-card-actions" onClick={stopPropagation}>
+              <Space size={4}>
+                {onFolderDownload && (
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<DownloadOutlined />}
+                    onClick={handleFolderDownload}
+                  />
+                )}
+                {onFolderRename && (
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<EditOutlined />}
+                    onClick={handleFolderRename}
+                  />
+                )}
+                {onFolderDelete && (
+                  <Button
+                    type="text"
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={handleFolderDelete}
+                  />
+                )}
+              </Space>
             </div>
           )
-        ) : undefined
-      }
-    >
-      {onToggleSelection && (
-        <div className="grid-card-checkbox" onClick={handleToggleSelection}>
-          <Checkbox checked={isSelected} />
-        </div>
-      )}
-      {!hasPreview && (
-        <div className="grid-card-icon">
-          {item.isFolder ? (
-            <FolderOutlined className="folder-icon" />
-          ) : isImage ? (
-            <FileImageOutlined className="image-icon" />
-          ) : isVideo ? (
-            <PlaySquareOutlined className="video-icon" />
-          ) : (
-            <FileOutlined className="file-icon" />
-          )}
-        </div>
-      )}
-      <div className="grid-card-name" title={showFullPath ? item.key : item.name}>
-        {showFullPath ? item.key : item.name}
-      </div>
-      <div className="grid-card-meta">
-        {item.isFolder
-          ? (() => {
-              if (folderMetadata?.size === 'loading') return '...';
-              if (folderMetadata?.size === 'error') return 'Error';
-
-              const sizeText =
-                typeof folderMetadata?.size === 'number'
-                  ? formatBytes(folderMetadata.size)
-                  : 'Folder';
-
-              const count = folderMetadata?.totalFileCount ?? folderMetadata?.fileCount;
-              const countText =
-                count != null ? `${count.toLocaleString()} file${count !== 1 ? 's' : ''}` : null;
-
-              return countText ? (
-                <>
-                  <span>{sizeText}</span>
-                  <br />
-                  <span>{countText}</span>
-                </>
-              ) : (
-                sizeText
-              );
-            })()
-          : formatBytes(item.size || 0)}
-      </div>
-      {item.isFolder ? (
-        (onFolderDownload || onFolderRename || onFolderDelete) && (
+        ) : (
           <div className="grid-card-actions" onClick={stopPropagation}>
             <Space size={4}>
-              {onFolderDownload && (
+              {onDownload && (
                 <Button
                   type="text"
                   size="small"
                   icon={<DownloadOutlined />}
-                  onClick={handleFolderDownload}
+                  onClick={handleDownload}
                 />
               )}
-              {onFolderRename && (
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<EditOutlined />}
-                  onClick={handleFolderRename}
-                />
-              )}
-              {onFolderDelete && (
-                <Button
-                  type="text"
-                  size="small"
-                  danger
-                  icon={<DeleteOutlined />}
-                  onClick={handleFolderDelete}
-                />
-              )}
+              <Button type="text" size="small" icon={<EditOutlined />} onClick={handleRename} />
+              <Popconfirm
+                title="Delete file"
+                description={`Are you sure you want to delete "${item.name}"?`}
+                onConfirm={handleDelete}
+                okText="Delete"
+                cancelText="Cancel"
+                okButtonProps={{ danger: true }}
+              >
+                <Button type="text" size="small" danger icon={<DeleteOutlined />} />
+              </Popconfirm>
             </Space>
           </div>
-        )
-      ) : (
-        <div className="grid-card-actions" onClick={stopPropagation}>
-          <Space size={4}>
-            {onDownload && (
-              <Button
-                type="text"
-                size="small"
-                icon={<DownloadOutlined />}
-                onClick={handleDownload}
-              />
-            )}
-            <Button type="text" size="small" icon={<EditOutlined />} onClick={handleRename} />
-            <Popconfirm
-              title="Delete file"
-              description={`Are you sure you want to delete "${item.name}"?`}
-              onConfirm={handleDelete}
-              okText="Delete"
-              cancelText="Cancel"
-              okButtonProps={{ danger: true }}
-            >
-              <Button type="text" size="small" danger icon={<DeleteOutlined />} />
-            </Popconfirm>
-          </Space>
-        </div>
-      )}
-    </Card>
+        )}
+      </Card>
+    </FileContextMenu>
   );
 });
 
@@ -308,8 +319,9 @@ export default memo(function FileGridView({
   onToggleSelection,
   showFullPath,
 }: FileGridViewProps) {
+  const hasSelection = selectedKeys && selectedKeys.size > 0;
   return (
-    <div className="file-grid" style={{ height: '100%' }}>
+    <div className={`file-grid${hasSelection ? 'has-selection' : ''}`} style={{ height: '100%' }}>
       <VirtuosoGrid
         style={{ height: '100%' }}
         data={items}

@@ -371,9 +371,9 @@ export default function UploadModal({
             style={{
               marginBottom: 16,
               padding: '12px',
-              background: '#fff7e6',
+              background: 'var(--color-accent-bg)',
               borderRadius: 6,
-              border: '1px solid #ffd591',
+              border: '1px solid var(--color-accent-border)',
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'center',
@@ -388,10 +388,18 @@ export default function UploadModal({
 
         <div style={{ display: 'flex', gap: 12 }}>
           <div
+            role="button"
+            tabIndex={hasActiveUploads ? -1 : 0}
             onClick={hasActiveUploads ? undefined : handleSelectFiles}
+            onKeyDown={(e) => {
+              if (!hasActiveUploads && (e.key === 'Enter' || e.key === ' ')) {
+                e.preventDefault();
+                handleSelectFiles();
+              }
+            }}
             style={{
               flex: 1,
-              border: '2px dashed #d9d9d9',
+              border: '2px dashed var(--color-border-control-hover)',
               borderRadius: 8,
               padding: '24px 16px',
               textAlign: 'center',
@@ -401,25 +409,33 @@ export default function UploadModal({
             }}
             onMouseEnter={(e) => {
               if (!hasActiveUploads) {
-                e.currentTarget.style.borderColor = '#f6821f';
+                e.currentTarget.style.borderColor = 'var(--color-accent)';
               }
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.borderColor = '#d9d9d9';
+              e.currentTarget.style.borderColor = 'var(--color-border-control-hover)';
             }}
           >
             <p style={{ marginBottom: 8 }}>
-              <FileAddOutlined style={{ color: '#f6821f', fontSize: 36 }} />
+              <FileAddOutlined style={{ color: 'var(--color-accent)', fontSize: 36 }} />
             </p>
             <p style={{ fontSize: 14, marginBottom: 4 }}>Select Files</p>
-            <p style={{ color: '#999', fontSize: 12 }}>Single or multiple</p>
+            <p style={{ color: 'var(--color-text-secondary)', fontSize: 12 }}>Single or multiple</p>
           </div>
 
           <div
+            role="button"
+            tabIndex={hasActiveUploads ? -1 : 0}
             onClick={hasActiveUploads ? undefined : handleSelectFolder}
+            onKeyDown={(e) => {
+              if (!hasActiveUploads && (e.key === 'Enter' || e.key === ' ')) {
+                e.preventDefault();
+                handleSelectFolder();
+              }
+            }}
             style={{
               flex: 1,
-              border: '2px dashed #d9d9d9',
+              border: '2px dashed var(--color-border-control-hover)',
               borderRadius: 8,
               padding: '24px 16px',
               textAlign: 'center',
@@ -429,18 +445,20 @@ export default function UploadModal({
             }}
             onMouseEnter={(e) => {
               if (!hasActiveUploads) {
-                e.currentTarget.style.borderColor = '#f6821f';
+                e.currentTarget.style.borderColor = 'var(--color-accent)';
               }
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.borderColor = '#d9d9d9';
+              e.currentTarget.style.borderColor = 'var(--color-border-control-hover)';
             }}
           >
             <p style={{ marginBottom: 8 }}>
-              <FolderOutlined style={{ color: '#f6821f', fontSize: 36 }} />
+              <FolderOutlined style={{ color: 'var(--color-accent)', fontSize: 36 }} />
             </p>
             <p style={{ fontSize: 14, marginBottom: 4 }}>Select Folder</p>
-            <p style={{ color: '#999', fontSize: 12 }}>Upload entire folder</p>
+            <p style={{ color: 'var(--color-text-secondary)', fontSize: 12 }}>
+              Upload entire folder
+            </p>
           </div>
         </div>
 

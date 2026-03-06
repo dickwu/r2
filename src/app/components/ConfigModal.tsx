@@ -870,9 +870,9 @@ export default function ConfigModal({
 
   function getIcon() {
     return isAccountMode ? (
-      <UserOutlined style={{ fontSize: 40, color: '#f6821f' }} />
+      <UserOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
     ) : (
-      <KeyOutlined style={{ fontSize: 40, color: '#f6821f' }} />
+      <KeyOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
     );
   }
 
@@ -1225,7 +1225,14 @@ export default function ConfigModal({
               )}
 
               {buckets.length === 0 && !addingBucket && (
-                <div style={{ padding: '8px 0', textAlign: 'center', color: '#999', fontSize: 12 }}>
+                <div
+                  style={{
+                    padding: '8px 0',
+                    textAlign: 'center',
+                    color: 'var(--color-text-secondary)',
+                    fontSize: 12,
+                  }}
+                >
                   Click &quot;Load&quot; to fetch or &quot;Add&quot; manually
                 </div>
               )}
