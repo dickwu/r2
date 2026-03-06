@@ -32,21 +32,19 @@ commit message, then proceed.
 
 ## Running the Release
 
+`publish.sh` accepts: `patch`, `minor`, `major`, or an explicit `x.y.z` version.
+Default to `patch` unless the user specifies otherwise.
+
 ```bash
-# Bump patch (e.g. 0.1.60 -> 0.1.61)
-./publish.sh patch
+# Show current version and bump examples
+./publish.sh
 
-# Bump minor (e.g. 0.1.60 -> 0.2.0)
-./publish.sh minor
-
-# Bump major (e.g. 0.1.60 -> 1.0.0)
-./publish.sh major
-
-# Explicit version
-./publish.sh 0.2.0
+# Run the release (replace <arg> with patch/minor/major/x.y.z)
+./publish.sh <arg>
 ```
 
-Default to `patch` unless the user specifies otherwise.
+The script handles all version arithmetic, file updates, git commit, tag creation,
+and push — do NOT duplicate any of that logic manually.
 
 ## Checking CI After Push
 
