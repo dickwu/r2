@@ -1,0 +1,78 @@
+name: Update Homebrew Cask
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-cask:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download DMGs and compute SHA256
+        id: sha
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          curl -sL "https://github.com/dickwu/r2/releases/download/${TAG}/r2_${VERSION}_aarch64.dmg" -o arm64.dmg
+          curl -sL "https://github.com/dickwu/r2/releases/download/${TAG}/r2_${VERSION}_x64.dmg" -o x64.dmg
+          echo "arm64=$(shasum -a 256 arm64.dmg | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "x64=$(shasum -a 256 x64.dmg | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew Cask
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA_ARM64: ${{ steps.sha.outputs.arm64 }}
+          SHA_X64: ${{ steps.sha.outputs.x64 }}
+        run: |
+          cat > /tmp/r2.rb <<'TEMPLATE'
+          cask "r2" do
+            version "VERSION_PLACEHOLDER"
+
+            on_arm do
+              url "https://github.com/dickwu/r2/releases/download/v#{version}/r2_#{version}_aarch64.dmg"
+              sha256 "SHA_ARM64_PLACEHOLDER"
+            end
+
+            on_intel do
+              url "https://github.com/dickwu/r2/releases/download/v#{version}/r2_#{version}_x64.dmg"
+              sha256 "SHA_X64_PLACEHOLDER"
+            end
+
+            name "R2 Client"
+            desc "Desktop client for managing S3-compatible storage (Cloudflare R2, AWS S3, MinIO, RustFS)"
+            homepage "https://github.com/dickwu/r2"
+            license "MIT"
+
+            app "r2.app"
+
+            zap trash: [
+              "~/Library/Application Support/com.lifefarmer.r2",
+              "~/Library/Caches/com.lifefarmer.r2",
+              "~/Library/Preferences/com.lifefarmer.r2.plist",
+              "~/Library/Saved Application State/com.lifefarmer.r2.savedState",
+            ]
+          end
+          TEMPLATE
+
+          # Remove leading whitespace and substitute placeholders
+          sed -i '' 's/^          //' /tmp/r2.rb
+          sed -i '' "s/VERSION_PLACEHOLDER/${VERSION}/" /tmp/r2.rb
+          sed -i '' "s/SHA_ARM64_PLACEHOLDER/${SHA_ARM64}/" /tmp/r2.rb
+          sed -i '' "s/SHA_X64_PLACEHOLDER/${SHA_X64}/" /tmp/r2.rb
+
+          ENCODED=$(base64 -i /tmp/r2.rb)
+          EXISTING_SHA=$(gh api repos/dickwu/homebrew-tap/contents/Casks/r2.rb --jq '.sha')
+
+          gh api repos/dickwu/homebrew-tap/contents/Casks/r2.rb \
+            --method PUT \
+            --field message="chore: update r2 cask to ${VERSION}" \
+            --field content="${ENCODED}" \
+            --field sha="${EXISTING_SHA}"
