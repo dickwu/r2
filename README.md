@@ -39,6 +39,22 @@ A desktop application for managing S3-compatible storage (Cloudflare R2, AWS S3,
 - Dark mode support
 - Auto-updates
 
+## Install
+
+### Homebrew (macOS)
+
+```bash
+brew install dickwu/tap/r2
+```
+
+### Download
+
+Download the latest release for your platform from the [Releases page](https://github.com/dickwu/r2/releases/latest):
+
+- **macOS**: `.dmg` (Apple Silicon & Intel)
+- **Windows**: `.msi` or `.exe` installer
+- **Linux**: `.deb`, `.rpm`, or `.AppImage`
+
 ## Screenshots
 
 ![Prerequisites](./images/create-account.png)
