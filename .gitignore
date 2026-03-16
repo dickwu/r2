@@ -50,3 +50,11 @@ build-windows.sh
 next-env.d.
 
 .cursor/
+
+# AI tooling
+.agents/
+.claude/
+.claude-flow/
+.codex/
+.mcp.json
+AGENTS.md
