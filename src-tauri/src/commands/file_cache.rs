@@ -153,16 +153,13 @@ pub async fn build_directory_tree(app: tauri::AppHandle) -> Result<(), String> {
 
     let _ = app.emit("sync-phase", "indexing");
 
-    let files = db::get_all_cached_files(&bucket, &account_id)
-        .await
-        .map_err(|e| format!("Failed to get cached files: {}", e))?;
-
     let app_clone = app.clone();
     let progress_callback = move |current: usize, total: usize| {
         let _ = app_clone.emit("indexing-progress", IndexingProgress { current, total });
     };
 
-    db::build_directory_tree(&bucket, &account_id, &files, &[], Some(progress_callback))
+    // Build from DB instead of loading all files into memory
+    db::build_directory_tree_from_db(&bucket, &account_id, &[], Some(progress_callback))
         .await
         .map_err(|e| format!("Failed to build directory tree: {}", e))?;
 

@@ -43,10 +43,16 @@ export function useFilesSync(config: StorageConfig | null) {
       useSyncStore.getState().setIndexingProgress(event.payload);
     });
 
+    // Listen for store progress events (from dedicated store task)
+    const unlistenStore = listen<number>('store-progress', (event) => {
+      useSyncStore.getState().setStoredFiles(event.payload);
+    });
+
     return () => {
       unlistenProgress.then((fn) => fn());
       unlistenPhase.then((fn) => fn());
       unlistenIndexing.then((fn) => fn());
+      unlistenStore.then((fn) => fn());
     };
   }, []);
 

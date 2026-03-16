@@ -16,7 +16,7 @@ pub struct CachedFile {
 }
 
 /// Helper to extract parent path and name from a key
-fn parse_key(key: &str) -> (String, String) {
+pub fn parse_key(key: &str) -> (String, String) {
     if let Some(last_slash) = key.rfind('/') {
         let parent = &key[..=last_slash]; // Include trailing slash
         let name = &key[last_slash + 1..];
@@ -671,4 +671,164 @@ pub async fn get_folder_contents(
     }
 
     Ok(FolderContents { files, folders })
+}
+
+// ============ Streaming Sync Functions ============
+//
+// Uses a staging table so the live cached_files table is untouched during sync.
+// If the sync fails midway, old data is preserved — the staging table is just
+// abandoned and cleaned up on the next begin_sync call.
+// finish_sync atomically swaps staging → live in a single transaction.
+
+/// Step 1: prepare staging table for new sync data.
+/// Old data in cached_files stays intact and queryable during the entire sync.
+pub async fn begin_sync(bucket: &str, account_id: &str) -> DbResult<()> {
+    let conn = get_connection()?.lock().await;
+
+    // Create staging table if it doesn't exist (same schema, no indexes needed)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS cached_files_staging (
+            bucket TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            parent_path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            last_modified TEXT NOT NULL,
+            synced_at INTEGER NOT NULL,
+            PRIMARY KEY (bucket, account_id, key)
+        )",
+        (),
+    )
+    .await?;
+
+    // Clear any leftover staging data from a previous failed sync
+    conn.execute(
+        "DELETE FROM cached_files_staging WHERE bucket = ?1 AND account_id = ?2",
+        turso::params![bucket, account_id],
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Step 2: insert a batch of files into the STAGING table.
+/// The live cached_files table is not modified.
+pub async fn store_file_batch(bucket: &str, account_id: &str, files: &[CachedFile]) -> DbResult<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    const BATCH_SIZE: usize = 1000;
+    let conn = get_connection()?.lock().await;
+    conn.execute("BEGIN TRANSACTION", ()).await?;
+
+    let tx_result = async {
+        for chunk in files.chunks(BATCH_SIZE) {
+            if chunk.is_empty() {
+                continue;
+            }
+
+            let placeholders: Vec<String> = chunk
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    let base = i * 8;
+                    format!(
+                        "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+                        base + 1, base + 2, base + 3, base + 4,
+                        base + 5, base + 6, base + 7, base + 8
+                    )
+                })
+                .collect();
+
+            let sql = format!(
+                "INSERT INTO cached_files_staging (bucket, account_id, key, parent_path, name, size, last_modified, synced_at) VALUES {}",
+                placeholders.join(", ")
+            );
+
+            let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 8);
+            for file in chunk {
+                let (parent_path, name) = if file.name.is_empty() {
+                    parse_key(&file.key)
+                } else {
+                    (file.parent_path.clone(), file.name.clone())
+                };
+
+                params.push(bucket.to_string().into());
+                params.push(account_id.to_string().into());
+                params.push(file.key.clone().into());
+                params.push(parent_path.into());
+                params.push(name.into());
+                params.push(file.size.into());
+                params.push(file.last_modified.clone().into());
+                params.push(file.synced_at.into());
+            }
+
+            conn.execute(&sql, params).await?;
+        }
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    if let Err(err) = tx_result {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        return Err(err);
+    }
+
+    conn.execute("COMMIT", ()).await?;
+    Ok(())
+}
+
+/// Step 3: atomically swap staging data into the live table.
+/// In one transaction: delete old live data → copy staging → clean staging → update meta.
+/// If this fails, old data is still intact in cached_files.
+pub async fn finish_sync(bucket: &str, account_id: &str, file_count: usize) -> DbResult<()> {
+    let now = chrono::Utc::now().timestamp();
+    let conn = get_connection()?.lock().await;
+    conn.execute("BEGIN TRANSACTION", ()).await?;
+
+    let tx_result = async {
+        // Remove old live data for this bucket
+        conn.execute(
+            "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2",
+            turso::params![bucket, account_id],
+        )
+        .await?;
+
+        // Copy staging → live
+        conn.execute(
+            "INSERT INTO cached_files SELECT * FROM cached_files_staging WHERE bucket = ?1 AND account_id = ?2",
+            turso::params![bucket, account_id],
+        )
+        .await?;
+
+        // Clean staging
+        conn.execute(
+            "DELETE FROM cached_files_staging WHERE bucket = ?1 AND account_id = ?2",
+            turso::params![bucket, account_id],
+        )
+        .await?;
+
+        // Update sync metadata
+        conn.execute(
+            "INSERT INTO sync_meta (bucket, account_id, last_sync, file_count)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (bucket, account_id) DO UPDATE SET last_sync = ?3, file_count = ?4",
+            turso::params![bucket, account_id, now, file_count as i32],
+        )
+        .await?;
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    if let Err(err) = tx_result {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        return Err(err);
+    }
+
+    conn.execute("COMMIT", ()).await?;
+    Ok(())
 }

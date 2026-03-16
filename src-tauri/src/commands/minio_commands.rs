@@ -131,41 +131,107 @@ pub async fn sync_minio_bucket(
     let account_id = config.account_id.clone();
     let minio_config: minio::MinioConfig = config.into();
     let bucket = minio_config.bucket.clone();
+    let now = chrono::Utc::now().timestamp();
 
     let _ = app.emit("sync-phase", "fetching");
 
-    let app_clone = app.clone();
-    let progress_callback = Box::new(move |count: usize| {
-        let _ = app_clone.emit("sync-progress", count);
+    db::begin_sync(&bucket, &account_id)
+        .await
+        .map_err(|e| format!("Failed to clear cache: {}", e))?;
+
+    // Spawn dedicated store task
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<CachedFile>>(8);
+    let store_bucket = bucket.clone();
+    let store_account_id = account_id.clone();
+    let store_app = app.clone();
+    let store_handle = tokio::spawn(async move {
+        let mut stored_count: usize = 0;
+        while let Some(batch) = rx.recv().await {
+            let batch_len = batch.len();
+            db::store_file_batch(&store_bucket, &store_account_id, &batch)
+                .await
+                .map_err(|e| format!("Failed to store files: {}", e))?;
+            stored_count += batch_len;
+            let _ = store_app.emit("store-progress", stored_count);
+        }
+        Ok::<usize, String>(stored_count)
     });
 
-    let list_result = minio::list_all_objects_recursive(&minio_config, Some(progress_callback))
+    let client = minio::create_minio_client(&minio_config)
         .await
-        .map_err(|e| format!("Failed to fetch objects: {}", e))?;
+        .map_err(|e| format!("Failed to create client: {}", e))?;
 
-    let count = list_result.objects.len() as i32;
+    let mut fetched_count: usize = 0;
+    let mut folder_keys: Vec<String> = Vec::new();
+    let mut continuation_token: Option<String> = None;
 
+    loop {
+        let mut request = client
+            .list_objects_v2()
+            .bucket(&minio_config.bucket)
+            .max_keys(1000);
+
+        if let Some(token) = &continuation_token {
+            request = request.continuation_token(token);
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("Failed to list objects: {}", e))?;
+        let is_truncated = response.is_truncated().unwrap_or(false);
+        let next_token = response.next_continuation_token().map(|s| s.to_string());
+
+        let mut batch: Vec<CachedFile> = Vec::new();
+        for obj in response.contents() {
+            if let Some(key) = obj.key() {
+                let key = key.to_string();
+                if key.ends_with('/') {
+                    folder_keys.push(key);
+                } else {
+                    let (parent_path, name) = db::parse_key(&key);
+                    batch.push(CachedFile {
+                        bucket: bucket.clone(),
+                        account_id: account_id.clone(),
+                        key,
+                        parent_path,
+                        name,
+                        size: obj.size().unwrap_or(0),
+                        last_modified: obj
+                            .last_modified()
+                            .map(|dt| dt.to_string())
+                            .unwrap_or_default(),
+                        synced_at: now,
+                    });
+                }
+            }
+        }
+
+        fetched_count += batch.len();
+        let _ = app.emit("sync-progress", fetched_count);
+
+        if !batch.is_empty() {
+            tx.send(batch)
+                .await
+                .map_err(|_| "Store task crashed".to_string())?;
+        }
+
+        if !is_truncated {
+            break;
+        }
+        continuation_token = next_token;
+    }
+
+    drop(tx);
     let _ = app.emit("sync-phase", "storing");
-
-    let now = chrono::Utc::now().timestamp();
-    let cached_files: Vec<CachedFile> = list_result
-        .objects
-        .into_iter()
-        .map(|obj| CachedFile {
-            bucket: bucket.clone(),
-            account_id: account_id.clone(),
-            key: obj.key,
-            parent_path: String::new(),
-            name: String::new(),
-            size: obj.size,
-            last_modified: obj.last_modified,
-            synced_at: now,
-        })
-        .collect();
-
-    db::store_all_files(&bucket, &account_id, &cached_files)
+    let stored_count = store_handle
         .await
-        .map_err(|e| format!("Failed to store files: {}", e))?;
+        .map_err(|e| format!("Store task panicked: {}", e))?
+        .map_err(|e| format!("Store failed: {}", e))?;
+
+    db::finish_sync(&bucket, &account_id, stored_count)
+        .await
+        .map_err(|e| format!("Failed to update sync metadata: {}", e))?;
 
     let _ = app.emit("sync-phase", "indexing");
 
@@ -174,11 +240,10 @@ pub async fn sync_minio_bucket(
         let _ = app_clone.emit("indexing-progress", IndexingProgress { current, total });
     };
 
-    db::build_directory_tree(
+    db::build_directory_tree_from_db(
         &bucket,
         &account_id,
-        &cached_files,
-        &list_result.folder_keys,
+        &folder_keys,
         Some(indexing_callback),
     )
     .await
@@ -187,7 +252,7 @@ pub async fn sync_minio_bucket(
     let _ = app.emit("sync-phase", "complete");
 
     Ok(SyncResult {
-        count,
+        count: stored_count as i32,
         timestamp: now,
     })
 }

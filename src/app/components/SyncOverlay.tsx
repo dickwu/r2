@@ -12,6 +12,7 @@ import { useSyncStore, SyncPhase } from '@/app/stores/syncStore';
 export default function SyncOverlay() {
   const phase = useSyncStore((state) => state.phase);
   const processedFiles = useSyncStore((state) => state.processedFiles);
+  const storedFiles = useSyncStore((state) => state.storedFiles);
   const totalFiles = useSyncStore((state) => state.totalFiles);
   const indexingProgress = useSyncStore((state) => state.indexingProgress);
 
@@ -57,11 +58,14 @@ export default function SyncOverlay() {
         <span className="sync-overlay-label">files found</span>
       </div>
     );
-  } else if (phase === 'storing' && totalFiles > 0) {
+  } else if (phase === 'storing') {
+    const total = processedFiles || totalFiles;
     progressDisplay = (
       <div className="sync-overlay-progress">
-        <span className="sync-overlay-count">{totalFiles.toLocaleString()}</span>
-        <span className="sync-overlay-label">files to cache</span>
+        <span className="sync-overlay-count">
+          {storedFiles.toLocaleString()}{total > 0 ? ` / ${total.toLocaleString()}` : ''}
+        </span>
+        <span className="sync-overlay-label">files cached</span>
       </div>
     );
   } else if (phase === 'indexing') {

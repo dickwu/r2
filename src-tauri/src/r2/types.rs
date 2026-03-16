@@ -39,6 +39,7 @@ pub struct ListObjectsResult {
 #[derive(Debug, Clone)]
 pub struct RecursiveListResult {
     pub objects: Vec<R2Object>,
+    #[allow(dead_code)]
     pub folder_keys: Vec<String>,
 }
 

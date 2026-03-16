@@ -39,6 +39,7 @@ pub struct ListObjectsResult {
 #[derive(Debug, Clone)]
 pub struct RecursiveListResult {
     pub objects: Vec<MinioObject>,
+    #[allow(dead_code)]
     pub folder_keys: Vec<String>,
 }
 

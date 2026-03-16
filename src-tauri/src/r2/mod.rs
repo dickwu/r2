@@ -16,7 +16,7 @@ mod types;
 pub(crate) mod upload;
 
 // Re-export types
-pub use types::{ListObjectsResult, R2Bucket, R2Config, R2Object};
+pub use types::{create_r2_client, ListObjectsResult, R2Bucket, R2Config, R2Object};
 
 // Re-export list operations
 pub use list::{list_all_objects_recursive, list_buckets, list_folder_objects, list_objects};

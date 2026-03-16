@@ -60,6 +60,15 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
     // Enable foreign keys
     conn.execute("PRAGMA foreign_keys = ON;", ()).await?;
 
+    // Performance tuning for large datasets (1M+ files)
+    // These are non-fatal: journal_mode and mmap_size return result rows
+    // which may fail with execute(); use let _ to ignore errors.
+    let _ = conn.execute("PRAGMA journal_mode = WAL;", ()).await;
+    let _ = conn.execute("PRAGMA synchronous = NORMAL;", ()).await;
+    let _ = conn.execute("PRAGMA cache_size = -64000;", ()).await;
+    let _ = conn.execute("PRAGMA temp_store = MEMORY;", ()).await;
+    let _ = conn.execute("PRAGMA mmap_size = 268435456;", ()).await;
+
     conn.execute_batch(&format!(
         "{}{}{}",
         sessions::get_table_sql(),
@@ -189,15 +198,16 @@ pub use rustfs_accounts::{
 pub use rustfs_buckets::{list_rustfs_buckets_by_account, save_rustfs_buckets_for_account};
 // Re-export file cache functions
 pub use file_cache::{
-    calculate_folder_size, clear_file_cache, delete_cached_file, delete_cached_files_batch,
-    get_all_cached_files, get_all_directory_nodes, get_cached_file_size, get_directory_node,
-    get_folder_contents, move_cached_file, search_cached_files, store_all_files,
-    update_cached_file,
+    begin_sync, calculate_folder_size, clear_file_cache, delete_cached_file,
+    delete_cached_files_batch, finish_sync, get_all_cached_files, get_all_directory_nodes,
+    get_cached_file_size, get_directory_node, get_folder_contents, move_cached_file, parse_key,
+    search_cached_files, store_all_files, store_file_batch, update_cached_file,
 };
 // Re-export directory tree builder
 pub use dir_tree::{
-    build_directory_tree, update_directory_tree_for_delete, update_directory_tree_for_delete_batch,
-    update_directory_tree_for_file, update_directory_tree_for_move,
+    build_directory_tree_from_db, update_directory_tree_for_delete,
+    update_directory_tree_for_delete_batch, update_directory_tree_for_file,
+    update_directory_tree_for_move,
 };
 // Re-export download session functions
 pub use downloads::{

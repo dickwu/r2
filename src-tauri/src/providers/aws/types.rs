@@ -40,6 +40,7 @@ pub struct ListObjectsResult {
 #[derive(Debug, Clone)]
 pub struct RecursiveListResult {
     pub objects: Vec<AwsObject>,
+    #[allow(dead_code)]
     pub folder_keys: Vec<String>,
 }
 

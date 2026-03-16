@@ -18,15 +18,17 @@ const YIELD_INTERVAL: usize = 1000;
 /// Progress callback receives (current, total) counts
 pub type ProgressCallback = Box<dyn FnMut(usize, usize) + Send>;
 
-/// In-memory directory node for tree building
+/// In-memory directory node for tree building (used by legacy build_directory_tree)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DirNode {
     direct_files: Vec<FileInfo>,
     subdirs: BTreeSet<String>,
 }
 
-/// Minimal file info needed for aggregation
+/// Minimal file info needed for aggregation (used by legacy build_directory_tree)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct FileInfo {
     size: i64,
     last_modified: String,
@@ -77,10 +79,12 @@ fn compute_parent_path(path: &str) -> String {
 /// let nodes = builder.build(files, Some(progress_cb)).await;
 /// DirectoryTreeBuilder::store(bucket, account_id, &nodes).await?;
 /// ```
+#[allow(dead_code)]
 pub struct DirectoryTreeBuilder {
     dir_map: HashMap<String, DirNode>,
 }
 
+#[allow(dead_code)]
 impl DirectoryTreeBuilder {
     pub fn new() -> Self {
         Self {
@@ -405,7 +409,165 @@ impl Default for DirectoryTreeBuilder {
     }
 }
 
-/// Convenience function matching old API signature
+/// Build directory tree from database instead of in-memory file list.
+/// This is much more efficient for large datasets (1M+ files) because:
+/// - SQL GROUP BY computes direct stats in SQLite's C engine
+/// - Only unique directory paths are loaded (~10K vs 1M files)
+/// - No per-file string allocations for path parsing
+pub async fn build_directory_tree_from_db<F>(
+    bucket: &str,
+    account_id: &str,
+    folder_keys: &[String],
+    progress_callback: Option<F>,
+) -> DbResult<()>
+where
+    F: FnMut(usize, usize) + Send + 'static,
+{
+    let mut progress: Option<ProgressCallback> =
+        progress_callback.map(|f| Box::new(f) as ProgressCallback);
+
+    // Step 1: Query direct file stats per directory from DB
+    let direct_stats = {
+        let conn = get_connection()?.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT parent_path, COUNT(*), SUM(size), MAX(last_modified)
+                 FROM cached_files
+                 WHERE bucket = ?1 AND account_id = ?2
+                 GROUP BY parent_path",
+                turso::params![bucket, account_id],
+            )
+            .await?;
+
+        let mut stats: HashMap<String, (i32, i64, Option<String>)> = HashMap::new();
+        while let Some(row) = rows.next().await? {
+            let parent_path: String = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            let size: i64 = row.get(2)?;
+            let last_modified: Option<String> = row.get(3)?;
+            stats.insert(parent_path, (count as i32, size, last_modified));
+        }
+        stats
+    };
+
+    // Step 2: Compute all directory paths (from direct stats + ancestors)
+    let mut all_dirs: HashSet<String> = HashSet::new();
+    all_dirs.insert(String::new()); // root
+
+    for parent_path in direct_stats.keys() {
+        let mut current = parent_path.clone();
+        while !current.is_empty() {
+            all_dirs.insert(current.clone());
+            let without_trailing = current.trim_end_matches('/');
+            current = match without_trailing.rfind('/') {
+                Some(pos) => without_trailing[..=pos].to_string(),
+                None => String::new(),
+            };
+        }
+    }
+
+    // Also register empty folder marker paths
+    for key in folder_keys {
+        let key_trimmed = key.trim_end_matches('/');
+        let parts: Vec<&str> = key_trimmed.split('/').collect();
+        for i in 0..parts.len() {
+            let path = format!("{}/", parts[0..=i].join("/"));
+            all_dirs.insert(path);
+        }
+    }
+
+    // Step 3: Build parent→children map
+    let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
+    for dir in &all_dirs {
+        if dir.is_empty() {
+            continue;
+        }
+        let parent = compute_parent_path(dir);
+        children_map.entry(parent).or_default().push(dir.clone());
+    }
+
+    // Step 4: Sort by depth (deepest first) and aggregate bottom-up
+    let mut sorted_dirs: Vec<String> = all_dirs.into_iter().collect();
+    sorted_dirs.sort_by_key(|p| std::cmp::Reverse(p.matches('/').count()));
+
+    let total = sorted_dirs.len();
+    let mut aggregates: HashMap<String, (i32, i64, Option<String>)> = HashMap::new();
+    let mut nodes: Vec<ComputedNode> = Vec::with_capacity(total);
+
+    if let Some(ref mut cb) = progress {
+        cb(0, total);
+    }
+
+    for (idx, path) in sorted_dirs.iter().enumerate() {
+        // Direct stats from DB query
+        let (direct_count, direct_size, ref direct_last_mod) =
+            direct_stats.get(path).cloned().unwrap_or((0, 0, None));
+
+        // Aggregate from children
+        let mut sub_count: i32 = 0;
+        let mut sub_size: i64 = 0;
+        let mut sub_last_mod: Option<String> = None;
+
+        if let Some(child_dirs) = children_map.get(path) {
+            for child in child_dirs {
+                if let Some((count, size, ref last_mod)) = aggregates.get(child) {
+                    sub_count += count;
+                    sub_size += size;
+                    if let Some(ref lm) = last_mod {
+                        sub_last_mod = match sub_last_mod {
+                            None => Some(lm.clone()),
+                            Some(ref curr) if lm > curr => Some(lm.clone()),
+                            other => other,
+                        };
+                    }
+                }
+            }
+        }
+
+        // Combined last_modified
+        let last_modified = match (direct_last_mod.as_deref(), sub_last_mod) {
+            (Some(d), Some(s)) => Some(if d > s.as_str() { d.to_string() } else { s }),
+            (Some(d), None) => Some(d.to_string()),
+            (None, Some(s)) => Some(s),
+            (None, None) => None,
+        };
+
+        let total_count = direct_count + sub_count;
+        let total_size = direct_size + sub_size;
+
+        aggregates.insert(
+            path.clone(),
+            (total_count, total_size, last_modified.clone()),
+        );
+
+        nodes.push(ComputedNode {
+            path: path.clone(),
+            parent_path: compute_parent_path(path),
+            file_count: direct_count,
+            total_file_count: total_count,
+            size: direct_size,
+            total_size,
+            last_modified,
+        });
+
+        if (idx + 1) % 100 == 0 || idx + 1 == total {
+            if let Some(ref mut cb) = progress {
+                cb(idx + 1, total);
+            }
+        }
+
+        // Yield periodically
+        if idx > 0 && idx % YIELD_INTERVAL == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    // Step 5: Store to DB
+    DirectoryTreeBuilder::store(bucket, account_id, &nodes).await
+}
+
+/// Convenience function matching old API signature (kept for backward compatibility)
+#[allow(dead_code)]
 pub async fn build_directory_tree<F>(
     bucket: &str,
     account_id: &str,

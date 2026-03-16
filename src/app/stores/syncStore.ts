@@ -31,6 +31,7 @@ interface SyncStore {
   // Bucket sync state
   phase: SyncPhase;
   processedFiles: number;
+  storedFiles: number;
   totalFiles: number;
   indexingProgress: IndexingProgress;
 
@@ -42,6 +43,7 @@ interface SyncStore {
   setIsFolderLoading: (loading: boolean) => void;
   setPhase: (phase: SyncPhase) => void;
   setProgress: (count: number) => void;
+  setStoredFiles: (count: number) => void;
   setTotalFiles: (count: number) => void;
   setIndexingProgress: (progress: IndexingProgress) => void;
   reset: () => void;
@@ -67,6 +69,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   // Bucket sync state
   phase: 'idle',
   processedFiles: 0,
+  storedFiles: 0,
   totalFiles: 0,
   indexingProgress: { current: 0, total: 0 },
 
@@ -108,6 +111,10 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     set({ processedFiles: count });
   },
 
+  setStoredFiles: (count) => {
+    set({ storedFiles: count });
+  },
+
   setTotalFiles: (count) => {
     set({ totalFiles: count });
   },
@@ -121,6 +128,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     set({
       phase: 'idle',
       processedFiles: 0,
+      storedFiles: 0,
       totalFiles: 0,
       indexingProgress: { current: 0, total: 0 },
       bucketSyncTimes: {},
@@ -133,6 +141,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     set({
       phase: 'idle',
       processedFiles: 0,
+      storedFiles: 0,
       totalFiles: 0,
       indexingProgress: { current: 0, total: 0 },
     });

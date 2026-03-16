@@ -25,6 +25,7 @@ export default function SyncProgress({ onClick }: SyncProgressProps) {
   const isSyncing = useSyncStore((state) => state.isSyncing);
   const phase = useSyncStore((state) => state.phase);
   const processedFiles = useSyncStore((state) => state.processedFiles);
+  const storedFiles = useSyncStore((state) => state.storedFiles);
   const totalFiles = useSyncStore((state) => state.totalFiles);
   const indexingProgress = useSyncStore((state) => state.indexingProgress);
 
@@ -39,7 +40,10 @@ export default function SyncProgress({ onClick }: SyncProgressProps) {
   if (phase === 'fetching') {
     progressText = `${processedFiles.toLocaleString()} files`;
   } else if (phase === 'storing') {
-    progressText = `${totalFiles.toLocaleString()} files`;
+    const total = processedFiles || totalFiles;
+    progressText = total > 0
+      ? `${storedFiles.toLocaleString()} / ${total.toLocaleString()} files`
+      : `${storedFiles.toLocaleString()} files`;
   } else if (phase === 'indexing') {
     const { current, total } = indexingProgress;
     if (total > 0) {
