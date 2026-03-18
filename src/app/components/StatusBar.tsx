@@ -7,6 +7,7 @@ import SyncOverlay from '@/app/components/SyncOverlay';
 import {
   SyncProgress,
   FolderLoadProgress,
+  BackgroundSyncProgress,
   BucketStats,
   DomainInfo,
   ItemsCount,
@@ -51,6 +52,7 @@ export default function StatusBar({
           />
           {hasConfig && <FolderLoadProgress />}
           {hasConfig && <SyncProgress onClick={() => setSyncDetailsOpen(true)} />}
+          {hasConfig && <BackgroundSyncProgress onClick={() => setSyncDetailsOpen(true)} />}
           <BucketStats
             hasConfig={hasConfig}
             accountId={storageConfig?.accountId}

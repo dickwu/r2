@@ -22,6 +22,7 @@ pub mod file_cache;
 pub mod minio_accounts;
 pub mod minio_buckets;
 pub mod move_sessions;
+pub mod prefix_sync;
 pub mod rustfs_accounts;
 pub mod rustfs_buckets;
 pub mod sessions;
@@ -153,6 +154,9 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
     // Create move sessions table
     conn.execute_batch(move_sessions::get_table_sql()).await?;
 
+    // Create prefix sync times table (for lazy sync)
+    conn.execute_batch(prefix_sync::get_table_sql()).await?;
+
     DB_CONNECTION
         .set(Mutex::new(conn))
         .map_err(|_| "Database already initialized")?;
@@ -202,10 +206,11 @@ pub use file_cache::{
     delete_cached_files_batch, finish_sync, get_all_cached_files, get_all_directory_nodes,
     get_cached_file_size, get_directory_node, get_folder_contents, move_cached_file, parse_key,
     search_cached_files, store_all_files, store_file_batch, update_cached_file,
+    upsert_prefix_files,
 };
 // Re-export directory tree builder
 pub use dir_tree::{
-    build_directory_tree_from_db, update_directory_tree_for_delete,
+    build_directory_tree_from_db, ensure_directory_node, update_directory_tree_for_delete,
     update_directory_tree_for_delete_batch, update_directory_tree_for_file,
     update_directory_tree_for_move,
 };

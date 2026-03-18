@@ -13,6 +13,26 @@ interface FolderLoadProgress {
   items: number;
 }
 
+export interface BackgroundSyncState {
+  isRunning: boolean;
+  objectsFetched: number;
+  estimatedTotal: number | null;
+  startedAt: number | null;
+  completedAt: number | null;
+  speed: number; // objects/second
+  error: string | null;
+}
+
+const initialBackgroundSync: BackgroundSyncState = {
+  isRunning: false,
+  objectsFetched: 0,
+  estimatedTotal: null,
+  startedAt: null,
+  completedAt: null,
+  speed: 0,
+  error: null,
+};
+
 // Key format: "accountId:bucket"
 function makeBucketKey(accountId: string, bucket: string): string {
   return `${accountId}:${bucket}`;
@@ -55,6 +75,14 @@ interface SyncStore {
   setFolderLoadPhase: (phase: FolderLoadPhase) => void;
   setFolderLoadProgress: (progress: FolderLoadProgress) => void;
   resetFolderLoad: () => void;
+
+  // Background sync state
+  backgroundSync: BackgroundSyncState;
+  setBackgroundSyncProgress: (progress: Partial<BackgroundSyncState>) => void;
+  startBackgroundSync: () => void;
+  completeBackgroundSync: (totalObjects: number) => void;
+  failBackgroundSync: (error: string) => void;
+  resetBackgroundSync: () => void;
 }
 
 export const useSyncStore = create<SyncStore>((set, get) => ({
@@ -133,6 +161,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
       indexingProgress: { current: 0, total: 0 },
       bucketSyncTimes: {},
       currentBucketKey: null,
+      backgroundSync: { ...initialBackgroundSync },
     });
   },
 
@@ -163,6 +192,57 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     set({
       folderLoadPhase: 'idle',
       folderLoadProgress: { pages: 0, items: 0 },
+    });
+  },
+
+  // Background sync state
+  backgroundSync: { ...initialBackgroundSync },
+
+  startBackgroundSync: () => {
+    set({
+      backgroundSync: {
+        isRunning: true,
+        objectsFetched: 0,
+        estimatedTotal: null,
+        startedAt: Date.now(),
+        completedAt: null,
+        speed: 0,
+        error: null,
+      },
+    });
+  },
+
+  setBackgroundSyncProgress: (progress) => {
+    set((state) => ({
+      backgroundSync: { ...state.backgroundSync, ...progress },
+    }));
+  },
+
+  completeBackgroundSync: (totalObjects) => {
+    set((state) => ({
+      backgroundSync: {
+        ...state.backgroundSync,
+        isRunning: false,
+        objectsFetched: totalObjects,
+        estimatedTotal: totalObjects,
+        completedAt: Date.now(),
+      },
+    }));
+  },
+
+  failBackgroundSync: (error) => {
+    set((state) => ({
+      backgroundSync: {
+        ...state.backgroundSync,
+        isRunning: false,
+        error,
+      },
+    }));
+  },
+
+  resetBackgroundSync: () => {
+    set({
+      backgroundSync: { ...initialBackgroundSync },
     });
   },
 }));

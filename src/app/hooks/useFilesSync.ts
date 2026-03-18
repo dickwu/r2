@@ -1,19 +1,36 @@
-import { useCallback, useEffect, useMemo } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { listen } from '@tauri-apps/api/event';
-import { syncBucket, StorageConfig } from '@/app/lib/r2cache';
+import { startBackgroundSync, cancelBackgroundSync, StorageConfig } from '@/app/lib/r2cache';
 import { useFolderSizeStore } from '@/app/stores/folderSizeStore';
 import { useSyncStore, SyncPhase } from '@/app/stores/syncStore';
 
-interface IndexingProgress {
-  current: number;
-  total: number;
+interface BackgroundSyncProgressEvent {
+  objects_fetched: number;
+  estimated_total: number | null;
+  is_running: boolean;
+  speed: number;
 }
 
-// Sync all files to SQLite for folder size calculation
+interface BackgroundSyncCompleteEvent {
+  total_objects: number;
+  cancelled: boolean;
+}
+
+/**
+ * Files sync hook — now uses background deep sync instead of blocking full sync.
+ *
+ * The foreground lazy sync (per-folder) is handled by useR2Files directly.
+ * This hook manages the background deep sync that fills in the complete dataset
+ * for search, folder sizes, and accurate counts.
+ *
+ * Keeps the same return API (isSyncing, isSynced, lastSyncTime, refresh)
+ * so page.tsx doesn't need massive changes.
+ */
 export function useFilesSync(config: StorageConfig | null) {
   const queryClient = useQueryClient();
   const clearSizes = useFolderSizeStore((state) => state.clearSizes);
+  const bgStartedRef = useRef<string | null>(null);
 
   // Get per-bucket sync time
   const bucketSyncTimes = useSyncStore((state) => state.bucketSyncTimes);
@@ -27,34 +44,67 @@ export function useFilesSync(config: StorageConfig | null) {
     useSyncStore.getState().setCurrentBucket(config?.accountId ?? null, config?.bucket ?? null);
   }, [config?.accountId, config?.bucket]);
 
-  // Listen for sync progress and phase events from Tauri backend
+  // Listen for background sync progress events
   useEffect(() => {
-    const unlistenProgress = listen<number>('sync-progress', (event) => {
-      useSyncStore.getState().setProgress(event.payload);
+    const unlistenProgress = listen<BackgroundSyncProgressEvent>(
+      'background-sync-progress',
+      (event) => {
+        useSyncStore.getState().setBackgroundSyncProgress({
+          objectsFetched: event.payload.objects_fetched,
+          estimatedTotal: event.payload.estimated_total,
+          speed: event.payload.speed,
+          isRunning: event.payload.is_running,
+        });
+      }
+    );
+
+    const unlistenComplete = listen<BackgroundSyncCompleteEvent>(
+      'background-sync-complete',
+      (event) => {
+        useSyncStore.getState().completeBackgroundSync(event.payload.total_objects);
+        useSyncStore.getState().setTotalFiles(event.payload.total_objects);
+
+        // Update sync time
+        if (config?.accountId && config?.bucket) {
+          useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, Date.now());
+        }
+
+        // Invalidate folder-contents queries so useR2Files refetches with full data
+        if (config) {
+          queryClient.invalidateQueries({
+            queryKey: ['folder-contents', config.provider, config.accountId, config.bucket],
+          });
+        }
+      }
+    );
+
+    const unlistenError = listen<string>('background-sync-error', (event) => {
+      useSyncStore.getState().failBackgroundSync(event.payload);
+      console.error('Background sync error:', event.payload);
     });
 
-    // Listen for phase change events from backend
+    // Also listen for legacy sync events (used by SyncProgress component)
     const unlistenPhase = listen<SyncPhase>('sync-phase', (event) => {
       useSyncStore.getState().setPhase(event.payload);
     });
 
-    // Listen for indexing progress events
-    const unlistenIndexing = listen<IndexingProgress>('indexing-progress', (event) => {
-      useSyncStore.getState().setIndexingProgress(event.payload);
+    const unlistenSyncProgress = listen<number>('sync-progress', (event) => {
+      useSyncStore.getState().setProgress(event.payload);
     });
 
-    // Listen for store progress events (from dedicated store task)
     const unlistenStore = listen<number>('store-progress', (event) => {
       useSyncStore.getState().setStoredFiles(event.payload);
     });
 
     return () => {
       unlistenProgress.then((fn) => fn());
+      unlistenComplete.then((fn) => fn());
+      unlistenError.then((fn) => fn());
       unlistenPhase.then((fn) => fn());
-      unlistenIndexing.then((fn) => fn());
+      unlistenSyncProgress.then((fn) => fn());
       unlistenStore.then((fn) => fn());
     };
-  }, []);
+  }, [config, queryClient]);
 
   const isConfigReady = useMemo(() => {
     if (!config?.accountId || !config?.bucket) return false;
@@ -72,80 +122,68 @@ export function useFilesSync(config: StorageConfig | null) {
     );
   }, [config]);
 
-  const query = useQuery({
-    queryKey: ['storage-all-files', config?.provider, config?.accountId, config?.bucket],
-    queryFn: async () => {
-      if (!config) return null;
-      console.log('Syncing bucket...');
-
-      // Clear sizes and reset progress (not sync times) before resyncing
-      clearSizes();
-      useSyncStore.getState().resetProgress();
-
-      // Single backend call: fetch from R2, store in DB, build directory tree
-      // Progress events are emitted via Tauri events (sync-progress, sync-phase, indexing-progress)
-      const result = await syncBucket(config);
-
-      console.log(`Synced ${result.count} files and built directory tree`);
-      useSyncStore.getState().setTotalFiles(result.count);
-      useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, result.timestamp);
-
-      // Invalidate folder-contents queries so useR2Files refetches from updated cache.
-      // This is necessary because the enabled transition (lastSyncTime null→non-null)
-      // depends on React render timing and may not reliably trigger a refetch.
-      await queryClient.invalidateQueries({
-        queryKey: ['folder-contents', config.provider, config.accountId, config.bucket],
-      });
-
-      return {
-        count: result.count,
-        timestamp: result.timestamp,
-        treeBuilt: true,
-      };
-    },
-    enabled: isConfigReady,
-    staleTime: 5 * 60 * 1000, // 5 minutes
-    retry: 1,
-    // Prevent concurrent syncs for the same bucket
-    refetchInterval: false,
-    refetchOnMount: false,
-    refetchOnReconnect: false,
-  });
-
-  // Sync isSyncing state to zustand store
+  // Auto-start background sync when bucket changes
   useEffect(() => {
-    useSyncStore.getState().setIsSyncing(query.isFetching);
-  }, [query.isFetching]);
+    if (!isConfigReady || !config) return;
+
+    const bucketKey = `${config.accountId}:${config.bucket}`;
+    if (bgStartedRef.current === bucketKey) return; // Already started for this bucket
+
+    bgStartedRef.current = bucketKey;
+    useSyncStore.getState().startBackgroundSync();
+
+    startBackgroundSync(config).catch((err) => {
+      console.error('Failed to start background sync:', err);
+      useSyncStore.getState().failBackgroundSync(err instanceof Error ? err.message : String(err));
+    });
+
+    return () => {
+      cancelBackgroundSync().catch(() => {});
+      bgStartedRef.current = null;
+    };
+  }, [isConfigReady, config?.accountId, config?.bucket]);
+
+  // Background sync state for return values
+  const backgroundSync = useSyncStore((state) => state.backgroundSync);
 
   const refresh = useCallback(async () => {
-    // Prevent concurrent syncs - check if already syncing
-    if (query.isFetching) {
-      console.log('Sync already in progress, skipping...');
-      return;
+    if (!config) return;
+
+    // Cancel current background sync and restart
+    try {
+      await cancelBackgroundSync();
+    } catch {
+      // Ignore cancel errors
     }
+
     clearSizes();
-    // Clear sync time for this bucket to force re-sync
-    if (config?.accountId && config?.bucket) {
-      useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, null);
-    }
     useSyncStore.getState().resetProgress();
+    useSyncStore.getState().resetBackgroundSync();
+    bgStartedRef.current = null;
+
+    // Restart background sync
+    useSyncStore.getState().startBackgroundSync();
+    const bucketKey = `${config.accountId}:${config.bucket}`;
+    bgStartedRef.current = bucketKey;
+
+    try {
+      await startBackgroundSync(config);
+    } catch (err) {
+      console.error('Failed to restart background sync:', err);
+    }
+
+    // Also invalidate folder-contents so useR2Files refetches current folder
     await queryClient.invalidateQueries({
-      queryKey: ['storage-all-files', config?.provider, config?.accountId, config?.bucket],
+      queryKey: ['folder-contents', config.provider, config.accountId, config.bucket],
     });
-  }, [
-    queryClient,
-    config?.provider,
-    config?.accountId,
-    config?.bucket,
-    clearSizes,
-    query.isFetching,
-  ]);
+  }, [queryClient, config, clearSizes]);
 
   return {
-    isSyncing: query.isFetching,
-    isSynced: query.isSuccess,
-    syncError: query.error,
-    // Expose timestamp so consumers can detect when sync completes
+    // isSyncing: true while background sync is running
+    isSyncing: backgroundSync.isRunning,
+    // isSynced: true once we have at least some data (lazy sync sets lastSyncTime)
+    isSynced: lastSyncTime !== null,
+    syncError: backgroundSync.error ? new Error(backgroundSync.error) : null,
     lastSyncTime,
     refresh,
   };

@@ -196,6 +196,7 @@ export default function Home() {
 
   // Get sync phase for first-load overlay
   const syncPhase = useSyncStore((state) => state.phase);
+  const backgroundSync = useSyncStore((state) => state.backgroundSync);
 
   // Zustand store for folder metadata
   const metadata = useFolderSizeStore((state) => state.metadata);
@@ -1104,6 +1105,26 @@ export default function Home() {
               <Button icon={<SettingOutlined />} onClick={handleSettingsClick} />
             </Space>
           </div>
+
+          {/* Partial-data search indicator during background sync */}
+          {searchQuery.trim() && backgroundSync.isRunning && (
+            <div
+              style={{
+                padding: '4px 12px',
+                fontSize: 12,
+                color: 'var(--ant-color-text-secondary)',
+                background: 'var(--ant-color-fill-quaternary)',
+                borderRadius: 4,
+                margin: '0 16px 4px',
+              }}
+            >
+              Searching {backgroundSync.objectsFetched.toLocaleString()}
+              {backgroundSync.estimatedTotal
+                ? ` of ~${backgroundSync.estimatedTotal.toLocaleString()}`
+                : ''}{' '}
+              objects (sync in progress)
+            </div>
+          )}
 
           {/* File List */}
           <div className="file-list">

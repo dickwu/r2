@@ -207,6 +207,63 @@ export async function clearCache(): Promise<void> {
   return invoke('clear_file_cache');
 }
 
+// ============ Lazy Sync Operations ============
+
+export interface LazyListResult {
+  files: Array<{ key: string; name: string; size: number; last_modified: string }>;
+  folders: string[];
+  prefix: string;
+  from_cache: boolean;
+}
+
+/** Extract credentials from any StorageConfig variant */
+function getCredentials(config: StorageConfig): { accessKeyId: string; secretAccessKey: string } {
+  switch (config.provider) {
+    case 'r2':
+      return {
+        accessKeyId: config.accessKeyId ?? '',
+        secretAccessKey: config.secretAccessKey ?? '',
+      };
+    case 'aws':
+    case 'minio':
+    case 'rustfs':
+      return {
+        accessKeyId: config.accessKeyId,
+        secretAccessKey: config.secretAccessKey,
+      };
+  }
+}
+
+export async function listPrefix(config: StorageConfig, prefix: string): Promise<LazyListResult> {
+  const creds = getCredentials(config);
+  return invoke('list_prefix', {
+    input: {
+      account_id: config.accountId,
+      bucket: config.bucket,
+      access_key_id: creds.accessKeyId,
+      secret_access_key: creds.secretAccessKey,
+      prefix,
+    },
+  });
+}
+
+export async function startBackgroundSync(config: StorageConfig): Promise<void> {
+  const creds = getCredentials(config);
+  return invoke('start_background_sync', {
+    input: {
+      account_id: config.accountId,
+      bucket: config.bucket,
+      access_key_id: creds.accessKeyId,
+      secret_access_key: creds.secretAccessKey,
+      prefix: '',
+    },
+  });
+}
+
+export async function cancelBackgroundSync(): Promise<void> {
+  return invoke('cancel_background_sync');
+}
+
 // Note: Upload state functions removed - now handled by backend upload_sessions table
 // The following functions from indexeddb.ts are NOT migrated:
 // - generateUploadStateId

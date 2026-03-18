@@ -41,9 +41,10 @@ export default function SyncProgress({ onClick }: SyncProgressProps) {
     progressText = `${processedFiles.toLocaleString()} files`;
   } else if (phase === 'storing') {
     const total = processedFiles || totalFiles;
-    progressText = total > 0
-      ? `${storedFiles.toLocaleString()} / ${total.toLocaleString()} files`
-      : `${storedFiles.toLocaleString()} files`;
+    progressText =
+      total > 0
+        ? `${storedFiles.toLocaleString()} / ${total.toLocaleString()} files`
+        : `${storedFiles.toLocaleString()} files`;
   } else if (phase === 'indexing') {
     const { current, total } = indexingProgress;
     if (total > 0) {

@@ -63,7 +63,8 @@ export default function SyncOverlay() {
     progressDisplay = (
       <div className="sync-overlay-progress">
         <span className="sync-overlay-count">
-          {storedFiles.toLocaleString()}{total > 0 ? ` / ${total.toLocaleString()}` : ''}
+          {storedFiles.toLocaleString()}
+          {total > 0 ? ` / ${total.toLocaleString()}` : ''}
         </span>
         <span className="sync-overlay-label">files cached</span>
       </div>

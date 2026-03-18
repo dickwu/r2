@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { getFolderContents, StoredFile } from '@/app/lib/r2cache';
+import { getFolderContents, listPrefix, StoredFile } from '@/app/lib/r2cache';
 import { StorageConfig } from '@/app/lib/r2cache';
 import { useSyncStore } from '@/app/stores/syncStore';
 import { useCurrentPathStore } from '@/app/stores/currentPathStore';
@@ -99,19 +99,33 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
     queryKey,
     queryFn: async (): Promise<FileItem[]> => {
       if (!config) return [];
-      console.log('Loading folder from cache:', { bucket: config.bucket, prefix });
 
-      // Load from local SQLite cache (instant)
+      // Try local SQLite cache first (instant)
       const result = await getFolderContents(prefix);
-      console.log('Cache result:', {
-        files: result.files.length,
-        folders: result.folders.length,
-      });
 
-      return buildFileItems(result.files, result.folders, prefix);
+      // If cache has data for this prefix, use it
+      if (result.files.length > 0 || result.folders.length > 0) {
+        return buildFileItems(result.files, result.folders, prefix);
+      }
+
+      // Cache empty — use lazy sync (ListObjectsV2 with delimiter)
+      try {
+        const lazyResult = await listPrefix(config, prefix);
+        const storedFiles: StoredFile[] = lazyResult.files.map((f) => ({
+          key: f.key,
+          size: f.size,
+          lastModified: f.last_modified,
+        }));
+        // Mark bucket as having data so other components can proceed
+        useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, Date.now());
+        return buildFileItems(storedFiles, lazyResult.folders, prefix);
+      } catch {
+        // Fall back to empty if lazy sync fails (e.g. network error)
+        return [];
+      }
     },
-    // Only enable after sync is complete (lastSyncTime is set)
-    enabled: isConfigReady && lastSyncTime !== null,
+    // Enable immediately when config is ready — lazy sync handles missing cache
+    enabled: isConfigReady,
     retry: 1,
   });
 

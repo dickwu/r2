@@ -8,6 +8,7 @@ mod aws_commands;
 mod cache_events;
 pub(crate) mod delete_cache;
 mod file_cache;
+pub mod lazy_sync;
 mod minio_commands;
 pub(crate) mod move_cache;
 mod r2_commands;

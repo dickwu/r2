@@ -374,6 +374,10 @@ pub fn run() {
             commands::upload_rustfs_content,
             commands::upload_rustfs_file,
             commands::sync_rustfs_bucket,
+            // Lazy sync commands
+            commands::lazy_sync::list_prefix,
+            commands::lazy_sync::start_background_sync,
+            commands::lazy_sync::cancel_background_sync,
             // Cache commands
             commands::store_all_files,
             commands::get_all_cached_files,

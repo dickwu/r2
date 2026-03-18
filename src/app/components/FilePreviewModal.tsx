@@ -271,7 +271,10 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
             {file.name}
           </span>
           {previewableFiles.length > 1 && (
-            <Text type="secondary" style={{ fontSize: 12, flexShrink: 0, marginRight: '30px', marginBottom: '30px' }}>
+            <Text
+              type="secondary"
+              style={{ fontSize: 12, flexShrink: 0, marginRight: '30px', marginBottom: '30px' }}
+            >
               {currentIndex + 1} / {previewableFiles.length}
             </Text>
           )}

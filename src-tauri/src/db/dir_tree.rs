@@ -918,6 +918,38 @@ pub async fn update_directory_tree_for_move(
     })
 }
 
+/// Ensure a directory node exists in the tree (creates with zero counts if missing).
+/// Used by lazy sync when discovering folders via common prefixes.
+pub async fn ensure_directory_node(bucket: &str, account_id: &str, path: &str) -> DbResult<()> {
+    let now = chrono::Utc::now().timestamp();
+    let parent = compute_parent_path(path);
+    let conn = get_connection()?.lock().await;
+
+    conn.execute(
+        "INSERT INTO directory_tree (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated)
+         VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 0, NULL, ?5)
+         ON CONFLICT (bucket, account_id, path) DO NOTHING",
+        turso::params![bucket, account_id, path, parent.clone(), now],
+    )
+    .await?;
+
+    // Also ensure all ancestor paths exist
+    let mut current_parent = parent;
+    while !current_parent.is_empty() {
+        let grandparent = compute_parent_path(&current_parent);
+        conn.execute(
+            "INSERT INTO directory_tree (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated)
+             VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 0, NULL, ?5)
+             ON CONFLICT (bucket, account_id, path) DO NOTHING",
+            turso::params![bucket, account_id, current_parent, grandparent.clone(), now],
+        )
+        .await?;
+        current_parent = grandparent;
+    }
+
+    Ok(())
+}
+
 /// Update directory tree when a file is uploaded or updated.
 /// For new files: increments file counts AND updates sizes.
 /// For existing files: only updates sizes (delta).
