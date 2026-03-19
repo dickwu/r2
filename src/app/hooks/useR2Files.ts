@@ -119,8 +119,9 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
         // Mark bucket as having data so other components can proceed
         useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, Date.now());
         return buildFileItems(storedFiles, lazyResult.folders, prefix);
-      } catch {
+      } catch (err) {
         // Fall back to empty if lazy sync fails (e.g. network error)
+        console.error('[useR2Files] lazy sync failed for prefix:', prefix, err);
         return [];
       }
     },

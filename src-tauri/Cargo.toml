@@ -46,3 +46,5 @@ aws-config = "1.8"
 aws-sdk-s3 = { version = "1.124.0", features = ["behavior-version-latest"] }
 aws-credential-types = "1.2"
 futures-util = "0.3"
+# Dev-only: connector for AI-assisted testing (excluded from release builds via cfg)
+tauri-plugin-connector = "0.5"

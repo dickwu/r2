@@ -69,6 +69,9 @@ export function useFilesSync(config: StorageConfig | null) {
           useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, Date.now());
         }
 
+        // Clear folder sizes so they reload from the now-accurate directory tree
+        clearSizes();
+
         // Invalidate folder-contents queries so useR2Files refetches with full data
         if (config) {
           queryClient.invalidateQueries({

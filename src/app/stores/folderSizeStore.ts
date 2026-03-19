@@ -75,8 +75,8 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
   loadMetadata: async (folderKey) => {
     const { metadata, setMetadata } = get();
 
-    // Skip if already loaded
-    if (metadata[folderKey] && typeof metadata[folderKey].size === 'number') return;
+    // Skip if already loaded with a real (non-zero) size
+    if (metadata[folderKey] && typeof metadata[folderKey].size === 'number' && metadata[folderKey].size > 0) return;
 
     // Set loading state
     setMetadata(folderKey, {

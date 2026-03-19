@@ -216,47 +216,48 @@ export interface LazyListResult {
   from_cache: boolean;
 }
 
-/** Extract credentials from any StorageConfig variant */
-function getCredentials(config: StorageConfig): { accessKeyId: string; secretAccessKey: string } {
+/** Build the full connection input for lazy sync commands (provider-aware) */
+function getConnectionInput(config: StorageConfig) {
+  const base = {
+    account_id: config.accountId,
+    bucket: config.bucket,
+    access_key_id: config.accessKeyId ?? '',
+    secret_access_key: config.secretAccessKey ?? '',
+    provider: config.provider,
+  };
+
   switch (config.provider) {
-    case 'r2':
-      return {
-        accessKeyId: config.accessKeyId ?? '',
-        secretAccessKey: config.secretAccessKey ?? '',
-      };
-    case 'aws':
     case 'minio':
     case 'rustfs':
       return {
-        accessKeyId: config.accessKeyId,
-        secretAccessKey: config.secretAccessKey,
+        ...base,
+        endpoint_scheme: config.endpointScheme,
+        endpoint_host: config.endpointHost,
+        force_path_style: config.forcePathStyle,
       };
+    case 'aws':
+      return {
+        ...base,
+        region: config.region,
+        endpoint_scheme: config.endpointScheme ?? null,
+        endpoint_host: config.endpointHost ?? null,
+        force_path_style: config.forcePathStyle,
+      };
+    case 'r2':
+    default:
+      return base;
   }
 }
 
 export async function listPrefix(config: StorageConfig, prefix: string): Promise<LazyListResult> {
-  const creds = getCredentials(config);
   return invoke('list_prefix', {
-    input: {
-      account_id: config.accountId,
-      bucket: config.bucket,
-      access_key_id: creds.accessKeyId,
-      secret_access_key: creds.secretAccessKey,
-      prefix,
-    },
+    input: { ...getConnectionInput(config), prefix },
   });
 }
 
 export async function startBackgroundSync(config: StorageConfig): Promise<void> {
-  const creds = getCredentials(config);
   return invoke('start_background_sync', {
-    input: {
-      account_id: config.accountId,
-      bucket: config.bucket,
-      access_key_id: creds.accessKeyId,
-      secret_access_key: creds.secretAccessKey,
-      prefix: '',
-    },
+    input: { ...getConnectionInput(config), prefix: '' },
   });
 }
 

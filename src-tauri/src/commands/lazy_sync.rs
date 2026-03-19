@@ -1,4 +1,6 @@
 use crate::db::{self, CachedFile};
+use crate::providers::aws;
+use crate::providers::minio;
 use crate::r2;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +16,64 @@ pub struct LazyListInput {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub prefix: String, // "" for root, "folder/" for subfolder
+    // Provider-aware fields (all optional for backward compatibility)
+    pub provider: Option<String>,
+    pub endpoint_scheme: Option<String>,
+    pub endpoint_host: Option<String>,
+    pub force_path_style: Option<bool>,
+    pub region: Option<String>,
+}
+
+// ============ Provider-Aware Client Factory ============
+
+async fn create_client_for_input(input: &LazyListInput) -> Result<aws_sdk_s3::Client, String> {
+    let provider = input.provider.as_deref().unwrap_or("r2");
+    match provider {
+        "minio" | "rustfs" => {
+            let config = minio::MinioConfig {
+                bucket: input.bucket.clone(),
+                access_key_id: input.access_key_id.clone(),
+                secret_access_key: input.secret_access_key.clone(),
+                endpoint_scheme: input
+                    .endpoint_scheme
+                    .clone()
+                    .unwrap_or_else(|| "http".into()),
+                endpoint_host: input.endpoint_host.clone().unwrap_or_default(),
+                force_path_style: input.force_path_style.unwrap_or(true),
+            };
+            minio::create_minio_client(&config)
+                .await
+                .map_err(|e| format!("Failed to create {} client: {}", provider, e))
+        }
+        "aws" => {
+            let config = aws::AwsConfig {
+                bucket: input.bucket.clone(),
+                access_key_id: input.access_key_id.clone(),
+                secret_access_key: input.secret_access_key.clone(),
+                region: input
+                    .region
+                    .clone()
+                    .unwrap_or_else(|| "us-east-1".into()),
+                endpoint_scheme: input.endpoint_scheme.clone(),
+                endpoint_host: input.endpoint_host.clone(),
+                force_path_style: input.force_path_style.unwrap_or(false),
+            };
+            aws::create_aws_client(&config)
+                .await
+                .map_err(|e| format!("Failed to create aws client: {}", e))
+        }
+        _ => {
+            let config = r2::R2Config {
+                account_id: input.account_id.clone(),
+                bucket: input.bucket.clone(),
+                access_key_id: input.access_key_id.clone(),
+                secret_access_key: input.secret_access_key.clone(),
+            };
+            r2::create_r2_client(&config)
+                .await
+                .map_err(|e| format!("Failed to create r2 client: {}", e))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,16 +139,7 @@ pub async fn list_prefix(
     }
 
     // Cache is stale or missing -- fetch from S3
-    let r2_config = r2::R2Config {
-        account_id: input.account_id.clone(),
-        bucket: input.bucket.clone(),
-        access_key_id: input.access_key_id.clone(),
-        secret_access_key: input.secret_access_key.clone(),
-    };
-
-    let client = r2::create_r2_client(&r2_config)
-        .await
-        .map_err(|e| format!("Failed to create client: {}", e))?;
+    let client = create_client_for_input(&input).await?;
 
     // Paginate with delimiter to get immediate children only
     let mut all_files: Vec<CachedFile> = Vec::new();
@@ -256,25 +307,16 @@ async fn run_background_sync(
     input: LazyListInput,
     app: tauri::AppHandle,
 ) -> Result<BackgroundSyncResult, String> {
-    let r2_config = r2::R2Config {
-        account_id: input.account_id.clone(),
-        bucket: input.bucket.clone(),
-        access_key_id: input.access_key_id.clone(),
-        secret_access_key: input.secret_access_key.clone(),
-    };
-
-    let bucket = r2_config.bucket.clone();
-    let account_id = r2_config.account_id.clone();
+    let bucket = input.bucket.clone();
+    let account_id = input.account_id.clone();
 
     // Begin sync (staging table)
     db::begin_sync(&bucket, &account_id)
         .await
         .map_err(|e| format!("Failed to begin sync: {}", e))?;
 
-    // Create S3 client
-    let client = r2::create_r2_client(&r2_config)
-        .await
-        .map_err(|e| format!("Failed to create client: {}", e))?;
+    // Create S3 client (provider-aware)
+    let client = create_client_for_input(&input).await?;
 
     // Spawn store task
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<CachedFile>>(8);
