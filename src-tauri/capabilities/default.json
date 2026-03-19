@@ -19,7 +19,6 @@
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
-    "connector:default",
     {
       "identifier": "http:default",
       "allow": [
