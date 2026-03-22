@@ -33,9 +33,9 @@ pub struct RangeDownloadConfig {
 impl Default for RangeDownloadConfig {
     fn default() -> Self {
         Self {
-            min_chunk_size: 8 * 1024 * 1024,       // 8 MB
+            min_chunk_size: 8 * 1024 * 1024, // 8 MB
             max_chunks: 8,
-            write_buffer_size: 2 * 1024 * 1024,     // 2 MB
+            write_buffer_size: 2 * 1024 * 1024, // 2 MB
             max_retries: 5,
             retry_backoff_base: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(30),
@@ -129,6 +129,8 @@ pub enum ChunkEvent {
     },
     /// Download was paused. Contains chunk states for resume.
     Paused { chunks_state: Vec<ChunkState> },
+    /// Download failed terminally with a user-visible error.
+    Failed { error: String },
     /// Download was cancelled.
     Cancelled,
 }

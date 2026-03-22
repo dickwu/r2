@@ -10,8 +10,8 @@ use tokio_util::sync::CancellationToken;
 use crate::chunk::{download_chunk, ChunkResult, ChunkTracker};
 use crate::meta::DownloadMeta;
 use crate::types::{
-    ChunkEvent, ChunkProgress, ChunkState, ChunkStatus, DownloadControl, DownloadTarget,
-    ErrorKind, RangeDownloadConfig, UrlProvider,
+    ChunkEvent, ChunkProgress, ChunkState, ChunkStatus, DownloadControl, DownloadTarget, ErrorKind,
+    RangeDownloadConfig, UrlProvider,
 };
 
 /// The main download engine.
@@ -35,9 +35,7 @@ impl RangeDownloader {
     }
 
     /// Start a new download. Returns a channel receiver for events and a control handle.
-    pub async fn start(
-        self,
-    ) -> Result<(mpsc::Receiver<ChunkEvent>, DownloadControl), String> {
+    pub async fn start(self) -> Result<(mpsc::Receiver<ChunkEvent>, DownloadControl), String> {
         let file_size = self.target.file_size;
         let chunk_count = self.config.chunks_for_size(file_size);
         let chunk_states = create_chunk_ranges(chunk_count, file_size);
@@ -104,14 +102,14 @@ impl RangeDownloader {
                 .await;
 
                 match result {
-                    OrchestratorOutcome::Complete { elapsed, total_bytes } => {
-                        // Remove existing file at destination before rename
-                        let _ = tokio::fs::remove_file(&dest).await;
-
-                        // Rename .part → final destination
-                        if let Err(e) = tokio::fs::rename(&part_path, &dest).await {
-                            log::error!("Rename failed: {}", e);
-                            let _ = event_tx.send(ChunkEvent::Cancelled).await;
+                    OrchestratorOutcome::Complete {
+                        elapsed,
+                        total_bytes,
+                    } => {
+                        if let Err(e) = finalize_download_file(&part_path, &dest, total_bytes).await
+                        {
+                            log::error!("Finalize failed: {}", e);
+                            let _ = event_tx.send(ChunkEvent::Failed { error: e }).await;
                             return;
                         }
                         let _ = tokio::fs::remove_file(&meta_path).await;
@@ -130,9 +128,16 @@ impl RangeDownloader {
                             .await;
                     }
                     OrchestratorOutcome::Paused { states } => {
-                        let meta = DownloadMeta { file_size, chunks: states.clone() };
+                        let meta = DownloadMeta {
+                            file_size,
+                            chunks: states.clone(),
+                        };
                         let _ = meta.save(&meta_path).await;
-                        let _ = event_tx.send(ChunkEvent::Paused { chunks_state: states }).await;
+                        let _ = event_tx
+                            .send(ChunkEvent::Paused {
+                                chunks_state: states,
+                            })
+                            .await;
                     }
                     OrchestratorOutcome::Cancelled => {
                         let _ = tokio::fs::remove_file(&part_path).await;
@@ -144,13 +149,7 @@ impl RangeDownloader {
                         // Do NOT delete .part file on failure — it may contain valid
                         // downloaded data. Only user-initiated Cancel deletes.
                         let _ = tokio::fs::remove_file(&meta_path).await;
-                        let _ = event_tx
-                            .send(ChunkEvent::ChunkFailed {
-                                chunk_id: 0,
-                                error,
-                            })
-                            .await;
-                        let _ = event_tx.send(ChunkEvent::Cancelled).await;
+                        let _ = event_tx.send(ChunkEvent::Failed { error }).await;
                     }
                 }
             };
@@ -181,6 +180,96 @@ fn meta_path_for(dest: &PathBuf) -> PathBuf {
     let mut p = dest.as_os_str().to_owned();
     p.push(".download_meta");
     PathBuf::from(p)
+}
+
+async fn file_matches_expected_size(path: &PathBuf, expected_size: u64) -> Result<bool, String> {
+    let exists = tokio::fs::try_exists(path)
+        .await
+        .map_err(|e| format!("Failed to inspect file existence: {}", e))?;
+    if !exists {
+        return Ok(false);
+    }
+
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| format!("Failed to read file metadata: {}", e))?;
+    Ok(metadata.is_file() && (expected_size == 0 || metadata.len() == expected_size))
+}
+
+async fn finalize_download_file(
+    part_path: &PathBuf,
+    dest: &PathBuf,
+    expected_size: u64,
+) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Failed to prepare destination folder: {}", e))?;
+    }
+
+    let temp_exists = tokio::fs::try_exists(part_path)
+        .await
+        .map_err(|e| format!("Failed to inspect temp download file: {}", e))?;
+
+    if !temp_exists {
+        if file_matches_expected_size(dest, expected_size).await? {
+            return Ok(());
+        }
+
+        return Err(format!(
+            "Failed to finalize download: temporary file disappeared before finalize ({})",
+            part_path.display()
+        ));
+    }
+
+    if tokio::fs::try_exists(dest)
+        .await
+        .map_err(|e| format!("Failed to inspect destination file: {}", e))?
+    {
+        tokio::fs::remove_file(dest)
+            .await
+            .map_err(|e| format!("Failed to replace existing destination file: {}", e))?;
+    }
+
+    match tokio::fs::rename(part_path, dest).await {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            if file_matches_expected_size(dest, expected_size).await? {
+                return Ok(());
+            }
+
+            let temp_still_exists = tokio::fs::try_exists(part_path)
+                .await
+                .map_err(|e| format!("Failed to re-check temp file after finalize error: {}", e))?;
+
+            if temp_still_exists {
+                tokio::fs::copy(part_path, dest).await.map_err(|copy_err| {
+                    format!(
+                        "Failed to finalize download: rename failed: {}; copy fallback failed: {}",
+                        rename_err, copy_err
+                    )
+                })?;
+
+                tokio::fs::remove_file(part_path)
+                    .await
+                    .map_err(|cleanup_err| {
+                        format!(
+                            "Download finalized, but failed to clean up temp file: {}",
+                            cleanup_err
+                        )
+                    })?;
+
+                return Ok(());
+            }
+
+            Err(format!(
+                "Failed to finalize download: {} (temp missing after rename: {}, destination: {})",
+                rename_err,
+                part_path.display(),
+                dest.display()
+            ))
+        }
+    }
 }
 
 /// Pre-allocate the .part file. If it already exists (resume), just verify the size.
@@ -342,6 +431,7 @@ async fn orchestrate(
 
     let mut active_count = 0u16;
     let mut failed_count = 0u16;
+    let mut last_failure_error: Option<String> = None;
 
     // Spawn initial chunk tasks
     for (idx, chunk) in chunks.iter_mut().enumerate() {
@@ -350,14 +440,7 @@ async fn orchestrate(
         }
         chunk.state.status = ChunkStatus::Downloading;
         spawn_chunk(
-            idx,
-            &client,
-            chunk,
-            &part_path,
-            &config,
-            &cancel,
-            &pause_rx,
-            &result_tx,
+            idx, &client, chunk, &part_path, &config, &cancel, &pause_rx, &result_tx,
         );
         active_count += 1;
     }
@@ -367,7 +450,6 @@ async fn orchestrate(
     let mut checkpoint_tick = tokio::time::interval(Duration::from_secs(10));
     let mut stall_check_tick = tokio::time::interval(Duration::from_secs(15));
 
-
     loop {
         // Check completion: all chunks done
         if chunks.iter().all(|c| c.completed) && active_count == 0 {
@@ -375,7 +457,9 @@ async fn orchestrate(
             if max_end < file_size {
                 log::warn!(
                     "Chunks cover up to {} but file_size is {} (gap: {} bytes) — proceeding anyway",
-                    max_end, file_size, file_size - max_end
+                    max_end,
+                    file_size,
+                    file_size - max_end
                 );
             }
             let _ = tokio::fs::remove_file(&meta_path).await;
@@ -389,11 +473,16 @@ async fn orchestrate(
         if active_count == 0 && failed_count > 0 {
             let non_completed = chunks.iter().filter(|c| !c.completed).count();
             if non_completed > 0 && failed_count as usize >= non_completed {
+                let summary = format!(
+                    "All remaining chunks failed ({} of {} total)",
+                    failed_count,
+                    chunks.len()
+                );
                 return OrchestratorOutcome::Failed {
-                    error: format!(
-                        "All remaining chunks failed ({} of {} total)",
-                        failed_count, chunks.len()
-                    ),
+                    error: match &last_failure_error {
+                        Some(last_error) => format!("{}. Last error: {}", summary, last_error),
+                        None => summary,
+                    },
                 };
             }
         }
@@ -472,6 +561,7 @@ async fn orchestrate(
                             active_count += 1;
                         } else {
                             failed_count += 1;
+                            last_failure_error = Some(error.clone());
                             chunks[idx].state.status = ChunkStatus::Failed;
                             let _ = event_tx.send(ChunkEvent::ChunkFailed {
                                 chunk_id: chunks[idx].state.chunk_id,
@@ -633,7 +723,72 @@ fn spawn_chunk(
     };
 
     tokio::spawn(async move {
-        let result = download_chunk(&client, &url, &state, &path, &cfg, &tracker, &cancel, &pause).await;
+        let result = download_chunk(
+            &client, &url, &state, &path, &cfg, &tracker, &cancel, &pause,
+        )
+        .await;
         let _ = tx.send((idx, gen, result)).await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{finalize_download_file, part_path_for};
+
+    #[tokio::test]
+    async fn finalize_moves_temp_file_into_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("final.bin");
+        let part = part_path_for(&dest);
+        let content = b"hello world";
+
+        tokio::fs::write(&part, content).await.unwrap();
+
+        finalize_download_file(&part, &dest, content.len() as u64)
+            .await
+            .unwrap();
+
+        assert!(!part.exists(), "temp file should be consumed");
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn finalize_replaces_existing_destination_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("final.bin");
+        let part = part_path_for(&dest);
+
+        tokio::fs::write(&dest, b"old").await.unwrap();
+        tokio::fs::write(&part, b"new").await.unwrap();
+
+        finalize_download_file(&part, &dest, 3).await.unwrap();
+
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    async fn finalize_accepts_already_finalized_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("final.bin");
+        let part = part_path_for(&dest);
+        let content = b"done";
+
+        tokio::fs::write(&dest, content).await.unwrap();
+
+        finalize_download_file(&part, &dest, content.len() as u64)
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn finalize_reports_missing_temp_when_nothing_was_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("final.bin");
+        let part = part_path_for(&dest);
+
+        let error = finalize_download_file(&part, &dest, 4).await.unwrap_err();
+        assert!(error.contains("temporary file disappeared before finalize"));
+    }
 }

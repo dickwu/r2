@@ -32,6 +32,8 @@ pub(crate) enum DownloadConfig {
 
 /// Write buffer size for downloads (2 MB) - reduces I/O operations
 const WRITE_BUFFER_SIZE: usize = 2 * 1024 * 1024;
+const DOWNLOAD_CANCELLED_ERROR: &str = "Download cancelled";
+const DOWNLOAD_PAUSED_ERROR: &str = "Download paused";
 
 // Global cancel/pause registry for downloads
 lazy_static::lazy_static! {
@@ -173,7 +175,7 @@ pub(crate) async fn download_file_internal(
                     error: None,
                 },
             );
-            return Err("Download cancelled".to_string());
+            return Err(DOWNLOAD_CANCELLED_ERROR.to_string());
         }
 
         // Check for pause - flush buffer and save progress before pausing
@@ -219,7 +221,7 @@ pub(crate) async fn download_file_internal(
                     error: None,
                 },
             );
-            return Err("Download paused".to_string());
+            return Err(DOWNLOAD_PAUSED_ERROR.to_string());
         }
 
         let chunk = chunk_result.map_err(|e| format!("Failed to read chunk: {}", e))?;
@@ -487,11 +489,7 @@ pub(crate) async fn download_file_chunked(
                     db::update_download_progress(&task_id_owned, aggregate_downloaded as i64).await;
             }
             ChunkEvent::ChunkComplete { chunk_id } => {
-                log::info!(
-                    "Download {}: chunk {} completed",
-                    task_id_owned,
-                    chunk_id
-                );
+                log::info!("Download {}: chunk {} completed", task_id_owned, chunk_id);
             }
             ChunkEvent::ChunkRetry {
                 chunk_id,
@@ -541,8 +539,7 @@ pub(crate) async fn download_file_chunked(
                 );
 
                 // Update DB
-                let _ =
-                    db::update_download_progress(&task_id_owned, total_bytes as i64).await;
+                let _ = db::update_download_progress(&task_id_owned, total_bytes as i64).await;
                 let _ = db::update_download_status(&task_id_owned, "completed", None).await;
 
                 // Emit status change
@@ -569,7 +566,11 @@ pub(crate) async fn download_file_chunked(
                 );
                 // Cleanup registries
                 cleanup_registries(&task_id_owned).await;
-                return Err("Download paused".to_string());
+                return Err(DOWNLOAD_PAUSED_ERROR.to_string());
+            }
+            ChunkEvent::Failed { error } => {
+                cleanup_registries(&task_id_owned).await;
+                return Err(error);
             }
             ChunkEvent::Cancelled => {
                 // Check if the file was actually downloaded successfully before
@@ -583,7 +584,8 @@ pub(crate) async fn download_file_chunked(
                         .unwrap_or(0);
                     if actual_size > 0 && (file_size == 0 || actual_size == file_size) {
                         // File exists at expected size — treat as completed
-                        let _ = db::update_download_progress(&task_id_owned, actual_size as i64).await;
+                        let _ =
+                            db::update_download_progress(&task_id_owned, actual_size as i64).await;
                         let _ = db::update_download_status(&task_id_owned, "completed", None).await;
                         let _ = app.emit(
                             "download-status-changed",
@@ -609,7 +611,7 @@ pub(crate) async fn download_file_chunked(
                     },
                 );
                 cleanup_registries(&task_id_owned).await;
-                return Err("Download cancelled".to_string());
+                return Err(DOWNLOAD_CANCELLED_ERROR.to_string());
             }
         }
     }
@@ -623,7 +625,10 @@ pub(crate) async fn download_file_chunked(
         let file_meta = tokio::fs::metadata(destination).await;
         let actual_size = file_meta.map(|m| m.len()).unwrap_or(0);
         if actual_size > 0 && (file_size == 0 || actual_size == file_size) {
-            log::info!("Download {}: file exists at destination, treating as success", task_id);
+            log::info!(
+                "Download {}: file exists at destination, treating as success",
+                task_id
+            );
             let _ = db::update_download_progress(task_id, actual_size as i64).await;
             let _ = db::update_download_status(task_id, "completed", None).await;
             let _ = app.emit(
@@ -710,8 +715,7 @@ pub(crate) async fn spawn_download_task(
         let client = match Client::builder().build() {
             Ok(c) => c,
             Err(e) => {
-                let _ =
-                    db::update_download_status(&task_id, "failed", Some(&e.to_string())).await;
+                let _ = db::update_download_status(&task_id, "failed", Some(&e.to_string())).await;
                 let _ = app.emit(
                     "download-status-changed",
                     DownloadStatusChanged {
@@ -745,7 +749,7 @@ pub(crate) async fn spawn_download_task(
 
     // Handle errors (both paths)
     if let Err(e) = result {
-        if !e.contains("paused") && !e.contains("cancelled") {
+        if e != DOWNLOAD_PAUSED_ERROR && e != DOWNLOAD_CANCELLED_ERROR {
             let _ = db::update_download_status(&task_id, "failed", Some(&e)).await;
             let _ = app.emit(
                 "download-status-changed",

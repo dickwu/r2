@@ -48,7 +48,7 @@ import { useFolderSizeStore } from '@/app/stores/folderSizeStore';
 import { useCurrentPathStore } from '@/app/stores/currentPathStore';
 import { useSyncStore } from '@/app/stores/syncStore';
 import { useBatchOperationStore } from '@/app/stores/batchOperationStore';
-import { useDownloadStore } from '@/app/stores/downloadStore';
+import { setupGlobalDownloadListeners, useDownloadStore } from '@/app/stores/downloadStore';
 import { useKeyboardShortcuts } from '@/app/hooks/useKeyboardShortcuts';
 
 type ViewMode = 'list' | 'grid';
@@ -115,7 +115,6 @@ export default function Home() {
 
   // Download store
   const addDownloadTask = useDownloadStore((state) => state.addTask);
-  const updateDownloadTask = useDownloadStore((state) => state.updateTask);
   const loadDownloadsFromDatabase = useDownloadStore((state) => state.loadFromDatabase);
 
   const [searchTotalCount, setSearchTotalCount] = useState(0);
@@ -420,86 +419,33 @@ export default function Home() {
   const startDownloadQueueRef = useRef(startDownloadQueue);
   startDownloadQueueRef.current = startDownloadQueue;
 
-  const updateDownloadTaskRef = useRef(updateDownloadTask);
-  updateDownloadTaskRef.current = updateDownloadTask;
-
-  // Listen for download progress events - ALWAYS active (even when modal is closed)
-  // This ensures store is updated regardless of UI state
+  // Ensure the download store owns the real-time task state even before the modal opens.
   useEffect(() => {
-    let unlistenProgress: UnlistenFn | undefined;
-    let unlistenComplete: UnlistenFn | undefined;
+    setupGlobalDownloadListeners();
+  }, []);
 
-    // Throttle progress updates to prevent React update overflow
-    // Store latest progress per task and flush periodically
-    const pendingUpdates = new Map<
-      string,
-      {
-        progress: number;
-        downloadedBytes: number;
-        speed: number;
-        status: 'downloading' | 'success';
-      }
-    >();
-    let flushTimeout: ReturnType<typeof setTimeout> | null = null;
-
-    const flushUpdates = () => {
-      pendingUpdates.forEach((update, taskId) => {
-        updateDownloadTaskRef.current(taskId, update);
-      });
-      pendingUpdates.clear();
-      flushTimeout = null;
-    };
-
+  // Refill the queue whenever a running download reaches a terminal state.
+  useEffect(() => {
+    let unlistenStatus: UnlistenFn | undefined;
     const setupListeners = async () => {
-      // Listen for progress updates (throttled)
-      unlistenProgress = await listen<{
+      unlistenStatus = await listen<{
         task_id: string;
-        percent: number;
-        downloaded_bytes: number;
-        total_bytes: number;
-        speed: number;
-      }>('download-progress', (event) => {
-        const { task_id, percent, downloaded_bytes, speed } = event.payload;
-
-        // Store latest update for this task
-        pendingUpdates.set(task_id, {
-          progress: percent,
-          downloadedBytes: downloaded_bytes,
-          speed,
-          status: percent >= 100 ? 'success' : 'downloading',
-        });
-
-        // Schedule flush if not already scheduled (every 100ms)
-        if (!flushTimeout) {
-          flushTimeout = setTimeout(flushUpdates, 100);
+        status: string;
+        error: string | null;
+      }>('download-status-changed', (event) => {
+        const { status } = event.payload;
+        if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+          setTimeout(() => {
+            startDownloadQueueRef.current();
+          }, 100);
         }
-
-        // Immediately flush completed downloads
-        if (percent >= 100) {
-          if (flushTimeout) {
-            clearTimeout(flushTimeout);
-            flushTimeout = null;
-          }
-          flushUpdates();
-        }
-      });
-
-      // Listen for download completion to start next in queue
-      unlistenComplete = await listen<string>('download-complete', () => {
-        setTimeout(() => {
-          startDownloadQueueRef.current();
-        }, 100);
       });
     };
 
     setupListeners();
 
     return () => {
-      unlistenProgress?.();
-      unlistenComplete?.();
-      if (flushTimeout) {
-        clearTimeout(flushTimeout);
-      }
+      unlistenStatus?.();
     };
   }, []); // Empty deps - only run once on mount
 

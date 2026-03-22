@@ -67,6 +67,18 @@ async fn setup_range_server(data: &[u8]) -> MockServer {
     server
 }
 
+/// Setup a mock server that always fails download requests.
+async fn setup_failure_server(status: u16, body: &'static str) -> MockServer {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(status).set_body_bytes(body.as_bytes().to_vec()))
+        .mount(&server)
+        .await;
+
+    server
+}
+
 #[tokio::test]
 async fn test_single_stream_small_file() {
     // Files < 10MB should use single stream (1 chunk)
@@ -220,7 +232,10 @@ async fn test_cancel_download() {
     // .part file should be cleaned up
     // (Give a moment for cleanup)
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!part_path.exists(), ".part file should be deleted on cancel");
+    assert!(
+        !part_path.exists(),
+        ".part file should be deleted on cancel"
+    );
     assert!(!dest.exists(), "Final file should not exist on cancel");
 }
 
@@ -308,6 +323,69 @@ async fn test_pause_and_resume() {
 }
 
 #[tokio::test]
+async fn test_terminal_failure_emits_failed_event_not_cancelled() {
+    let file_size = 12 * 1024 * 1024;
+    let server = setup_failure_server(500, "boom").await;
+    let url = server.uri();
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("failed_file.bin");
+
+    let config = RangeDownloadConfig {
+        min_chunk_size: 4 * 1024 * 1024,
+        max_chunks: 4,
+        max_retries: 0,
+        ..Default::default()
+    };
+
+    let downloader = RangeDownloader::new(
+        url_provider_for(url),
+        DownloadTarget {
+            file_size,
+            destination: dest.clone(),
+        },
+        config,
+    );
+
+    let (mut rx, _control) = downloader.start().await.unwrap();
+
+    let mut terminal_error: Option<String> = None;
+    let mut saw_cancelled = false;
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            ChunkEvent::Failed { error } => {
+                terminal_error = Some(error);
+                break;
+            }
+            ChunkEvent::Cancelled => {
+                saw_cancelled = true;
+                break;
+            }
+            ChunkEvent::Complete { .. } => {
+                panic!("Download should not complete successfully");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        !saw_cancelled,
+        "Terminal failure should not be reported as cancelled"
+    );
+
+    let error = terminal_error.expect("Download should emit a terminal failure");
+    assert!(
+        error.contains("All remaining chunks failed") && error.contains("HTTP 500"),
+        "Unexpected terminal failure: {error}"
+    );
+    assert!(
+        !dest.exists(),
+        "Final destination file should not exist after failure"
+    );
+}
+
+#[tokio::test]
 async fn test_chunks_for_size() {
     let config = RangeDownloadConfig::default();
 
@@ -339,12 +417,21 @@ async fn test_chunks_for_size() {
 async fn test_error_classification() {
     use range_dl::{classify_error, ErrorKind};
 
-    assert_eq!(classify_error("No space left on device"), ErrorKind::DiskFull);
+    assert_eq!(
+        classify_error("No space left on device"),
+        ErrorKind::DiskFull
+    );
     assert_eq!(classify_error("disk full"), ErrorKind::DiskFull);
-    assert_eq!(classify_error("Permission denied"), ErrorKind::PermissionDenied);
+    assert_eq!(
+        classify_error("Permission denied"),
+        ErrorKind::PermissionDenied
+    );
     assert_eq!(classify_error("HTTP 403 Forbidden"), ErrorKind::AuthExpired);
     assert_eq!(classify_error("connection timeout"), ErrorKind::Network);
-    assert_eq!(classify_error("connection reset by peer"), ErrorKind::Network);
+    assert_eq!(
+        classify_error("connection reset by peer"),
+        ErrorKind::Network
+    );
     assert_eq!(classify_error("something unexpected"), ErrorKind::Other);
 }
 
