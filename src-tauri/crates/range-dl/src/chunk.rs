@@ -67,10 +67,13 @@ pub(crate) async fn download_chunk(
     // Build HTTP request with Range header
     let range_header = format!("bytes={}-{}", resume_offset, end_byte);
 
+    // NOTE: Do NOT use .timeout() here — that sets the TOTAL request timeout
+    // including body transfer. A 13MB chunk at 1MB/s takes 13 seconds, which
+    // would exceed a 30s timeout under load. Connection timeout is set on the
+    // reqwest::Client builder in the orchestrator instead.
     let response = match client
         .get(url)
         .header("Range", &range_header)
-        .timeout(config.connect_timeout)
         .send()
         .await
     {
