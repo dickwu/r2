@@ -65,14 +65,12 @@ impl RangeDownloader {
         // Pre-allocate .part file
         preallocate_file(&part_path, file_size).await?;
 
-        // Generate URLs upfront for initial chunks
-        let mut urls: Vec<String> = Vec::with_capacity(initial_chunks.len());
-        for _ in &initial_chunks {
-            let url = (self.url_provider)()
-                .await
-                .map_err(|e| format!("Failed to generate presigned URL: {}", e))?;
-            urls.push(url);
-        }
+        // Generate one presigned URL — all chunks use the same URL with different Range headers.
+        // Fresh URLs are only needed for stall-restart retries (generated per-chunk then).
+        let base_url = (self.url_provider)()
+            .await
+            .map_err(|e| format!("Failed to generate presigned URL: {}", e))?;
+        let urls: Vec<String> = vec![base_url; initial_chunks.len()];
 
         let (event_tx, event_rx) = mpsc::channel::<ChunkEvent>(64);
         let cancel = CancellationToken::new();
@@ -103,39 +101,48 @@ impl RangeDownloader {
 
             match result {
                 OrchestratorOutcome::Complete { elapsed, total_bytes } => {
+                    log::info!("Download complete: {} bytes in {:.1}s, renaming .part → final", total_bytes, elapsed);
+
                     // Remove existing file at destination (if any) before rename
-                    let _ = tokio::fs::remove_file(&dest).await;
+                    if dest.exists() {
+                        log::info!("Removing existing file at {}", dest.display());
+                        let _ = tokio::fs::remove_file(&dest).await;
+                    }
 
                     // Rename .part → final destination
-                    if let Err(e) = tokio::fs::rename(&part_path, &dest).await {
-                        // Rename failed — send a terminal error event and exit
-                        let _ = event_tx
-                            .send(ChunkEvent::ChunkFailed {
-                                chunk_id: 0,
-                                error: format!(
-                                    "Rename failed: {}. File kept as {}",
-                                    e,
-                                    part_path.display()
-                                ),
-                            })
-                            .await;
-                        // Send Cancelled so the worker breaks out of its event loop
-                        let _ = event_tx.send(ChunkEvent::Cancelled).await;
-                        return;
+                    match tokio::fs::rename(&part_path, &dest).await {
+                        Ok(()) => {
+                            log::info!("Rename successful: {} → {}", part_path.display(), dest.display());
+                        }
+                        Err(e) => {
+                            log::error!("Rename failed: {} ({} → {})", e, part_path.display(), dest.display());
+                            let _ = event_tx
+                                .send(ChunkEvent::ChunkFailed {
+                                    chunk_id: 0,
+                                    error: format!("Rename failed: {}. File kept as {}", e, part_path.display()),
+                                })
+                                .await;
+                            let _ = event_tx.send(ChunkEvent::Cancelled).await;
+                            return;
+                        }
                     }
+
                     let _ = tokio::fs::remove_file(&meta_path).await;
                     let avg_speed = if elapsed > 0.0 {
                         total_bytes as f64 / elapsed
                     } else {
                         0.0
                     };
-                    let _ = event_tx
+                    if let Err(e) = event_tx
                         .send(ChunkEvent::Complete {
                             total_bytes,
                             elapsed_secs: elapsed,
                             avg_speed,
                         })
-                        .await;
+                        .await
+                    {
+                        log::error!("Failed to send Complete event: {}", e);
+                    }
                 }
                 OrchestratorOutcome::Paused { states } => {
                     let meta = DownloadMeta {
@@ -155,6 +162,7 @@ impl RangeDownloader {
                     let _ = event_tx.send(ChunkEvent::Cancelled).await;
                 }
                 OrchestratorOutcome::Failed { error } => {
+                    log::error!("Download failed: {}", error);
                     let _ = tokio::fs::remove_file(&part_path).await;
                     let _ = tokio::fs::remove_file(&meta_path).await;
                     let _ = event_tx
@@ -163,6 +171,8 @@ impl RangeDownloader {
                             error,
                         })
                         .await;
+                    // Also send Cancelled so the worker's event loop exits
+                    let _ = event_tx.send(ChunkEvent::Cancelled).await;
                 }
             }
         });
