@@ -572,6 +572,33 @@ pub(crate) async fn download_file_chunked(
                 return Err("Download paused".to_string());
             }
             ChunkEvent::Cancelled => {
+                // Check if the file was actually downloaded successfully before
+                // the Cancelled event arrived. The engine sends Cancelled as a
+                // generic terminal event — but the download may have completed
+                // (file renamed from .part to final) before this event was sent.
+                if destination.exists() {
+                    let actual_size = tokio::fs::metadata(destination)
+                        .await
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    if actual_size > 0 && (file_size == 0 || actual_size == file_size) {
+                        // File exists at expected size — treat as completed
+                        let _ = db::update_download_progress(&task_id_owned, actual_size as i64).await;
+                        let _ = db::update_download_status(&task_id_owned, "completed", None).await;
+                        let _ = app.emit(
+                            "download-status-changed",
+                            DownloadStatusChanged {
+                                task_id: task_id_owned.clone(),
+                                status: "completed".to_string(),
+                                error: None,
+                            },
+                        );
+                        let _ = app.emit("download-complete", task_id_owned.clone());
+                        cleanup_registries(&task_id_owned).await;
+                        return Ok(());
+                    }
+                }
+                // Actually cancelled
                 let _ = db::update_download_status(&task_id_owned, "cancelled", None).await;
                 let _ = app.emit(
                     "download-status-changed",
@@ -581,7 +608,6 @@ pub(crate) async fn download_file_chunked(
                         error: None,
                     },
                 );
-                // Cleanup registries
                 cleanup_registries(&task_id_owned).await;
                 return Err("Download cancelled".to_string());
             }
