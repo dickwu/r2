@@ -275,8 +275,11 @@ struct ChunkRuntime {
     completed: bool,
     retry_count: u8,
     /// Generation counter — incremented on each re-spawn (stall restart).
-    /// Results from older generations are ignored to prevent double-counting.
     generation: u32,
+    /// Stall detection: last observed downloaded bytes
+    last_progress: u64,
+    /// Consecutive stall checks with no progress
+    stall_count: u8,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -315,13 +318,18 @@ async fn orchestrate(
     let mut chunks: Vec<ChunkRuntime> = initial_chunks
         .into_iter()
         .zip(initial_urls.into_iter())
-        .map(|(state, url)| ChunkRuntime {
-            tracker: ChunkTracker::new(state.downloaded_bytes),
-            state,
-            url,
-            completed: false,
-            retry_count: 0,
-            generation: 0,
+        .map(|(state, url)| {
+            let initial_bytes = state.downloaded_bytes;
+            ChunkRuntime {
+                tracker: ChunkTracker::new(initial_bytes),
+                state,
+                url,
+                completed: false,
+                retry_count: 0,
+                generation: 0,
+                last_progress: initial_bytes,
+                stall_count: 0,
+            }
         })
         .collect();
 
@@ -359,9 +367,6 @@ async fn orchestrate(
     let mut checkpoint_tick = tokio::time::interval(Duration::from_secs(10));
     let mut stall_check_tick = tokio::time::interval(Duration::from_secs(15));
 
-    // Stall detection: track last-known progress per chunk
-    let mut last_chunk_progress: Vec<u64> = chunks.iter().map(|c| c.tracker.get_downloaded()).collect();
-    let mut stall_count: Vec<u8> = vec![0; chunks.len()];
 
     loop {
         // Check completion: all chunks done
@@ -518,22 +523,16 @@ async fn orchestrate(
 
             // Stall detection: restart chunks that haven't made progress in 30s (2 consecutive checks)
             _ = stall_check_tick.tick() => {
-                // Extend tracking arrays if auto-tuning added new chunks
-                while last_chunk_progress.len() < chunks.len() {
-                    last_chunk_progress.push(0);
-                    stall_count.push(0);
-                }
-
                 for (idx, chunk) in chunks.iter_mut().enumerate() {
                     if chunk.completed || chunk.state.status != ChunkStatus::Downloading {
-                        stall_count[idx] = 0;
+                        chunk.stall_count = 0;
                         continue;
                     }
 
                     let current = chunk.tracker.get_downloaded();
-                    if current <= last_chunk_progress[idx] {
-                        stall_count[idx] += 1;
-                        if stall_count[idx] >= 2 {
+                    if current <= chunk.last_progress {
+                        chunk.stall_count += 1;
+                        if chunk.stall_count >= 2 {
                             // Stalled for 30s — restart this chunk with a fresh URL
                             log::warn!(
                                 "Stall detected: chunk {} stuck at {} bytes for 30s, restarting",
@@ -562,7 +561,7 @@ async fn orchestrate(
                                 &cancel, &pause_rx, &result_tx,
                             );
                             // active_count stays the same — replacing, not adding
-                            stall_count[idx] = 0;
+                            chunk.stall_count = 0;
 
                             let _ = event_tx.send(ChunkEvent::ChunkRetry {
                                 chunk_id: chunk.state.chunk_id,
@@ -571,9 +570,9 @@ async fn orchestrate(
                             }).await;
                         }
                     } else {
-                        stall_count[idx] = 0;
+                        chunk.stall_count = 0;
                     }
-                    last_chunk_progress[idx] = current;
+                    chunk.last_progress = current;
                 }
             }
         }

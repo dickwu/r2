@@ -336,7 +336,7 @@ function TaskDescription({ task }: { task: DownloadTask }) {
     case 'downloading': {
       const remainingBytes = Math.max(0, task.fileSize - task.downloadedBytes);
       const eta = task.speed > 0 ? remainingBytes / task.speed : 0;
-      const chunkLabel = task.chunkCount > 1 ? ` · ${task.chunkCount} chunks` : '';
+      const chunkLabel = task.chunks.length > 1 ? ` · ${task.chunks.length} chunks` : '';
       // Show "finishing..." when > 97% — the last few percent often take longer
       // due to file assembly, rename, and integrity checks
       const isFinishing = task.progress >= 97;
@@ -411,6 +411,10 @@ function TaskDescription({ task }: { task: DownloadTask }) {
   }
 }
 
+// Sum of chunk downloaded bytes — cheap proxy for "did any chunk make progress"
+const chunkBytes = (t: DownloadTask) =>
+  t.chunks.reduce((sum, c) => sum + c.downloadedBytes, 0);
+
 export default memo(DownloadTaskItem, (prevProps, nextProps) => {
   const prev = prevProps.task;
   const next = nextProps.task;
@@ -421,8 +425,8 @@ export default memo(DownloadTaskItem, (prevProps, nextProps) => {
     prev.speed === next.speed &&
     prev.downloadedBytes === next.downloadedBytes &&
     prev.error === next.error &&
-    prev.chunkCount === next.chunkCount &&
     prev.chunks.length === next.chunks.length &&
-    prev.peakSpeed === next.peakSpeed
+    prev.peakSpeed === next.peakSpeed &&
+    chunkBytes(prev) === chunkBytes(next)
   );
 });

@@ -68,7 +68,7 @@ export interface DownloadChunk {
   endByte: number;
   downloadedBytes: number;
   speed: number;
-  status: 'pending' | 'downloading' | 'complete' | 'retrying' | 'failed';
+  status: 'pending' | 'downloading' | 'complete' | 'failed' | 'paused';
 }
 
 export type DownloadStatus =
@@ -92,7 +92,6 @@ export interface DownloadTask {
   error?: string;
   // Chunk-level state (populated for files >= 10MB using range-dl)
   chunks: DownloadChunk[];
-  chunkCount: number;
   // Speed history ring buffer for sparkline (last 60 samples, 1/sec)
   speedHistory: number[];
   peakSpeed: number;
@@ -127,7 +126,6 @@ interface DownloadStore {
       | 'downloadedBytes'
       | 'speed'
       | 'chunks'
-      | 'chunkCount'
       | 'speedHistory'
       | 'peakSpeed'
     >
@@ -140,7 +138,6 @@ interface DownloadStore {
       | 'downloadedBytes'
       | 'speed'
       | 'chunks'
-      | 'chunkCount'
       | 'speedHistory'
       | 'peakSpeed'
     >[]
@@ -160,19 +157,24 @@ interface DownloadStore {
 
   // Queue management
   getTasksToStart: () => DownloadTask[];
-  canStartMore: () => boolean;
 }
 
 // Convert chunk status string from Rust to frontend status
 function mapChunkStatus(
   status: string
-): 'pending' | 'downloading' | 'complete' | 'retrying' | 'failed' {
-  const lower = status.toLowerCase();
-  if (lower === 'complete' || lower === 'Complete') return 'complete';
-  if (lower === 'downloading' || lower === 'Downloading') return 'downloading';
-  if (lower === 'failed' || lower === 'Failed') return 'failed';
-  if (lower === 'pending' || lower === 'Pending') return 'pending';
-  return 'pending';
+): 'pending' | 'downloading' | 'complete' | 'failed' | 'paused' {
+  switch (status.toLowerCase()) {
+    case 'complete':
+      return 'complete';
+    case 'downloading':
+      return 'downloading';
+    case 'failed':
+      return 'failed';
+    case 'paused':
+      return 'paused';
+    default:
+      return 'pending';
+  }
 }
 
 // Convert database status to frontend status
@@ -213,7 +215,6 @@ function applyChunkUpdate(t: DownloadTask, evt: DownloadChunkProgressEvent): Dow
   return {
     ...t,
     chunks,
-    chunkCount: chunks.length,
     speedHistory,
     peakSpeed: Math.max(t.peakSpeed, evt.aggregate_speed),
   };
@@ -231,7 +232,6 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
       downloadedBytes: 0,
       speed: 0,
       chunks: [],
-      chunkCount: 0,
       speedHistory: [],
       peakSpeed: 0,
     };
@@ -246,7 +246,6 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
       downloadedBytes: 0,
       speed: 0,
       chunks: [],
-      chunkCount: 0,
       speedHistory: [],
       peakSpeed: 0,
     }));
@@ -312,7 +311,6 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
         error: session.error || undefined,
         // Preserve chunk data from real-time events
         chunks: isActiveDownload && existing ? existing.chunks : [],
-        chunkCount: isActiveDownload && existing ? existing.chunkCount : 0,
         speedHistory: isActiveDownload && existing ? existing.speedHistory : [],
         peakSpeed: isActiveDownload && existing ? existing.peakSpeed : 0,
       };
@@ -470,12 +468,6 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
     return pendingTasks.slice(0, slotsAvailable);
   },
 
-  // Check if we can start more downloads
-  canStartMore: () => {
-    const { tasks } = get();
-    const activeCount = tasks.filter((t) => t.status === 'downloading').length;
-    return activeCount < MAX_CONCURRENT_DOWNLOADS;
-  },
 }));
 
 // Selectors
