@@ -39,10 +39,9 @@ impl RangeDownloader {
         self,
     ) -> Result<(mpsc::Receiver<ChunkEvent>, DownloadControl), String> {
         let file_size = self.target.file_size;
-        let ceiling = self.config.chunks_ceiling_for_size(file_size);
-        let initial_count = if ceiling <= 1 { 1 } else { 2u16.min(ceiling) };
-        let chunk_states = create_chunk_ranges(initial_count, file_size, ceiling);
-        self.run(chunk_states, ceiling).await
+        let chunk_count = self.config.chunks_for_size(file_size);
+        let chunk_states = create_chunk_ranges(chunk_count, file_size);
+        self.run(chunk_states).await
     }
 
     /// Resume a download from persisted chunk states.
@@ -50,14 +49,12 @@ impl RangeDownloader {
         self,
         chunks: Vec<ChunkState>,
     ) -> Result<(mpsc::Receiver<ChunkEvent>, DownloadControl), String> {
-        let ceiling = self.config.chunks_ceiling_for_size(self.target.file_size);
-        self.run(chunks, ceiling).await
+        self.run(chunks).await
     }
 
     async fn run(
         self,
         initial_chunks: Vec<ChunkState>,
-        ceiling: u16,
     ) -> Result<(mpsc::Receiver<ChunkEvent>, DownloadControl), String> {
         let file_size = self.target.file_size;
         let dest = self.target.destination.clone();
@@ -93,7 +90,6 @@ impl RangeDownloader {
                 initial_chunks,
                 urls,
                 url_provider,
-                ceiling,
                 file_size,
                 part_path.clone(),
                 meta_path.clone(),
@@ -107,18 +103,24 @@ impl RangeDownloader {
 
             match result {
                 OrchestratorOutcome::Complete { elapsed, total_bytes } => {
+                    // Remove existing file at destination (if any) before rename
+                    let _ = tokio::fs::remove_file(&dest).await;
+
                     // Rename .part → final destination
                     if let Err(e) = tokio::fs::rename(&part_path, &dest).await {
+                        // Rename failed — send a terminal error event and exit
                         let _ = event_tx
                             .send(ChunkEvent::ChunkFailed {
                                 chunk_id: 0,
                                 error: format!(
-                                    "Rename failed: {}. File saved as {}",
+                                    "Rename failed: {}. File kept as {}",
                                     e,
                                     part_path.display()
                                 ),
                             })
                             .await;
+                        // Send Cancelled so the worker breaks out of its event loop
+                        let _ = event_tx.send(ChunkEvent::Cancelled).await;
                         return;
                     }
                     let _ = tokio::fs::remove_file(&meta_path).await;
@@ -222,8 +224,11 @@ async fn preallocate_file(path: &PathBuf, size: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// Create initial chunk ranges with reserved space for auto-tuning.
-fn create_chunk_ranges(count: u16, file_size: u64, ceiling: u16) -> Vec<ChunkState> {
+/// Create initial chunk ranges covering the ENTIRE file.
+/// Every byte from 0 to file_size is assigned to a chunk — no unassigned gaps.
+/// Auto-tuning works by observing throughput gain from these initial chunks
+/// and adjusting chunk count for future downloads, NOT by leaving bytes unassigned.
+fn create_chunk_ranges(count: u16, file_size: u64) -> Vec<ChunkState> {
     if count <= 1 {
         return vec![ChunkState {
             chunk_id: 0,
@@ -234,23 +239,13 @@ fn create_chunk_ranges(count: u16, file_size: u64, ceiling: u16) -> Vec<ChunkSta
         }];
     }
 
-    // If auto-tuning is possible (count < ceiling), assign only a fraction of the file
-    // to initial chunks. The unassigned tail is reserved for future chunks.
-    let assigned_end = if count < ceiling {
-        let fraction = count as f64 / ceiling as f64;
-        let computed = (file_size as f64 * fraction) as u64;
-        // At least min_chunk_size per chunk
-        computed.max(count as u64 * 1024 * 1024).min(file_size)
-    } else {
-        file_size
-    };
-
-    let chunk_size = assigned_end / count as u64;
+    // Always cover the entire file — no reserved/unassigned ranges.
+    let chunk_size = file_size / count as u64;
     (0..count)
         .map(|i| {
             let start = i as u64 * chunk_size;
             let end = if i == count - 1 {
-                assigned_end
+                file_size // Last chunk gets the remainder
             } else {
                 (i as u64 + 1) * chunk_size
             };
@@ -281,6 +276,9 @@ struct ChunkRuntime {
     tracker: ChunkTracker,
     completed: bool,
     retry_count: u8,
+    /// Generation counter — incremented on each re-spawn (stall restart).
+    /// Results from older generations are ignored to prevent double-counting.
+    generation: u32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -288,7 +286,6 @@ async fn orchestrate(
     initial_chunks: Vec<ChunkState>,
     initial_urls: Vec<String>,
     url_provider: UrlProvider,
-    ceiling: u16,
     file_size: u64,
     part_path: PathBuf,
     meta_path: PathBuf,
@@ -312,8 +309,9 @@ async fn orchestrate(
 
     let start_time = Instant::now();
 
-    // Channel for chunk tasks to report results back to the orchestrator
-    let (result_tx, mut result_rx) = mpsc::channel::<(usize, ChunkResult)>(32);
+    // Channel for chunk tasks to report results back to the orchestrator.
+    // Includes (chunk_index, generation, result) so stale results can be ignored.
+    let (result_tx, mut result_rx) = mpsc::channel::<(usize, u32, ChunkResult)>(32);
 
     // Build chunk runtime state
     let mut chunks: Vec<ChunkRuntime> = initial_chunks
@@ -325,6 +323,7 @@ async fn orchestrate(
             url,
             completed: false,
             retry_count: 0,
+            generation: 0,
         })
         .collect();
 
@@ -360,14 +359,35 @@ async fn orchestrate(
     // Timers
     let mut progress_tick = tokio::time::interval(Duration::from_millis(200));
     let mut checkpoint_tick = tokio::time::interval(Duration::from_secs(10));
-    let mut autotune_tick = tokio::time::interval(Duration::from_secs(5));
-    let autotune_possible = chunks.len() < ceiling as usize && ceiling > 1;
-    let mut autotune_active = autotune_possible;
-    let mut last_throughput: Option<f64> = None;
+    let mut stall_check_tick = tokio::time::interval(Duration::from_secs(15));
+
+    // Stall detection: track last-known progress per chunk
+    let mut last_chunk_progress: Vec<u64> = chunks.iter().map(|c| c.tracker.get_downloaded()).collect();
+    let mut stall_count: Vec<u8> = vec![0; chunks.len()];
 
     loop {
-        // Check completion
+        // Check completion: all chunks done AND all bytes covered
         if chunks.iter().all(|c| c.completed) && active_count == 0 {
+            // Safety: verify that chunks cover the entire file (no gaps)
+            let max_end = chunks.iter().map(|c| c.state.end).max().unwrap_or(0);
+            let _total_downloaded: u64 = chunks.iter().map(|c| c.tracker.get_downloaded()).sum();
+
+            if max_end < file_size {
+                // BUG SAFETY NET: chunks don't cover the whole file
+                log::error!(
+                    "Completion check failed: chunks cover up to {} but file_size is {} (gap: {} bytes)",
+                    max_end, file_size, file_size - max_end
+                );
+                let _ = tokio::fs::remove_file(&meta_path).await;
+                return OrchestratorOutcome::Failed {
+                    error: format!(
+                        "Internal error: chunks only cover {}/{} bytes. Download incomplete.",
+                        max_end, file_size
+                    ),
+                };
+            }
+
+            let _ = tokio::fs::remove_file(&meta_path).await;
             return OrchestratorOutcome::Complete {
                 elapsed: start_time.elapsed().as_secs_f64(),
                 total_bytes: file_size,
@@ -390,7 +410,13 @@ async fn orchestrate(
             }
 
             // Chunk task completed
-            Some((idx, result)) = result_rx.recv() => {
+            Some((idx, gen, result)) = result_rx.recv() => {
+                // Ignore results from stale tasks (previous generation before stall restart)
+                if idx < chunks.len() && gen < chunks[idx].generation {
+                    log::debug!("Ignoring stale result for chunk {} (gen {} < current {})",
+                        idx, gen, chunks[idx].generation);
+                    continue;
+                }
                 active_count = active_count.saturating_sub(1);
 
                 match result {
@@ -499,86 +525,65 @@ async fn orchestrate(
                 let _ = meta.save(&meta_path).await;
             }
 
-            // Auto-tuning
-            _ = autotune_tick.tick(), if autotune_active => {
-                let current_speed: f64 = chunks.iter()
-                    .filter(|c| !c.completed)
-                    .map(|c| c.tracker.get_speed())
-                    .sum();
+            // Stall detection: restart chunks that haven't made progress in 30s (2 consecutive checks)
+            _ = stall_check_tick.tick() => {
+                // Extend tracking arrays if auto-tuning added new chunks
+                while last_chunk_progress.len() < chunks.len() {
+                    last_chunk_progress.push(0);
+                    stall_count.push(0);
+                }
 
-                if let Some(prev) = last_throughput {
-                    let gain = if prev > 0.0 { current_speed / prev } else { 2.0 };
-                    if gain < 1.2 {
-                        autotune_active = false;
-                        log::info!("Auto-tune: stopped at {} chunks (gain {:.0}%)",
-                            chunks.len(), (gain - 1.0) * 100.0);
+                for (idx, chunk) in chunks.iter_mut().enumerate() {
+                    if chunk.completed || chunk.state.status != ChunkStatus::Downloading {
+                        stall_count[idx] = 0;
                         continue;
                     }
-                }
-                last_throughput = Some(current_speed);
 
-                let current_count = chunks.len() as u16;
-                if current_count >= ceiling {
-                    autotune_active = false;
-                    continue;
-                }
+                    let current = chunk.tracker.get_downloaded();
+                    if current <= last_chunk_progress[idx] {
+                        stall_count[idx] += 1;
+                        if stall_count[idx] >= 2 {
+                            // Stalled for 30s — restart this chunk with a fresh URL
+                            log::warn!(
+                                "Stall detected: chunk {} stuck at {} bytes for 30s, restarting",
+                                chunk.state.chunk_id, current
+                            );
 
-                // Find unassigned range
-                let max_assigned = chunks.iter().map(|c| c.state.end).max().unwrap_or(0);
-                if max_assigned >= file_size {
-                    autotune_active = false;
-                    continue;
-                }
+                            // Update chunk state with current progress for resume
+                            chunk.state.downloaded_bytes = current;
+                            chunk.retry_count = chunk.retry_count.saturating_add(1);
+                            chunk.generation += 1; // Bump generation so old task's result is ignored
 
-                let unassigned = file_size - max_assigned;
-                let new_count = current_count.min(ceiling - current_count);
-                if new_count == 0 || unassigned < config.min_chunk_size {
-                    autotune_active = false;
-                    continue;
-                }
+                            // Get fresh URL
+                            if let Ok(new_url) = (url_provider)().await {
+                                chunk.url = new_url;
+                            }
 
-                let new_chunk_size = unassigned / new_count as u64;
+                            // Re-spawn the chunk. Do NOT increment active_count —
+                            // we're replacing the old stalled task, not adding a new one.
+                            // The old task's HTTP stream is hanging; its eventual result
+                            // (if any) will be safely ignored since completed is already
+                            // set or the new task's result arrives first.
+                            // The saturating_sub on active_count handles the case where
+                            // both old and new tasks eventually report results.
+                            spawn_chunk(
+                                idx, &client, chunk, &part_path, &config,
+                                &cancel, &pause_rx, &result_tx,
+                            );
+                            // active_count stays the same — replacing, not adding
+                            stall_count[idx] = 0;
 
-                for i in 0..new_count {
-                    let cid = current_count + i;
-                    let start = max_assigned + i as u64 * new_chunk_size;
-                    let end = if i == new_count - 1 { file_size } else { max_assigned + (i as u64 + 1) * new_chunk_size };
-
-                    let url = match (url_provider)().await {
-                        Ok(u) => u,
-                        Err(e) => {
-                            log::warn!("Auto-tune URL failed for chunk {}: {}", cid, e);
-                            autotune_active = false;
-                            break;
+                            let _ = event_tx.send(ChunkEvent::ChunkRetry {
+                                chunk_id: chunk.state.chunk_id,
+                                attempt: chunk.retry_count,
+                                error: "Stall detected — restarting chunk".to_string(),
+                            }).await;
                         }
-                    };
-
-                    let state = ChunkState {
-                        chunk_id: cid,
-                        start,
-                        end,
-                        downloaded_bytes: 0,
-                        status: ChunkStatus::Downloading,
-                    };
-
-                    let runtime = ChunkRuntime {
-                        tracker: ChunkTracker::new(0),
-                        state: state.clone(),
-                        url,
-                        completed: false,
-                        retry_count: 0,
-                    };
-
-                    chunks.push(runtime);
-                    let idx = chunks.len() - 1;
-                    spawn_chunk(
-                        idx, &client, &chunks[idx], &part_path, &config,
-                        &cancel, &pause_rx, &result_tx,
-                    );
-                    active_count += 1;
+                    } else {
+                        stall_count[idx] = 0;
+                    }
+                    last_chunk_progress[idx] = current;
                 }
-
-                log::info!("Auto-tune: scaled to {} chunks", chunks.len());
             }
         }
     }
@@ -618,7 +623,7 @@ fn spawn_chunk(
     config: &RangeDownloadConfig,
     cancel: &CancellationToken,
     pause_rx: &watch::Receiver<bool>,
-    result_tx: &mpsc::Sender<(usize, ChunkResult)>,
+    result_tx: &mpsc::Sender<(usize, u32, ChunkResult)>,
 ) {
     let client = client.clone();
     let url = chunk.url.clone();
@@ -630,6 +635,7 @@ fn spawn_chunk(
     let cancel = cancel.clone();
     let pause = pause_rx.clone();
     let tx = result_tx.clone();
+    let gen = chunk.generation;
 
     let tracker = ChunkTracker {
         downloaded_bytes: downloaded,
@@ -638,6 +644,6 @@ fn spawn_chunk(
 
     tokio::spawn(async move {
         let result = download_chunk(&client, &url, &state, &path, &cfg, &tracker, &cancel, &pause).await;
-        let _ = tx.send((idx, result)).await;
+        let _ = tx.send((idx, gen, result)).await;
     });
 }

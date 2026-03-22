@@ -44,18 +44,20 @@ impl Default for RangeDownloadConfig {
 }
 
 impl RangeDownloadConfig {
-    /// Determine the max_chunks ceiling based on file size tier.
-    pub fn chunks_ceiling_for_size(&self, file_size: u64) -> u16 {
-        let tier_max = if file_size < 10 * 1024 * 1024 {
-            1 // < 10 MB → single stream
-        } else if file_size < 100 * 1024 * 1024 {
-            4 // 10–100 MB
-        } else if file_size < 1024 * 1024 * 1024 {
-            8 // 100 MB – 1 GB
-        } else {
-            16 // > 1 GB
-        };
-        tier_max.min(self.max_chunks)
+    /// Determine chunk count based on file size.
+    /// Goal: each chunk should be ~8-16 MB for optimal throughput.
+    /// Small files: 1 chunk (no overhead). Large files: more chunks, smaller each.
+    pub fn chunks_for_size(&self, file_size: u64) -> u16 {
+        if file_size < self.min_chunk_size {
+            return 1; // Below threshold → single stream
+        }
+
+        // Target ~8 MB per chunk, rounded up. Ensures good parallelism for large files.
+        let target_chunk_size: u64 = 8 * 1024 * 1024;
+        let ideal = (file_size / target_chunk_size).max(2) as u16;
+
+        // Clamp to max_chunks
+        ideal.min(self.max_chunks)
     }
 }
 

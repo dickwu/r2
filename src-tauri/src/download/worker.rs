@@ -400,24 +400,29 @@ pub(crate) async fn download_file_chunked(
             pause_reg.insert(task_id_owned.clone(), pause_flag.clone());
         }
 
-        // Bridge task: polls old AtomicBool flags and forwards to new control handles
+        // Bridge task: continuously polls old AtomicBool flags and forwards to new control handles.
+        // Does NOT exit after pause — keeps polling so cancel still works while paused.
         let cancel_token = control.cancel.clone();
         let pause_sender = control.pause.clone();
         let cancel_flag_clone = cancel_flag.clone();
         let pause_flag_clone = pause_flag.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+            let mut pause_sent = false;
             loop {
                 interval.tick().await;
+                // Cancel always takes priority and terminates
                 if cancel_flag_clone.load(Ordering::SeqCst) {
                     cancel_token.cancel();
                     break;
                 }
-                if pause_flag_clone.load(Ordering::SeqCst) {
+                // Forward pause signal but keep polling (cancel must still work)
+                if pause_flag_clone.load(Ordering::SeqCst) && !pause_sent {
                     let _ = pause_sender.send(true);
-                    break;
+                    pause_sent = true;
+                    // Don't break — keep polling for cancel
                 }
-                // Stop polling if the token is already cancelled
+                // Exit only when the download engine is done (token cancelled = engine exited)
                 if cancel_token.is_cancelled() {
                     break;
                 }
@@ -583,9 +588,10 @@ pub(crate) async fn download_file_chunked(
         }
     }
 
-    // Cleanup registries
+    // If we get here, the event channel closed without a Complete/Paused/Cancelled event.
+    // This means the engine task exited unexpectedly (e.g., rename failure).
     cleanup_registries(&task_id_owned).await;
-    Ok(())
+    Err("Download ended unexpectedly without completion event".to_string())
 }
 
 async fn cleanup_registries(task_id: &str) {

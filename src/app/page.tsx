@@ -1138,7 +1138,7 @@ export default function Home() {
               <SyncOverlay />
             ) : isLoading || isSearching ? (
               <div className="file-list-loading">
-                <Spin tip={isSearching ? 'Searching bucket...' : undefined} fullscreen />
+                <Spin description={isSearching ? 'Searching bucket...' : undefined} fullscreen />
               </div>
             ) : filteredItems.length === 0 ? (
               <Empty

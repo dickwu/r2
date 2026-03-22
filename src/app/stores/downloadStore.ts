@@ -7,9 +7,12 @@ export const MAX_CONCURRENT_DOWNLOADS = 5;
 
 // Throttle progress updates to max once per 200ms per task
 const PROGRESS_THROTTLE_MS = 200;
+const CHUNK_THROTTLE_MS = 500;
 const progressThrottleMap = new Map<string, number>();
 const pendingProgressUpdates = new Map<string, DownloadProgressEvent>();
+const pendingChunkUpdates = new Map<string, DownloadChunkProgressEvent>();
 let progressFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let chunkFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Global listener state - persists across component unmounts
 let globalListenersSetup = false;
@@ -192,6 +195,30 @@ function mapStatus(dbStatus: string): DownloadStatus {
   }
 }
 
+// Apply chunk progress update to a task (shared between immediate and throttled paths)
+function applyChunkUpdate(t: DownloadTask, evt: DownloadChunkProgressEvent): DownloadTask {
+  const chunks: DownloadChunk[] = evt.chunks.map((c) => ({
+    chunkId: c.chunk_id,
+    startByte: c.start,
+    endByte: c.end,
+    downloadedBytes: c.downloaded_bytes,
+    speed: c.speed,
+    status: mapChunkStatus(c.status),
+  }));
+
+  // Update speed history ring buffer (max 60 samples)
+  const speedHistory = [...t.speedHistory, evt.aggregate_speed];
+  if (speedHistory.length > 60) speedHistory.shift();
+
+  return {
+    ...t,
+    chunks,
+    chunkCount: chunks.length,
+    speedHistory,
+    peakSpeed: Math.max(t.peakSpeed, evt.aggregate_speed),
+  };
+}
+
 export const useDownloadStore = create<DownloadStore>((set, get) => ({
   tasks: [],
   modalOpen: false,
@@ -359,39 +386,55 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
   },
 
   // Event handler for chunk-level progress (from range-dl, already aggregated at 200ms)
+  // Throttled to prevent cascading re-renders — only updates chunk data every 500ms
   handleChunkProgressEvent: (event) => {
+    const now = Date.now();
+    const key = `chunk:${event.task_id}`;
+    const lastUpdate = progressThrottleMap.get(key) || 0;
+
+    // Store latest event
+    pendingChunkUpdates.set(event.task_id, event);
+
+    if (now - lastUpdate < CHUNK_THROTTLE_MS) {
+      if (!chunkFlushTimer) {
+        chunkFlushTimer = setTimeout(() => {
+          chunkFlushTimer = null;
+          const updates = new Map(pendingChunkUpdates);
+          pendingChunkUpdates.clear();
+          if (updates.size === 0) return;
+
+          set((state) => ({
+            tasks: state.tasks.map((t) => {
+              const evt = updates.get(t.id);
+              if (!evt) return t;
+              progressThrottleMap.set(`chunk:${t.id}`, Date.now());
+              return applyChunkUpdate(t, evt);
+            }),
+          }));
+        }, CHUNK_THROTTLE_MS);
+      }
+      return;
+    }
+
+    // Immediate update
+    progressThrottleMap.set(key, now);
+    pendingChunkUpdates.delete(event.task_id);
+
     set((state) => ({
       tasks: state.tasks.map((t) => {
         if (t.id !== event.task_id) return t;
-
-        // Map chunk progress info to frontend chunk state
-        const chunks: DownloadChunk[] = event.chunks.map((c) => ({
-          chunkId: c.chunk_id,
-          startByte: c.start,
-          endByte: c.end,
-          downloadedBytes: c.downloaded_bytes,
-          speed: c.speed,
-          status: mapChunkStatus(c.status),
-        }));
-
-        // Update speed history ring buffer (max 60 samples)
-        const speedHistory = [...t.speedHistory, event.aggregate_speed];
-        if (speedHistory.length > 60) speedHistory.shift();
-
-        return {
-          ...t,
-          chunks,
-          chunkCount: chunks.length,
-          speedHistory,
-          peakSpeed: Math.max(t.peakSpeed, event.aggregate_speed),
-        };
+        return applyChunkUpdate(t, event);
       }),
     }));
   },
 
-  // Event handler for status changes
+  // Event handler for status changes (bails early if nothing changed to prevent loops)
   handleStatusChanged: (event) => {
     const newStatus = mapStatus(event.status);
+    const current = get().tasks.find((t) => t.id === event.task_id);
+    if (current && current.status === newStatus && current.error === (event.error || undefined)) {
+      return; // No change — skip update to prevent re-render cascade
+    }
     set((state) => ({
       tasks: state.tasks.map((t) =>
         t.id === event.task_id

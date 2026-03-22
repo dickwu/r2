@@ -284,7 +284,7 @@ function ChunkRow({ chunk, fileSize }: { chunk: DownloadChunk; fileSize: number 
           size={['100%', 6]}
           showInfo={false}
           strokeColor={chunk.status === 'complete' ? 'var(--color-success)' : 'var(--color-link)'}
-          trailColor="var(--color-border-control)"
+          railColor="var(--color-border-control)"
         />
       </div>
       <Text type="secondary" style={{ fontSize: 11, width: 40, textAlign: 'right', flexShrink: 0 }}>
@@ -360,9 +360,12 @@ function StatusIcon({ status }: { status: DownloadTask['status'] }) {
 function TaskDescription({ task }: { task: DownloadTask }) {
   switch (task.status) {
     case 'downloading': {
-      const remainingBytes = task.fileSize - task.downloadedBytes;
+      const remainingBytes = Math.max(0, task.fileSize - task.downloadedBytes);
       const eta = task.speed > 0 ? remainingBytes / task.speed : 0;
       const chunkLabel = task.chunkCount > 1 ? ` · ${task.chunkCount} chunks` : '';
+      // Show "finishing..." when > 97% — the last few percent often take longer
+      // due to file assembly, rename, and integrity checks
+      const isFinishing = task.progress >= 97;
 
       return (
         <div>
@@ -370,7 +373,7 @@ function TaskDescription({ task }: { task: DownloadTask }) {
             percent={task.progress}
             status="active"
             strokeColor={{ from: 'var(--color-link)', to: 'var(--color-success)' }}
-            trailColor="var(--color-border-control)"
+            railColor="var(--color-border-control)"
             size={['100%', 8]}
           />
           <Text type="secondary" style={{ fontSize: 11 }}>
@@ -379,7 +382,7 @@ function TaskDescription({ task }: { task: DownloadTask }) {
                 {formatSpeed(task.speed)}
                 {chunkLabel}
                 <span style={{ marginLeft: 8, color: 'var(--color-text-tertiary)' }}>
-                  {formatTimeLeft(eta)}
+                  {isFinishing ? 'finishing...' : formatTimeLeft(eta)}
                 </span>
               </>
             ) : task.downloadedBytes > 0 ? (
@@ -398,7 +401,7 @@ function TaskDescription({ task }: { task: DownloadTask }) {
             percent={Math.round(task.progress)}
             status="exception"
             strokeColor="var(--color-warning, #faad14)"
-            trailColor="var(--color-border-control)"
+            railColor="var(--color-border-control)"
             size={['100%', 8]}
           />
           <Text style={{ fontSize: 12, color: 'var(--color-warning, #faad14)' }}>

@@ -98,15 +98,14 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
     loadDownloadTasks(bucket, accountId);
   }, [bucket, accountId]);
 
-  // Don't show if no tasks
-  if (tasks.length === 0) {
-    return null;
-  }
-
   // Aggregate speed across all downloading tasks
-  const totalSpeed = tasks
-    .filter((t) => t.status === 'downloading')
-    .reduce((sum, t) => sum + t.speed, 0);
+  const totalSpeed = useMemo(
+    () =>
+      tasks
+        .filter((t) => t.status === 'downloading')
+        .reduce((sum, t) => sum + t.speed, 0),
+    [tasks]
+  );
 
   // Aggregate speed history for sparkline (merge all active tasks' histories)
   const aggregateSpeedHistory = useMemo(() => {
@@ -114,7 +113,6 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
       (t) => t.status === 'downloading' && t.speedHistory.length > 0
     );
     if (activeTasks.length === 0) return [];
-    // Use the longest history as the base length
     const maxLen = Math.max(...activeTasks.map((t) => t.speedHistory.length));
     const history: number[] = [];
     for (let i = 0; i < Math.min(maxLen, 30); i++) {
@@ -131,30 +129,50 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
     return history;
   }, [tasks]);
 
-  // Calculate ETA
+  // Calculate ETA — includes ALL pending work (downloading + queued + paused)
   const eta = useMemo(() => {
     if (totalSpeed <= 0) return '';
-    const activeTasks = tasks.filter((t) => t.status === 'downloading');
-    const remaining = activeTasks.reduce((sum, t) => sum + (t.fileSize - t.downloadedBytes), 0);
+    const allPending = tasks.filter(
+      (t) => t.status === 'downloading' || t.status === 'pending' || t.status === 'paused'
+    );
+    const remaining = allPending.reduce(
+      (sum, t) => sum + Math.max(0, t.fileSize - t.downloadedBytes),
+      0
+    );
     return formatEta(remaining / totalSpeed);
   }, [tasks, totalSpeed]);
 
-  // Per-file tooltip breakdown
+  // Per-file tooltip breakdown as React elements
   const tooltipContent = useMemo(() => {
     const active = tasks.filter(
       (t) => t.status === 'downloading' || t.status === 'pending' || t.status === 'paused'
     );
-    if (active.length === 0) return '';
-    return active
-      .slice(0, 8) // limit tooltip rows
-      .map((t) => {
-        const pct = t.progress;
-        const speed = t.speed > 0 ? `${formatBytes(t.speed)}/s` : t.status;
-        const name = t.fileName.length > 30 ? t.fileName.slice(0, 27) + '...' : t.fileName;
-        return `${name}  ${pct}% · ${speed}`;
-      })
-      .join('\n');
+    if (active.length === 0) return null;
+    return (
+      <div style={{ fontSize: 11, lineHeight: '18px' }}>
+        {active.slice(0, 8).map((t) => {
+          const name = t.fileName.length > 25 ? t.fileName.slice(0, 22) + '...' : t.fileName;
+          const info = t.speed > 0 ? `${formatBytes(t.speed)}/s` : t.status;
+          return (
+            <div key={t.id} style={{ display: 'flex', gap: 8, justifyContent: 'space-between' }}>
+              <span style={{ opacity: 0.85 }}>{name}</span>
+              <span style={{ whiteSpace: 'nowrap' }}>
+                {t.progress}% · {info}
+              </span>
+            </div>
+          );
+        })}
+        {active.length > 8 && (
+          <div style={{ opacity: 0.5, marginTop: 2 }}>+{active.length - 8} more</div>
+        )}
+      </div>
+    );
   }, [tasks]);
+
+  // Don't show if no tasks (AFTER all hooks)
+  if (tasks.length === 0) {
+    return null;
+  }
 
   const handleClick = () => {
     setModalOpen(true);
@@ -164,13 +182,22 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
 
   return (
     <Tooltip
-      title={<pre style={{ margin: 0, fontSize: 11, whiteSpace: 'pre' }}>{tooltipContent}</pre>}
+      title={tooltipContent}
       placement="top"
+      styles={{ root: { maxWidth: 360 } }}
     >
       <span
         className="download-progress"
         onClick={handleClick}
-        style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        style={{
+          cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          maxWidth: 360,
+          overflow: 'hidden',
+          flexShrink: 1,
+        }}
         role="status"
         aria-live="polite"
         aria-label={`Download progress: ${totalProgress}%`}

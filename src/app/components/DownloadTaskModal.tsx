@@ -220,9 +220,10 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
   const totalSpeed = tasks
     .filter((t) => t.status === 'downloading')
     .reduce((sum, t) => sum + t.speed, 0);
+  // Include ALL pending work: downloading (partial remaining) + queued (full size) + paused (partial remaining)
   const totalRemaining = tasks
-    .filter((t) => t.status === 'downloading')
-    .reduce((sum, t) => sum + (t.fileSize - t.downloadedBytes), 0);
+    .filter((t) => t.status === 'downloading' || t.status === 'pending' || t.status === 'paused')
+    .reduce((sum, t) => sum + Math.max(0, t.fileSize - t.downloadedBytes), 0);
   const etaSeconds = totalSpeed > 0 ? totalRemaining / totalSpeed : 0;
 
   const formatEtaShort = (secs: number) => {

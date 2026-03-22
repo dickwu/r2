@@ -121,9 +121,13 @@ pub(crate) async fn download_chunk(
 
     let mut write_buffer = Vec::with_capacity(config.write_buffer_size);
     let mut bytes_written = state.downloaded_bytes;
-    let session_start = Instant::now();
-    let session_start_bytes = bytes_written;
     let mut pause_rx = pause.clone();
+
+    // Speed calculation: use a sliding window (last 3 seconds) for responsive speed display.
+    // Total-average (bytes/elapsed) becomes misleadingly low when a chunk is nearly done
+    // and the last few percent trickle in slowly.
+    let mut speed_window_start = Instant::now();
+    let mut speed_window_bytes: u64 = 0;
 
     loop {
         tokio::select! {
@@ -166,17 +170,30 @@ pub(crate) async fn download_chunk(
             chunk = stream.next() => {
                 match chunk {
                     Some(Ok(data)) => {
+                        let data_len = data.len() as u64;
                         write_buffer.extend_from_slice(&data);
-                        bytes_written += data.len() as u64;
+                        bytes_written += data_len;
+                        speed_window_bytes += data_len;
 
                         // Update tracker atomics
                         tracker.downloaded_bytes.store(bytes_written, Ordering::Relaxed);
 
-                        // Calculate speed
-                        let elapsed = session_start.elapsed().as_secs_f64();
-                        let session_bytes = bytes_written.saturating_sub(session_start_bytes);
-                        let speed = if elapsed > 0.0 { session_bytes as f64 / elapsed } else { 0.0 };
+                        // Calculate speed using a 3-second sliding window for responsive display.
+                        // Reset the window every 3 seconds so the speed reflects recent throughput,
+                        // not the ever-declining total average.
+                        let window_elapsed = speed_window_start.elapsed().as_secs_f64();
+                        let speed = if window_elapsed > 0.1 {
+                            speed_window_bytes as f64 / window_elapsed
+                        } else {
+                            0.0
+                        };
                         tracker.speed.store(speed.to_bits(), Ordering::Relaxed);
+
+                        // Reset window every 3 seconds
+                        if window_elapsed >= 3.0 {
+                            speed_window_start = Instant::now();
+                            speed_window_bytes = 0;
+                        }
 
                         // Flush buffer when it reaches target size
                         if write_buffer.len() >= config.write_buffer_size {

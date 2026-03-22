@@ -308,27 +308,31 @@ async fn test_pause_and_resume() {
 }
 
 #[tokio::test]
-async fn test_chunk_ceiling_by_file_size() {
+async fn test_chunks_for_size() {
     let config = RangeDownloadConfig::default();
 
-    // < 10 MB → single stream
-    assert_eq!(config.chunks_ceiling_for_size(5 * 1024 * 1024), 1);
+    // < 8 MB (min_chunk_size) → single stream
+    assert_eq!(config.chunks_for_size(5 * 1024 * 1024), 1);
 
-    // 10-100 MB → max 4
-    assert_eq!(config.chunks_ceiling_for_size(50 * 1024 * 1024), 4);
+    // 16 MB → 2 chunks (16/8=2)
+    assert_eq!(config.chunks_for_size(16 * 1024 * 1024), 2);
 
-    // 100 MB - 1 GB → max 8
-    assert_eq!(config.chunks_ceiling_for_size(500 * 1024 * 1024), 8);
+    // 50 MB → 6 chunks (50/8=6.25, rounded down)
+    assert_eq!(config.chunks_for_size(50 * 1024 * 1024), 6);
 
-    // > 1 GB → max 8 (capped by config.max_chunks=8)
-    assert_eq!(config.chunks_ceiling_for_size(2 * 1024 * 1024 * 1024), 8);
+    // 100 MB → 8 chunks (100/8=12, capped by max_chunks=8)
+    assert_eq!(config.chunks_for_size(100 * 1024 * 1024), 8);
+
+    // 1 GB → 8 (capped by default max_chunks=8)
+    assert_eq!(config.chunks_for_size(1024 * 1024 * 1024), 8);
 
     // With higher max_chunks
     let config2 = RangeDownloadConfig {
-        max_chunks: 16,
+        max_chunks: 32,
         ..Default::default()
     };
-    assert_eq!(config2.chunks_ceiling_for_size(2 * 1024 * 1024 * 1024), 16);
+    // 1 GB / 8 MB = 128 chunks, capped at 32
+    assert_eq!(config2.chunks_for_size(1024 * 1024 * 1024), 32);
 }
 
 #[tokio::test]
