@@ -36,7 +36,7 @@ impl Default for RangeDownloadConfig {
             min_chunk_size: 8 * 1024 * 1024,       // 8 MB
             max_chunks: 8,
             write_buffer_size: 2 * 1024 * 1024,     // 2 MB
-            max_retries: 3,
+            max_retries: 5,
             retry_backoff_base: Duration::from_secs(1),
             connect_timeout: Duration::from_secs(30),
         }

@@ -380,12 +380,17 @@ async fn orchestrate(
             };
         }
 
-        // Too many failures
-        if failed_count as usize > chunks.len() / 2 {
-            cancel.cancel();
-            return OrchestratorOutcome::Failed {
-                error: format!("Too many failures ({}/{})", failed_count, chunks.len()),
-            };
+        // Only fail if ALL non-completed chunks have permanently failed
+        if active_count == 0 && failed_count > 0 {
+            let non_completed = chunks.iter().filter(|c| !c.completed).count();
+            if non_completed > 0 && failed_count as usize >= non_completed {
+                return OrchestratorOutcome::Failed {
+                    error: format!(
+                        "All remaining chunks failed ({} of {} total)",
+                        failed_count, chunks.len()
+                    ),
+                };
+            }
         }
 
         tokio::select! {
@@ -429,8 +434,8 @@ async fn orchestrate(
                         let can_retry = match kind {
                             ErrorKind::DiskFull | ErrorKind::PermissionDenied => false,
                             ErrorKind::Network => chunks[idx].retry_count < config.max_retries,
-                            ErrorKind::AuthExpired => chunks[idx].retry_count < 1,
-                            ErrorKind::Other => chunks[idx].retry_count < 1,
+                            ErrorKind::AuthExpired => chunks[idx].retry_count < config.max_retries,
+                            ErrorKind::Other => chunks[idx].retry_count < config.max_retries,
                         };
 
                         if can_retry {
