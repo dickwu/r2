@@ -588,9 +588,30 @@ pub(crate) async fn download_file_chunked(
         }
     }
 
-    // If we get here, the event channel closed without a Complete/Paused/Cancelled event.
-    // This means the engine task exited unexpectedly (e.g., rename failure).
+    // Event channel closed without a terminal event we processed.
+    // Check if the file was actually downloaded (engine completed + renamed but
+    // the Complete event was lost in channel buffering).
     cleanup_registries(&task_id_owned).await;
+    if destination.exists() {
+        // File exists — the download actually succeeded, we just missed the event.
+        let file_meta = tokio::fs::metadata(destination).await;
+        let actual_size = file_meta.map(|m| m.len()).unwrap_or(0);
+        if actual_size > 0 && (file_size == 0 || actual_size == file_size) {
+            log::info!("Download {}: file exists at destination, treating as success", task_id);
+            let _ = db::update_download_progress(task_id, actual_size as i64).await;
+            let _ = db::update_download_status(task_id, "completed", None).await;
+            let _ = app.emit(
+                "download-status-changed",
+                DownloadStatusChanged {
+                    task_id: task_id.to_string(),
+                    status: "completed".to_string(),
+                    error: None,
+                },
+            );
+            let _ = app.emit("download-complete", task_id.to_string());
+            return Ok(());
+        }
+    }
     Err("Download ended unexpectedly without completion event".to_string())
 }
 

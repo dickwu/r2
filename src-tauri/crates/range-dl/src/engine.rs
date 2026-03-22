@@ -83,98 +83,79 @@ impl RangeDownloader {
 
         let url_provider = self.url_provider;
 
+        // Spawn engine task. Uses an inner spawn + join to catch panics
+        // and guarantee a terminal event is always sent to the worker.
+        let event_tx_guard = event_tx.clone();
         tokio::spawn(async move {
-            let result = orchestrate(
-                initial_chunks,
-                urls,
-                url_provider,
-                file_size,
-                part_path.clone(),
-                meta_path.clone(),
-                dest.clone(),
-                config,
-                event_tx.clone(),
-                cancel,
-                pause_rx,
-            )
-            .await;
+            let inner = async {
+                let result = orchestrate(
+                    initial_chunks,
+                    urls,
+                    url_provider,
+                    file_size,
+                    part_path.clone(),
+                    meta_path.clone(),
+                    dest.clone(),
+                    config,
+                    event_tx.clone(),
+                    cancel,
+                    pause_rx,
+                )
+                .await;
 
-            match result {
-                OrchestratorOutcome::Complete { elapsed, total_bytes } => {
-                    log::info!("Download complete: {} bytes in {:.1}s, renaming .part → final", total_bytes, elapsed);
-
-                    // Remove existing file at destination (if any) before rename
-                    if dest.exists() {
-                        log::info!("Removing existing file at {}", dest.display());
+                match result {
+                    OrchestratorOutcome::Complete { elapsed, total_bytes } => {
+                        // Remove existing file at destination before rename
                         let _ = tokio::fs::remove_file(&dest).await;
-                    }
 
-                    // Rename .part → final destination
-                    match tokio::fs::rename(&part_path, &dest).await {
-                        Ok(()) => {
-                            log::info!("Rename successful: {} → {}", part_path.display(), dest.display());
-                        }
-                        Err(e) => {
-                            log::error!("Rename failed: {} ({} → {})", e, part_path.display(), dest.display());
-                            let _ = event_tx
-                                .send(ChunkEvent::ChunkFailed {
-                                    chunk_id: 0,
-                                    error: format!("Rename failed: {}. File kept as {}", e, part_path.display()),
-                                })
-                                .await;
+                        // Rename .part → final destination
+                        if let Err(e) = tokio::fs::rename(&part_path, &dest).await {
+                            log::error!("Rename failed: {}", e);
                             let _ = event_tx.send(ChunkEvent::Cancelled).await;
                             return;
                         }
-                    }
+                        let _ = tokio::fs::remove_file(&meta_path).await;
 
-                    let _ = tokio::fs::remove_file(&meta_path).await;
-                    let avg_speed = if elapsed > 0.0 {
-                        total_bytes as f64 / elapsed
-                    } else {
-                        0.0
-                    };
-                    if let Err(e) = event_tx
-                        .send(ChunkEvent::Complete {
-                            total_bytes,
-                            elapsed_secs: elapsed,
-                            avg_speed,
-                        })
-                        .await
-                    {
-                        log::error!("Failed to send Complete event: {}", e);
+                        let avg_speed = if elapsed > 0.0 {
+                            total_bytes as f64 / elapsed
+                        } else {
+                            0.0
+                        };
+                        let _ = event_tx
+                            .send(ChunkEvent::Complete {
+                                total_bytes,
+                                elapsed_secs: elapsed,
+                                avg_speed,
+                            })
+                            .await;
+                    }
+                    OrchestratorOutcome::Paused { states } => {
+                        let meta = DownloadMeta { file_size, chunks: states.clone() };
+                        let _ = meta.save(&meta_path).await;
+                        let _ = event_tx.send(ChunkEvent::Paused { chunks_state: states }).await;
+                    }
+                    OrchestratorOutcome::Cancelled => {
+                        let _ = tokio::fs::remove_file(&part_path).await;
+                        let _ = tokio::fs::remove_file(&meta_path).await;
+                        let _ = event_tx.send(ChunkEvent::Cancelled).await;
+                    }
+                    OrchestratorOutcome::Failed { error } => {
+                        log::error!("Download failed: {}", error);
+                        let _ = tokio::fs::remove_file(&part_path).await;
+                        let _ = tokio::fs::remove_file(&meta_path).await;
+                        let _ = event_tx.send(ChunkEvent::Cancelled).await;
                     }
                 }
-                OrchestratorOutcome::Paused { states } => {
-                    let meta = DownloadMeta {
-                        file_size,
-                        chunks: states.clone(),
-                    };
-                    let _ = meta.save(&meta_path).await;
-                    let _ = event_tx
-                        .send(ChunkEvent::Paused {
-                            chunks_state: states,
-                        })
-                        .await;
-                }
-                OrchestratorOutcome::Cancelled => {
-                    let _ = tokio::fs::remove_file(&part_path).await;
-                    let _ = tokio::fs::remove_file(&meta_path).await;
-                    let _ = event_tx.send(ChunkEvent::Cancelled).await;
-                }
-                OrchestratorOutcome::Failed { error } => {
-                    log::error!("Download failed: {}", error);
-                    let _ = tokio::fs::remove_file(&part_path).await;
-                    let _ = tokio::fs::remove_file(&meta_path).await;
-                    let _ = event_tx
-                        .send(ChunkEvent::ChunkFailed {
-                            chunk_id: 0,
-                            error,
-                        })
-                        .await;
-                    // Also send Cancelled so the worker's event loop exits
-                    let _ = event_tx.send(ChunkEvent::Cancelled).await;
-                }
-            }
+            };
+
+            // Run the inner async block. If it panics or the event_tx is somehow
+            // dropped without sending a terminal event, the guard sends Cancelled.
+            inner.await;
+            // event_tx_guard is dropped here — if inner already sent a terminal event
+            // and the worker consumed it, this drop is harmless (channel already closing).
+            // If inner panicked before sending, the guard's drop closes the channel,
+            // and the worker sees None from rx.recv().
+            drop(event_tx_guard);
         });
 
         Ok((event_rx, control))
