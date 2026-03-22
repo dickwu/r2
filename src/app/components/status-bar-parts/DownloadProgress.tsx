@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect } from 'react';
-import { Spin, Typography } from 'antd';
+import { useEffect, useMemo } from 'react';
+import { Tooltip, Typography } from 'antd';
 import {
   DownloadOutlined,
   CheckCircleOutlined,
@@ -15,7 +15,7 @@ import {
   selectPausedCount,
   selectFinishedCount,
   selectHasActiveDownloads,
-  MAX_CONCURRENT_DOWNLOADS,
+  selectTotalProgress,
   setupGlobalDownloadListeners,
   loadDownloadTasks,
 } from '@/app/stores/downloadStore';
@@ -28,6 +28,55 @@ interface DownloadProgressProps {
   accountId?: string;
 }
 
+/** Inline SVG sparkline from speed history samples */
+function Sparkline({
+  data,
+  width = 60,
+  height = 16,
+}: {
+  data: number[];
+  width?: number;
+  height?: number;
+}) {
+  if (data.length < 2) return null;
+  const max = Math.max(...data, 1);
+  const points = data
+    .map((v, i) => {
+      const x = (i / (data.length - 1)) * width;
+      const y = height - (v / max) * height;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+
+  return (
+    <svg
+      width={width}
+      height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      style={{ marginLeft: 6, verticalAlign: 'middle', opacity: 0.7 }}
+    >
+      <polyline
+        points={points}
+        fill="none"
+        stroke="var(--color-link)"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/** Format seconds into human-readable ETA */
+function formatEta(seconds: number): string {
+  if (seconds <= 0 || !isFinite(seconds)) return '';
+  if (seconds < 60) return `~${Math.ceil(seconds)}s`;
+  if (seconds < 3600) return `~${Math.floor(seconds / 60)}m`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return m > 0 ? `~${h}h ${m}m` : `~${h}h`;
+}
+
 export default function DownloadProgress({ bucket, accountId }: DownloadProgressProps) {
   const tasks = useDownloadStore((state) => state.tasks);
   const downloadingCount = useDownloadStore(selectDownloadingCount);
@@ -35,14 +84,15 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
   const pausedCount = useDownloadStore(selectPausedCount);
   const finishedCount = useDownloadStore(selectFinishedCount);
   const hasActiveDownloads = useDownloadStore(selectHasActiveDownloads);
+  const totalProgress = useDownloadStore(selectTotalProgress);
   const setModalOpen = useDownloadStore((state) => state.setModalOpen);
 
-  // Setup global listeners once (persists even when component unmounts)
+  // Setup global listeners once
   useEffect(() => {
     setupGlobalDownloadListeners();
   }, []);
 
-  // Load tasks for current bucket when bucket changes
+  // Load tasks for current bucket
   useEffect(() => {
     if (!bucket || !accountId) return;
     loadDownloadTasks(bucket, accountId);
@@ -53,52 +103,140 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
     return null;
   }
 
-  // Calculate total speed
+  // Aggregate speed across all downloading tasks
   const totalSpeed = tasks
     .filter((t) => t.status === 'downloading')
     .reduce((sum, t) => sum + t.speed, 0);
+
+  // Aggregate speed history for sparkline (merge all active tasks' histories)
+  const aggregateSpeedHistory = useMemo(() => {
+    const activeTasks = tasks.filter(
+      (t) => t.status === 'downloading' && t.speedHistory.length > 0
+    );
+    if (activeTasks.length === 0) return [];
+    // Use the longest history as the base length
+    const maxLen = Math.max(...activeTasks.map((t) => t.speedHistory.length));
+    const history: number[] = [];
+    for (let i = 0; i < Math.min(maxLen, 30); i++) {
+      let sum = 0;
+      for (const t of activeTasks) {
+        const offset = t.speedHistory.length - Math.min(maxLen, 30);
+        const idx = offset + i;
+        if (idx >= 0 && idx < t.speedHistory.length) {
+          sum += t.speedHistory[idx];
+        }
+      }
+      history.push(sum);
+    }
+    return history;
+  }, [tasks]);
+
+  // Calculate ETA
+  const eta = useMemo(() => {
+    if (totalSpeed <= 0) return '';
+    const activeTasks = tasks.filter((t) => t.status === 'downloading');
+    const remaining = activeTasks.reduce((sum, t) => sum + (t.fileSize - t.downloadedBytes), 0);
+    return formatEta(remaining / totalSpeed);
+  }, [tasks, totalSpeed]);
+
+  // Per-file tooltip breakdown
+  const tooltipContent = useMemo(() => {
+    const active = tasks.filter(
+      (t) => t.status === 'downloading' || t.status === 'pending' || t.status === 'paused'
+    );
+    if (active.length === 0) return '';
+    return active
+      .slice(0, 8) // limit tooltip rows
+      .map((t) => {
+        const pct = t.progress;
+        const speed = t.speed > 0 ? `${formatBytes(t.speed)}/s` : t.status;
+        const name = t.fileName.length > 30 ? t.fileName.slice(0, 27) + '...' : t.fileName;
+        return `${name}  ${pct}% · ${speed}`;
+      })
+      .join('\n');
+  }, [tasks]);
 
   const handleClick = () => {
     setModalOpen(true);
   };
 
+  const activeFileCount = downloadingCount + pendingCount;
+
   return (
-    <span
-      className="download-progress"
-      onClick={handleClick}
-      style={{ cursor: 'pointer' }}
-      title="Click to view download details"
+    <Tooltip
+      title={<pre style={{ margin: 0, fontSize: 11, whiteSpace: 'pre' }}>{tooltipContent}</pre>}
+      placement="top"
     >
-      {hasActiveDownloads ? (
-        <>
-          <Spin size="small" />
-          <DownloadOutlined style={{ marginLeft: 4 }} />
-          <Text style={{ marginLeft: 4 }}>
-            {downloadingCount}/{MAX_CONCURRENT_DOWNLOADS} downloading
-            {pendingCount > 0 && ` (${pendingCount} queued)`}
-          </Text>
-          {totalSpeed > 0 && (
-            <Text type="secondary" style={{ marginLeft: 4 }}>
-              {formatBytes(totalSpeed)}/s
+      <span
+        className="download-progress"
+        onClick={handleClick}
+        style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        role="status"
+        aria-live="polite"
+        aria-label={`Download progress: ${totalProgress}%`}
+      >
+        {hasActiveDownloads ? (
+          <>
+            {/* Mini aggregate progress bar */}
+            <span
+              style={{
+                display: 'inline-block',
+                width: 48,
+                height: 4,
+                borderRadius: 2,
+                backgroundColor: 'var(--color-border-control)',
+                overflow: 'hidden',
+                verticalAlign: 'middle',
+              }}
+              role="progressbar"
+              aria-valuenow={totalProgress}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
+              <span
+                style={{
+                  display: 'block',
+                  width: `${totalProgress}%`,
+                  height: '100%',
+                  borderRadius: 2,
+                  backgroundColor: 'var(--color-link)',
+                  transition: 'width 0.3s ease',
+                }}
+              />
+            </span>
+            <DownloadOutlined style={{ fontSize: 12 }} />
+            <Text style={{ fontSize: 12 }}>
+              {activeFileCount} file{activeFileCount !== 1 ? 's' : ''}
             </Text>
-          )}
-        </>
-      ) : pendingCount > 0 ? (
-        <>
-          <ClockCircleOutlined style={{ color: '#1677ff' }} />
-          <Text style={{ marginLeft: 4 }}>{pendingCount} queued</Text>
-        </>
-      ) : pausedCount > 0 ? (
-        <>
-          <PauseCircleOutlined style={{ color: '#faad14' }} />
-          <Text style={{ marginLeft: 4 }}>{pausedCount} paused</Text>
-        </>
-      ) : (
-        <>
-          <CheckCircleOutlined style={{ color: '#52c41a' }} />
-          <Text style={{ marginLeft: 4 }}>{finishedCount} downloaded</Text>
-        </>
-      )}
-    </span>
+            {totalSpeed > 0 && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {formatBytes(totalSpeed)}/s
+              </Text>
+            )}
+            {eta && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {eta}
+              </Text>
+            )}
+            <Sparkline data={aggregateSpeedHistory} />
+          </>
+        ) : pendingCount > 0 ? (
+          <>
+            <ClockCircleOutlined style={{ color: 'var(--color-link)' }} />
+            <Text style={{ fontSize: 12 }}>{pendingCount} queued</Text>
+          </>
+        ) : pausedCount > 0 ? (
+          <>
+            <PauseCircleOutlined style={{ color: 'var(--color-warning, #faad14)' }} />
+            <Text style={{ fontSize: 12 }}>{pausedCount} paused</Text>
+          </>
+        ) : (
+          <>
+            <CheckCircleOutlined style={{ color: 'var(--color-success)' }} />
+            <Text style={{ fontSize: 12 }}>{finishedCount} downloaded</Text>
+          </>
+        )}
+      </span>
+    </Tooltip>
   );
 }

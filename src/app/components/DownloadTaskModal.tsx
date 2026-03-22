@@ -216,15 +216,39 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
     }
   };
 
+  // Aggregate stats for the header
+  const totalSpeed = tasks
+    .filter((t) => t.status === 'downloading')
+    .reduce((sum, t) => sum + t.speed, 0);
+  const totalRemaining = tasks
+    .filter((t) => t.status === 'downloading')
+    .reduce((sum, t) => sum + (t.fileSize - t.downloadedBytes), 0);
+  const etaSeconds = totalSpeed > 0 ? totalRemaining / totalSpeed : 0;
+
+  const formatEtaShort = (secs: number) => {
+    if (secs <= 0 || !isFinite(secs)) return '';
+    if (secs < 60) return `~${Math.ceil(secs)}s left`;
+    if (secs < 3600) return `~${Math.floor(secs / 60)}m left`;
+    return `~${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m left`;
+  };
+
+  const formatBytes = (bytes: number) => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  };
+
   // Render task list for a tab using Virtuoso
-  const renderTaskList = (taskList: DownloadTask[]) => {
+  const renderTaskList = (taskList: DownloadTask[], emptyText: string) => {
     if (taskList.length === 0) {
-      return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No downloads" />;
+      return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyText} />;
     }
     return (
       <Virtuoso
         className="download-task-list"
-        style={{ height: 350 }}
+        style={{ height: 340 }}
         data={taskList}
         itemContent={(index, task) => (
           <DownloadTaskItem key={task.id} task={task} onResume={() => handleResume(task.id)} />
@@ -251,7 +275,36 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
           />
         </span>
       ),
-      children: renderTaskList(pendingTasks),
+      children: (
+        <>
+          {/* Aggregate stats header when downloads are active */}
+          {downloadingCount > 0 && (
+            <div
+              style={{
+                padding: '6px 12px',
+                marginBottom: 8,
+                borderRadius: 6,
+                backgroundColor: 'var(--color-bg-surface)',
+                border: '1px solid var(--color-border-subtle)',
+                display: 'flex',
+                gap: 12,
+                fontSize: 12,
+                color: 'var(--color-text-secondary)',
+              }}
+            >
+              {totalSpeed > 0 && <span>{formatBytes(totalSpeed)}/s</span>}
+              <span>
+                {downloadingCount} downloading{pendingCount > 0 ? ` · ${pendingCount} queued` : ''}
+              </span>
+              {etaSeconds > 0 && <span>{formatEtaShort(etaSeconds)}</span>}
+            </div>
+          )}
+          {renderTaskList(
+            pendingTasks,
+            'No downloads queued. Select files and click Download to get started.'
+          )}
+        </>
+      ),
     },
     {
       key: 'finished',
@@ -269,7 +322,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
           />
         </span>
       ),
-      children: renderTaskList(finishedTasks),
+      children: renderTaskList(finishedTasks, 'No completed downloads'),
     },
   ];
 
@@ -321,7 +374,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
           </div>
         ) : null
       }
-      width={500}
+      width={600}
     >
       <div className="cursor-default select-none">
         <Tabs

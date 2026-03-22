@@ -40,6 +40,34 @@ export interface DownloadBatchOperationEvent {
   account_id: string;
 }
 
+// Chunk-level progress event from range-dl (aggregated, one per file per 200ms)
+export interface DownloadChunkProgressEvent {
+  task_id: string;
+  chunks: ChunkProgressInfo[];
+  aggregate_speed: number;
+  aggregate_downloaded: number;
+  total_bytes: number;
+}
+
+export interface ChunkProgressInfo {
+  chunk_id: number;
+  start: number;
+  end: number;
+  downloaded_bytes: number;
+  speed: number;
+  status: string;
+}
+
+// Per-chunk state tracked in the frontend
+export interface DownloadChunk {
+  chunkId: number;
+  startByte: number;
+  endByte: number;
+  downloadedBytes: number;
+  speed: number;
+  status: 'pending' | 'downloading' | 'complete' | 'retrying' | 'failed';
+}
+
 export type DownloadStatus =
   | 'pending'
   | 'downloading'
@@ -59,6 +87,12 @@ export interface DownloadTask {
   downloadedBytes: number;
   speed: number;
   error?: string;
+  // Chunk-level state (populated for files >= 10MB using range-dl)
+  chunks: DownloadChunk[];
+  chunkCount: number;
+  // Speed history ring buffer for sparkline (last 60 samples, 1/sec)
+  speedHistory: number[];
+  peakSpeed: number;
 }
 
 // Database session type (from Rust)
@@ -82,9 +116,31 @@ interface DownloadStore {
   modalOpen: boolean;
 
   // Actions
-  addTask: (task: Omit<DownloadTask, 'status' | 'progress' | 'downloadedBytes' | 'speed'>) => void;
+  addTask: (
+    task: Omit<
+      DownloadTask,
+      | 'status'
+      | 'progress'
+      | 'downloadedBytes'
+      | 'speed'
+      | 'chunks'
+      | 'chunkCount'
+      | 'speedHistory'
+      | 'peakSpeed'
+    >
+  ) => void;
   addTasks: (
-    tasks: Omit<DownloadTask, 'status' | 'progress' | 'downloadedBytes' | 'speed'>[]
+    tasks: Omit<
+      DownloadTask,
+      | 'status'
+      | 'progress'
+      | 'downloadedBytes'
+      | 'speed'
+      | 'chunks'
+      | 'chunkCount'
+      | 'speedHistory'
+      | 'peakSpeed'
+    >[]
   ) => void;
   removeTask: (id: string) => void;
   updateTask: (id: string, updates: Partial<DownloadTask>) => void;
@@ -95,12 +151,25 @@ interface DownloadStore {
 
   // Event handlers (called by event listeners)
   handleProgressEvent: (event: DownloadProgressEvent) => void;
+  handleChunkProgressEvent: (event: DownloadChunkProgressEvent) => void;
   handleStatusChanged: (event: DownloadStatusChangedEvent) => void;
   handleTaskDeleted: (event: DownloadTaskDeletedEvent) => void;
 
   // Queue management
   getTasksToStart: () => DownloadTask[];
   canStartMore: () => boolean;
+}
+
+// Convert chunk status string from Rust to frontend status
+function mapChunkStatus(
+  status: string
+): 'pending' | 'downloading' | 'complete' | 'retrying' | 'failed' {
+  const lower = status.toLowerCase();
+  if (lower === 'complete' || lower === 'Complete') return 'complete';
+  if (lower === 'downloading' || lower === 'Downloading') return 'downloading';
+  if (lower === 'failed' || lower === 'Failed') return 'failed';
+  if (lower === 'pending' || lower === 'Pending') return 'pending';
+  return 'pending';
 }
 
 // Convert database status to frontend status
@@ -134,6 +203,10 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
       progress: 0,
       downloadedBytes: 0,
       speed: 0,
+      chunks: [],
+      chunkCount: 0,
+      speedHistory: [],
+      peakSpeed: 0,
     };
     set((state) => ({ tasks: [...state.tasks, newTask] }));
   },
@@ -145,6 +218,10 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
       progress: 0,
       downloadedBytes: 0,
       speed: 0,
+      chunks: [],
+      chunkCount: 0,
+      speedHistory: [],
+      peakSpeed: 0,
     }));
     set((state) => ({ tasks: [...state.tasks, ...newTasks] }));
   },
@@ -206,6 +283,11 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
           isActiveDownload && existing ? existing.downloadedBytes : dbDownloadedBytes,
         speed: isActiveDownload && existing ? existing.speed : 0,
         error: session.error || undefined,
+        // Preserve chunk data from real-time events
+        chunks: isActiveDownload && existing ? existing.chunks : [],
+        chunkCount: isActiveDownload && existing ? existing.chunkCount : 0,
+        speedHistory: isActiveDownload && existing ? existing.speedHistory : [],
+        peakSpeed: isActiveDownload && existing ? existing.peakSpeed : 0,
       };
     });
     set({ tasks });
@@ -271,6 +353,37 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
           downloadedBytes: newDownloadedBytes,
           fileSize: newFileSize,
           speed: event.speed,
+        };
+      }),
+    }));
+  },
+
+  // Event handler for chunk-level progress (from range-dl, already aggregated at 200ms)
+  handleChunkProgressEvent: (event) => {
+    set((state) => ({
+      tasks: state.tasks.map((t) => {
+        if (t.id !== event.task_id) return t;
+
+        // Map chunk progress info to frontend chunk state
+        const chunks: DownloadChunk[] = event.chunks.map((c) => ({
+          chunkId: c.chunk_id,
+          startByte: c.start,
+          endByte: c.end,
+          downloadedBytes: c.downloaded_bytes,
+          speed: c.speed,
+          status: mapChunkStatus(c.status),
+        }));
+
+        // Update speed history ring buffer (max 60 samples)
+        const speedHistory = [...t.speedHistory, event.aggregate_speed];
+        if (speedHistory.length > 60) speedHistory.shift();
+
+        return {
+          ...t,
+          chunks,
+          chunkCount: chunks.length,
+          speedHistory,
+          peakSpeed: Math.max(t.peakSpeed, event.aggregate_speed),
         };
       }),
     }));
@@ -372,6 +485,15 @@ export async function setupGlobalDownloadListeners(): Promise<void> {
       useDownloadStore.getState().handleProgressEvent(event.payload);
     });
     globalUnlisteners.push(unlistenProgress);
+
+    // Listen for chunk-level progress events (from range-dl engine)
+    const unlistenChunkProgress = await listen<DownloadChunkProgressEvent>(
+      'download-chunk-progress',
+      (event) => {
+        useDownloadStore.getState().handleChunkProgressEvent(event.payload);
+      }
+    );
+    globalUnlisteners.push(unlistenChunkProgress);
 
     // Listen for status change events
     const unlistenStatus = await listen<DownloadStatusChangedEvent>(

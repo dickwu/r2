@@ -1,4 +1,8 @@
 //! Download worker - internal download logic with streaming and progress tracking
+//!
+//! Dispatches downloads based on file size:
+//! - Files < 10MB: single-stream download (original path)
+//! - Files >= 10MB: multi-chunk parallel download via range-dl crate
 
 use crate::db::{self, DownloadSession};
 use crate::providers::{aws, minio, rustfs};
@@ -13,7 +17,10 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Mutex;
 
-use super::types::{DownloadProgress, DownloadStatusChanged, MAX_CONCURRENT_DOWNLOADS};
+use super::types::{
+    ChunkProgressInfo, DownloadChunkProgressEvent, DownloadProgress, DownloadStatusChanged,
+    MAX_CONCURRENT_DOWNLOADS,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) enum DownloadConfig {
@@ -58,20 +65,7 @@ pub(crate) async fn download_file_internal(
     );
 
     // Generate presigned URL for the object (fresh URL every time)
-    let presigned_url: String = match config {
-        DownloadConfig::R2(cfg) => crate::r2::generate_presigned_url(cfg, key, 3600)
-            .await
-            .map_err(|e| format!("Failed to generate presigned URL: {}", e))?,
-        DownloadConfig::Aws(cfg) => aws::generate_presigned_url(cfg, key, 3600)
-            .await
-            .map_err(|e| format!("Failed to generate presigned URL: {}", e))?,
-        DownloadConfig::Minio(cfg) => minio::generate_presigned_url(cfg, key, 3600)
-            .await
-            .map_err(|e| format!("Failed to generate presigned URL: {}", e))?,
-        DownloadConfig::Rustfs(cfg) => rustfs::generate_presigned_url(cfg, key, 3600)
-            .await
-            .map_err(|e| format!("Failed to generate presigned URL: {}", e))?,
-    };
+    let presigned_url = generate_presigned_url_for_config(config, key, 3600).await?;
 
     // Check if we should resume from existing partial file
     let existing_bytes = if destination.exists() {
@@ -334,68 +328,372 @@ pub(crate) async fn download_file_internal(
     Ok(())
 }
 
-/// Spawn a download task
+/// Minimum file size (10 MB) to use chunked parallel download.
+/// Files smaller than this use the single-stream path.
+const CHUNKED_DOWNLOAD_THRESHOLD: u64 = 10 * 1024 * 1024;
+
+/// Generate a presigned URL for any provider (shared helper to avoid DRY violations).
+pub(crate) async fn generate_presigned_url_for_config(
+    config: &DownloadConfig,
+    key: &str,
+    ttl: u64,
+) -> Result<String, String> {
+    match config {
+        DownloadConfig::R2(cfg) => crate::r2::generate_presigned_url(cfg, key, ttl)
+            .await
+            .map_err(|e| format!("Failed to generate presigned URL: {}", e)),
+        DownloadConfig::Aws(cfg) => aws::generate_presigned_url(cfg, key, ttl)
+            .await
+            .map_err(|e| format!("Failed to generate presigned URL: {}", e)),
+        DownloadConfig::Minio(cfg) => minio::generate_presigned_url(cfg, key, ttl)
+            .await
+            .map_err(|e| format!("Failed to generate presigned URL: {}", e)),
+        DownloadConfig::Rustfs(cfg) => rustfs::generate_presigned_url(cfg, key, ttl)
+            .await
+            .map_err(|e| format!("Failed to generate presigned URL: {}", e)),
+    }
+}
+
+/// Download a file using the range-dl crate's multi-chunk parallel engine.
+/// Emits both legacy aggregate events (backwards-compatible) and new chunk events.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn download_file_chunked(
+    config: &DownloadConfig,
+    key: &str,
+    destination: &PathBuf,
+    task_id: &str,
+    file_size: u64,
+    app: &AppHandle,
+) -> Result<(), String> {
+    use range_dl::{ChunkEvent, DownloadTarget, RangeDownloadConfig, RangeDownloader};
+
+    // Build URL provider closure that generates fresh presigned URLs
+    let cfg = config.clone();
+    let key_owned = key.to_string();
+    let url_provider: range_dl::UrlProvider = Box::new(move || {
+        let cfg = cfg.clone();
+        let key = key_owned.clone();
+        Box::pin(async move { generate_presigned_url_for_config(&cfg, &key, 3600).await })
+    });
+
+    let dl_config = RangeDownloadConfig::default();
+    let target = DownloadTarget {
+        file_size,
+        destination: destination.clone(),
+    };
+
+    let downloader = RangeDownloader::new(url_provider, target, dl_config);
+    let (mut rx, control) = downloader.start().await?;
+
+    let task_id_owned = task_id.to_string();
+
+    // Register cancel/pause control in the registries so commands.rs can signal them
+    {
+        // We bridge the old AtomicBool-based system to the new watch/CancellationToken system
+        // by spawning a watcher task that polls the old registries
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let pause_flag = Arc::new(AtomicBool::new(false));
+        {
+            let mut cancel_reg = DOWNLOAD_CANCEL_REGISTRY.lock().await;
+            cancel_reg.insert(task_id_owned.clone(), cancel_flag.clone());
+            let mut pause_reg = DOWNLOAD_PAUSE_REGISTRY.lock().await;
+            pause_reg.insert(task_id_owned.clone(), pause_flag.clone());
+        }
+
+        // Bridge task: polls old AtomicBool flags and forwards to new control handles
+        let cancel_token = control.cancel.clone();
+        let pause_sender = control.pause.clone();
+        let cancel_flag_clone = cancel_flag.clone();
+        let pause_flag_clone = pause_flag.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                interval.tick().await;
+                if cancel_flag_clone.load(Ordering::SeqCst) {
+                    cancel_token.cancel();
+                    break;
+                }
+                if pause_flag_clone.load(Ordering::SeqCst) {
+                    let _ = pause_sender.send(true);
+                    break;
+                }
+                // Stop polling if the token is already cancelled
+                if cancel_token.is_cancelled() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Process events from the range-dl engine
+    while let Some(event) = rx.recv().await {
+        match event {
+            ChunkEvent::Progress {
+                chunks,
+                aggregate_speed,
+                aggregate_downloaded,
+                total_bytes,
+            } => {
+                // Emit legacy aggregate progress event (backwards-compatible)
+                let percent = if total_bytes > 0 {
+                    std::cmp::min(
+                        ((aggregate_downloaded as f64 / total_bytes as f64) * 100.0) as u32,
+                        100,
+                    )
+                } else {
+                    0
+                };
+                let _ = app.emit(
+                    "download-progress",
+                    DownloadProgress {
+                        task_id: task_id_owned.clone(),
+                        percent,
+                        downloaded_bytes: aggregate_downloaded,
+                        total_bytes,
+                        speed: aggregate_speed,
+                    },
+                );
+
+                // Emit new chunk-level progress event
+                let chunk_infos: Vec<ChunkProgressInfo> = chunks
+                    .iter()
+                    .map(|c| ChunkProgressInfo {
+                        chunk_id: c.chunk_id,
+                        start: c.start,
+                        end: c.end,
+                        downloaded_bytes: c.downloaded_bytes,
+                        speed: c.speed,
+                        status: format!("{:?}", c.status),
+                    })
+                    .collect();
+                let _ = app.emit(
+                    "download-chunk-progress",
+                    DownloadChunkProgressEvent {
+                        task_id: task_id_owned.clone(),
+                        chunks: chunk_infos,
+                        aggregate_speed,
+                        aggregate_downloaded,
+                        total_bytes,
+                    },
+                );
+
+                // Periodic DB progress update (the engine handles throttling to 200ms)
+                let _ =
+                    db::update_download_progress(&task_id_owned, aggregate_downloaded as i64).await;
+            }
+            ChunkEvent::ChunkComplete { chunk_id } => {
+                log::info!(
+                    "Download {}: chunk {} completed",
+                    task_id_owned,
+                    chunk_id
+                );
+            }
+            ChunkEvent::ChunkRetry {
+                chunk_id,
+                attempt,
+                error,
+            } => {
+                log::warn!(
+                    "Download {}: chunk {} retry #{}: {}",
+                    task_id_owned,
+                    chunk_id,
+                    attempt,
+                    error
+                );
+            }
+            ChunkEvent::ChunkFailed { chunk_id, error } => {
+                log::error!(
+                    "Download {}: chunk {} failed: {}",
+                    task_id_owned,
+                    chunk_id,
+                    error
+                );
+                // Don't fail the whole download — the engine handles failure threshold
+            }
+            ChunkEvent::Complete {
+                total_bytes,
+                elapsed_secs,
+                avg_speed,
+            } => {
+                log::info!(
+                    "Download {} complete: {} bytes in {:.1}s ({}/s)",
+                    task_id_owned,
+                    total_bytes,
+                    elapsed_secs,
+                    format_speed(avg_speed)
+                );
+
+                // Emit final progress (100%)
+                let _ = app.emit(
+                    "download-progress",
+                    DownloadProgress {
+                        task_id: task_id_owned.clone(),
+                        percent: 100,
+                        downloaded_bytes: total_bytes,
+                        total_bytes,
+                        speed: avg_speed,
+                    },
+                );
+
+                // Update DB
+                let _ =
+                    db::update_download_progress(&task_id_owned, total_bytes as i64).await;
+                let _ = db::update_download_status(&task_id_owned, "completed", None).await;
+
+                // Emit status change
+                let _ = app.emit(
+                    "download-status-changed",
+                    DownloadStatusChanged {
+                        task_id: task_id_owned.clone(),
+                        status: "completed".to_string(),
+                        error: None,
+                    },
+                );
+                let _ = app.emit("download-complete", task_id_owned.clone());
+                break;
+            }
+            ChunkEvent::Paused { chunks_state: _ } => {
+                let _ = db::update_download_status(&task_id_owned, "paused", None).await;
+                let _ = app.emit(
+                    "download-status-changed",
+                    DownloadStatusChanged {
+                        task_id: task_id_owned.clone(),
+                        status: "paused".to_string(),
+                        error: None,
+                    },
+                );
+                // Cleanup registries
+                cleanup_registries(&task_id_owned).await;
+                return Err("Download paused".to_string());
+            }
+            ChunkEvent::Cancelled => {
+                let _ = db::update_download_status(&task_id_owned, "cancelled", None).await;
+                let _ = app.emit(
+                    "download-status-changed",
+                    DownloadStatusChanged {
+                        task_id: task_id_owned.clone(),
+                        status: "cancelled".to_string(),
+                        error: None,
+                    },
+                );
+                // Cleanup registries
+                cleanup_registries(&task_id_owned).await;
+                return Err("Download cancelled".to_string());
+            }
+        }
+    }
+
+    // Cleanup registries
+    cleanup_registries(&task_id_owned).await;
+    Ok(())
+}
+
+async fn cleanup_registries(task_id: &str) {
+    let mut cancel_reg = DOWNLOAD_CANCEL_REGISTRY.lock().await;
+    cancel_reg.remove(task_id);
+    let mut pause_reg = DOWNLOAD_PAUSE_REGISTRY.lock().await;
+    pause_reg.remove(task_id);
+}
+
+fn format_speed(bytes_per_sec: f64) -> String {
+    if bytes_per_sec < 1024.0 {
+        format!("{:.0} B", bytes_per_sec)
+    } else if bytes_per_sec < 1024.0 * 1024.0 {
+        format!("{:.1} KB", bytes_per_sec / 1024.0)
+    } else if bytes_per_sec < 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} MB", bytes_per_sec / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes_per_sec / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+/// Spawn a download task.
+/// Dispatches to chunked parallel download for files >= 10MB,
+/// or single-stream download for smaller files.
 pub(crate) async fn spawn_download_task(
     app: AppHandle,
     session: DownloadSession,
     config: DownloadConfig,
 ) {
     let task_id = session.id.clone();
-
-    // Register cancel and pause flags
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let paused = Arc::new(AtomicBool::new(false));
-    {
-        let mut cancel_registry = DOWNLOAD_CANCEL_REGISTRY.lock().await;
-        cancel_registry.insert(task_id.clone(), cancelled.clone());
-        let mut pause_registry = DOWNLOAD_PAUSE_REGISTRY.lock().await;
-        pause_registry.insert(task_id.clone(), paused.clone());
-    }
-
-    let client = match Client::builder().build() {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = db::update_download_status(&task_id, "failed", Some(&e.to_string())).await;
-            let _ = app.emit(
-                "download-status-changed",
-                DownloadStatusChanged {
-                    task_id: task_id.clone(),
-                    status: "failed".to_string(),
-                    error: Some(e.to_string()),
-                },
-            );
-            return;
-        }
-    };
-
+    let file_size = session.file_size as u64;
     let destination = PathBuf::from(&session.local_path).join(&session.file_name);
 
-    let result = download_file_internal(
-        &client,
-        &config,
-        &session.object_key,
-        &destination,
-        &task_id,
-        session.file_size as u64,
-        &app,
-        &cancelled,
-        &paused,
-    )
-    .await;
+    // Dispatch based on file size
+    let result = if file_size >= CHUNKED_DOWNLOAD_THRESHOLD {
+        // Multi-chunk parallel download via range-dl
+        log::info!(
+            "Download {}: using chunked download for {} bytes",
+            task_id,
+            file_size
+        );
+        download_file_chunked(
+            &config,
+            &session.object_key,
+            &destination,
+            &task_id,
+            file_size,
+            &app,
+        )
+        .await
+    } else {
+        // Single-stream download (original path for small files)
+        log::info!(
+            "Download {}: using single-stream for {} bytes",
+            task_id,
+            file_size
+        );
 
-    // Cleanup registries
-    {
-        let mut cancel_registry = DOWNLOAD_CANCEL_REGISTRY.lock().await;
-        cancel_registry.remove(&task_id);
-        let mut pause_registry = DOWNLOAD_PAUSE_REGISTRY.lock().await;
-        pause_registry.remove(&task_id);
-    }
+        // Register cancel and pause flags
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        {
+            let mut cancel_registry = DOWNLOAD_CANCEL_REGISTRY.lock().await;
+            cancel_registry.insert(task_id.clone(), cancelled.clone());
+            let mut pause_registry = DOWNLOAD_PAUSE_REGISTRY.lock().await;
+            pause_registry.insert(task_id.clone(), paused.clone());
+        }
 
-    // Handle result
+        let client = match Client::builder().build() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ =
+                    db::update_download_status(&task_id, "failed", Some(&e.to_string())).await;
+                let _ = app.emit(
+                    "download-status-changed",
+                    DownloadStatusChanged {
+                        task_id: task_id.clone(),
+                        status: "failed".to_string(),
+                        error: Some(e.to_string()),
+                    },
+                );
+                return;
+            }
+        };
+
+        let result = download_file_internal(
+            &client,
+            &config,
+            &session.object_key,
+            &destination,
+            &task_id,
+            file_size,
+            &app,
+            &cancelled,
+            &paused,
+        )
+        .await;
+
+        // Cleanup registries for single-stream path
+        cleanup_registries(&task_id).await;
+
+        result
+    };
+
+    // Handle errors (both paths)
     if let Err(e) = result {
         if !e.contains("paused") && !e.contains("cancelled") {
             let _ = db::update_download_status(&task_id, "failed", Some(&e)).await;
-            // Emit status change event for failure
             let _ = app.emit(
                 "download-status-changed",
                 DownloadStatusChanged {

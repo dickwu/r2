@@ -36,3 +36,24 @@ pub struct DownloadBatchOperation {
     pub bucket: String,
     pub account_id: String,
 }
+
+/// Chunk-level progress event payload (aggregated, emitted once per file per 200ms)
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadChunkProgressEvent {
+    pub task_id: String,
+    pub chunks: Vec<ChunkProgressInfo>,
+    pub aggregate_speed: f64,
+    pub aggregate_downloaded: u64,
+    pub total_bytes: u64,
+}
+
+/// Per-chunk progress info within an aggregated event
+#[derive(Debug, Clone, Serialize)]
+pub struct ChunkProgressInfo {
+    pub chunk_id: u16,
+    pub start: u64,
+    pub end: u64,
+    pub downloaded_bytes: u64,
+    pub speed: f64,
+    pub status: String,
+}

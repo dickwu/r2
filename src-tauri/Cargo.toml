@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/range-dl"]
+
 [package]
 name = "r2"
 version = "0.1.70"
@@ -46,6 +49,8 @@ aws-config = "1.8"
 aws-sdk-s3 = { version = "1.124.0", features = ["behavior-version-latest"] }
 aws-credential-types = "1.2"
 futures-util = "0.3"
+# Multi-threaded download engine with Range-based parallel chunk acceleration
+range-dl = { path = "crates/range-dl" }
 # Dev-only: connector for AI-assisted testing (opt-in via --features connector)
 tauri-plugin-connector = { version = "0.5", optional = true }
 

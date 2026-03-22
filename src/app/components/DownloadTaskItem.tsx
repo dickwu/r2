@@ -1,6 +1,6 @@
 'use client';
 
-import { memo } from 'react';
+import { memo, useState } from 'react';
 import { Button, Progress, Typography, Space, Tooltip } from 'antd';
 import {
   CheckCircleOutlined,
@@ -10,9 +10,12 @@ import {
   PlayCircleOutlined,
   DeleteOutlined,
   StopOutlined,
+  DownOutlined,
+  RightOutlined,
+  FolderOpenOutlined,
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
-import { type DownloadTask } from '@/app/stores/downloadStore';
+import { type DownloadTask, type DownloadChunk } from '@/app/stores/downloadStore';
 
 const { Text } = Typography;
 
@@ -22,7 +25,8 @@ interface DownloadTaskItemProps {
 }
 
 function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
-  // Pause download - UI will update via download-status-changed event
+  const [expanded, setExpanded] = useState(false);
+
   async function handlePause() {
     try {
       await invoke('pause_download', { taskId: task.id });
@@ -31,7 +35,6 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
     }
   }
 
-  // Cancel download - UI will update via download-status-changed event
   async function handleCancel() {
     try {
       await invoke('cancel_download', { taskId: task.id });
@@ -40,7 +43,6 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
     }
   }
 
-  // Delete task - UI will update via download-task-deleted event
   async function handleDelete() {
     try {
       await invoke('delete_download_task', { taskId: task.id });
@@ -50,10 +52,28 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
   }
 
   function handleResume() {
-    if (onResume) {
-      onResume();
+    if (onResume) onResume();
+  }
+
+  async function handleShowInFolder() {
+    try {
+      // Use tauri-plugin-opener to reveal the file in Finder/Explorer
+      const { revealItemInDir } = await import('@tauri-apps/plugin-opener');
+      const filePath = `${task.localPath}/${task.fileName}`;
+      await revealItemInDir(filePath);
+    } catch {
+      // Fallback: try opening the folder itself
+      try {
+        const { openPath } = await import('@tauri-apps/plugin-opener');
+        await openPath(task.localPath);
+      } catch (e) {
+        console.error('Failed to open folder:', e);
+      }
     }
   }
+
+  const hasChunks = task.chunks.length > 1;
+  const canExpand = hasChunks && (task.status === 'downloading' || task.status === 'paused');
 
   const getActions = () => {
     switch (task.status) {
@@ -102,7 +122,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
                 size="small"
                 icon={<PlayCircleOutlined />}
                 onClick={handleResume}
-                style={{ color: '#52c41a' }}
+                style={{ color: 'var(--color-success)' }}
               />
             </Tooltip>
             <Tooltip title="Cancel">
@@ -134,7 +154,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
                 size="small"
                 icon={<PlayCircleOutlined />}
                 onClick={handleResume}
-                style={{ color: '#1677ff' }}
+                style={{ color: 'var(--color-link)' }}
               />
             </Tooltip>
             <Tooltip title="Delete">
@@ -149,6 +169,27 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
           </Space>
         );
       case 'success':
+        return (
+          <Space size={4}>
+            <Tooltip title="Show in Folder">
+              <Button
+                type="text"
+                size="small"
+                icon={<FolderOpenOutlined />}
+                onClick={handleShowInFolder}
+              />
+            </Tooltip>
+            <Tooltip title="Delete">
+              <Button
+                type="text"
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                onClick={handleDelete}
+              />
+            </Tooltip>
+          </Space>
+        );
       case 'cancelled':
         return (
           <Tooltip title="Delete">
@@ -167,31 +208,150 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
   };
 
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', padding: '8px 0', gap: 12 }}>
-      <StatusIcon status={task.status} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <Text ellipsis style={{ maxWidth: 280, display: 'block' }}>
-          {task.fileName}
-        </Text>
-        <TaskDescription task={task} />
+    <div style={{ padding: '8px 0' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+        <StatusIcon status={task.status} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            {canExpand && (
+              <span
+                onClick={() => setExpanded(!expanded)}
+                style={{ cursor: 'pointer', fontSize: 10, color: 'var(--color-text-secondary)' }}
+                aria-expanded={expanded}
+                aria-controls={`chunk-detail-${task.id}`}
+              >
+                {expanded ? <DownOutlined /> : <RightOutlined />}
+              </span>
+            )}
+            <Text ellipsis style={{ maxWidth: 320, display: 'block' }}>
+              {task.fileName}
+            </Text>
+          </div>
+          <TaskDescription task={task} />
+        </div>
+        <div style={{ display: 'flex', gap: 4 }}>{getActions()}</div>
       </div>
-      <div style={{ display: 'flex', gap: 4 }}>{getActions()}</div>
+
+      {/* Expandable chunk detail view */}
+      {expanded && canExpand && (
+        <div
+          id={`chunk-detail-${task.id}`}
+          style={{
+            marginTop: 8,
+            marginLeft: 28,
+            padding: '8px 12px',
+            borderRadius: 6,
+            backgroundColor: 'var(--color-bg-surface)',
+            border: '1px solid var(--color-border-subtle)',
+            transition: 'max-height 0.2s ease-out',
+          }}
+        >
+          {task.chunks.map((chunk) => (
+            <ChunkRow key={chunk.chunkId} chunk={chunk} fileSize={task.fileSize} />
+          ))}
+          {task.speedHistory.length > 1 && (
+            <div style={{ marginTop: 8 }}>
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                Speed history
+              </Text>
+              <SparklineLarge data={task.speedHistory} />
+            </div>
+          )}
+          {task.peakSpeed > 0 && (
+            <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+              Peak: {formatSpeed(task.peakSpeed)}
+            </Text>
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+function ChunkRow({ chunk, fileSize }: { chunk: DownloadChunk; fileSize: number }) {
+  const totalBytes = chunk.endByte - chunk.startByte;
+  const pct = totalBytes > 0 ? Math.round((chunk.downloadedBytes / totalBytes) * 100) : 0;
+  const rangeLabel = `${formatFileSize(chunk.startByte)}–${formatFileSize(chunk.endByte)}`;
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+      <Text type="secondary" style={{ fontSize: 11, width: 50, flexShrink: 0 }}>
+        Chunk {chunk.chunkId + 1}
+      </Text>
+      <div style={{ flex: 1 }}>
+        <Progress
+          percent={pct}
+          size={['100%', 6]}
+          showInfo={false}
+          strokeColor={chunk.status === 'complete' ? 'var(--color-success)' : 'var(--color-link)'}
+          trailColor="var(--color-border-control)"
+        />
+      </div>
+      <Text type="secondary" style={{ fontSize: 11, width: 40, textAlign: 'right', flexShrink: 0 }}>
+        {pct}%
+      </Text>
+      {chunk.speed > 0 && (
+        <Text
+          type="secondary"
+          style={{ fontSize: 11, width: 65, textAlign: 'right', flexShrink: 0 }}
+        >
+          {formatSpeed(chunk.speed)}
+        </Text>
+      )}
+      {chunk.status === 'complete' && (
+        <CheckCircleOutlined style={{ color: 'var(--color-success)', fontSize: 12 }} />
+      )}
+    </div>
+  );
+}
+
+/** Larger sparkline for expanded detail view */
+function SparklineLarge({ data }: { data: number[] }) {
+  if (data.length < 2) return null;
+  const width = 120;
+  const height = 24;
+  const max = Math.max(...data, 1);
+  const points = data
+    .map((v, i) => {
+      const x = (i / (data.length - 1)) * width;
+      const y = height - (v / max) * height;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+
+  return (
+    <svg
+      width={width}
+      height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      style={{ display: 'block' }}
+    >
+      <polyline
+        points={points}
+        fill="none"
+        stroke="var(--color-link)"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 
 function StatusIcon({ status }: { status: DownloadTask['status'] }) {
   switch (status) {
     case 'success':
-      return <CheckCircleOutlined style={{ color: '#52c41a', fontSize: 16 }} />;
+      return <CheckCircleOutlined style={{ color: 'var(--color-success)', fontSize: 16 }} />;
     case 'error':
-      return <CloseCircleOutlined style={{ color: '#ff4d4f', fontSize: 16 }} />;
+      return <CloseCircleOutlined style={{ color: 'var(--color-error, #ff4d4f)', fontSize: 16 }} />;
     case 'cancelled':
-      return <StopOutlined style={{ color: '#999', fontSize: 16 }} />;
+      return <StopOutlined style={{ color: 'var(--color-text-tertiary)', fontSize: 16 }} />;
     case 'downloading':
-      return <LoadingOutlined style={{ color: '#1677ff', fontSize: 16 }} />;
+      return <LoadingOutlined style={{ color: 'var(--color-link)', fontSize: 16 }} />;
     case 'paused':
-      return <PauseCircleOutlined style={{ color: '#faad14', fontSize: 16 }} />;
+      return (
+        <PauseCircleOutlined style={{ color: 'var(--color-warning, #faad14)', fontSize: 16 }} />
+      );
     default:
       return null;
   }
@@ -202,21 +362,25 @@ function TaskDescription({ task }: { task: DownloadTask }) {
     case 'downloading': {
       const remainingBytes = task.fileSize - task.downloadedBytes;
       const eta = task.speed > 0 ? remainingBytes / task.speed : 0;
+      const chunkLabel = task.chunkCount > 1 ? ` · ${task.chunkCount} chunks` : '';
 
       return (
         <div>
           <Progress
             percent={task.progress}
             status="active"
-            strokeColor={{ from: '#108ee9', to: '#87d068' }}
-            railColor="#e8e8e8"
+            strokeColor={{ from: 'var(--color-link)', to: 'var(--color-success)' }}
+            trailColor="var(--color-border-control)"
             size={['100%', 8]}
           />
           <Text type="secondary" style={{ fontSize: 11 }}>
             {task.speed > 0 ? (
               <>
                 {formatSpeed(task.speed)}
-                <span style={{ marginLeft: 8, color: '#999' }}>{formatTimeLeft(eta)}</span>
+                {chunkLabel}
+                <span style={{ marginLeft: 8, color: 'var(--color-text-tertiary)' }}>
+                  {formatTimeLeft(eta)}
+                </span>
               </>
             ) : task.downloadedBytes > 0 ? (
               `${formatFileSize(task.downloadedBytes)} / ${formatFileSize(task.fileSize)}`
@@ -233,11 +397,11 @@ function TaskDescription({ task }: { task: DownloadTask }) {
           <Progress
             percent={Math.round(task.progress)}
             status="exception"
-            strokeColor="#faad14"
-            railColor="#e8e8e8"
+            strokeColor="var(--color-warning, #faad14)"
+            trailColor="var(--color-border-control)"
             size={['100%', 8]}
           />
-          <Text type="warning" style={{ fontSize: 12 }}>
+          <Text style={{ fontSize: 12, color: 'var(--color-warning, #faad14)' }}>
             Paused - {formatFileSize(task.downloadedBytes)} / {formatFileSize(task.fileSize)}
           </Text>
         </div>
@@ -245,14 +409,14 @@ function TaskDescription({ task }: { task: DownloadTask }) {
     }
     case 'error':
       return (
-        <Text type="danger" style={{ fontSize: 12 }}>
+        <Text style={{ fontSize: 12, color: 'var(--color-error, #ff4d4f)' }}>
           {task.error || 'Download failed'}
         </Text>
       );
     case 'success':
       return (
-        <Text type="success" style={{ fontSize: 12 }}>
-          Downloaded
+        <Text style={{ fontSize: 12, color: 'var(--color-success)' }}>
+          Downloaded · {formatFileSize(task.fileSize)}
         </Text>
       );
     case 'cancelled':
@@ -299,17 +463,18 @@ function formatTimeLeft(seconds: number): string {
   return mins > 0 ? `${hours}h ${mins}m left` : `${hours}h left`;
 }
 
-// Memoize to prevent unnecessary re-renders in the list
 export default memo(DownloadTaskItem, (prevProps, nextProps) => {
   const prev = prevProps.task;
   const next = nextProps.task;
-  // Only re-render if task data that affects display has changed
   return (
     prev.id === next.id &&
     prev.status === next.status &&
     prev.progress === next.progress &&
     prev.speed === next.speed &&
     prev.downloadedBytes === next.downloadedBytes &&
-    prev.error === next.error
+    prev.error === next.error &&
+    prev.chunkCount === next.chunkCount &&
+    prev.chunks.length === next.chunks.length &&
+    prev.peakSpeed === next.peakSpeed
   );
 });
