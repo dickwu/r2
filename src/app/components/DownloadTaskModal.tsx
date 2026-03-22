@@ -15,6 +15,7 @@ import {
   DownloadTask,
 } from '@/app/stores/downloadStore';
 import DownloadTaskItem from '@/app/components/DownloadTaskItem';
+import { formatBytes, formatEta } from '@/app/utils/formatBytes';
 import type { StorageConfig } from '@/app/lib/r2cache';
 
 interface DownloadTaskModalProps {
@@ -226,21 +227,6 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
     .reduce((sum, t) => sum + Math.max(0, t.fileSize - t.downloadedBytes), 0);
   const etaSeconds = totalSpeed > 0 ? totalRemaining / totalSpeed : 0;
 
-  const formatEtaShort = (secs: number) => {
-    if (secs <= 0 || !isFinite(secs)) return '';
-    if (secs < 60) return `~${Math.ceil(secs)}s left`;
-    if (secs < 3600) return `~${Math.floor(secs / 60)}m left`;
-    return `~${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m left`;
-  };
-
-  const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  };
-
   // Render task list for a tab using Virtuoso
   const renderTaskList = (taskList: DownloadTask[], emptyText: string) => {
     if (taskList.length === 0) {
@@ -297,7 +283,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
               <span>
                 {downloadingCount} downloading{pendingCount > 0 ? ` · ${pendingCount} queued` : ''}
               </span>
-              {etaSeconds > 0 && <span>{formatEtaShort(etaSeconds)}</span>}
+              {etaSeconds > 0 && <span>{formatEta(etaSeconds)}</span>}
             </div>
           )}
           {renderTaskList(

@@ -16,6 +16,8 @@ import {
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import { type DownloadTask, type DownloadChunk } from '@/app/stores/downloadStore';
+import { formatBytes, formatSpeed, formatTimeLeft } from '@/app/utils/formatBytes';
+import Sparkline from '@/app/components/Sparkline';
 
 const { Text } = Typography;
 
@@ -254,7 +256,12 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
               <Text type="secondary" style={{ fontSize: 11 }}>
                 Speed history
               </Text>
-              <SparklineLarge data={task.speedHistory} />
+              <Sparkline
+                data={task.speedHistory}
+                width={120}
+                height={24}
+                style={{ display: 'block' }}
+              />
             </div>
           )}
           {task.peakSpeed > 0 && (
@@ -271,7 +278,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
 function ChunkRow({ chunk, fileSize }: { chunk: DownloadChunk; fileSize: number }) {
   const totalBytes = chunk.endByte - chunk.startByte;
   const pct = totalBytes > 0 ? Math.round((chunk.downloadedBytes / totalBytes) * 100) : 0;
-  const rangeLabel = `${formatFileSize(chunk.startByte)}–${formatFileSize(chunk.endByte)}`;
+  const rangeLabel = `${formatBytes(chunk.startByte)}–${formatBytes(chunk.endByte)}`;
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
@@ -302,39 +309,6 @@ function ChunkRow({ chunk, fileSize }: { chunk: DownloadChunk; fileSize: number 
         <CheckCircleOutlined style={{ color: 'var(--color-success)', fontSize: 12 }} />
       )}
     </div>
-  );
-}
-
-/** Larger sparkline for expanded detail view */
-function SparklineLarge({ data }: { data: number[] }) {
-  if (data.length < 2) return null;
-  const width = 120;
-  const height = 24;
-  const max = Math.max(...data, 1);
-  const points = data
-    .map((v, i) => {
-      const x = (i / (data.length - 1)) * width;
-      const y = height - (v / max) * height;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(' ');
-
-  return (
-    <svg
-      width={width}
-      height={height}
-      viewBox={`0 0 ${width} ${height}`}
-      style={{ display: 'block' }}
-    >
-      <polyline
-        points={points}
-        fill="none"
-        stroke="var(--color-link)"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }
 
@@ -386,7 +360,7 @@ function TaskDescription({ task }: { task: DownloadTask }) {
                 </span>
               </>
             ) : task.downloadedBytes > 0 ? (
-              `${formatFileSize(task.downloadedBytes)} / ${formatFileSize(task.fileSize)}`
+              `${formatBytes(task.downloadedBytes)} / ${formatBytes(task.fileSize)}`
             ) : (
               'Connecting...'
             )}
@@ -405,7 +379,7 @@ function TaskDescription({ task }: { task: DownloadTask }) {
             size={['100%', 8]}
           />
           <Text style={{ fontSize: 12, color: 'var(--color-warning, #faad14)' }}>
-            Paused - {formatFileSize(task.downloadedBytes)} / {formatFileSize(task.fileSize)}
+            Paused - {formatBytes(task.downloadedBytes)} / {formatBytes(task.fileSize)}
           </Text>
         </div>
       );
@@ -419,7 +393,7 @@ function TaskDescription({ task }: { task: DownloadTask }) {
     case 'success':
       return (
         <Text style={{ fontSize: 12, color: 'var(--color-success)' }}>
-          Downloaded · {formatFileSize(task.fileSize)}
+          Downloaded · {formatBytes(task.fileSize)}
         </Text>
       );
     case 'cancelled':
@@ -431,39 +405,10 @@ function TaskDescription({ task }: { task: DownloadTask }) {
     default:
       return (
         <Text type="secondary" style={{ fontSize: 12 }}>
-          {formatFileSize(task.fileSize)}
+          {formatBytes(task.fileSize)}
         </Text>
       );
   }
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-function formatSpeed(bytesPerSecond: number): string {
-  if (bytesPerSecond === 0) return '0 B/s';
-  const k = 1024;
-  const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
-  const i = Math.floor(Math.log(bytesPerSecond) / Math.log(k));
-  return parseFloat((bytesPerSecond / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
-
-function formatTimeLeft(seconds: number): string {
-  if (seconds <= 0) return '';
-  if (seconds < 60) return `${Math.ceil(seconds)}s left`;
-  if (seconds < 3600) {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.ceil(seconds % 60);
-    return secs > 0 ? `${mins}m ${secs}s left` : `${mins}m left`;
-  }
-  const hours = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  return mins > 0 ? `${hours}h ${mins}m left` : `${hours}h left`;
 }
 
 export default memo(DownloadTaskItem, (prevProps, nextProps) => {

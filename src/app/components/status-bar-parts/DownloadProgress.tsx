@@ -19,62 +19,14 @@ import {
   setupGlobalDownloadListeners,
   loadDownloadTasks,
 } from '@/app/stores/downloadStore';
-import { formatBytes } from '@/app/utils/formatBytes';
+import { formatBytes, formatEta } from '@/app/utils/formatBytes';
+import Sparkline from '@/app/components/Sparkline';
 
 const { Text } = Typography;
 
 interface DownloadProgressProps {
   bucket?: string;
   accountId?: string;
-}
-
-/** Inline SVG sparkline from speed history samples */
-function Sparkline({
-  data,
-  width = 60,
-  height = 16,
-}: {
-  data: number[];
-  width?: number;
-  height?: number;
-}) {
-  if (data.length < 2) return null;
-  const max = Math.max(...data, 1);
-  const points = data
-    .map((v, i) => {
-      const x = (i / (data.length - 1)) * width;
-      const y = height - (v / max) * height;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(' ');
-
-  return (
-    <svg
-      width={width}
-      height={height}
-      viewBox={`0 0 ${width} ${height}`}
-      style={{ marginLeft: 6, verticalAlign: 'middle', opacity: 0.7 }}
-    >
-      <polyline
-        points={points}
-        fill="none"
-        stroke="var(--color-link)"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-/** Format seconds into human-readable ETA */
-function formatEta(seconds: number): string {
-  if (seconds <= 0 || !isFinite(seconds)) return '';
-  if (seconds < 60) return `~${Math.ceil(seconds)}s`;
-  if (seconds < 3600) return `~${Math.floor(seconds / 60)}m`;
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return m > 0 ? `~${h}h ${m}m` : `~${h}h`;
 }
 
 export default function DownloadProgress({ bucket, accountId }: DownloadProgressProps) {
@@ -100,10 +52,7 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
 
   // Aggregate speed across all downloading tasks
   const totalSpeed = useMemo(
-    () =>
-      tasks
-        .filter((t) => t.status === 'downloading')
-        .reduce((sum, t) => sum + t.speed, 0),
+    () => tasks.filter((t) => t.status === 'downloading').reduce((sum, t) => sum + t.speed, 0),
     [tasks]
   );
 
@@ -181,11 +130,7 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
   const activeFileCount = downloadingCount + pendingCount;
 
   return (
-    <Tooltip
-      title={tooltipContent}
-      placement="top"
-      styles={{ root: { maxWidth: 360 } }}
-    >
+    <Tooltip title={tooltipContent} placement="top" styles={{ root: { maxWidth: 360 } }}>
       <span
         className="download-progress"
         onClick={handleClick}
@@ -245,7 +190,10 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
                 {eta}
               </Text>
             )}
-            <Sparkline data={aggregateSpeedHistory} />
+            <Sparkline
+              data={aggregateSpeedHistory}
+              style={{ marginLeft: 6, verticalAlign: 'middle', opacity: 0.7 }}
+            />
           </>
         ) : pendingCount > 0 ? (
           <>
