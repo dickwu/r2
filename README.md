@@ -111,6 +111,24 @@ bun install
 bun run tauri dev
 ```
 
+### Debugging with tauri-connector
+
+[tauri-connector](https://github.com/dickwu/tauri-connector) is integrated for AI-assisted debugging and testing. It provides DOM inspection, element interaction, screenshots, and console log access via CLI or MCP server.
+
+```bash
+# Start with connector enabled
+bun run tauri:dev
+
+# CLI commands (after app is running)
+tauri-connector snapshot -i          # AI DOM snapshot with element refs
+tauri-connector click @e5            # Click element by ref
+tauri-connector fill @e18 "query"    # Fill search box
+tauri-connector screenshot /tmp/r2.png  # Take screenshot
+tauri-connector logs -n 20           # View console logs
+```
+
+Install the CLI: `cargo install connector-cli`
+
 ## Build
 
 ```bash

@@ -6822,14 +6822,15 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-connector"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1db8b51272cf8fa7836cd5ea1b70f552b23cca4acda31d61ad56161c6a3e9fe"
+checksum = "6bfe4d8fbc443d54060e3452bf3bdd81542df435e2d6a9e3dbb17bd3e9cbdbb2"
 dependencies = [
  "axum",
  "base64 0.22.1",
  "futures-util",
  "image 0.25.10",
+ "regex",
  "serde",
  "serde_json",
  "tauri",

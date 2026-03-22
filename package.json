@@ -27,6 +27,7 @@
     "@tauri-apps/plugin-opener": "^2.5.3",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.0",
+    "@zumer/snapdom": "^2.5.0",
     "antd": "^6.3.2",
     "framer-motion": "^12.36.0",
     "monaco-editor": "^0.55.1",

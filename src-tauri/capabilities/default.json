@@ -16,6 +16,7 @@
     "fs:allow-write-text-file",
     "fs:allow-read-text-file",
     "video-thumbnail:default",
+    "connector:default",
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-unlisten",

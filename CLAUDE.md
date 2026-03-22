@@ -67,6 +67,20 @@ The sync system caches bucket contents locally in SQLite for fast browsing:
 - Tauri features are conditionally loaded (check `window.__TAURI__`)
 - API responses use `{ code: 1 }` for success
 
+### Debugging with tauri-connector
+
+[tauri-connector](https://github.com/dickwu/tauri-connector) provides deep inspection and interaction with the running app via an embedded MCP server + CLI. Enabled via `--features connector`.
+
+```bash
+bun run tauri:dev            # Starts app with connector enabled (port 9555 WS, 9556 MCP)
+tauri-connector snapshot -i  # AI DOM snapshot with refs and React component names
+tauri-connector click @e5    # Click element by ref
+tauri-connector fill @e3 "text"  # Fill input
+tauri-connector screenshot /tmp/shot.png  # Screenshot
+tauri-connector logs -n 20   # Console logs
+tauri-connector state        # App metadata
+```
+
 ## Key Conventions
 
 - **Package manager**: Bun (not npm/yarn)
