@@ -412,8 +412,7 @@ function TaskDescription({ task }: { task: DownloadTask }) {
 }
 
 // Sum of chunk downloaded bytes — cheap proxy for "did any chunk make progress"
-const chunkBytes = (t: DownloadTask) =>
-  t.chunks.reduce((sum, c) => sum + c.downloadedBytes, 0);
+const chunkBytes = (t: DownloadTask) => t.chunks.reduce((sum, c) => sum + c.downloadedBytes, 0);
 
 export default memo(DownloadTaskItem, (prevProps, nextProps) => {
   const prev = prevProps.task;

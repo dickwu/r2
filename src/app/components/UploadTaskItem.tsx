@@ -55,7 +55,7 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
         ? uploadPath
         : uploadPath + '/'
       : '';
-    const key = normalizedPath + task.fileName;
+    const key = normalizedPath + (task.renamedFileName ?? task.fileName);
 
     // Listen for progress events
     listen<UploadProgress>('upload-progress', (event) => {
@@ -162,6 +162,12 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
         <Text ellipsis style={{ maxWidth: 280, display: 'block' }}>
           {task.fileName}
         </Text>
+        {task.renamedFileName && task.status === 'pending' && (
+          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+            {'→ '}
+            {task.renamedFileName}
+          </Text>
+        )}
         <TaskDescription task={task} />
       </div>
       {actions && <div style={{ display: 'flex', gap: 4 }}>{actions}</div>}

@@ -121,25 +121,13 @@ interface DownloadStore {
   addTask: (
     task: Omit<
       DownloadTask,
-      | 'status'
-      | 'progress'
-      | 'downloadedBytes'
-      | 'speed'
-      | 'chunks'
-      | 'speedHistory'
-      | 'peakSpeed'
+      'status' | 'progress' | 'downloadedBytes' | 'speed' | 'chunks' | 'speedHistory' | 'peakSpeed'
     >
   ) => void;
   addTasks: (
     tasks: Omit<
       DownloadTask,
-      | 'status'
-      | 'progress'
-      | 'downloadedBytes'
-      | 'speed'
-      | 'chunks'
-      | 'speedHistory'
-      | 'peakSpeed'
+      'status' | 'progress' | 'downloadedBytes' | 'speed' | 'chunks' | 'speedHistory' | 'peakSpeed'
     >[]
   ) => void;
   removeTask: (id: string) => void;
@@ -467,7 +455,6 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
     const pendingTasks = tasks.filter((t) => t.status === 'pending');
     return pendingTasks.slice(0, slotsAvailable);
   },
-
 }));
 
 // Selectors

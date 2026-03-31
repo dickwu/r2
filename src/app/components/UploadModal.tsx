@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useCallback, useState, useRef } from 'react';
-import { Modal, Typography, Button, App } from 'antd';
+import { Modal, Typography, Button, Switch, App } from 'antd';
 import { FolderOutlined, FileAddOutlined, SwapOutlined } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
@@ -13,6 +13,7 @@ import {
 import type { StorageConfig } from '@/app/lib/r2cache';
 import UploadTaskList from '@/app/components/UploadTaskList';
 import FolderPickerModal from '@/app/components/folder/FolderPickerModal';
+import { renameKey, type RenameMode } from '@/app/utils/renameKey';
 
 const { Text } = Typography;
 
@@ -88,6 +89,7 @@ export default function UploadModal({
 }: UploadModalProps) {
   const { message } = App.useApp();
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [renameMode, setRenameMode] = useState<RenameMode>('overwrite');
   const isProcessingDropRef = useRef(false);
   const uploadPath = useUploadStore((s) => s.uploadPath);
   const setUploadPath = useUploadStore((s) => s.setUploadPath);
@@ -122,10 +124,17 @@ export default function UploadModal({
       });
 
       if (uniqueTasks.length > 0) {
-        addTasks(uniqueTasks);
+        const tasksWithRename = uniqueTasks.map((task) => {
+          const renamed = renameKey(task.fileName, renameMode);
+          return {
+            ...task,
+            renamedFileName: renamed !== task.fileName ? renamed : undefined,
+          };
+        });
+        addTasks(tasksWithRename);
       }
     },
-    [addTasks, existingTasks]
+    [addTasks, existingTasks, renameMode]
   );
 
   // Sync config to store
@@ -352,7 +361,7 @@ export default function UploadModal({
                   whiteSpace: 'nowrap',
                 }}
               >
-                {uploadPath ? `/${uploadPath}/` : '/ (root)'}
+                {uploadPath ? `/${uploadPath.replace(/\/+$/, '')}/` : '/ (root)'}
               </span>
             </div>
             <Button
@@ -364,6 +373,25 @@ export default function UploadModal({
               Change...
             </Button>
           </div>
+        </div>
+
+        <div
+          style={{
+            marginBottom: 16,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+          }}
+        >
+          <Switch
+            size="small"
+            checked={renameMode === 'auto-rename'}
+            onChange={(checked) => setRenameMode(checked ? 'auto-rename' : 'overwrite')}
+            disabled={hasActiveUploads}
+          />
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            Auto-rename to avoid collisions
+          </Text>
         </div>
 
         {!hasS3Credentials && (

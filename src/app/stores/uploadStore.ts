@@ -7,6 +7,7 @@ export interface UploadTask {
   id: string;
   filePath: string; // Native file path for Rust upload
   fileName: string;
+  renamedFileName?: string; // Auto-renamed filename for collision avoidance
   fileSize: number;
   contentType: string;
   status: UploadStatus;
