@@ -69,10 +69,17 @@ jobs:
           EOF
 
           ENCODED=$(base64 -w 0 /tmp/r2.rb)
-          EXISTING_SHA=$(gh api repos/dickwu/homebrew-tap/contents/Casks/r2.rb --jq '.sha')
+          EXISTING_SHA=$(gh api repos/dickwu/homebrew-tap/contents/Casks/r2.rb --jq '.sha' 2>/dev/null || true)
 
-          gh api repos/dickwu/homebrew-tap/contents/Casks/r2.rb \
-            --method PUT \
-            --field message="chore: update r2 cask to ${VERSION}" \
-            --field content="${ENCODED}" \
-            --field sha="${EXISTING_SHA}"
+          if [ -n "${EXISTING_SHA}" ]; then
+            gh api repos/dickwu/homebrew-tap/contents/Casks/r2.rb \
+              --method PUT \
+              --field message="chore: update r2 cask to ${VERSION}" \
+              --field content="${ENCODED}" \
+              --field sha="${EXISTING_SHA}"
+          else
+            gh api repos/dickwu/homebrew-tap/contents/Casks/r2.rb \
+              --method PUT \
+              --field message="chore: add r2 cask ${VERSION}" \
+              --field content="${ENCODED}"
+          fi
