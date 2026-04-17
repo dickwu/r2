@@ -110,7 +110,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_video_thumbnail::init());
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "connector"))]
     {
         builder = builder.plugin(tauri_plugin_connector::init());
     }

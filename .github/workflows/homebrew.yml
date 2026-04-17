@@ -33,34 +33,35 @@ jobs:
           SHA_ARM64: ${{ steps.sha.outputs.arm64 }}
           SHA_X64: ${{ steps.sha.outputs.x64 }}
         run: |
-          printf 'cask "r2" do
-  version "%s"
+          cat > /tmp/r2.rb <<EOF
+          cask "r2" do
+            version "${VERSION}"
 
-  on_arm do
-    url "https://github.com/dickwu/r2/releases/download/v#{version}/r2_#{version}_aarch64.dmg"
-    sha256 "%s"
-  end
+            on_arm do
+              url "https://github.com/dickwu/r2/releases/download/v#{version}/r2_#{version}_aarch64.dmg"
+              sha256 "${SHA_ARM64}"
+            end
 
-  on_intel do
-    url "https://github.com/dickwu/r2/releases/download/v#{version}/r2_#{version}_x64.dmg"
-    sha256 "%s"
-  end
+            on_intel do
+              url "https://github.com/dickwu/r2/releases/download/v#{version}/r2_#{version}_x64.dmg"
+              sha256 "${SHA_X64}"
+            end
 
-  name "R2 Client"
-  desc "Desktop client for managing S3-compatible storage (Cloudflare R2, AWS S3, MinIO, RustFS)"
-  homepage "https://github.com/dickwu/r2"
-  license "MIT"
+            name "R2 Client"
+            desc "Desktop client for managing S3-compatible storage (Cloudflare R2, AWS S3, MinIO, RustFS)"
+            homepage "https://github.com/dickwu/r2"
+            license "MIT"
 
-  app "r2.app"
+            app "r2.app"
 
-  zap trash: [
-    "~/Library/Application Support/com.lifefarmer.r2",
-    "~/Library/Caches/com.lifefarmer.r2",
-    "~/Library/Preferences/com.lifefarmer.r2.plist",
-    "~/Library/Saved Application State/com.lifefarmer.r2.savedState",
-  ]
-end
-' "${VERSION}" "${SHA_ARM64}" "${SHA_X64}" > /tmp/r2.rb
+            zap trash: [
+              "~/Library/Application Support/com.lifefarmer.r2",
+              "~/Library/Caches/com.lifefarmer.r2",
+              "~/Library/Preferences/com.lifefarmer.r2.plist",
+              "~/Library/Saved Application State/com.lifefarmer.r2.savedState",
+            ]
+          end
+          EOF
 
           ENCODED=$(base64 -w 0 /tmp/r2.rb)
           EXISTING_SHA=$(gh api repos/dickwu/homebrew-tap/contents/Casks/r2.rb --jq '.sha')

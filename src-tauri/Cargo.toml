@@ -51,5 +51,9 @@ aws-credential-types = "1.2"
 futures-util = "0.3"
 # Multi-threaded download engine with Range-based parallel chunk acceleration
 range-dl = { path = "crates/range-dl" }
-# Dev-only runtime registration is handled in src/lib.rs with debug_assertions.
-tauri-plugin-connector = "0.8"
+# Dev-only: connector for AI-assisted testing (opt-in via --features connector)
+tauri-plugin-connector = { version = "0.8", optional = true }
+
+[features]
+default = []
+connector = ["tauri-plugin-connector"]
