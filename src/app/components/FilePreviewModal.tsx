@@ -18,6 +18,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import dynamic from 'next/dynamic';
 import { generateSignedUrl, uploadContent, StorageConfig } from '@/app/lib/r2cache';
 import { TEXT_EXTENSIONS } from '@/app/components/preview/TextViewer';
+import { useVideoThumbnail } from '@/app/hooks/useVideoThumbnail';
 import { usePreviewStore } from '@/app/stores/previewStore';
 
 const PDFViewer = dynamic(() => import('@/app/components/preview/PDFViewer'), { ssr: false });
@@ -219,6 +220,7 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   const isAudio = isAudioFile(file.name);
   const isPdf = isPdfFile(file.name);
   const isText = isTextFile(file.name);
+  const { thumbnailSrc: videoPoster } = useVideoThumbnail(isVideo ? fileUrl : null);
 
   async function handleOpenUrl() {
     if (!fileUrl) {
@@ -303,7 +305,12 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
           <video
             src={fileUrl}
             controls
+            preload="metadata"
+            poster={videoPoster ?? undefined}
+            playsInline
             style={{
+              display: 'block',
+              margin: '0 auto',
               maxWidth: '100%',
               maxHeight: getPreviewMaxHeight(),
               borderRadius: 8,

@@ -505,6 +505,12 @@ body {
   object-fit: cover;
 }
 
+.video-thumbnail img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .video-thumbnail .play-icon {
   position: absolute;
   font-size: 32px;
