@@ -4,23 +4,28 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish to Homebrew (for example v0.1.74)
+        required: true
+        type: string
 
 jobs:
   update-cask:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
       - name: Get version from tag
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Download DMGs and compute SHA256
         id: sha
-        env:
-          TAG: ${{ github.ref_name }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${TAG#v}"
           curl -sL "https://github.com/dickwu/r2/releases/download/${TAG}/r2_${VERSION}_aarch64.dmg" -o arm64.dmg
           curl -sL "https://github.com/dickwu/r2/releases/download/${TAG}/r2_${VERSION}_x64.dmg" -o x64.dmg
           echo "arm64=$(sha256sum arm64.dmg | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
