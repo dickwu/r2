@@ -13,24 +13,5 @@ fn main() {
         }
     }
 
-    // Conditionally include connector capability when the feature is enabled
-    let connector_cap = std::path::Path::new("capabilities/connector.json");
-    if cfg!(feature = "connector") {
-        std::fs::write(
-            connector_cap,
-            r#"{
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "connector",
-  "description": "Capability for the tauri-connector plugin",
-  "windows": ["main"],
-  "permissions": ["connector:default"]
-}
-"#,
-        )
-        .expect("failed to write connector capability");
-    } else if connector_cap.exists() {
-        std::fs::remove_file(connector_cap).ok();
-    }
-
     tauri_build::build()
 }

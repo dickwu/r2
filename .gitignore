@@ -60,3 +60,4 @@ next-env.d.
 .mcp.json
 AGENTS.md
 docs/superpowers/
+.omx/
