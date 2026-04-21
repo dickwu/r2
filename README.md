@@ -3,16 +3,16 @@
 **Cloudflare R2 Client** is a free, open-source desktop application (GUI) for managing **Cloudflare R2**, **AWS S3**, **MinIO**, and **RustFS** object storage from your Mac, Windows PC, or Linux machine. Browse buckets, upload and download files with resumable multipart transfers, preview images / videos / PDFs / code, manage multiple accounts and tokens, and move files between providers — all from a fast native app built with **Tauri**, **Next.js**, and **React**.
 
 > Looking for a free Cloudflare R2 GUI, an S3 client for Mac, a MinIO desktop browser, or a RustFS file manager? This is the all-in-one S3-compatible storage client you've been looking for.
->
-> **Keywords:** Cloudflare R2 desktop client, R2 GUI, S3 client macOS, S3 GUI Windows, MinIO browser, RustFS GUI, S3 file manager, object storage desktop app, Tauri R2 uploader.
->
-> ## Features
+
+**Keywords:** Cloudflare R2 desktop client, R2 GUI, S3 client macOS, S3 GUI Windows, MinIO browser, RustFS GUI, S3 file manager, object storage desktop app, Tauri R2 uploader.
+
+## Features
 
 - **Multi-Provider Support** - R2, AWS S3, MinIO, and RustFS (path-style forced)
 - **Multi-Account Support** - Manage multiple accounts across providers
 - **Multiple Tokens per Account (R2)** - Each account can have multiple API tokens with different bucket access
 - Browse and manage files in S3-compatible buckets
- Upload files and folders with resumable multipart uploads
+- Upload files and folders with resumable multipart uploads
 - **File Preview** - Preview files directly in the app:
   - **Images**: jpg, jpeg, png, gif, webp, svg, bmp, ico
   - **Videos**: mp4, webm, ogg, mov, m4v
@@ -55,9 +55,9 @@ brew install dickwu/tap/r2
 
 Download the latest release for your platform from the [Releases page](https://github.com/dickwu/r2/releases/latest):
 
-- **macOS**: `.dmg` (Apple Silicon & Intel)
-- **Windows**: `.msi` or `.exe` installer
-- **Linux**: `.deb`, `.rpm`, or `.AppImage`
+- macOS: .dmg (Apple Silicon & Intel)
+- Windows: .msi or .exe installer
+- Linux: .deb, .rpm, or .AppImage
 
 ## Screenshots
 
@@ -88,8 +88,8 @@ choco install ffmpeg
 
 On macOS, you need to manually allow the app to run:
 
-1. Open **System Preferences** → **Privacy & Security**
-2. Click **"Open Anyway"** next to the blocked app message
+1. Open System Preferences → Privacy & Security
+2. Click "Open Anyway" next to the blocked app message
 
 If the app doesn't appear in Privacy & Security settings, run:
 
@@ -165,7 +165,7 @@ rustup target add x86_64-pc-windows-msvc
 bun run tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
 ```
 
-**Note:** Cross-compilation is experimental. For production builds, consider using GitHub Actions or a Windows VM.
+Note: Cross-compilation is experimental. For production builds, consider using GitHub Actions or a Windows VM.
 
 ## Configuration
 
@@ -174,70 +174,70 @@ bun run tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
 1. On first launch, the "Add Account" dialog will open automatically
 2. Choose the provider (R2, AWS, MinIO, RustFS) via the clickable tags
 3. Enter provider-specific credentials:
-   - **R2**:
-     - **Account ID** (required) - Cloudflare account ID (from dashboard URL)
-     - **Token Name** (optional)
-     - **API Token** - R2 read/write token
-     - **Access Key ID** / **Secret Access Key**
-   - **AWS S3**:
-     - **Access Key ID** / **Secret Access Key**
-     - **Region** (required)
-     - **Endpoint** (optional custom scheme + host)
-     - **Force Path Style** (optional)
-   - **MinIO**:
-     - **Access Key ID** / **Secret Access Key**
-     - **Endpoint** (scheme + host/port)
-     - **Force Path Style** (optional)
-   - **RustFS**:
-     - **Access Key ID** / **Secret Access Key**
-     - **Endpoint** (scheme + host/port)
-     - **Force Path Style** is always enabled (not configurable)
+   - R2:
+     - Account ID (required) - Cloudflare account ID (from dashboard URL)
+     - Token Name (optional)
+     - API Token - R2 read/write token
+     - Access Key ID / Secret Access Key
+   - AWS S3:
+     - Access Key ID / Secret Access Key
+     - Region (required)
+     - Endpoint (optional custom scheme + host)
+     - Force Path Style (optional)
+   - MinIO:
+     - Access Key ID / Secret Access Key
+     - Endpoint (scheme + host/port)
+     - Force Path Style (optional)
+   - RustFS:
+     - Access Key ID / Secret Access Key
+     - Endpoint (scheme + host/port)
+     - Force Path Style is always enabled (not configurable)
 4. Click "Load" to fetch available buckets, or manually add bucket names
 5. Configure public domain per bucket (optional, R2/AWS only)
 
-**Endpoint/Domain Tips**
+Endpoint/Domain Tips
 
 - Endpoint and domain inputs accept full URLs (scheme + host) and normalize automatically.
-- For R2/AWS public domains, you can select `http`/`https` explicitly.
+- For R2/AWS public domains, you can select http/https explicitly.
 
 ### Managing Multiple Accounts
 
-- **Sidebar** - Shows all configured accounts with token/bucket counts
-- **Click account** - Opens drawer with all tokens and buckets for that account
-- **Click bucket** - Switches to that bucket
-- **Context menu** - Edit or delete accounts/tokens
-- **Collapse sidebar** - Click the collapse icon to minimize to icon-only view
+- Sidebar - Shows all configured accounts with token/bucket counts
+- Click account - Opens drawer with all tokens and buckets for that account
+- Click bucket - Switches to that bucket
+- Context menu - Edit or delete accounts/tokens
+- Collapse sidebar - Click the collapse icon to minimize to icon-only view
 
 ### Sync to a Different Account (Move/Copy)
 
 Use the Batch Move workflow to sync files between accounts/providers:
 
 1. Add both the source and destination accounts.
-2. Switch to the **source** bucket in the sidebar.
-3. Select files/folders -> **Batch Move**.
+2. Switch to the source bucket in the sidebar.
+3. Select files/folders -> Batch Move.
 4. Choose the destination account + bucket, and an optional target folder.
-5. Toggle **Delete original**:
-   - **On** = move (source files removed after transfer)
-   - **Off** = copy (source files preserved)
+5. Toggle Delete original:
+   - On = move (source files removed after transfer)
+   - Off = copy (source files preserved)
 6. Start the transfer and track progress in the Move modal/status bar.
 
 Transfers are queued (up to 5 concurrent), and same-provider transfers prefer server-side copy.
 
 ### Getting API Credentials
 
-**Cloudflare R2**
+Cloudflare R2
 
 1. Go to [Cloudflare Dashboard](https://dash.cloudflare.com/)
-2. Navigate to **R2** → **Overview** → **Manage R2 API Tokens**
+2. Navigate to R2 → Overview → Manage R2 API Tokens
 3. Create a token with appropriate permissions
-4. Note the **Access Key ID** and **Secret Access Key** (shown only once)
+4. Note the Access Key ID and Secret Access Key (shown only once)
 
-**AWS S3**
+AWS S3
 
 - Create an IAM user with S3 permissions and generate access keys.
-- Note the **Region** for your buckets.
+- Note the Region for your buckets.
 
-**MinIO / RustFS**
+MinIO / RustFS
 
 - Use the access/secret keys from your deployment.
 - Set the endpoint host/port and scheme (http/https).
@@ -246,9 +246,9 @@ Transfers are queued (up to 5 concurrent), and same-provider transfers prefer se
 
 Account configurations are stored locally in a SQLite database:
 
-- **macOS**: `~/Library/Application Support/r2/uploads-turso.db`
-- **Windows**: `%APPDATA%\r2\uploads-turso.db`
-- **Linux**: `~/.local/share/r2/uploads-turso.db`
+- macOS: `~/Library/Application Support/r2/uploads-turso.db`
+- Windows: `%APPDATA%\r2\uploads-turso.db`
+- Linux: `~/.local/share/r2/uploads-turso.db`
 
 ## Tech Stack
 
