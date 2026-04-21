@@ -1,14 +1,18 @@
-# Cloudflare R2 Client
+# Cloudflare R2 Client — Free, Open-Source S3 Desktop GUI for macOS, Windows, and Linux
 
-A desktop application for managing S3-compatible storage (Cloudflare R2, AWS S3, MinIO, RustFS). Built with Tauri, Next.js, and React.
+**Cloudflare R2 Client** is a free, open-source desktop application (GUI) for managing **Cloudflare R2**, **AWS S3**, **MinIO**, and **RustFS** object storage from your Mac, Windows PC, or Linux machine. Browse buckets, upload and download files with resumable multipart transfers, preview images / videos / PDFs / code, manage multiple accounts and tokens, and move files between providers — all from a fast native app built with **Tauri**, **Next.js**, and **React**.
 
-## Features
+> Looking for a free Cloudflare R2 GUI, an S3 client for Mac, a MinIO desktop browser, or a RustFS file manager? This is the all-in-one S3-compatible storage client you've been looking for.
+>
+> **Keywords:** Cloudflare R2 desktop client, R2 GUI, S3 client macOS, S3 GUI Windows, MinIO browser, RustFS GUI, S3 file manager, object storage desktop app, Tauri R2 uploader.
+>
+> ## Features
 
 - **Multi-Provider Support** - R2, AWS S3, MinIO, and RustFS (path-style forced)
 - **Multi-Account Support** - Manage multiple accounts across providers
 - **Multiple Tokens per Account (R2)** - Each account can have multiple API tokens with different bucket access
 - Browse and manage files in S3-compatible buckets
-- Upload files and folders with resumable multipart uploads
+ Upload files and folders with resumable multipart uploads
 - **File Preview** - Preview files directly in the app:
   - **Images**: jpg, jpeg, png, gif, webp, svg, bmp, ico
   - **Videos**: mp4, webm, ogg, mov, m4v
