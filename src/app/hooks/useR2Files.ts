@@ -1,31 +1,20 @@
 import { useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { getFolderContents, listPrefix, StoredFile } from '@/app/lib/r2cache';
+import { getAllFiles, getFolderContents, listPrefix } from '@/app/lib/r2cache';
 import { StorageConfig } from '@/app/lib/r2cache';
 import { useSyncStore } from '@/app/stores/syncStore';
 import { useCurrentPathStore } from '@/app/stores/currentPathStore';
+import { loadFolderItems } from '@/app/utils/folderItems';
+import type { FileItem } from '@/app/utils/folderItems';
+
+export type { FileItem } from '@/app/utils/folderItems';
 
 // Event emitted by backend when cache is updated
-export interface FileItem {
-  name: string;
-  key: string;
-  isFolder: boolean;
-  size?: number;
-  lastModified?: string;
-}
-
 interface MoveStatusChangedEvent {
   task_id: string;
   status: string;
   error: string | null;
-}
-
-const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-
-function extractName(key: string, prefix: string): string {
-  const relativePath = prefix ? key.slice(prefix.length) : key;
-  return relativePath.replace(/\/$/, '');
 }
 
 function getParentPath(path: string): string {
@@ -34,38 +23,6 @@ function getParentPath(path: string): string {
   const lastSlash = withoutTrailing.lastIndexOf('/');
   if (lastSlash === -1) return '';
   return `${withoutTrailing.slice(0, lastSlash + 1)}`;
-}
-
-function buildFileItems(files: StoredFile[], folders: string[], prefix: string): FileItem[] {
-  const items: FileItem[] = [];
-
-  // Add folders first (skip root "/" when at root level)
-  for (const folder of folders) {
-    if (folder === '/' || folder === '') continue;
-    items.push({
-      name: extractName(folder, prefix),
-      key: folder,
-      isFolder: true,
-    });
-  }
-
-  // Add files
-  for (const file of files) {
-    if (file.key === prefix || file.key.endsWith('/')) continue;
-    items.push({
-      name: extractName(file.key, prefix),
-      key: file.key,
-      isFolder: false,
-      size: file.size,
-      lastModified: file.lastModified,
-    });
-  }
-
-  return items.sort((a, b) => {
-    if (a.isFolder && !b.isFolder) return -1;
-    if (!a.isFolder && b.isFolder) return 1;
-    return nameCollator.compare(a.name, b.name);
-  });
 }
 
 export function useR2Files(config: StorageConfig | null, prefix: string = '') {
@@ -100,28 +57,26 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
     queryFn: async (): Promise<FileItem[]> => {
       if (!config) return [];
 
-      // Try local SQLite cache first (instant)
-      const result = await getFolderContents(prefix);
-
-      // If cache has data for this prefix, use it
-      if (result.files.length > 0 || result.folders.length > 0) {
-        return buildFileItems(result.files, result.folders, prefix);
-      }
-
-      // Cache empty — use lazy sync (ListObjectsV2 with delimiter)
       try {
-        const lazyResult = await listPrefix(config, prefix);
-        const storedFiles: StoredFile[] = lazyResult.files.map((f) => ({
-          key: f.key,
-          size: f.size,
-          lastModified: f.last_modified,
-        }));
-        // Mark bucket as having data so other components can proceed
-        useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, Date.now());
-        return buildFileItems(storedFiles, lazyResult.folders, prefix);
+        const result = await loadFolderItems({
+          config,
+          prefix,
+          forceRefresh: true,
+          readCachedFolder: getFolderContents,
+          readAllCachedFiles: getAllFiles,
+          readPrefixFolder: listPrefix,
+        });
+
+        if (result.source === 'prefix') {
+          useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, Date.now());
+        }
+
+        return result.items;
       } catch (err) {
-        // Fall back to empty if lazy sync fails (e.g. network error)
-        console.error('[useR2Files] lazy sync failed for prefix:', prefix, err);
+        console.warn('[useR2Files] failed to load prefix and no cache fallback was available:', {
+          prefix,
+          err,
+        });
         return [];
       }
     },

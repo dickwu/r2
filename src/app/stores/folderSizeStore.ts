@@ -29,6 +29,24 @@ interface FolderSizeStore {
   clearSizes: () => void;
 }
 
+export function isProvisionalZeroNode(path: string, node: DirectoryNode): boolean {
+  return path !== '' && node.totalSize === 0 && node.totalFileCount === 0;
+}
+
+export function shouldReuseFolderMetadata(path: string, metadata: FolderMetadata): boolean {
+  if (typeof metadata.size !== 'number') return false;
+
+  // Fallback size calculations store counts as null. A zero byte fallback can
+  // become stale after the folder is later lazy-loaded; a nonzero fallback can
+  // still be partial if only some descendants are cached. Keep rechecking until
+  // directory indexing gives us a real count.
+  if (metadata.totalFileCount === null) return false;
+
+  // Root is allowed to be a genuinely empty bucket. Non-root zero-count nodes
+  // are lazy placeholders until directory indexing proves otherwise.
+  return path === '' || metadata.size > 0 || metadata.totalFileCount !== 0;
+}
+
 export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
   sizes: {},
   metadata: {},
@@ -74,14 +92,11 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
   // Load metadata from pre-built directory tree
   loadMetadata: async (folderKey) => {
     const { metadata, setMetadata } = get();
+    const existing = metadata[folderKey];
 
-    // Skip if already loaded with a real (non-zero) size
-    if (
-      metadata[folderKey] &&
-      typeof metadata[folderKey].size === 'number' &&
-      metadata[folderKey].size > 0
-    )
+    if (existing && shouldReuseFolderMetadata(folderKey, existing)) {
       return;
+    }
 
     // Set loading state
     setMetadata(folderKey, {
@@ -93,7 +108,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
 
     try {
       const node = await getDirectoryNode(folderKey);
-      if (node) {
+      if (node && !isProvisionalZeroNode(folderKey, node)) {
         setMetadata(folderKey, {
           size: node.totalSize,
           fileCount: node.fileCount,
@@ -101,7 +116,8 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
           lastModified: node.lastModified,
         });
       } else {
-        // Fallback to old method if node not found
+        // Fallback when the node is missing, or when lazy sync only created a
+        // zero-valued placeholder before background indexing computed aggregates.
         const size = await calculateFolderSize(folderKey);
         setMetadata(folderKey, {
           size,
