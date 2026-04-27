@@ -216,6 +216,10 @@ export interface LazyListResult {
   from_cache: boolean;
 }
 
+export interface ListPrefixOptions {
+  forceRefresh?: boolean;
+}
+
 /** Build the full connection input for lazy sync commands (provider-aware) */
 function getConnectionInput(config: StorageConfig) {
   const base = {
@@ -249,9 +253,13 @@ function getConnectionInput(config: StorageConfig) {
   }
 }
 
-export async function listPrefix(config: StorageConfig, prefix: string): Promise<LazyListResult> {
+export async function listPrefix(
+  config: StorageConfig,
+  prefix: string,
+  options: ListPrefixOptions = {}
+): Promise<LazyListResult> {
   return invoke('list_prefix', {
-    input: { ...getConnectionInput(config), prefix },
+    input: { ...getConnectionInput(config), prefix, force_refresh: options.forceRefresh ?? false },
   });
 }
 

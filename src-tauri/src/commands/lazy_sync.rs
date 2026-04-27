@@ -3,7 +3,8 @@ use crate::providers::aws;
 use crate::providers::minio;
 use crate::r2;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use tauri::Emitter;
 
@@ -22,6 +23,7 @@ pub struct LazyListInput {
     pub endpoint_host: Option<String>,
     pub force_path_style: Option<bool>,
     pub region: Option<String>,
+    pub force_refresh: Option<bool>,
 }
 
 // ============ Provider-Aware Client Factory ============
@@ -50,10 +52,7 @@ async fn create_client_for_input(input: &LazyListInput) -> Result<aws_sdk_s3::Cl
                 bucket: input.bucket.clone(),
                 access_key_id: input.access_key_id.clone(),
                 secret_access_key: input.secret_access_key.clone(),
-                region: input
-                    .region
-                    .clone()
-                    .unwrap_or_else(|| "us-east-1".into()),
+                region: input.region.clone().unwrap_or_else(|| "us-east-1".into()),
                 endpoint_scheme: input.endpoint_scheme.clone(),
                 endpoint_host: input.endpoint_host.clone(),
                 force_path_style: input.force_path_style.unwrap_or(false),
@@ -113,28 +112,30 @@ pub async fn list_prefix(
     let now = chrono::Utc::now().timestamp();
     const STALE_THRESHOLD_SECS: i64 = 60;
 
-    if let Some(synced_at) = cached_time {
-        if now - synced_at < STALE_THRESHOLD_SECS {
-            // Serve from cache
-            let contents = db::get_folder_contents(bucket, account_id, prefix)
-                .await
-                .map_err(|e| format!("DB error: {}", e))?;
+    if !input.force_refresh.unwrap_or(false) {
+        if let Some(synced_at) = cached_time {
+            if now - synced_at < STALE_THRESHOLD_SECS {
+                // Serve from cache
+                let contents = db::get_folder_contents(bucket, account_id, prefix)
+                    .await
+                    .map_err(|e| format!("DB error: {}", e))?;
 
-            return Ok(LazyListResult {
-                files: contents
-                    .files
-                    .into_iter()
-                    .map(|f| LazyFileItem {
-                        name: f.name,
-                        key: f.key,
-                        size: f.size,
-                        last_modified: f.last_modified,
-                    })
-                    .collect(),
-                folders: contents.folders,
-                prefix: prefix.clone(),
-                from_cache: true,
-            });
+                return Ok(LazyListResult {
+                    files: contents
+                        .files
+                        .into_iter()
+                        .map(|f| LazyFileItem {
+                            name: f.name,
+                            key: f.key,
+                            size: f.size,
+                            last_modified: f.last_modified,
+                        })
+                        .collect(),
+                    folders: contents.folders,
+                    prefix: prefix.clone(),
+                    from_cache: true,
+                });
+            }
         }
     }
 
@@ -148,24 +149,36 @@ pub async fn list_prefix(
     let mut page_count = 0;
 
     loop {
-        let mut request = client
-            .list_objects_v2()
-            .bucket(bucket)
-            .delimiter("/")
-            .max_keys(1000);
+        let create_request = || {
+            let mut request = client
+                .list_objects_v2()
+                .bucket(bucket)
+                .delimiter("/")
+                .max_keys(1000);
 
-        if !prefix.is_empty() {
-            request = request.prefix(prefix);
-        }
+            if !prefix.is_empty() {
+                request = request.prefix(prefix);
+            }
 
-        if let Some(token) = &continuation_token {
-            request = request.continuation_token(token);
-        }
+            if let Some(token) = &continuation_token {
+                request = request.continuation_token(token);
+            }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| format!("S3 list failed: {}", e))?;
+            request
+        };
+
+        let response = {
+            let _list_guard = S3_LIST_LOCK.lock().await;
+            match create_request().send().await {
+                Ok(response) => response,
+                Err(first_error) => create_request().send().await.map_err(|retry_error| {
+                    format!(
+                        "S3 list failed after retry: {}; first attempt: {}",
+                        retry_error, first_error
+                    )
+                })?,
+            }
+        };
 
         page_count += 1;
 
@@ -264,6 +277,15 @@ pub async fn list_prefix(
 // Global cancellation token for background sync (one per app)
 static BACKGROUND_CANCEL: LazyLock<Arc<AtomicBool>> =
     LazyLock::new(|| Arc::new(AtomicBool::new(false)));
+static S3_LIST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+static BACKGROUND_RUN_ID: AtomicU64 = AtomicU64::new(0);
+static BACKGROUND_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+fn is_background_run_active(run_id: u64) -> bool {
+    BACKGROUND_RUN_ID.load(Ordering::SeqCst) == run_id && !BACKGROUND_CANCEL.load(Ordering::SeqCst)
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BackgroundSyncProgress {
@@ -284,19 +306,24 @@ pub async fn start_background_sync(
     input: LazyListInput,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    let run_id = BACKGROUND_RUN_ID.fetch_add(1, Ordering::SeqCst) + 1;
+
     // Reset cancellation flag
     BACKGROUND_CANCEL.store(false, Ordering::SeqCst);
 
     // Spawn background task -- returns immediately
     tokio::spawn(async move {
-        let result = run_background_sync(input, app.clone()).await;
+        let result = run_background_sync(input, app.clone(), run_id).await;
+        let is_active = is_background_run_active(run_id);
+
         match result {
-            Ok(sync_result) => {
+            Ok(sync_result) if is_active && !sync_result.cancelled => {
                 let _ = app.emit("background-sync-complete", sync_result);
             }
-            Err(e) => {
+            Err(e) if is_active => {
                 let _ = app.emit("background-sync-error", e);
             }
+            _ => {}
         }
     });
 
@@ -306,14 +333,31 @@ pub async fn start_background_sync(
 async fn run_background_sync(
     input: LazyListInput,
     app: tauri::AppHandle,
+    run_id: u64,
 ) -> Result<BackgroundSyncResult, String> {
+    let _sync_guard = BACKGROUND_SYNC_LOCK.lock().await;
+
     let bucket = input.bucket.clone();
     let account_id = input.account_id.clone();
+
+    if !is_background_run_active(run_id) {
+        return Ok(BackgroundSyncResult {
+            total_objects: 0,
+            cancelled: true,
+        });
+    }
 
     // Begin sync (staging table)
     db::begin_sync(&bucket, &account_id)
         .await
         .map_err(|e| format!("Failed to begin sync: {}", e))?;
+
+    if !is_background_run_active(run_id) {
+        return Ok(BackgroundSyncResult {
+            total_objects: 0,
+            cancelled: true,
+        });
+    }
 
     // Create S3 client (provider-aware)
     let client = create_client_for_input(&input).await?;
@@ -325,6 +369,10 @@ async fn run_background_sync(
     let store_handle = tokio::spawn(async move {
         let mut stored_count: usize = 0;
         while let Some(batch) = rx.recv().await {
+            if !is_background_run_active(run_id) {
+                break;
+            }
+
             let batch_len = batch.len();
             db::store_file_batch(&store_bucket, &store_account_id, &batch)
                 .await
@@ -337,93 +385,143 @@ async fn run_background_sync(
     // Fetch loop with progress emission
     let mut fetched_count: usize = 0;
     let mut folder_keys: Vec<String> = Vec::new();
-    let mut continuation_token: Option<String> = None;
     let start_time = std::time::Instant::now();
+    let use_delimiter_crawl = input.provider.as_deref() == Some("rustfs");
 
-    loop {
-        // Check cancellation
-        if BACKGROUND_CANCEL.load(Ordering::SeqCst) {
-            drop(tx);
-            return Ok(BackgroundSyncResult {
-                total_objects: fetched_count,
-                cancelled: true,
-            });
-        }
+    let mut pending_prefixes: VecDeque<String> = VecDeque::from([String::new()]);
+    let mut seen_prefixes: HashSet<String> = HashSet::from([String::new()]);
 
-        let mut request = client
-            .list_objects_v2()
-            .bucket(&bucket)
-            .max_keys(1000);
+    while let Some(current_prefix) = pending_prefixes.pop_front() {
+        let mut continuation_token: Option<String> = None;
 
-        if let Some(token) = &continuation_token {
-            request = request.continuation_token(token);
-        }
+        loop {
+            if !is_background_run_active(run_id) {
+                drop(tx);
+                return Ok(BackgroundSyncResult {
+                    total_objects: fetched_count,
+                    cancelled: true,
+                });
+            }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| format!("S3 list failed: {}", e))?;
+            let create_request = || {
+                let mut request = client.list_objects_v2().bucket(&bucket).max_keys(1000);
 
-        let is_truncated = response.is_truncated().unwrap_or(false);
-        let next_token = response.next_continuation_token().map(|s| s.to_string());
-        let now = chrono::Utc::now().timestamp();
+                if use_delimiter_crawl {
+                    request = request.delimiter("/");
+                    if !current_prefix.is_empty() {
+                        request = request.prefix(&current_prefix);
+                    }
+                }
 
-        let mut batch: Vec<CachedFile> = Vec::new();
-        for obj in response.contents() {
-            if let Some(key) = obj.key() {
-                let key = key.to_string();
-                if key.ends_with('/') {
-                    folder_keys.push(key);
-                } else {
-                    let (parent_path, name) = db::parse_key(&key);
-                    batch.push(CachedFile {
-                        bucket: bucket.clone(),
-                        account_id: account_id.clone(),
-                        key,
-                        parent_path,
-                        name,
-                        size: obj.size().unwrap_or(0),
-                        last_modified: obj
-                            .last_modified()
-                            .map(|dt| dt.to_string())
-                            .unwrap_or_default(),
-                        synced_at: now,
-                    });
+                if let Some(token) = &continuation_token {
+                    request = request.continuation_token(token);
+                }
+
+                request
+            };
+
+            let response = {
+                let _list_guard = S3_LIST_LOCK.lock().await;
+                match create_request().send().await {
+                    Ok(response) => response,
+                    Err(first_error) => create_request().send().await.map_err(|retry_error| {
+                        format!(
+                            "S3 list failed after retry: {}; first attempt: {}",
+                            retry_error, first_error
+                        )
+                    })?,
+                }
+            };
+
+            if !is_background_run_active(run_id) {
+                drop(tx);
+                return Ok(BackgroundSyncResult {
+                    total_objects: fetched_count,
+                    cancelled: true,
+                });
+            }
+
+            let is_truncated = response.is_truncated().unwrap_or(false);
+            let next_token = response.next_continuation_token().map(|s| s.to_string());
+            let now = chrono::Utc::now().timestamp();
+
+            let mut batch: Vec<CachedFile> = Vec::new();
+            for obj in response.contents() {
+                if let Some(key) = obj.key() {
+                    let key = key.to_string();
+                    if key.ends_with('/') {
+                        folder_keys.push(key);
+                    } else {
+                        let (parent_path, name) = db::parse_key(&key);
+                        batch.push(CachedFile {
+                            bucket: bucket.clone(),
+                            account_id: account_id.clone(),
+                            key,
+                            parent_path,
+                            name,
+                            size: obj.size().unwrap_or(0),
+                            last_modified: obj
+                                .last_modified()
+                                .map(|dt| dt.to_string())
+                                .unwrap_or_default(),
+                            synced_at: now,
+                        });
+                    }
                 }
             }
-        }
 
-        fetched_count += batch.len();
+            if use_delimiter_crawl {
+                for cp in response.common_prefixes() {
+                    if let Some(prefix) = cp.prefix() {
+                        let prefix = prefix.to_string();
+                        folder_keys.push(prefix.clone());
+                        if seen_prefixes.insert(prefix.clone()) {
+                            pending_prefixes.push_back(prefix);
+                        }
+                    }
+                }
+            }
 
-        // Calculate speed
-        let elapsed = start_time.elapsed().as_secs_f64().max(0.001);
-        let speed = fetched_count as f64 / elapsed;
+            fetched_count += batch.len();
 
-        // Emit progress every page
-        let _ = app.emit(
-            "background-sync-progress",
-            BackgroundSyncProgress {
-                objects_fetched: fetched_count,
-                estimated_total: if is_truncated {
-                    None // S3 doesn't provide total count
-                } else {
-                    Some(fetched_count)
+            // Calculate speed
+            let elapsed = start_time.elapsed().as_secs_f64().max(0.001);
+            let speed = fetched_count as f64 / elapsed;
+
+            // Emit progress every page
+            let _ = app.emit(
+                "background-sync-progress",
+                BackgroundSyncProgress {
+                    objects_fetched: fetched_count,
+                    estimated_total: {
+                        let has_pending_prefixes =
+                            use_delimiter_crawl && !pending_prefixes.is_empty();
+                        if is_truncated || has_pending_prefixes {
+                            None
+                        } else {
+                            Some(fetched_count)
+                        }
+                    },
+                    is_running: true,
+                    speed,
                 },
-                is_running: true,
-                speed,
-            },
-        );
+            );
 
-        if !batch.is_empty() {
-            tx.send(batch)
-                .await
-                .map_err(|_| "Store task crashed".to_string())?;
+            if !batch.is_empty() {
+                tx.send(batch)
+                    .await
+                    .map_err(|_| "Store task crashed".to_string())?;
+            }
+
+            if !is_truncated {
+                break;
+            }
+            continuation_token = next_token;
         }
 
-        if !is_truncated {
+        if !use_delimiter_crawl {
             break;
         }
-        continuation_token = next_token;
     }
 
     // Wait for store task
@@ -433,10 +531,24 @@ async fn run_background_sync(
         .map_err(|e| format!("Store task panicked: {}", e))?
         .map_err(|e| format!("Store failed: {}", e))?;
 
+    if !is_background_run_active(run_id) {
+        return Ok(BackgroundSyncResult {
+            total_objects: fetched_count,
+            cancelled: true,
+        });
+    }
+
     // Finish sync (swap staging -> live)
     db::finish_sync(&bucket, &account_id, stored_count)
         .await
         .map_err(|e| format!("Failed to finish sync: {}", e))?;
+
+    if !is_background_run_active(run_id) {
+        return Ok(BackgroundSyncResult {
+            total_objects: fetched_count,
+            cancelled: true,
+        });
+    }
 
     // Build directory tree
     db::build_directory_tree_from_db(&bucket, &account_id, &folder_keys, None::<fn(usize, usize)>)
@@ -451,6 +563,7 @@ async fn run_background_sync(
 
 #[tauri::command]
 pub async fn cancel_background_sync() -> Result<(), String> {
+    BACKGROUND_RUN_ID.fetch_add(1, Ordering::SeqCst);
     BACKGROUND_CANCEL.store(true, Ordering::SeqCst);
     Ok(())
 }
