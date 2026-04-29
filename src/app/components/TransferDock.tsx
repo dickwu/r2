@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import {
   UploadOutlined,
@@ -13,6 +13,10 @@ import {
 import { useUploadStore } from '@/app/stores/uploadStore';
 import { useDownloadStore } from '@/app/stores/downloadStore';
 import { useMoveStore } from '@/app/stores/moveStore';
+
+// How long to keep the dock visible after the last task completes,
+// so the user briefly sees the success state before it auto-dismisses.
+const AUTO_DISMISS_DELAY_MS = 2500;
 
 // ── Unified task shape ────────────────────────────────────────────────────────
 
@@ -56,6 +60,10 @@ export default function TransferDock() {
   const downloadTasks = useDownloadStore((s) => s.tasks);
   const moveTasks = useMoveStore((s) => s.tasks);
 
+  const clearFinishedUploads = useUploadStore((s) => s.clearFinished);
+  const clearFinishedDownloads = useDownloadStore((s) => s.clearFinished);
+  const clearFinishedMoves = useMoveStore((s) => s.clearFinishedTasks);
+
   // "dismissed" resets when a NEW task arrives
   const [dismissed, setDismissed] = useState(false);
   const [prevTotal, setPrevTotal] = useState(0);
@@ -98,13 +106,32 @@ export default function TransferDock() {
   const total = dockTasks.length;
   const running = dockTasks.filter((t) => t.state === 'active').length;
 
-  // Show dock when new tasks arrive (reset dismissed flag)
+  // Centralised dismiss path: hide dock + flush finished tasks from stores so
+  // they don't reappear alongside the next new task.
+  const dismissAndClear = useCallback(() => {
+    setDismissed(true);
+    clearFinishedUploads();
+    clearFinishedDownloads();
+    clearFinishedMoves();
+  }, [clearFinishedUploads, clearFinishedDownloads, clearFinishedMoves]);
+
+  // Reset dismissed flag whenever a new task arrives
   useEffect(() => {
     if (total > prevTotal) {
       setDismissed(false);
     }
     setPrevTotal(total);
   }, [total, prevTotal]);
+
+  // Auto-dismiss once every task has reached a terminal state. The brief
+  // delay lets the user see the completion state before the dock disappears.
+  useEffect(() => {
+    if (total === 0 || running > 0 || dismissed) return;
+    const timer = setTimeout(() => {
+      dismissAndClear();
+    }, AUTO_DISMISS_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [total, running, dismissed, dismissAndClear]);
 
   const visible = total > 0 && !dismissed;
 
@@ -114,9 +141,9 @@ export default function TransferDock() {
     <div className="dock">
       <div className="dock-header">
         <span className="dock-title">
-          {running > 0 ? `${running} active` : 'Transfers'} · {total} total
+          {running > 0 ? `${running} active` : `${total} complete`} · {total} total
         </span>
-        <button className="dock-close" onClick={() => setDismissed(true)} title="Dismiss">
+        <button className="dock-close" onClick={dismissAndClear} title="Dismiss">
           <CloseOutlined style={{ fontSize: 11 }} />
         </button>
       </div>

@@ -542,17 +542,29 @@ body {
   height: 100%;
   min-height: 300px;
   padding: 40px;
+  background: var(--bg-app);
+  font-family: var(--font-sans);
 }
 
 .sync-overlay-content {
   text-align: center;
-  max-width: 320px;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
 .sync-overlay-icon {
-  font-size: 48px;
-  color: var(--color-accent);
-  margin-bottom: 16px;
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-size: 28px;
+  margin-bottom: 18px;
   animation: pulse 2s ease-in-out infinite;
 }
 
@@ -563,62 +575,197 @@ body {
     transform: scale(1);
   }
   50% {
-    opacity: 0.7;
-    transform: scale(0.95);
+    opacity: 0.75;
+    transform: scale(0.96);
   }
 }
 
 .sync-overlay-title {
-  font-size: 20px;
+  font-family: var(--font-display);
+  font-size: 19px;
   font-weight: 600;
-  color: var(--color-sync-title);
-  margin: 0 0 8px 0;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0 0 6px 0;
 }
 
 .sync-overlay-description {
-  font-size: 14px;
-  color: var(--color-sync-description);
-  margin: 0 0 20px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0 0 18px 0;
+  line-height: 1.5;
 }
 
 .sync-overlay-progress {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  width: 100%;
 }
 
 .sync-overlay-count {
-  font-size: 32px;
+  font-family: var(--font-display);
+  font-size: 28px;
   font-weight: 700;
-  color: var(--color-accent);
+  color: var(--accent);
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
 }
 
 .sync-overlay-label {
-  font-size: 13px;
-  color: var(--color-sync-label);
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .sync-overlay-bar {
-  width: 200px;
+  width: 240px;
   height: 6px;
-  background: var(--color-sync-bar-bg);
-  border-radius: 3px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 999px;
   overflow: hidden;
 }
 
 .sync-overlay-bar-fill {
   height: 100%;
-  background: linear-gradient(90deg, #f6821f, #ff9a44);
-  border-radius: 3px;
-  transition: width 0.3s ease;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 240ms ease;
 }
 
 .sync-overlay-percentage {
-  font-size: 14px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
   font-weight: 600;
-  color: var(--color-accent);
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Floating Sync Banner — auto-show progress pill at bottom ───── */
+.sync-banner {
+  position: fixed;
+  bottom: calc(var(--statusbar-h) + 16px);
+  left: 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px 9px 12px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-panel));
+  font-size: 12px;
+  color: var(--text);
+  font-family: var(--font-sans);
+  box-shadow: var(--shadow-lg);
+  min-width: 320px;
+  max-width: 460px;
+  z-index: 40;
+  animation: sync-banner-in 240ms cubic-bezier(0.18, 0.84, 0.27, 1.06);
+}
+.sync-banner.synced {
+  border-color: rgba(76, 175, 80, 0.45);
+  background: rgba(76, 175, 80, 0.1);
+}
+.sync-banner.synced .sync-banner-icon,
+.sync-banner.synced .sync-banner-phase {
+  color: #4caf50;
+}
+.sync-banner.synced .sync-banner-dot {
+  background: #4caf50;
+  box-shadow: 0 0 0 4px rgba(76, 175, 80, 0.18);
+  animation: none;
+}
+
+.sync-banner.error {
+  border-color: rgba(212, 73, 58, 0.45);
+  background: rgba(212, 73, 58, 0.1);
+}
+.sync-banner.error .sync-banner-icon,
+.sync-banner.error .sync-banner-phase {
+  color: #d4493a;
+}
+.sync-banner.error .sync-banner-dot {
+  background: #d4493a;
+  box-shadow: 0 0 0 4px rgba(212, 73, 58, 0.18);
+  animation: none;
+}
+/* (sync-banner-bar / sync-banner-percent and the indeterminate keyframes
+    were removed — the banner now reports progress via count + rate text
+    only, since the bar was effectively only ever 0% or 100% in practice.) */
+
+@keyframes sync-banner-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.sync-banner-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
+  animation: sync-dot-pulse 1.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes sync-dot-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 7px color-mix(in srgb, var(--accent) 6%, transparent);
+  }
+}
+
+.sync-banner-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.sync-banner-text {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+.sync-banner-phase {
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.sync-banner-detail {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-banner-link {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  border-radius: 5px;
+  transition: all 120ms;
+  flex-shrink: 0;
+}
+.sync-banner-link:hover {
+  color: var(--accent);
+  background: var(--bg-hover);
 }
 
 /* ── Grid View ──────────────────────────────────────────────────── */
@@ -1856,9 +2003,20 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   padding: 0;
 }
 .btn.btn-danger {
-  color: #d4493a;
+  background: #d4493a;
+  border-color: #d4493a;
+  color: #fff;
 }
 .btn.btn-danger:hover {
+  background: #c03830;
+  border-color: #c03830;
+}
+.btn.btn-danger-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: #d4493a;
+}
+.btn.btn-danger-ghost:hover {
   background: rgba(212, 73, 58, 0.08);
   border-color: rgba(212, 73, 58, 0.3);
 }
@@ -2672,46 +2830,9 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   margin-top: 2px;
 }
 
-/* Buttons */
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 14px;
-  height: 32px;
-  border-radius: 7px;
-  font-size: 13px;
-  font-weight: 500;
-  font-family: var(--font-sans);
-  border: 1px solid var(--border);
-  background: var(--bg-panel);
-  color: var(--text);
-  cursor: pointer;
-  transition: all 120ms;
-  white-space: nowrap;
-}
-.btn:hover {
-  border-color: var(--border-strong);
-  background: var(--bg-hover);
-}
-.btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-ink);
-}
-.btn-primary:hover {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
-}
-.btn-danger {
-  background: #d4493a;
-  border-color: #d4493a;
-  color: #fff;
-}
-.btn-danger:hover {
-  background: #c03830;
-  border-color: #c03830;
-}
+/* (Duplicate .btn / .btn-primary / .btn-danger block removed —
+   canonical rules live above near line 1806 to avoid specificity
+   collisions that previously hid the danger-button label.) */
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -3585,6 +3706,115 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* ── Account list (Settings → Account tab) ─────────────────────── */
+.settings-account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-account-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  text-align: left;
+  cursor: pointer;
+  transition: all 120ms;
+  width: 100%;
+}
+.settings-account-card:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+.settings-account-card .pi {
+  flex-shrink: 0;
+}
+.settings-account-card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-account-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.005em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-account-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.settings-account-card-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--text-subtle);
+  flex-shrink: 0;
+}
+
+.settings-account-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 32px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--bg-sunken);
+  text-align: center;
+}
+.settings-account-empty strong {
+  font-size: 13.5px;
+  color: var(--text);
+}
+.settings-account-empty span {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Account list items inside SettingsAccountPanel */
+.acct-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: background 120ms;
+}
+.acct-list-item:hover {
+  background: var(--bg-hover);
+}
+.acct-list-item.active {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+}
+.acct-list-item-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* dock-task-bar for upload progress */

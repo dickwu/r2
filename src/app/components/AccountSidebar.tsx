@@ -27,7 +27,7 @@ interface AccountSidebarProps {
   onEditAccount: (account: ProviderAccount) => void;
   onAddToken: (accountId: string) => void;
   onEditToken: (token: Token) => void;
-  onOpenSettings?: () => void;
+  onOpenSettings?: (tab?: 'appearance' | 'layout' | 'account' | 'shortcuts') => void;
 }
 
 export default function AccountSidebar({
@@ -247,11 +247,7 @@ export default function AccountSidebar({
             sits between the brand and the account list */}
         {collapsed && (
           <div className="sb-collapse-rail">
-            <button
-              className="sb-icon-btn"
-              title="Cycle sidebar style"
-              onClick={cycleSidebarStyle}
-            >
+            <button className="sb-icon-btn" title="Cycle sidebar style" onClick={cycleSidebarStyle}>
               <MenuFoldOutlined style={{ fontSize: 14 }} />
             </button>
           </div>
@@ -268,11 +264,7 @@ export default function AccountSidebar({
                 onChange={(e) => setSearch(e.target.value)}
               />
             </div>
-            <button
-              className="sb-icon-btn"
-              title="Cycle sidebar style"
-              onClick={cycleSidebarStyle}
-            >
+            <button className="sb-icon-btn" title="Cycle sidebar style" onClick={cycleSidebarStyle}>
               <MenuFoldOutlined style={{ fontSize: 14 }} />
             </button>
           </div>
@@ -350,14 +342,17 @@ export default function AccountSidebar({
 
         {/* Footer */}
         <div className="sb-footer">
-          <button className="sb-footer-btn" onClick={onAddAccount}>
+          <button
+            className="sb-footer-btn"
+            onClick={() => onOpenSettings?.('account') ?? onAddAccount()}
+          >
             <PlusOutlined style={{ fontSize: 11 }} />
             {!collapsed && <span>Add account</span>}
           </button>
           {!collapsed && (
             <button
               className="sb-icon-btn"
-              onClick={onOpenSettings ?? (() => undefined)}
+              onClick={() => onOpenSettings?.('account')}
               title="Settings"
               style={{ width: 30, height: 30 }}
             >

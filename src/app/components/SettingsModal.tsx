@@ -11,6 +11,7 @@ import {
 import { useThemeStore } from '@/app/stores/themeStore';
 import { ACCENT_LIST } from '@/app/lib/accent';
 import Modal from '@/app/components/ui/Modal';
+import SettingsAccountPanel from '@/app/components/SettingsAccountPanel';
 
 export type SettingsTab = 'appearance' | 'layout' | 'account' | 'shortcuts';
 
@@ -18,6 +19,8 @@ interface SettingsModalProps {
   open: boolean;
   onClose: () => void;
   initialTab?: SettingsTab;
+  initialAccountId?: string;
+  /** @deprecated kept for compatibility — no longer used by this modal */
   onOpenAccountSettings?: () => void;
 }
 
@@ -413,27 +416,15 @@ function ShortcutsPanel() {
   );
 }
 
-/* ── Account panel ───────────────────────────────────────────────── */
-function AccountPanel({ onOpenAccountSettings }: { onOpenAccountSettings?: () => void }) {
-  return (
-    <div className="settings-account-pad">
-      <p style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.55, margin: '0 0 16px' }}>
-        Add, edit, and remove storage accounts (R2, AWS S3, MinIO, RustFS) and API tokens in Account
-        Settings.
-      </p>
-      <button className="btn btn-primary" onClick={onOpenAccountSettings}>
-        <SettingOutlined /> Manage accounts in account settings…
-      </button>
-    </div>
-  );
-}
+/* ── Account panel is now the full SettingsAccountPanel ─────────── */
 
 /* ── SettingsModal ───────────────────────────────────────────────── */
 export default function SettingsModal({
   open,
   onClose,
   initialTab = 'appearance',
-  onOpenAccountSettings,
+  initialAccountId,
+  onOpenAccountSettings: _onOpenAccountSettings,
 }: SettingsModalProps) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
 
@@ -451,11 +442,8 @@ export default function SettingsModal({
   const footer =
     tab === 'account' ? (
       <>
-        <button className="btn" onClick={onClose}>
-          Cancel
-        </button>
         <button className="btn btn-primary" onClick={onClose}>
-          Save changes
+          Done
         </button>
       </>
     ) : (
@@ -512,7 +500,7 @@ export default function SettingsModal({
           {tab === 'appearance' && <AppearancePanel />}
           {tab === 'layout' && <LayoutPanel />}
           {tab === 'shortcuts' && <ShortcutsPanel />}
-          {tab === 'account' && <AccountPanel onOpenAccountSettings={onOpenAccountSettings} />}
+          {tab === 'account' && <SettingsAccountPanel initialAccountId={initialAccountId} />}
         </div>
       </div>
     </Modal>

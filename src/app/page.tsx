@@ -22,6 +22,7 @@ import Titlebar from '@/app/components/Titlebar';
 import BatchDeleteModal from '@/app/components/BatchDeleteModal';
 import BatchMoveModal from '@/app/components/BatchMoveModal';
 import SyncOverlay from '@/app/components/SyncOverlay';
+import SyncBanner from '@/app/components/SyncBanner';
 import DownloadTaskModal from '@/app/components/DownloadTaskModal';
 import MoveTaskModal from '@/app/components/MoveTaskModal';
 import SelectionActionBar from '@/app/components/SelectionActionBar';
@@ -1035,8 +1036,8 @@ export default function Home() {
           onEditAccount={handleEditAccount}
           onAddToken={handleAddToken}
           onEditToken={handleEditToken}
-          onOpenSettings={() => {
-            setSettingsTab('account');
+          onOpenSettings={(tab) => {
+            setSettingsTab(tab ?? 'account');
             setSettingsOpen(true);
           }}
         />
@@ -1084,6 +1085,11 @@ export default function Home() {
                 onClear={clearSelection}
               />
             )}
+
+            {/* Floating sync progress banner — auto-shows at bottom-left
+                whenever any sync pipeline is running. Self-hides when idle. */}
+            <SyncBanner />
+
 
             {/* Partial-data search indicator during background sync */}
             {searchQuery.trim() && backgroundSync.isRunning && (
@@ -1206,11 +1212,6 @@ export default function Home() {
               open={settingsOpen}
               onClose={() => setSettingsOpen(false)}
               initialTab={settingsTab}
-              onOpenAccountSettings={() => {
-                setSettingsOpen(false);
-                setConfigModalMode('add-account');
-                setConfigModalOpen(true);
-              }}
             />
 
             {uploadModalOpen && (
