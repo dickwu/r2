@@ -1,8 +1,14 @@
 'use client';
 
 import { useEffect, useCallback, useState, useRef } from 'react';
-import { Modal, Typography, Button, Switch, App } from 'antd';
-import { FolderOutlined, FileAddOutlined, SwapOutlined } from '@ant-design/icons';
+import { App, Switch } from 'antd';
+import {
+  UploadOutlined,
+  FolderOutlined,
+  FileAddOutlined,
+  SwapOutlined,
+  CheckOutlined,
+} from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import {
@@ -14,14 +20,12 @@ import type { StorageConfig } from '@/app/lib/r2cache';
 import UploadTaskList from '@/app/components/UploadTaskList';
 import FolderPickerModal from '@/app/components/folder/FolderPickerModal';
 import { renameKey, type RenameMode } from '@/app/utils/renameKey';
-
-const { Text } = Typography;
+import Modal from '@/app/components/ui/Modal';
 
 // Get content type from file extension
 function getContentType(fileName: string): string {
   const ext = fileName.split('.').pop()?.toLowerCase() || '';
   const mimeTypes: Record<string, string> = {
-    // Images
     jpg: 'image/jpeg',
     jpeg: 'image/jpeg',
     png: 'image/png',
@@ -29,18 +33,15 @@ function getContentType(fileName: string): string {
     webp: 'image/webp',
     svg: 'image/svg+xml',
     ico: 'image/x-icon',
-    // Video
     mp4: 'video/mp4',
     webm: 'video/webm',
     mov: 'video/quicktime',
     avi: 'video/x-msvideo',
     mkv: 'video/x-matroska',
-    // Audio
     mp3: 'audio/mpeg',
     wav: 'audio/wav',
     ogg: 'audio/ogg',
     m4a: 'audio/mp4',
-    // Documents
     pdf: 'application/pdf',
     doc: 'application/msword',
     docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -48,7 +49,6 @@ function getContentType(fileName: string): string {
     xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     ppt: 'application/vnd.ms-powerpoint',
     pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-    // Text
     txt: 'text/plain',
     html: 'text/html',
     css: 'text/css',
@@ -57,7 +57,6 @@ function getContentType(fileName: string): string {
     xml: 'application/xml',
     csv: 'text/csv',
     md: 'text/markdown',
-    // Archives
     zip: 'application/zip',
     tar: 'application/x-tar',
     gz: 'application/gzip',
@@ -90,6 +89,7 @@ export default function UploadModal({
   const { message } = App.useApp();
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const [renameMode, setRenameMode] = useState<RenameMode>('overwrite');
+  const [over, setOver] = useState(false);
   const isProcessingDropRef = useRef(false);
   const uploadPath = useUploadStore((s) => s.uploadPath);
   const setUploadPath = useUploadStore((s) => s.setUploadPath);
@@ -112,24 +112,17 @@ export default function UploadModal({
       tasks: Array<{ filePath: string; fileName: string; fileSize: number; contentType: string }>
     ) => {
       if (tasks.length === 0) return;
-
       const existingPaths = new Set(existingTasks.map((task) => task.filePath));
       const seen = new Set<string>();
       const uniqueTasks = tasks.filter((task) => {
-        if (existingPaths.has(task.filePath) || seen.has(task.filePath)) {
-          return false;
-        }
+        if (existingPaths.has(task.filePath) || seen.has(task.filePath)) return false;
         seen.add(task.filePath);
         return true;
       });
-
       if (uniqueTasks.length > 0) {
         const tasksWithRename = uniqueTasks.map((task) => {
           const renamed = renameKey(task.fileName, renameMode);
-          return {
-            ...task,
-            renamedFileName: renamed !== task.fileName ? renamed : undefined,
-          };
+          return { ...task, renamedFileName: renamed !== task.fileName ? renamed : undefined };
         });
         addTasks(tasksWithRename);
       }
@@ -137,12 +130,10 @@ export default function UploadModal({
     [addTasks, existingTasks, renameMode]
   );
 
-  // Sync config to store
   useEffect(() => {
     setConfig(config);
   }, [config, setConfig]);
 
-  // Reset upload path when modal opens
   useEffect(() => {
     if (isOpen) {
       setUploadPath(currentPath);
@@ -150,9 +141,7 @@ export default function UploadModal({
   }, [isOpen, currentPath, setUploadPath]);
 
   useEffect(() => {
-    if (!isOpen || dropQueue.length === 0 || isProcessingDropRef.current) {
-      return;
-    }
+    if (!isOpen || dropQueue.length === 0 || isProcessingDropRef.current) return;
 
     if (!hasS3Credentials) {
       message.warning('S3 credentials required. Please configure them in Account Settings.');
@@ -188,9 +177,7 @@ export default function UploadModal({
             Array<{ file_path: string; relative_path: string; file_size: number }>
           >('get_folder_files', { folderPath: filePath });
 
-          if (folderFiles.length === 0) {
-            continue;
-          }
+          if (folderFiles.length === 0) continue;
 
           for (const file of folderFiles) {
             tasks.push({
@@ -207,18 +194,11 @@ export default function UploadModal({
               const [fileSize, fileName] = await invoke<[number, string]>('get_file_info', {
                 filePath,
               });
-              tasks.push({
-                filePath,
-                fileName,
-                fileSize,
-                contentType: getContentType(fileName),
-              });
+              tasks.push({ filePath, fileName, fileSize, contentType: getContentType(fileName) });
             } catch (fileError) {
-              console.error('Failed to read dropped file:', fileError);
               message.error(`Failed to read dropped file: ${filePath}`);
             }
           } else {
-            console.error('Failed to read dropped folder:', error);
             message.error(`Failed to read dropped folder: ${filePath}`);
           }
         }
@@ -228,8 +208,8 @@ export default function UploadModal({
     };
 
     processDrop()
-      .catch((error) => {
-        console.error('Failed to process dropped items:', error);
+      .catch(() => {
+        /* errors already surfaced above */
       })
       .finally(() => {
         isProcessingDropRef.current = false;
@@ -250,32 +230,21 @@ export default function UploadModal({
       message.warning('S3 credentials required. Please configure them in Account Settings.');
       return;
     }
-
     try {
-      const selected = await open({
-        multiple: true,
-        directory: false,
-      });
-
+      const selected = await open({ multiple: true, directory: false });
       if (selected && selected.length > 0) {
-        // Get file info for each selected file
         const tasks = await Promise.all(
           selected.map(async (filePath) => {
             const [fileSize, fileName] = await invoke<[number, string]>('get_file_info', {
               filePath,
             });
-            return {
-              filePath,
-              fileName,
-              fileSize,
-              contentType: getContentType(fileName),
-            };
+            return { filePath, fileName, fileSize, contentType: getContentType(fileName) };
           })
         );
         addUniqueTasks(tasks);
       }
     } catch (e) {
-      console.error('Failed to select files:', e);
+      /* dialog cancelled */
     }
   }, [hasS3Credentials, addUniqueTasks, message]);
 
@@ -284,15 +253,9 @@ export default function UploadModal({
       message.warning('S3 credentials required. Please configure them in Account Settings.');
       return;
     }
-
     try {
-      const selected = await open({
-        multiple: false,
-        directory: true,
-      });
-
+      const selected = await open({ multiple: false, directory: true });
       if (selected) {
-        // Get all files in the folder recursively
         const folderFiles = await invoke<
           Array<{ file_path: string; relative_path: string; file_size: number }>
         >('get_folder_files', { folderPath: selected });
@@ -300,7 +263,7 @@ export default function UploadModal({
         if (folderFiles.length > 0) {
           const tasks = folderFiles.map((file) => ({
             filePath: file.file_path,
-            fileName: file.relative_path, // Use relative path as the "name" to preserve folder structure
+            fileName: file.relative_path,
             fileSize: file.file_size,
             contentType: getContentType(file.relative_path),
           }));
@@ -308,7 +271,7 @@ export default function UploadModal({
         }
       }
     } catch (e) {
-      console.error('Failed to select folder:', e);
+      /* dialog cancelled */
     }
   }, [hasS3Credentials, addUniqueTasks, message]);
 
@@ -317,179 +280,149 @@ export default function UploadModal({
       const shouldReload = hasSuccessfulUploads;
       clearAll();
       onClose();
-      if (shouldReload) {
-        onUploadComplete();
-      }
+      if (shouldReload) onUploadComplete();
     }
   }
+
+  const totalTasks = existingTasks.length;
+  const doneTasks = existingTasks.filter((t) => t.status === 'success').length;
+
+  const footer = (
+    <>
+      <span
+        className="left"
+        style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}
+      >
+        {doneTasks}/{totalTasks} complete
+      </span>
+      <button className="btn" onClick={handleClose} disabled={hasActiveUploads}>
+        Close
+      </button>
+      <button className="btn btn-primary" onClick={handleClose} disabled={hasActiveUploads}>
+        <CheckOutlined /> Done
+      </button>
+    </>
+  );
 
   return (
     <>
       <Modal
         open={isOpen}
-        onCancel={handleClose}
-        footer={null}
-        title="Upload Files"
-        width={520}
-        centered
-        destroyOnHidden
-        mask={{ closable: !hasActiveUploads }}
-        closable={!hasActiveUploads}
+        onClose={handleClose}
+        title="Upload files"
+        subtitle={`Destination: ${uploadPath ? `/${uploadPath.replace(/\/+$/, '')}/` : '/ (root)'}`}
+        icon={<UploadOutlined style={{ fontSize: 18 }} />}
+        width={620}
+        footer={footer}
       >
-        <div style={{ marginBottom: 16 }}>
-          <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
-            Upload to:
-          </Text>
+        {/* Upload path + rename toggle */}
+        <div style={{ marginBottom: 14 }}>
           <div
             style={{
               padding: '8px 12px',
-              background: 'var(--bg-secondary)',
-              borderRadius: 6,
+              background: 'var(--bg-sunken)',
+              borderRadius: 8,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
               gap: 8,
+              marginBottom: 10,
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
-              <FolderOutlined style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
+              <FolderOutlined style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
               <span
                 style={{
-                  fontFamily: 'monospace',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 12,
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
+                  color: 'var(--text)',
                 }}
               >
                 {uploadPath ? `/${uploadPath.replace(/\/+$/, '')}/` : '/ (root)'}
               </span>
             </div>
-            <Button
-              size="small"
-              icon={<SwapOutlined />}
+            <button
+              className="btn"
+              style={{ height: 26, fontSize: 12, padding: '0 10px' }}
               onClick={() => setFolderPickerOpen(true)}
               disabled={hasActiveUploads}
             >
-              Change...
-            </Button>
+              <SwapOutlined /> Change...
+            </button>
           </div>
-        </div>
 
-        <div
-          style={{
-            marginBottom: 16,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-          }}
-        >
-          <Switch
-            size="small"
-            checked={renameMode === 'auto-rename'}
-            onChange={(checked) => setRenameMode(checked ? 'auto-rename' : 'overwrite')}
-            disabled={hasActiveUploads}
-          />
-          <Text type="secondary" style={{ fontSize: 13 }}>
-            Auto-rename to avoid collisions
-          </Text>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Switch
+              size="small"
+              checked={renameMode === 'auto-rename'}
+              onChange={(checked) => setRenameMode(checked ? 'auto-rename' : 'overwrite')}
+              disabled={hasActiveUploads}
+            />
+            <span style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>
+              Auto-rename to avoid collisions
+            </span>
+          </div>
         </div>
 
         {!hasS3Credentials && (
           <div
             style={{
-              marginBottom: 16,
-              padding: '12px',
-              background: 'var(--color-accent-bg)',
-              borderRadius: 6,
-              border: '1px solid var(--color-accent-border)',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
+              marginBottom: 14,
+              padding: '10px 12px',
+              background: 'rgba(243,128,32,0.08)',
+              borderRadius: 8,
+              border: '1px solid rgba(243,128,32,0.25)',
+              fontSize: 12.5,
+              color: 'var(--text-muted)',
             }}
           >
-            <Text type="warning">S3 credentials required for uploads</Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              Configure in Account Settings
-            </Text>
+            S3 credentials required for uploads — configure in Account Settings.
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: 12 }}>
-          <div
-            role="button"
-            tabIndex={hasActiveUploads ? -1 : 0}
-            onClick={hasActiveUploads ? undefined : handleSelectFiles}
-            onKeyDown={(e) => {
-              if (!hasActiveUploads && (e.key === 'Enter' || e.key === ' ')) {
-                e.preventDefault();
-                handleSelectFiles();
-              }
-            }}
-            style={{
-              flex: 1,
-              border: '2px dashed var(--color-border-control-hover)',
-              borderRadius: 8,
-              padding: '24px 16px',
-              textAlign: 'center',
-              cursor: hasActiveUploads ? 'not-allowed' : 'pointer',
-              opacity: hasActiveUploads ? 0.5 : 1,
-              transition: 'border-color 0.3s',
-            }}
-            onMouseEnter={(e) => {
-              if (!hasActiveUploads) {
-                e.currentTarget.style.borderColor = 'var(--color-accent)';
-              }
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.borderColor = 'var(--color-border-control-hover)';
-            }}
-          >
-            <p style={{ marginBottom: 8 }}>
-              <FileAddOutlined style={{ color: 'var(--color-accent)', fontSize: 36 }} />
-            </p>
-            <p style={{ fontSize: 14, marginBottom: 4 }}>Select Files</p>
-            <p style={{ color: 'var(--color-text-secondary)', fontSize: 12 }}>Single or multiple</p>
+        {/* Drop zone */}
+        <div
+          className={`drop-zone${over ? 'over' : ''}`}
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (!hasActiveUploads) setOver(true);
+          }}
+          onDragLeave={() => setOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setOver(false);
+          }}
+          onClick={hasActiveUploads ? undefined : handleSelectFiles}
+          style={{
+            cursor: hasActiveUploads ? 'not-allowed' : 'pointer',
+            opacity: hasActiveUploads ? 0.6 : 1,
+          }}
+        >
+          <FileAddOutlined style={{ fontSize: 28, color: 'var(--accent)' }} />
+          <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text)' }}>
+            Drop files or folders here
           </div>
-
-          <div
-            role="button"
-            tabIndex={hasActiveUploads ? -1 : 0}
-            onClick={hasActiveUploads ? undefined : handleSelectFolder}
-            onKeyDown={(e) => {
-              if (!hasActiveUploads && (e.key === 'Enter' || e.key === ' ')) {
-                e.preventDefault();
+          <div style={{ fontSize: 12 }}>
+            or <span style={{ color: 'var(--accent)', textDecoration: 'underline' }}>browse</span>
+            {' · '}
+            <button
+              className="btn"
+              style={{ height: 24, fontSize: 11.5, padding: '0 8px', display: 'inline-flex' }}
+              onClick={(e) => {
+                e.stopPropagation();
                 handleSelectFolder();
-              }
-            }}
-            style={{
-              flex: 1,
-              border: '2px dashed var(--color-border-control-hover)',
-              borderRadius: 8,
-              padding: '24px 16px',
-              textAlign: 'center',
-              cursor: hasActiveUploads ? 'not-allowed' : 'pointer',
-              opacity: hasActiveUploads ? 0.5 : 1,
-              transition: 'border-color 0.3s',
-            }}
-            onMouseEnter={(e) => {
-              if (!hasActiveUploads) {
-                e.currentTarget.style.borderColor = 'var(--color-accent)';
-              }
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.borderColor = 'var(--color-border-control-hover)';
-            }}
-          >
-            <p style={{ marginBottom: 8 }}>
-              <FolderOutlined style={{ color: 'var(--color-accent)', fontSize: 36 }} />
-            </p>
-            <p style={{ fontSize: 14, marginBottom: 4 }}>Select Folder</p>
-            <p style={{ color: 'var(--color-text-secondary)', fontSize: 12 }}>
-              Upload entire folder
-            </p>
+              }}
+              disabled={hasActiveUploads}
+            >
+              <FolderOutlined /> Folder
+            </button>
           </div>
         </div>
 
+        {/* Task list */}
         <UploadTaskList />
       </Modal>
 

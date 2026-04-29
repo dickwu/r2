@@ -1,12 +1,13 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Modal, App, Button, Select, Input, Checkbox } from 'antd';
-import { FolderOutlined, SwapOutlined } from '@ant-design/icons';
+import { App } from 'antd';
+import { ArrowRightOutlined, SendOutlined } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import type { StorageConfig, StorageProvider } from '@/app/lib/r2cache';
 import FolderPickerModal from '@/app/components/folder/FolderPickerModal';
 import { useAccountStore } from '@/app/stores/accountStore';
+import Modal from '@/app/components/ui/Modal';
 
 interface DestinationBucket {
   name: string;
@@ -57,8 +58,8 @@ export default function BatchMoveModal({
   const selectedCount = selectedKeys.size;
 
   useEffect(() => {
-    loadAccounts().catch((e) => {
-      console.error('Failed to load accounts:', e);
+    loadAccounts().catch(() => {
+      /* silently handle */
     });
   }, [open, loadAccounts]);
 
@@ -140,9 +141,7 @@ export default function BatchMoveModal({
       destinationOptions.find((option) => {
         if (option.provider !== config.provider) return false;
         if (option.accountId !== config.accountId) return false;
-        if (option.provider === 'r2') {
-          return option.accessKeyId === config.accessKeyId;
-        }
+        if (option.provider === 'r2') return option.accessKeyId === config.accessKeyId;
         return true;
       }) || null;
 
@@ -237,7 +236,6 @@ export default function BatchMoveModal({
       onClose();
       onSuccess();
     } catch (e) {
-      console.error('Batch move error:', e);
       message.error({
         content: `Failed to start move: ${e instanceof Error ? e.message : 'Unknown error'}`,
         key: 'batch-move',
@@ -258,119 +256,131 @@ export default function BatchMoveModal({
     onSuccess,
   ]);
 
+  const footer = (
+    <>
+      <span
+        className="left"
+        style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}
+      >
+        <div
+          className={`switch${deleteOriginal ? 'on' : ''}`}
+          onClick={() => setDeleteOriginal((v) => !v)}
+        />
+        Delete original after copy
+      </span>
+      <button className="btn" onClick={onClose} disabled={isStartingQueue}>
+        Cancel
+      </button>
+      <button
+        className="btn btn-primary"
+        onClick={handleMove}
+        disabled={!selectedDestination || !selectedBucket || isStartingQueue}
+      >
+        {isStartingQueue ? (
+          'Starting...'
+        ) : (
+          <>
+            {deleteOriginal ? <ArrowRightOutlined /> : <SendOutlined />}{' '}
+            {deleteOriginal ? 'Move' : 'Copy'} here
+          </>
+        )}
+      </button>
+    </>
+  );
+
   return (
     <>
       <Modal
-        title="Move Files"
         open={open}
-        onCancel={onClose}
-        onOk={handleMove}
-        okText="Move"
-        okButtonProps={{
-          disabled: !selectedDestination || !selectedBucket || isStartingQueue,
-          loading: isStartingQueue,
-        }}
-        cancelButtonProps={{ disabled: isStartingQueue }}
-        width={480}
-        centered
+        onClose={onClose}
+        title={`${deleteOriginal ? 'Move' : 'Copy'} ${selectedCount} item${selectedCount !== 1 ? 's' : ''}`}
+        subtitle="Pick a destination bucket and folder"
+        icon={<ArrowRightOutlined style={{ fontSize: 18 }} />}
+        width={640}
+        footer={footer}
       >
-        <div>
-          <p style={{ marginBottom: 16 }}>
-            Move <strong>{selectedCount}</strong> file{selectedCount > 1 ? 's' : ''} to:
-          </p>
+        {/* Destination account + bucket */}
+        <div className="field">
+          <div className="field-label">Destination account</div>
+          <select
+            className="select"
+            value={selectedDestinationId ?? ''}
+            onChange={(e) => setSelectedDestinationId(e.target.value || null)}
+          >
+            <option value="">Select destination account…</option>
+            {destinationOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.provider === 'r2'
+                  ? `R2 · ${option.accountLabel} · ${option.tokenLabel}`
+                  : `${option.provider.toUpperCase()} · ${option.accountLabel}`}
+              </option>
+            ))}
+          </select>
+        </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 6 }}>
-                Destination account
-              </div>
-              <Select
-                value={selectedDestinationId ?? undefined}
-                onChange={(value) => setSelectedDestinationId(value)}
-                placeholder="Select destination account"
-                style={{ width: '100%' }}
-                options={destinationOptions.map((option) => ({
-                  value: option.id,
-                  label:
-                    option.provider === 'r2'
-                      ? `R2 · ${option.accountLabel} · ${option.tokenLabel}`
-                      : `${option.provider.toUpperCase()} · ${option.accountLabel}`,
-                }))}
-              />
-            </div>
+        <div className="field">
+          <div className="field-label">Destination bucket</div>
+          <select
+            className="select"
+            value={selectedBucket}
+            onChange={(e) => setSelectedBucket(e.target.value)}
+            disabled={!selectedDestination}
+          >
+            <option value="">Select bucket…</option>
+            {(selectedDestination?.buckets || []).map((bucket) => (
+              <option key={bucket.name} value={bucket.name}>
+                {bucket.name}
+              </option>
+            ))}
+          </select>
+        </div>
 
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 6 }}>
-                Destination bucket
-              </div>
-              <Select
-                value={selectedBucket || undefined}
-                onChange={(value) => setSelectedBucket(value)}
-                placeholder="Select destination bucket"
-                style={{ width: '100%' }}
-                disabled={!selectedDestination}
-                options={(selectedDestination?.buckets || []).map((bucket) => ({
-                  value: bucket.name,
-                  label: bucket.name,
-                }))}
-              />
-            </div>
-
-            <div>
-              <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', marginBottom: 6 }}>
-                Destination folder
-              </div>
-              {isSameDestination ? (
-                <div
-                  style={{
-                    padding: '8px 12px',
-                    background: 'var(--bg-secondary)',
-                    borderRadius: 6,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 8,
-                  }}
-                >
-                  <div
-                    style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}
-                  >
-                    <FolderOutlined style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
-                    <span
-                      style={{
-                        fontFamily: 'monospace',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {targetDirectory ? `/${targetDirectory}/` : '/ (root)'}
-                    </span>
-                  </div>
-                  <Button
-                    size="small"
-                    icon={<SwapOutlined />}
-                    onClick={() => setFolderPickerOpen(true)}
-                  >
-                    Change...
-                  </Button>
-                </div>
-              ) : (
-                <Input
-                  placeholder="Enter destination folder (optional)"
-                  value={targetDirectory}
-                  onChange={(event) => setTargetDirectory(event.target.value.replace(/^\/+/, ''))}
-                  allowClear
-                />
-              )}
-            </div>
-
-            <Checkbox
-              checked={deleteOriginal}
-              onChange={(event) => setDeleteOriginal(event.target.checked)}
+        {/* Target folder */}
+        <div className="field">
+          <div className="field-label">Target folder</div>
+          {isSameDestination ? (
+            <div
+              style={{
+                padding: '8px 12px',
+                background: 'var(--bg-sunken)',
+                borderRadius: 8,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+              }}
             >
-              Delete original after move
-            </Checkbox>
+              <span
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 12,
+                  color: 'var(--text)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  flex: 1,
+                }}
+              >
+                {targetDirectory ? `/${targetDirectory}/` : '/ (root)'}
+              </span>
+              <button
+                className="btn"
+                style={{ height: 26, fontSize: 11.5, padding: '0 10px' }}
+                onClick={() => setFolderPickerOpen(true)}
+              >
+                Change...
+              </button>
+            </div>
+          ) : (
+            <input
+              className="input mono"
+              placeholder="Enter destination folder (optional)"
+              value={targetDirectory}
+              onChange={(e) => setTargetDirectory(e.target.value.replace(/^\/+/, ''))}
+            />
+          )}
+          <div className="field-hint">
+            Cross-provider transfers stream without temp files (4 parallel parts)
           </div>
         </div>
       </Modal>

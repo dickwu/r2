@@ -1,26 +1,14 @@
 'use client';
 
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { Button, Space, App, Spin, Empty, Segmented, Input, type InputRef } from 'antd';
-import {
-  SettingOutlined,
-  ReloadOutlined,
-  UploadOutlined,
-  SunOutlined,
-  MoonOutlined,
-  AppstoreOutlined,
-  BarsOutlined,
-  SearchOutlined,
-  DeleteOutlined,
-  FolderOutlined,
-  DownloadOutlined,
-} from '@ant-design/icons';
+import { App, Spin, type InputRef } from 'antd';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useThemeStore } from '@/app/stores/themeStore';
 import { usePreviewStore } from '@/app/stores/previewStore';
 import ConfigModal, { ModalMode } from '@/app/components/ConfigModal';
+import SettingsModal, { type SettingsTab } from '@/app/components/SettingsModal';
 import UploadModal from '@/app/components/UploadModal';
 import FilePreviewModal from '@/app/components/FilePreviewModal';
 import FileRenameModal from '@/app/components/FileRenameModal';
@@ -28,13 +16,17 @@ import FolderRenameModal from '@/app/components/FolderRenameModal';
 import FileGridView from '@/app/components/FileGridView';
 import FileListView from '@/app/components/FileListView';
 import AccountSidebar from '@/app/components/AccountSidebar';
-import PathBreadcrumb from '@/app/components/PathBreadcrumb';
+import Toolbar from '@/app/components/Toolbar';
 import StatusBar from '@/app/components/StatusBar';
+import Titlebar from '@/app/components/Titlebar';
 import BatchDeleteModal from '@/app/components/BatchDeleteModal';
 import BatchMoveModal from '@/app/components/BatchMoveModal';
 import SyncOverlay from '@/app/components/SyncOverlay';
 import DownloadTaskModal from '@/app/components/DownloadTaskModal';
 import MoveTaskModal from '@/app/components/MoveTaskModal';
+import SelectionActionBar from '@/app/components/SelectionActionBar';
+import Inspector from '@/app/components/Inspector';
+import EmptyState from '@/app/components/EmptyState';
 import { useAccountStore, ProviderAccount, Token } from '@/app/stores/accountStore';
 import { useR2Files, FileItem } from '@/app/hooks/useR2Files';
 import { useFilesSync } from '@/app/hooks/useFilesSync';
@@ -50,6 +42,11 @@ import { useSyncStore } from '@/app/stores/syncStore';
 import { useBatchOperationStore } from '@/app/stores/batchOperationStore';
 import { setupGlobalDownloadListeners, useDownloadStore } from '@/app/stores/downloadStore';
 import { useKeyboardShortcuts } from '@/app/hooks/useKeyboardShortcuts';
+import { useGlobalShortcuts } from '@/app/hooks/useGlobalShortcuts';
+import CommandPalette, { type CommandAction } from '@/app/components/CommandPalette';
+import TransferDock from '@/app/components/TransferDock';
+import Toast from '@/app/components/Toast';
+import { useToastStore } from '@/app/stores/toastStore';
 
 type ViewMode = 'list' | 'grid';
 type SortOrder = 'asc' | 'desc' | null;
@@ -72,6 +69,9 @@ export default function Home() {
   const [editToken, setEditToken] = useState<Token | null>(null);
   const [parentAccountId, setParentAccountId] = useState<string | undefined>();
 
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('appearance');
+
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [dropQueue, setDropQueue] = useState<string[][]>([]);
   const previewFile = usePreviewStore((s) => s.file);
@@ -91,6 +91,14 @@ export default function Home() {
   const mainContentRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<InputRef | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [focusedItem, setFocusedItem] = useState<FileItem | null>(null);
+  const showInspector = useThemeStore((s) => s.showInspector);
+  const setShowInspector = useThemeStore((s) => s.setShowInspector);
+
+  // Command palette state
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const pushToast = useToastStore((s) => s.pushToast);
+  const toggleTheme = useThemeStore((s) => s.toggleTheme);
 
   const handleDropHandled = useCallback(() => {
     setDropQueue((prev) => prev.slice(1));
@@ -120,8 +128,7 @@ export default function Home() {
   const [searchTotalCount, setSearchTotalCount] = useState(0);
   const [isSearching, setIsSearching] = useState(false);
   const { message } = App.useApp();
-  const theme = useThemeStore((s) => s.theme);
-  const toggleTheme = useThemeStore((s) => s.toggleTheme);
+  const sidebarStyle = useThemeStore((s) => s.sidebarStyle);
 
   const config = useMemo<StorageConfig | null>(
     () => toStorageConfig(),
@@ -891,6 +898,56 @@ export default function Home() {
     startDownloadQueue,
   ]);
 
+  // Command palette action handler
+  const handleCmdAction = useCallback(
+    (action: CommandAction) => {
+      if (action.type === 'bucket') {
+        const store = useAccountStore.getState();
+        if (action.provider === 'r2' && action.tokenId != null) {
+          store.selectR2Bucket(action.tokenId, action.bucket);
+        } else if (action.provider === 'aws') {
+          store.selectAwsBucket(action.accountId, action.bucket);
+        } else if (action.provider === 'minio') {
+          store.selectMinioBucket(action.accountId, action.bucket);
+        } else if (action.provider === 'rustfs') {
+          store.selectRustfsBucket(action.accountId, action.bucket);
+        }
+      } else if (action.type === 'open') {
+        if (action.value === 'upload') setUploadModalOpen(true);
+        else if (action.value === 'settings') {
+          setSettingsTab('appearance');
+          setSettingsOpen(true);
+        }
+        // 'dock' — TransferDock auto-shows when tasks are running; no extra state needed
+      } else if (action.type === 'refresh') {
+        handleRefresh();
+        pushToast('Files refreshed', 'success');
+      } else if (action.type === 'theme') {
+        toggleTheme();
+      } else if (action.type === 'view') {
+        setViewMode((v) => (v === 'list' ? 'grid' : 'list'));
+      } else if (action.type === 'path') {
+        setCurrentPath(action.value);
+      }
+    },
+    [handleRefresh, pushToast, toggleTheme, setCurrentPath]
+  );
+
+  // Global keyboard shortcuts (new shortcuts not covered by useKeyboardShortcuts)
+  useGlobalShortcuts({
+    openPalette: () => setPaletteOpen(true),
+    closePalette: () => setPaletteOpen(false),
+    paletteOpen,
+    openUpload: () => setUploadModalOpen(true),
+    refresh: handleRefresh,
+    openSettings: () => {
+      setSettingsTab('appearance');
+      setSettingsOpen(true);
+    },
+    toggleView: () => setViewMode((v) => (v === 'list' ? 'grid' : 'list')),
+    viewMode,
+  });
+
   // Keyboard shortcuts
   useKeyboardShortcuts(
     {
@@ -960,281 +1017,289 @@ export default function Home() {
     );
   }
 
+  const appBodyClass = [
+    'app-body',
+    sidebarStyle === 'collapsed' ? 'collapsed' : '',
+    sidebarStyle === 'floating' ? 'floating' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
   return (
-    <div className="app-layout">
-      {/* Sidebar */}
-      <AccountSidebar
-        onAddAccount={handleAddAccount}
-        onEditAccount={handleEditAccount}
-        onAddToken={handleAddToken}
-        onEditToken={handleEditToken}
-      />
+    <div className="app-shell">
+      <Titlebar onOpenPalette={() => setPaletteOpen(true)} />
+      <div className={appBodyClass}>
+        {/* Sidebar */}
+        <AccountSidebar
+          onAddAccount={handleAddAccount}
+          onEditAccount={handleEditAccount}
+          onAddToken={handleAddToken}
+          onEditToken={handleEditToken}
+          onOpenSettings={() => {
+            setSettingsTab('account');
+            setSettingsOpen(true);
+          }}
+        />
 
-      {/* Main Content */}
-      <div className={`main-content${isDragOver ? 'drag-over' : ''}`} ref={mainContentRef}>
-        <div className="file-manager">
-          {/* Toolbar */}
-          <div className="toolbar">
-            <Space>
-              <PathBreadcrumb
-                bucketName={currentConfig?.bucket || 'Root'}
-                onNavigate={() => setSearchQuery('')}
-              />
-              {selectedKeys.size > 0 && (
-                <>
-                  <span style={{ color: 'var(--text-secondary)' }}>
-                    {selectedFileCount !== selectedKeys.size
-                      ? `${selectedKeys.size} items (${selectedFileCount.toLocaleString()} files)`
-                      : `${selectedKeys.size} selected`}
-                  </span>
-                  <Button size="small" icon={<DownloadOutlined />} onClick={handleBatchDownload}>
-                    Download
-                  </Button>
-                  <Button
-                    size="small"
-                    icon={<FolderOutlined />}
-                    onClick={openBatchMoveModalHandler}
-                  >
-                    Move
-                  </Button>
-                  <Button
-                    size="small"
-                    danger
-                    icon={<DeleteOutlined />}
-                    onClick={openBatchDeleteConfirm}
-                  >
-                    Delete
-                  </Button>
-                  <Button size="small" onClick={clearSelection}>
-                    Clear
-                  </Button>
-                </>
-              )}
-            </Space>
-            <Space>
-              <Input
-                ref={searchInputRef}
-                placeholder="Search all files in bucket..."
-                prefix={<SearchOutlined />}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                allowClear
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="off"
-                style={{ width: 220 }}
-              />
-              <Segmented
-                value={viewMode}
-                onChange={(value) => setViewMode(value as ViewMode)}
-                options={[
-                  { value: 'list', icon: <BarsOutlined /> },
-                  { value: 'grid', icon: <AppstoreOutlined /> },
-                ]}
-              />
-              <Button
-                type="primary"
-                icon={<UploadOutlined />}
-                onClick={() => setUploadModalOpen(true)}
-              >
-                Upload
-              </Button>
-              <Button
-                icon={<ReloadOutlined spin={isFetching} />}
-                onClick={handleRefresh}
-                loading={isFetching}
-              />
-              <Button
-                icon={theme === 'dark' ? <SunOutlined /> : <MoonOutlined />}
-                onClick={toggleTheme}
-              />
-              <Button icon={<SettingOutlined />} onClick={handleSettingsClick} />
-            </Space>
-          </div>
-
-          {/* Partial-data search indicator during background sync */}
-          {searchQuery.trim() && backgroundSync.isRunning && (
-            <div
-              style={{
-                padding: '4px 12px',
-                fontSize: 12,
-                color: 'var(--ant-color-text-secondary)',
-                background: 'var(--ant-color-fill-quaternary)',
-                borderRadius: 4,
-                margin: '0 16px 4px',
+        {/* Main Content */}
+        <div
+          className={['main-content', isDragOver && 'drag-over'].filter(Boolean).join(' ')}
+          ref={mainContentRef}
+        >
+          <div className="file-manager">
+            {/* Toolbar */}
+            <Toolbar
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              viewMode={viewMode}
+              onViewModeChange={(v) => setViewMode(v as ViewMode)}
+              onRefresh={handleRefresh}
+              isRefreshing={isFetching}
+              onUploadOpen={() => setUploadModalOpen(true)}
+              onSettingsOpen={() => {
+                setSettingsTab('account');
+                setSettingsOpen(true);
               }}
-            >
-              Searching {backgroundSync.objectsFetched.toLocaleString()}
-              {backgroundSync.estimatedTotal
-                ? ` of ~${backgroundSync.estimatedTotal.toLocaleString()}`
-                : ''}{' '}
-              objects (sync in progress)
-            </div>
-          )}
+              onAppearanceOpen={() => {
+                setSettingsTab('appearance');
+                setSettingsOpen(true);
+              }}
+              bucketName={currentConfig?.bucket ?? null}
+              bucketSize={null}
+              bucketCount={null}
+              onNavigate={(newPath) => {
+                setCurrentPath(newPath);
+                setSearchQuery('');
+              }}
+            />
 
-          {/* File List */}
-          <div className="file-list">
-            {!config ? (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="Select a bucket from the sidebar to get started"
-              />
-            ) : lastSyncTime === null && (isSyncing || syncPhase !== 'idle') ? (
-              /* Show sync overlay during initial sync (before cache is ready) */
-              <SyncOverlay />
-            ) : isLoading || isSearching ? (
-              <div className="file-list-loading">
-                <Spin description={isSearching ? 'Searching bucket...' : undefined} fullscreen />
-              </div>
-            ) : filteredItems.length === 0 ? (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description={
-                  searchQuery
-                    ? `No files matching "${searchQuery}" in bucket`
-                    : 'This folder is empty'
-                }
-              />
-            ) : viewMode === 'list' ? (
-              <FileListView
-                items={filteredItems}
-                selectedKeys={selectedKeys}
-                metadata={metadata}
-                nameSort={nameSort}
-                sizeSort={sizeSort}
-                modifiedSort={modifiedSort}
-                showFullPath={!!searchQuery.trim()}
-                onItemClick={handleItemClick}
-                onToggleSelection={toggleSelection}
-                onSelectAll={selectAll}
-                onClearSelection={clearSelection}
-                onToggleNameSort={toggleNameSort}
-                onToggleSizeSort={toggleSizeSort}
-                onToggleModifiedSort={toggleModifiedSort}
-                onDelete={handleDelete}
-                onRename={handleRenameClick}
-                onDownload={handleDownload}
-                onFolderDelete={handleFolderDelete}
-                onFolderDownload={handleFolderDownload}
-                onFolderRename={handleFolderRenameClick}
-              />
-            ) : (
-              <FileGridView
-                items={filteredItems}
-                onItemClick={handleItemClick}
-                onDelete={handleDelete}
-                onRename={handleRenameClick}
-                onDownload={handleDownload}
-                onFolderDelete={handleFolderDelete}
-                onFolderDownload={handleFolderDownload}
-                onFolderRename={handleFolderRenameClick}
-                storageConfig={config}
-                folderSizes={metadata}
-                selectedKeys={selectedKeys}
-                onToggleSelection={toggleSelection}
-                showFullPath={!!searchQuery.trim()}
+            {/* Selection action bar */}
+            {selectedKeys.size > 0 && (
+              <SelectionActionBar
+                selectedCount={selectedKeys.size}
+                fileCount={selectedFileCount !== selectedKeys.size ? selectedFileCount : undefined}
+                onDownload={handleBatchDownload}
+                onMove={openBatchMoveModalHandler}
+                onDelete={openBatchDeleteConfirm}
+                onClear={clearSelection}
               />
             )}
+
+            {/* Partial-data search indicator during background sync */}
+            {searchQuery.trim() && backgroundSync.isRunning && (
+              <div
+                style={{
+                  padding: '4px 12px',
+                  fontSize: 12,
+                  color: 'var(--ant-color-text-secondary)',
+                  background: 'var(--ant-color-fill-quaternary)',
+                  borderRadius: 4,
+                  margin: '0 16px 4px',
+                }}
+              >
+                Searching {backgroundSync.objectsFetched.toLocaleString()}
+                {backgroundSync.estimatedTotal
+                  ? ` of ~${backgroundSync.estimatedTotal.toLocaleString()}`
+                  : ''}{' '}
+                objects (sync in progress)
+              </div>
+            )}
+
+            {/* File area */}
+            <div className="file-area" style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+              {!config ? (
+                <EmptyState onUpload={() => setUploadModalOpen(true)} />
+              ) : lastSyncTime === null && (isSyncing || syncPhase !== 'idle') ? (
+                /* Show sync overlay during initial sync (before cache is ready) */
+                <SyncOverlay />
+              ) : isLoading || isSearching ? (
+                <div className="file-list-loading">
+                  <Spin description={isSearching ? 'Searching bucket...' : undefined} fullscreen />
+                </div>
+              ) : filteredItems.length === 0 ? (
+                <EmptyState
+                  search={searchQuery || undefined}
+                  onUpload={() => setUploadModalOpen(true)}
+                />
+              ) : viewMode === 'list' ? (
+                <FileListView
+                  items={filteredItems}
+                  selectedKeys={selectedKeys}
+                  metadata={metadata}
+                  nameSort={nameSort}
+                  sizeSort={sizeSort}
+                  modifiedSort={modifiedSort}
+                  showFullPath={!!searchQuery.trim()}
+                  onItemClick={handleItemClick}
+                  onToggleSelection={toggleSelection}
+                  onSelectAll={selectAll}
+                  onClearSelection={clearSelection}
+                  onToggleNameSort={toggleNameSort}
+                  onToggleSizeSort={toggleSizeSort}
+                  onToggleModifiedSort={toggleModifiedSort}
+                  onDelete={handleDelete}
+                  onRename={handleRenameClick}
+                  onDownload={handleDownload}
+                  onFolderDelete={handleFolderDelete}
+                  onFolderDownload={handleFolderDownload}
+                  onFolderRename={handleFolderRenameClick}
+                  onFocus={setFocusedItem}
+                />
+              ) : (
+                <FileGridView
+                  items={filteredItems}
+                  onItemClick={handleItemClick}
+                  onDelete={handleDelete}
+                  onRename={handleRenameClick}
+                  onDownload={handleDownload}
+                  onFolderDelete={handleFolderDelete}
+                  onFolderDownload={handleFolderDownload}
+                  onFolderRename={handleFolderRenameClick}
+                  storageConfig={config}
+                  folderSizes={metadata}
+                  selectedKeys={selectedKeys}
+                  onToggleSelection={toggleSelection}
+                  showFullPath={!!searchQuery.trim()}
+                  onFocus={setFocusedItem}
+                />
+              )}
+
+              {/* Inspector right-rail */}
+              {showInspector && focusedItem && (
+                <Inspector
+                  item={focusedItem}
+                  bucket={currentConfig?.bucket ?? ''}
+                  path={currentPath}
+                  onClose={() => setShowInspector(false)}
+                  onDownload={handleDownload}
+                />
+              )}
+            </div>
+
+            {/* Status Bar */}
+            <StatusBar
+              totalItemsCount={items.length}
+              searchQuery={searchQuery}
+              searchTotalCount={searchTotalCount}
+              hasConfig={!!config}
+              isLoadingFiles={isLoading || isSyncing}
+              storageConfig={config}
+              selectedCount={selectedKeys.size}
+            />
+
+            {configModalOpen && (
+              <ConfigModal
+                open={true}
+                onClose={(force) => {
+                  if (force || currentConfig || hasAccounts()) {
+                    setConfigModalOpen(false);
+                  }
+                }}
+                mode={configModalMode}
+                editAccount={editAccount}
+                editToken={editToken}
+                parentAccountId={parentAccountId}
+              />
+            )}
+
+            <SettingsModal
+              open={settingsOpen}
+              onClose={() => setSettingsOpen(false)}
+              initialTab={settingsTab}
+              onOpenAccountSettings={() => {
+                setSettingsOpen(false);
+                setConfigModalMode('add-account');
+                setConfigModalOpen(true);
+              }}
+            />
+
+            {uploadModalOpen && (
+              <UploadModal
+                open={true}
+                onClose={() => setUploadModalOpen(false)}
+                currentPath={currentPath}
+                config={config}
+                dropQueue={dropQueue}
+                onDropHandled={handleDropHandled}
+                onUploadComplete={() => {
+                  Promise.all([refresh(), refreshSync()]);
+                }}
+                onCredentialsUpdate={() => {
+                  initialize();
+                }}
+              />
+            )}
+
+            {previewFile && (
+              <FilePreviewModal
+                config={config}
+                onCredentialsUpdate={() => {
+                  initialize();
+                }}
+              />
+            )}
+
+            {renameFile && config && (
+              <FileRenameModal
+                open={true}
+                onClose={() => setRenameFile(null)}
+                file={renameFile}
+                config={config}
+                onSuccess={handleRenameSuccess}
+              />
+            )}
+
+            {renameFolder && (
+              <FolderRenameModal
+                open={true}
+                onClose={() => setRenameFolder(null)}
+                folder={renameFolder}
+                folderMetadata={metadata[renameFolder.key]}
+                config={config}
+                onSuccess={handleFolderRenameSuccess}
+              />
+            )}
+
+            {deleteModalOpen && (
+              <BatchDeleteModal
+                open={true}
+                selectedKeys={keysToDelete}
+                config={config}
+                onClose={closeDeleteModal}
+                onSuccess={handleBatchDeleteSuccess}
+                onDeletingChange={setDeleting}
+              />
+            )}
+
+            {moveModalOpen && (
+              <BatchMoveModal
+                open={true}
+                selectedKeys={keysToMove}
+                config={config}
+                onClose={closeMoveModal}
+                onSuccess={handleBatchMoveSuccess}
+                onMovingChange={setMoving}
+              />
+            )}
+
+            <MoveTaskModal storageConfig={config} />
+            <DownloadTaskModal storageConfig={config} />
           </div>
-
-          {/* Status Bar */}
-          <StatusBar
-            totalItemsCount={items.length}
-            searchQuery={searchQuery}
-            searchTotalCount={searchTotalCount}
-            hasConfig={!!config}
-            isLoadingFiles={isLoading || isSyncing}
-            storageConfig={config}
-          />
-
-          {configModalOpen && (
-            <ConfigModal
-              open={true}
-              onClose={(force) => {
-                if (force || currentConfig || hasAccounts()) {
-                  setConfigModalOpen(false);
-                }
-              }}
-              mode={configModalMode}
-              editAccount={editAccount}
-              editToken={editToken}
-              parentAccountId={parentAccountId}
-            />
-          )}
-
-          {uploadModalOpen && (
-            <UploadModal
-              open={true}
-              onClose={() => setUploadModalOpen(false)}
-              currentPath={currentPath}
-              config={config}
-              dropQueue={dropQueue}
-              onDropHandled={handleDropHandled}
-              onUploadComplete={() => {
-                Promise.all([refresh(), refreshSync()]);
-              }}
-              onCredentialsUpdate={() => {
-                initialize();
-              }}
-            />
-          )}
-
-          {previewFile && (
-            <FilePreviewModal
-              config={config}
-              onCredentialsUpdate={() => {
-                initialize();
-              }}
-            />
-          )}
-
-          {renameFile && config && (
-            <FileRenameModal
-              open={true}
-              onClose={() => setRenameFile(null)}
-              file={renameFile}
-              config={config}
-              onSuccess={handleRenameSuccess}
-            />
-          )}
-
-          {renameFolder && (
-            <FolderRenameModal
-              open={true}
-              onClose={() => setRenameFolder(null)}
-              folder={renameFolder}
-              folderMetadata={metadata[renameFolder.key]}
-              config={config}
-              onSuccess={handleFolderRenameSuccess}
-            />
-          )}
-
-          {deleteModalOpen && (
-            <BatchDeleteModal
-              open={true}
-              selectedKeys={keysToDelete}
-              config={config}
-              onClose={closeDeleteModal}
-              onSuccess={handleBatchDeleteSuccess}
-              onDeletingChange={setDeleting}
-            />
-          )}
-
-          {moveModalOpen && (
-            <BatchMoveModal
-              open={true}
-              selectedKeys={keysToMove}
-              config={config}
-              onClose={closeMoveModal}
-              onSuccess={handleBatchMoveSuccess}
-              onMovingChange={setMoving}
-            />
-          )}
-
-          <MoveTaskModal storageConfig={config} />
-          <DownloadTaskModal storageConfig={config} />
         </div>
       </div>
+
+      {/* Command palette — portal to body */}
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        onAction={handleCmdAction}
+      />
+
+      {/* Transfer dock — auto-shows when tasks are running */}
+      <TransferDock />
+
+      {/* Toast notification stack */}
+      <Toast />
     </div>
   );
 }

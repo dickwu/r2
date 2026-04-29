@@ -5,9 +5,11 @@ import { App, ConfigProvider, theme } from 'antd';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { useThemeStore, initializeTheme } from '@/app/stores/themeStore';
+import { applyAccent } from '@/app/lib/accent';
 
 export default function Providers({ children }: { children: React.ReactNode }) {
   const currentTheme = useThemeStore((s) => s.theme);
+  const accent = useThemeStore((s) => s.accent);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -15,9 +17,20 @@ export default function Providers({ children }: { children: React.ReactNode }) {
     setMounted(true);
   }, []);
 
+  // Theme: keep `html.dark` (legacy) and `[data-theme="dark|light"]`
+  // (handoff) in lockstep. Old CSS continues to react to `.dark`;
+  // the new design tokens key off the data attribute.
   useEffect(() => {
-    document.documentElement.classList.toggle('dark', currentTheme === 'dark');
+    const root = document.documentElement;
+    root.classList.toggle('dark', currentTheme === 'dark');
+    root.setAttribute('data-theme', currentTheme);
   }, [currentTheme]);
+
+  // Accent: write the design's --accent* CSS variables on every change so
+  // every component that styles against them updates at once.
+  useEffect(() => {
+    applyAccent(accent);
+  }, [accent]);
 
   const [queryClient] = useState(
     () =>
@@ -42,7 +55,7 @@ export default function Providers({ children }: { children: React.ReactNode }) {
         theme={{
           algorithm: currentTheme === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm,
           token: {
-            colorPrimary: '#f6821f',
+            colorPrimary: accent,
           },
         }}
       >

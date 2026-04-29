@@ -1,11 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { Modal, Input, Form, App, Button } from 'antd';
-import { FolderOutlined, SwapOutlined } from '@ant-design/icons';
+import { App } from 'antd';
+import { EditOutlined, FolderOutlined, SwapOutlined } from '@ant-design/icons';
 import FolderPickerModal from '@/app/components/folder/FolderPickerModal';
 import { renameObject, StorageConfig } from '@/app/lib/r2cache';
 import type { FileItem } from '@/app/hooks/useR2Files';
+import Modal from '@/app/components/ui/Modal';
 
 export interface FileRenameModalProps {
   open: boolean;
@@ -22,7 +23,6 @@ export default function FileRenameModal({
   config,
   onSuccess,
 }: FileRenameModalProps) {
-  const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const { message } = App.useApp();
@@ -30,31 +30,31 @@ export default function FileRenameModal({
   const currentDir = file.key.substring(0, file.key.lastIndexOf('/') + 1);
   const currentDirDisplay = currentDir ? currentDir.replace(/\/$/, '') : '';
   const [directory, setDirectory] = useState(currentDirDisplay);
+  const [filename, setFilename] = useState(file.name);
 
   const handleOk = async () => {
+    const trimmedFilename = filename.trim();
+    if (!trimmedFilename) {
+      message.error('File name cannot be empty');
+      return;
+    }
+    if (trimmedFilename.includes('/')) {
+      message.error('File name cannot contain /');
+      return;
+    }
+
+    let dir = directory ? directory.trim() : '';
+    if (dir && !dir.endsWith('/')) dir += '/';
+
+    const newPath = dir ? `${dir}${trimmedFilename}` : trimmedFilename;
+    if (newPath === file.key) {
+      message.info('No changes made');
+      onClose();
+      return;
+    }
+
+    setLoading(true);
     try {
-      const values = await form.validateFields();
-      let dir = directory ? directory.trim() : '';
-      const filename = values.filename.trim();
-
-      if (!filename) {
-        message.error('File name cannot be empty');
-        return;
-      }
-
-      if (dir && !dir.endsWith('/')) {
-        dir += '/';
-      }
-
-      const newPath = dir ? `${dir}${filename}` : filename;
-
-      if (newPath === file.key) {
-        message.info('No changes made');
-        onClose();
-        return;
-      }
-
-      setLoading(true);
       await renameObject(config, file.key, newPath);
       message.success('File renamed/moved successfully');
       onSuccess?.();
@@ -68,81 +68,83 @@ export default function FileRenameModal({
     }
   };
 
-  const handleCancel = () => {
-    if (!loading) {
-      onClose();
-    }
-  };
+  const footer = (
+    <>
+      <button className="btn" onClick={onClose} disabled={loading}>
+        Cancel
+      </button>
+      <button className="btn btn-primary" onClick={handleOk} disabled={loading || !filename.trim()}>
+        {loading ? 'Renaming…' : 'Rename'}
+      </button>
+    </>
+  );
 
   return (
     <>
       <Modal
-        title="Rename / Move File"
         open={open}
-        onOk={handleOk}
-        onCancel={handleCancel}
-        confirmLoading={loading}
-        okText="Save"
-        cancelText="Cancel"
+        onClose={loading ? () => undefined : onClose}
+        title="Rename file"
+        icon={<EditOutlined style={{ fontSize: 18 }} />}
         width={480}
-        centered
+        footer={footer}
       >
-        <Form form={form} layout="vertical" initialValues={{ filename: file.name }}>
-          <Form.Item
-            label="File Name"
-            name="filename"
-            rules={[
-              { required: true, message: 'Please enter a file name' },
-              {
-                validator: (_, value) => {
-                  if (value && value.includes('/')) {
-                    return Promise.reject(new Error('File name cannot contain /'));
-                  }
-                  return Promise.resolve();
-                },
-              },
-            ]}
-          >
-            <Input placeholder="e.g., document.pdf" />
-          </Form.Item>
+        <div className="field">
+          <div className="field-label">New name</div>
+          <input
+            className="input mono"
+            value={filename}
+            onChange={(e) => setFilename(e.target.value)}
+            autoFocus
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !loading) handleOk();
+            }}
+            disabled={loading}
+          />
+          <div className="field-hint">Renaming triggers a copy + delete on object storage.</div>
+        </div>
 
-          {/* Current Path - read-only display */}
-          <Form.Item label="Location">
-            <div
-              style={{
-                padding: '8px 12px',
-                background: 'var(--bg-secondary)',
-                borderRadius: 6,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 8,
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
-                <FolderOutlined style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
-                <span
-                  style={{
-                    fontFamily: 'monospace',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {directory ? `/${directory}/` : '/ (root)'}
-                </span>
-              </div>
-              <Button
-                size="small"
-                icon={<SwapOutlined />}
-                onClick={() => setFolderPickerOpen(true)}
-                disabled={loading}
+        <div className="field" style={{ marginBottom: 0 }}>
+          <div className="field-label">Location</div>
+          <div
+            style={{
+              padding: '8px 12px',
+              background: 'var(--bg-sunken)',
+              borderRadius: 8,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 8,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+              <FolderOutlined style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+              <span
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 12,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  color: 'var(--text)',
+                }}
               >
-                Move to...
-              </Button>
+                {directory ? `/${directory}/` : '/ (root)'}
+              </span>
             </div>
-          </Form.Item>
-        </Form>
+            <button
+              className="btn"
+              style={{ height: 26, fontSize: 11.5, padding: '0 10px' }}
+              onClick={() => setFolderPickerOpen(true)}
+              disabled={loading}
+            >
+              <SwapOutlined /> Move to…
+            </button>
+          </div>
+        </div>
       </Modal>
 
       {folderPickerOpen && (

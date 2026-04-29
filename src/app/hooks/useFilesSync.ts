@@ -125,26 +125,50 @@ export function useFilesSync(config: StorageConfig | null) {
     );
   }, [config]);
 
-  // Auto-start background sync when bucket changes
+  // Auto-start background sync when bucket/account/provider changes
   useEffect(() => {
     if (!isConfigReady || !config) return;
 
-    const bucketKey = `${config.accountId}:${config.bucket}`;
+    const bucketKey = `${config.provider}:${config.accountId}:${config.bucket}`;
     if (bgStartedRef.current === bucketKey) return; // Already started for this bucket
 
     bgStartedRef.current = bucketKey;
-    useSyncStore.getState().startBackgroundSync();
 
-    startBackgroundSync(config).catch((err) => {
-      console.error('Failed to start background sync:', err);
-      useSyncStore.getState().failBackgroundSync(err instanceof Error ? err.message : String(err));
-    });
+    let cancelled = false;
+    const run = async () => {
+      // Wait for any pending cancel to complete first to avoid the
+      // cancel/start race where the new run_id is invalidated immediately.
+      try {
+        await cancelBackgroundSync();
+      } catch {}
+      if (cancelled) return;
+
+      useSyncStore.getState().resetProgress();
+      useSyncStore.getState().startBackgroundSync();
+
+      try {
+        await startBackgroundSync(config);
+      } catch (err) {
+        console.error('Failed to start background sync:', err);
+        useSyncStore
+          .getState()
+          .failBackgroundSync(err instanceof Error ? err.message : String(err));
+      }
+
+      // Force-refetch the current folder for the new bucket so the file list
+      // doesn't reuse the previous account's results during the transition.
+      queryClient.invalidateQueries({
+        queryKey: ['folder-contents', config.provider, config.accountId, config.bucket],
+      });
+    };
+    run();
 
     return () => {
+      cancelled = true;
       cancelBackgroundSync().catch(() => {});
       bgStartedRef.current = null;
     };
-  }, [isConfigReady, config?.accountId, config?.bucket]);
+  }, [isConfigReady, config?.provider, config?.accountId, config?.bucket, queryClient]);
 
   // Background sync state for return values
   const backgroundSync = useSyncStore((state) => state.backgroundSync);

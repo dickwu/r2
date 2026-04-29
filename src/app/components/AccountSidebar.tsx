@@ -1,47 +1,33 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import {
-  Button,
-  Drawer,
-  Dropdown,
-  App,
-  Spin,
-  Empty,
-  Tooltip,
-  Divider,
-  Space,
-  Typography,
-  Tag,
-} from 'antd';
+import { useState, useMemo } from 'react';
+import { Dropdown, App } from 'antd';
 import type { MenuProps } from 'antd';
 import {
-  UserOutlined,
-  KeyOutlined,
-  DatabaseOutlined,
   PlusOutlined,
   EditOutlined,
   DeleteOutlined,
-  MoreOutlined,
-  CheckCircleFilled,
-  CloudOutlined,
-  RightOutlined,
+  SettingOutlined,
   MenuFoldOutlined,
+  SearchOutlined,
   SwapOutlined,
 } from '@ant-design/icons';
-import { motion, AnimatePresence } from 'framer-motion';
 import { useAccountStore, Token, ProviderAccount } from '@/app/stores/accountStore';
+import { useThemeStore } from '@/app/stores/themeStore';
+import { useCurrentPathStore } from '@/app/stores/currentPathStore';
 import AccountTransferModal from '@/app/components/AccountTransferModal';
-
-const { Text } = Typography;
-
-const SIDEBAR_COLLAPSED_KEY = 'account-sidebar-collapsed';
+import {
+  AccountRow,
+  R2AccountChildren,
+  NonR2AccountChildren,
+} from '@/app/components/AccountSidebarRows';
 
 interface AccountSidebarProps {
   onAddAccount: () => void;
   onEditAccount: (account: ProviderAccount) => void;
   onAddToken: (accountId: string) => void;
   onEditToken: (token: Token) => void;
+  onOpenSettings?: () => void;
 }
 
 export default function AccountSidebar({
@@ -49,10 +35,10 @@ export default function AccountSidebar({
   onEditAccount,
   onAddToken,
   onEditToken,
+  onOpenSettings,
 }: AccountSidebarProps) {
   const accounts = useAccountStore((state) => state.accounts);
   const currentConfig = useAccountStore((state) => state.currentConfig);
-  const loading = useAccountStore((state) => state.loading);
   const selectR2Bucket = useAccountStore((state) => state.selectR2Bucket);
   const selectAwsBucket = useAccountStore((state) => state.selectAwsBucket);
   const selectMinioBucket = useAccountStore((state) => state.selectMinioBucket);
@@ -63,62 +49,85 @@ export default function AccountSidebar({
   const deleteRustfsAccount = useAccountStore((state) => state.deleteRustfsAccount);
   const deleteToken = useAccountStore((state) => state.deleteToken);
 
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [selectedAccount, setSelectedAccount] = useState<ProviderAccount | null>(null);
+  const sidebarStyle = useThemeStore((state) => state.sidebarStyle);
+  const cycleSidebarStyle = useThemeStore((state) => state.cycleSidebarStyle);
+  const setSidebarStyle = useThemeStore((state) => state.setSidebarStyle);
+  const setCurrentPath = useCurrentPathStore((state) => state.setCurrentPath);
+
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [search, setSearch] = useState('');
   const [transferModalOpen, setTransferModalOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
-      return stored === 'true';
-    }
-    return false;
-  });
 
   const { message, modal } = App.useApp();
 
-  // Sync selectedAccount with store when drawer is open and accounts update
-  useEffect(() => {
-    if (drawerOpen && selectedAccount) {
-      const updatedAccount = accounts.find((a) => a.account.id === selectedAccount.account.id);
-      if (updatedAccount) {
-        setSelectedAccount(updatedAccount);
+  const collapsed = sidebarStyle === 'collapsed';
+
+  const sidebarCls = [
+    'sidebar',
+    sidebarStyle === 'collapsed' ? 'collapsed-sidebar' : '',
+    sidebarStyle === 'floating' ? 'floating-sidebar' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  const searchLower = search.trim().toLowerCase();
+
+  const filteredAccounts = useMemo(() => {
+    if (!searchLower) return accounts;
+    return accounts.filter((a) => {
+      const nameMatch =
+        a.account.name?.toLowerCase().includes(searchLower) ||
+        a.account.id.toLowerCase().includes(searchLower);
+      if (nameMatch) return true;
+      if (a.provider === 'r2') {
+        return a.tokens.some(
+          (td) =>
+            td.token.name?.toLowerCase().includes(searchLower) ||
+            td.buckets.some((b) => b.name.toLowerCase().includes(searchLower))
+        );
       }
+      return a.buckets.some((b) => b.name.toLowerCase().includes(searchLower));
+    });
+  }, [accounts, searchLower]);
+
+  function toggleExpanded(id: string) {
+    // Clicking an account icon while collapsed expands the sidebar and opens that account.
+    if (sidebarStyle === 'collapsed') {
+      setSidebarStyle('full');
+      setExpanded((prev) => ({ ...prev, [id]: true }));
+      return;
     }
-  }, [accounts, drawerOpen, selectedAccount?.account.id]);
-
-  function toggleCollapse(value: boolean) {
-    setCollapsed(value);
-    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(value));
+    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
   }
 
-  function handleAccountClick(accountData: ProviderAccount) {
-    setSelectedAccount(accountData);
-    setDrawerOpen(true);
-  }
-
-  async function handleSelectBucket(
-    provider: ProviderAccount['provider'],
-    id: string | number,
-    bucketName: string
-  ) {
+  async function handleSelectR2Bucket(tokenId: number, bucketName: string) {
     try {
-      if (provider === 'r2') {
-        await selectR2Bucket(id as number, bucketName);
-      } else if (provider === 'aws') {
-        await selectAwsBucket(id as string, bucketName);
-      } else if (provider === 'minio') {
-        await selectMinioBucket(id as string, bucketName);
-      } else {
-        await selectRustfsBucket(id as string, bucketName);
-      }
-      message.success(`Switched to ${bucketName}`);
-      setDrawerOpen(false);
+      setCurrentPath('');
+      await selectR2Bucket(tokenId, bucketName);
     } catch {
       message.error('Failed to switch bucket');
     }
   }
 
-  async function handleDeleteAccount(account: ProviderAccount) {
+  async function handleSelectNonR2Bucket(
+    accountData: ProviderAccount & { provider: 'aws' | 'minio' | 'rustfs' },
+    bucketName: string
+  ) {
+    try {
+      setCurrentPath('');
+      if (accountData.provider === 'aws') {
+        await selectAwsBucket(accountData.account.id, bucketName);
+      } else if (accountData.provider === 'minio') {
+        await selectMinioBucket(accountData.account.id, bucketName);
+      } else {
+        await selectRustfsBucket(accountData.account.id, bucketName);
+      }
+    } catch {
+      message.error('Failed to switch bucket');
+    }
+  }
+
+  async function handleDeleteAccount(accountData: ProviderAccount) {
     modal.confirm({
       title: 'Delete Account',
       content:
@@ -127,20 +136,16 @@ export default function AccountSidebar({
       okButtonProps: { danger: true },
       onOk: async () => {
         try {
-          if (account.provider === 'r2') {
-            await deleteAccount(account.account.id);
-          } else if (account.provider === 'aws') {
-            await deleteAwsAccount(account.account.id);
-          } else if (account.provider === 'minio') {
-            await deleteMinioAccount(account.account.id);
+          if (accountData.provider === 'r2') {
+            await deleteAccount(accountData.account.id);
+          } else if (accountData.provider === 'aws') {
+            await deleteAwsAccount(accountData.account.id);
+          } else if (accountData.provider === 'minio') {
+            await deleteMinioAccount(accountData.account.id);
           } else {
-            await deleteRustfsAccount(account.account.id);
+            await deleteRustfsAccount(accountData.account.id);
           }
           message.success('Account deleted');
-          if (selectedAccount?.account.id === account.account.id) {
-            setDrawerOpen(false);
-            setSelectedAccount(null);
-          }
         } catch {
           message.error('Failed to delete account');
         }
@@ -191,6 +196,16 @@ export default function AccountSidebar({
       });
     }
 
+    items.push({
+      key: 'transfer',
+      label: 'Transfer accounts…',
+      icon: <SwapOutlined />,
+      onClick: (e) => {
+        e.domEvent.stopPropagation();
+        setTransferModalOpen(true);
+      },
+    });
+
     items.push({ type: 'divider' });
     items.push({
       key: 'delete',
@@ -225,466 +240,137 @@ export default function AccountSidebar({
     ];
   }
 
-  function getProviderShortLabel(provider: ProviderAccount['provider']) {
-    return provider === 'r2'
-      ? 'R2'
-      : provider === 'aws'
-        ? 'AWS'
-        : provider === 'minio'
-          ? 'MIO'
-          : 'RFS';
-  }
-
-  function getProviderColor(provider: ProviderAccount['provider']) {
-    return provider === 'r2'
-      ? 'blue'
-      : provider === 'aws'
-        ? 'gold'
-        : provider === 'minio'
-          ? 'cyan'
-          : 'purple';
-  }
-
-  if (loading) {
-    return (
-      <div className={`account-sidebar ${collapsed ? 'collapsed' : ''}`}>
-        <div className="sidebar-header">
-          <div className="sidebar-header-title" onClick={() => toggleCollapse(!collapsed)}>
-            <CloudOutlined className="sidebar-header-icon" />
-            {!collapsed && <span>Accounts</span>}
-          </div>
-          {!collapsed && (
-            <Button
-              type="text"
-              size="small"
-              icon={<MenuFoldOutlined />}
-              onClick={() => toggleCollapse(true)}
-            />
-          )}
-        </div>
-        {!collapsed && (
-          <div className="sidebar-loading">
-            <Spin size="small" />
-          </div>
-        )}
-      </div>
-    );
-  }
-
   return (
-    <div className={`account-sidebar ${collapsed ? 'collapsed' : ''}`}>
-      <div className="sidebar-header">
-        <div
-          className="sidebar-header-title"
-          onClick={() => collapsed && toggleCollapse(false)}
-          style={{ cursor: collapsed ? 'pointer' : 'default' }}
-        >
-          <CloudOutlined className="sidebar-header-icon" />
-          {!collapsed && <span>Accounts</span>}
-        </div>
-        {!collapsed && (
-          <Space size={4}>
-            <Tooltip title="Add Account">
-              <Button type="text" size="small" icon={<PlusOutlined />} onClick={onAddAccount} />
-            </Tooltip>
-            <Tooltip title="Collapse">
-              <Button
-                type="text"
-                size="small"
-                icon={<MenuFoldOutlined />}
-                onClick={() => toggleCollapse(true)}
-              />
-            </Tooltip>
-          </Space>
+    <>
+      <aside className={sidebarCls}>
+        {/* Standalone collapse toggle row, shown only when collapsed —
+            sits between the brand and the account list */}
+        {collapsed && (
+          <div className="sb-collapse-rail">
+            <button
+              className="sb-icon-btn"
+              title="Cycle sidebar style"
+              onClick={cycleSidebarStyle}
+            >
+              <MenuFoldOutlined style={{ fontSize: 14 }} />
+            </button>
+          </div>
         )}
-      </div>
 
-      {collapsed ? (
-        <div className="sidebar-collapsed-content">
-          {accounts.map((accountData) => {
-            const account = accountData.account;
+        {/* Search + collapse toggle, single row in full mode */}
+        {!collapsed && (
+          <div className="sb-search-row">
+            <div className="sb-search">
+              <SearchOutlined className="search-icon" style={{ fontSize: 13 }} />
+              <input
+                placeholder="Filter accounts & buckets"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+            <button
+              className="sb-icon-btn"
+              title="Cycle sidebar style"
+              onClick={cycleSidebarStyle}
+            >
+              <MenuFoldOutlined style={{ fontSize: 14 }} />
+            </button>
+          </div>
+        )}
+
+        {/* Section label */}
+        {!collapsed && <div className="sb-section-label">Accounts</div>}
+
+        {/* Account tree */}
+        <div className="sb-scroll">
+          {filteredAccounts.map((accountData) => {
+            const id = accountData.account.id;
+            const isExpanded = !!expanded[id];
             const isCurrentAccount =
-              currentConfig?.account_id === account.id &&
-              currentConfig?.provider === accountData.provider;
-            const tokenCount = accountData.provider === 'r2' ? accountData.tokens.length : 0;
-            const bucketCount =
-              accountData.provider === 'r2'
-                ? accountData.tokens.reduce((sum, t) => sum + t.buckets.length, 0)
-                : accountData.buckets.length;
-            const displayName = account.name || account.id.slice(0, 12);
-            const shortName = displayName.slice(0, 3).toUpperCase();
-            const providerLabel =
-              accountData.provider === 'r2'
-                ? 'R2'
-                : accountData.provider === 'aws'
-                  ? 'AWS'
-                  : accountData.provider === 'minio'
-                    ? 'MinIO'
-                    : 'RustFS';
+              currentConfig?.account_id === id && currentConfig?.provider === accountData.provider;
 
             return (
-              <Tooltip
-                key={account.id}
-                title={
-                  <div>
-                    <div style={{ fontWeight: 500 }}>{displayName}</div>
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>
-                      {providerLabel} ·{' '}
-                      {tokenCount > 0 ? `${tokenCount} token${tokenCount !== 1 ? 's' : ''}, ` : ''}
-                      {bucketCount} bucket{bucketCount !== 1 ? 's' : ''}
-                    </div>
-                  </div>
-                }
-                placement="right"
-              >
-                <motion.div
-                  className={`collapsed-account-item ${isCurrentAccount ? 'current' : ''}`}
-                  onClick={() => handleAccountClick(accountData)}
-                  style={{ position: 'relative' }}
-                  whileHover={{ scale: 1.1, y: -1 }}
-                  whileTap={{ scale: 0.95 }}
-                  transition={{ type: 'spring', stiffness: 400, damping: 20 }}
-                >
-                  <span className="collapsed-account-text">{shortName}</span>
-                  <span
-                    style={{
-                      position: 'absolute',
-                      top: 2,
-                      right: 2,
-                      width: 8,
-                      height: 8,
-                      borderRadius: '50%',
-                      backgroundColor:
-                        accountData.provider === 'r2'
-                          ? '#1677ff'
-                          : accountData.provider === 'aws'
-                            ? '#faad14'
-                            : accountData.provider === 'minio'
-                              ? '#13c2c2'
-                              : '#722ed1',
-                    }}
+              <div className="sb-account" key={id}>
+                <AccountRow
+                  accountData={accountData}
+                  expanded={isExpanded}
+                  collapsed={collapsed}
+                  onToggle={() => toggleExpanded(id)}
+                  contextMenu={getAccountContextMenu(accountData)}
+                />
+
+                {isExpanded && !collapsed && accountData.provider === 'r2' && (
+                  <R2AccountChildren
+                    accountData={accountData}
+                    currentTokenId={currentConfig?.token_id}
+                    currentBucket={currentConfig?.bucket}
+                    search={searchLower}
+                    onSelectBucket={handleSelectR2Bucket}
+                    getTokenContextMenu={getTokenContextMenu}
                   />
-                  {isCurrentAccount && <span className="collapsed-current-dot" />}
-                </motion.div>
-              </Tooltip>
+                )}
+
+                {isExpanded && !collapsed && accountData.provider !== 'r2' && (
+                  <NonR2AccountChildren
+                    accountData={
+                      accountData as ProviderAccount & {
+                        provider: 'aws' | 'minio' | 'rustfs';
+                      }
+                    }
+                    currentBucket={currentConfig?.bucket}
+                    isCurrentAccount={isCurrentAccount}
+                    search={searchLower}
+                    onSelectBucket={(bucketName) =>
+                      handleSelectNonR2Bucket(
+                        accountData as ProviderAccount & {
+                          provider: 'aws' | 'minio' | 'rustfs';
+                        },
+                        bucketName
+                      )
+                    }
+                  />
+                )}
+              </div>
             );
           })}
-          <Tooltip title="Add Account" placement="right">
-            <motion.div
-              className="collapsed-account-item add"
-              onClick={onAddAccount}
-              whileHover={{ scale: 1.1, y: -1 }}
-              whileTap={{ scale: 0.95 }}
-              transition={{ type: 'spring', stiffness: 400, damping: 20 }}
-            >
-              <PlusOutlined />
-            </motion.div>
-          </Tooltip>
-        </div>
-      ) : (
-        <div className="sidebar-content">
-          {accounts.length === 0 ? (
-            <div className="sidebar-empty">
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No accounts">
-                <Button type="primary" icon={<PlusOutlined />} onClick={onAddAccount}>
-                  Add Account
-                </Button>
-              </Empty>
-            </div>
-          ) : (
-            <div className="account-menu">
-              <AnimatePresence>
-                {accounts.map((accountData) => {
-                  const account = accountData.account;
-                  const isCurrentAccount =
-                    currentConfig?.account_id === account.id &&
-                    currentConfig?.provider === accountData.provider;
-                  const tokenCount = accountData.provider === 'r2' ? accountData.tokens.length : 0;
-                  const bucketCount =
-                    accountData.provider === 'r2'
-                      ? accountData.tokens.reduce((sum, t) => sum + t.buckets.length, 0)
-                      : accountData.buckets.length;
 
-                  return (
-                    <motion.div
-                      key={account.id}
-                      className={`account-menu-item-wrapper ${isCurrentAccount ? 'selected' : ''}`}
-                      onClick={() => handleAccountClick(accountData)}
-                      initial={{ opacity: 0, x: -8 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: -8 }}
-                      whileHover={{ backgroundColor: 'var(--color-sidebar-hover)', x: 2 }}
-                      whileTap={{ scale: 0.98 }}
-                      transition={{ duration: 0.15 }}
-                    >
-                      {isCurrentAccount && (
-                        <motion.div
-                          className="selected-indicator-bar"
-                          layoutId="selectedAccount"
-                          transition={{ type: 'spring', stiffness: 500, damping: 35 }}
-                        />
-                      )}
-                      <div className="account-menu-item">
-                        <div
-                          style={{
-                            position: 'relative',
-                            display: 'inline-flex',
-                            marginRight: 8,
-                            width: '20px',
-                            textAlign: 'center',
-                          }}
-                        >
-                          <Tag
-                            color={getProviderColor(accountData.provider)}
-                            style={{
-                              position: 'absolute',
-                              top: -4,
-                              right: -8,
-                              fontSize: 10,
-                              lineHeight: '14px',
-                              padding: '0 4px',
-                              height: 16,
-                            }}
-                          >
-                            {getProviderShortLabel(accountData.provider)}
-                          </Tag>
-                        </div>
-                        <div className="account-menu-content">
-                          <span className="account-menu-name">
-                            {account.name || account.id.slice(0, 12) + '...'}
-                          </span>
-                          <Text type="secondary" className="account-menu-meta">
-                            {tokenCount > 0
-                              ? `${tokenCount} token${tokenCount !== 1 ? 's' : ''}, `
-                              : ''}
-                            {bucketCount} bucket{bucketCount !== 1 ? 's' : ''}
-                          </Text>
-                        </div>
-                        <Space size={4}>
-                          {isCurrentAccount && (
-                            <motion.span
-                              initial={{ scale: 0 }}
-                              animate={{ scale: 1 }}
-                              transition={{ type: 'spring', stiffness: 500, damping: 25 }}
-                            >
-                              <CheckCircleFilled className="current-indicator" />
-                            </motion.span>
-                          )}
-                          <Dropdown
-                            menu={{ items: getAccountContextMenu(accountData) }}
-                            trigger={['click']}
-                          >
-                            <Button
-                              type="text"
-                              size="small"
-                              icon={<MoreOutlined />}
-                              className="account-menu-action"
-                              onClick={(e) => e.stopPropagation()}
-                            />
-                          </Dropdown>
-                          <RightOutlined className="account-menu-arrow" />
-                        </Space>
-                      </div>
-                    </motion.div>
-                  );
-                })}
-              </AnimatePresence>
+          {filteredAccounts.length === 0 && !collapsed && (
+            <div
+              style={{
+                padding: '16px 12px',
+                fontSize: 12,
+                color: 'var(--text-subtle)',
+                textAlign: 'center',
+              }}
+            >
+              {searchLower ? 'No matching accounts' : 'No accounts yet'}
             </div>
           )}
         </div>
-      )}
 
-      <div className={`sidebar-footer${collapsed ? 'collapsed' : ''}`}>
-        {collapsed ? (
-          <Tooltip title="Import / Export" placement="right">
-            <div className="collapsed-account-item" onClick={() => setTransferModalOpen(true)}>
-              <SwapOutlined />
-            </div>
-          </Tooltip>
-        ) : (
-          <Button block icon={<SwapOutlined />} onClick={() => setTransferModalOpen(true)}>
-            Import / Export
-          </Button>
-        )}
-      </div>
+        {/* Footer */}
+        <div className="sb-footer">
+          <button className="sb-footer-btn" onClick={onAddAccount}>
+            <PlusOutlined style={{ fontSize: 11 }} />
+            {!collapsed && <span>Add account</span>}
+          </button>
+          {!collapsed && (
+            <button
+              className="sb-icon-btn"
+              onClick={onOpenSettings ?? (() => undefined)}
+              title="Settings"
+              style={{ width: 30, height: 30 }}
+            >
+              <SettingOutlined style={{ fontSize: 14 }} />
+            </button>
+          )}
+        </div>
+      </aside>
 
       {transferModalOpen && (
         <AccountTransferModal open={true} onClose={() => setTransferModalOpen(false)} />
       )}
-
-      {/* Tokens & Buckets Drawer */}
-      <Drawer
-        title={
-          <Space>
-            <UserOutlined />
-            <span>
-              {selectedAccount?.account.name || selectedAccount?.account.id.slice(0, 12) + '...'}
-            </span>
-            {selectedAccount && (
-              <Tag
-                color={
-                  selectedAccount.provider === 'r2'
-                    ? 'blue'
-                    : selectedAccount.provider === 'aws'
-                      ? 'gold'
-                      : selectedAccount.provider === 'minio'
-                        ? 'cyan'
-                        : 'purple'
-                }
-              >
-                {selectedAccount.provider === 'r2'
-                  ? 'R2'
-                  : selectedAccount.provider === 'aws'
-                    ? 'AWS'
-                    : selectedAccount.provider === 'minio'
-                      ? 'MinIO'
-                      : 'RustFS'}
-              </Tag>
-            )}
-          </Space>
-        }
-        placement="right"
-        onClose={() => setDrawerOpen(false)}
-        open={drawerOpen}
-        size={320}
-        push={false}
-        extra={
-          selectedAccount?.provider === 'r2' ? (
-            <Button
-              type="text"
-              size="small"
-              icon={<PlusOutlined />}
-              onClick={() => {
-                if (selectedAccount) {
-                  onAddToken(selectedAccount.account.id);
-                }
-              }}
-            >
-              Add Token
-            </Button>
-          ) : null
-        }
-      >
-        {selectedAccount?.provider === 'r2' ? (
-          selectedAccount.tokens.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No tokens">
-              <Button
-                type="primary"
-                icon={<PlusOutlined />}
-                onClick={() => onAddToken(selectedAccount.account.id)}
-              >
-                Add Token
-              </Button>
-            </Empty>
-          ) : (
-            selectedAccount.tokens.map((tokenData, index) => {
-              const token = tokenData.token;
-              const isCurrentToken =
-                currentConfig?.provider === 'r2' && currentConfig?.token_id === token.id;
-
-              return (
-                <div key={token.id}>
-                  {index > 0 && <Divider style={{ margin: '16px 0' }} />}
-
-                  <div className="drawer-token-header">
-                    <div className="drawer-token-info">
-                      <KeyOutlined className="drawer-token-icon" />
-                      <span className="drawer-token-name">{token.name || 'Unnamed Token'}</span>
-                      {isCurrentToken && <CheckCircleFilled className="current-indicator" />}
-                    </div>
-                    <Dropdown menu={{ items: getTokenContextMenu(token) }} trigger={['click']}>
-                      <Button type="text" size="small" icon={<MoreOutlined />} />
-                    </Dropdown>
-                  </div>
-
-                  <div className="drawer-buckets">
-                    {tokenData.buckets.map((bucket) => {
-                      const isCurrentBucket =
-                        isCurrentToken && currentConfig?.bucket === bucket.name;
-
-                      return (
-                        <Tooltip
-                          key={bucket.name}
-                          title={
-                            bucket.public_domain
-                              ? `${bucket.public_domain_scheme || 'https'}://${bucket.public_domain}`
-                              : null
-                          }
-                          placement="right"
-                        >
-                          <motion.div
-                            className={`drawer-bucket-item ${isCurrentBucket ? 'current' : ''}`}
-                            whileHover={{ x: 3, backgroundColor: 'var(--color-accent-bg)' }}
-                            whileTap={{ scale: 0.98 }}
-                            transition={{ duration: 0.15 }}
-                            onClick={() => handleSelectBucket('r2', token.id, bucket.name)}
-                          >
-                            <DatabaseOutlined className="drawer-bucket-icon" />
-                            <span className="drawer-bucket-name">{bucket.name}</span>
-                            {isCurrentBucket && (
-                              <CheckCircleFilled className="current-indicator active" />
-                            )}
-                          </motion.div>
-                        </Tooltip>
-                      );
-                    })}
-                    {tokenData.buckets.length === 0 && (
-                      <Text type="secondary" style={{ padding: '8px 12px', display: 'block' }}>
-                        No buckets configured
-                      </Text>
-                    )}
-                  </div>
-                </div>
-              );
-            })
-          )
-        ) : selectedAccount ? (
-          <div className="drawer-buckets">
-            {selectedAccount.buckets.map((bucket) => {
-              const isCurrentBucket =
-                currentConfig?.provider === selectedAccount.provider &&
-                currentConfig?.account_id === selectedAccount.account.id &&
-                currentConfig?.bucket === bucket.name;
-
-              return (
-                <Tooltip
-                  key={bucket.name}
-                  title={
-                    bucket.public_domain_host
-                      ? `${bucket.public_domain_scheme || 'https'}://${bucket.public_domain_host}`
-                      : null
-                  }
-                  placement="right"
-                >
-                  <motion.div
-                    className={`drawer-bucket-item ${isCurrentBucket ? 'current' : ''}`}
-                    whileHover={{ x: 3, backgroundColor: 'var(--color-accent-bg)' }}
-                    whileTap={{ scale: 0.98 }}
-                    transition={{ duration: 0.15 }}
-                    onClick={() =>
-                      handleSelectBucket(
-                        selectedAccount.provider,
-                        selectedAccount.account.id,
-                        bucket.name
-                      )
-                    }
-                  >
-                    <DatabaseOutlined className="drawer-bucket-icon" />
-                    <span className="drawer-bucket-name">{bucket.name}</span>
-                    {isCurrentBucket && <CheckCircleFilled className="current-indicator active" />}
-                  </motion.div>
-                </Tooltip>
-              );
-            })}
-            {selectedAccount.buckets.length === 0 && (
-              <Text type="secondary" style={{ padding: '8px 12px', display: 'block' }}>
-                No buckets configured
-              </Text>
-            )}
-          </div>
-        ) : null}
-      </Drawer>
-    </div>
+    </>
   );
 }
 

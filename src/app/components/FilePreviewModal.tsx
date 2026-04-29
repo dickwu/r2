@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Modal, Button, Space, Typography, App, Image, Spin } from 'antd';
+import { Image, Spin, App } from 'antd';
 import {
   LinkOutlined,
   CopyOutlined,
+  DownloadOutlined,
   FileOutlined,
   FileImageOutlined,
   PlaySquareOutlined,
@@ -20,42 +21,16 @@ import { generateSignedUrl, uploadContent, StorageConfig } from '@/app/lib/r2cac
 import { TEXT_EXTENSIONS } from '@/app/components/preview/TextViewer';
 import { useVideoThumbnail } from '@/app/hooks/useVideoThumbnail';
 import { usePreviewStore } from '@/app/stores/previewStore';
+import Modal from '@/app/components/ui/Modal';
 
 const PDFViewer = dynamic(() => import('@/app/components/preview/PDFViewer'), { ssr: false });
 const TextViewer = dynamic(() => import('@/app/components/preview/TextViewer'), { ssr: false });
-
-const { Text, Paragraph } = Typography;
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogv', 'mov', 'm4v'];
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac', 'opus'];
 const PDF_EXTENSIONS = ['pdf'];
 
-function getFileExtension(filename: string): string {
-  return filename.split('.').pop()?.toLowerCase() || '';
-}
-
-function isImageFile(filename: string): boolean {
-  return IMAGE_EXTENSIONS.includes(getFileExtension(filename));
-}
-
-function isVideoFile(filename: string): boolean {
-  return VIDEO_EXTENSIONS.includes(getFileExtension(filename));
-}
-
-function isAudioFile(filename: string): boolean {
-  return AUDIO_EXTENSIONS.includes(getFileExtension(filename));
-}
-
-function isPdfFile(filename: string): boolean {
-  return PDF_EXTENSIONS.includes(getFileExtension(filename));
-}
-
-function isTextFile(filename: string): boolean {
-  return TEXT_EXTENSIONS.includes(getFileExtension(filename));
-}
-
-// Map file extensions to MIME types for text files
 const TEXT_CONTENT_TYPES: Record<string, string> = {
   js: 'application/javascript',
   ts: 'application/typescript',
@@ -83,9 +58,37 @@ const TEXT_CONTENT_TYPES: Record<string, string> = {
   env: 'text/plain',
 };
 
+function getExt(filename: string): string {
+  return filename.split('.').pop()?.toLowerCase() || '';
+}
+
 function getContentType(filename: string): string {
-  const ext = filename.split('.').pop()?.toLowerCase() || '';
-  return TEXT_CONTENT_TYPES[ext] || 'text/plain';
+  return TEXT_CONTENT_TYPES[getExt(filename)] || 'text/plain';
+}
+
+function isImageFile(f: string) {
+  return IMAGE_EXTENSIONS.includes(getExt(f));
+}
+function isVideoFile(f: string) {
+  return VIDEO_EXTENSIONS.includes(getExt(f));
+}
+function isAudioFile(f: string) {
+  return AUDIO_EXTENSIONS.includes(getExt(f));
+}
+function isPdfFile(f: string) {
+  return PDF_EXTENSIONS.includes(getExt(f));
+}
+function isTextFile(f: string) {
+  return TEXT_EXTENSIONS.includes(getExt(f));
+}
+
+function fileTypeIcon(filename: string, size = 18): React.ReactNode {
+  if (isImageFile(filename)) return <FileImageOutlined style={{ fontSize: size }} />;
+  if (isVideoFile(filename)) return <PlaySquareOutlined style={{ fontSize: size }} />;
+  if (isAudioFile(filename)) return <SoundOutlined style={{ fontSize: size }} />;
+  if (isPdfFile(filename)) return <FilePdfOutlined style={{ fontSize: size }} />;
+  if (isTextFile(filename)) return <FileTextOutlined style={{ fontSize: size }} />;
+  return <FileOutlined style={{ fontSize: size }} />;
 }
 
 interface FilePreviewModalProps {
@@ -102,22 +105,16 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   const [loading, setLoading] = useState(false);
   const [windowSize, setWindowSize] = useState({ width: 0, height: 0 });
 
-  // Track window size for responsive behavior
   useEffect(() => {
     if (typeof window === 'undefined') return;
-
-    const updateSize = () => {
+    const updateSize = () =>
       setWindowSize({ width: window.innerWidth, height: window.innerHeight });
-    };
-
     updateSize();
     window.addEventListener('resize', updateSize);
     return () => window.removeEventListener('resize', updateSize);
   }, []);
 
-  // Previewable (non-folder) files for keyboard navigation
   const previewableFiles = useMemo(() => files.filter((f) => !f.isFolder), [files]);
-
   const currentIndex = useMemo(
     () => (file ? previewableFiles.findIndex((f) => f.key === file.key) : -1),
     [file, previewableFiles]
@@ -126,11 +123,9 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   // Keyboard navigation: arrow keys to switch files
   useEffect(() => {
     if (!isOpen || previewableFiles.length <= 1) return;
-
     const handleKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
         navigate('prev');
@@ -138,7 +133,6 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
         e.preventDefault();
         navigate('next');
       } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-        const tag = (e.target as HTMLElement)?.tagName;
         const isScrollable =
           tag === 'PRE' ||
           tag === 'CODE' ||
@@ -149,7 +143,6 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
         }
       }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, previewableFiles.length, navigate]);
@@ -165,16 +158,12 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
 
   const handleSaveContent = useCallback(
     async (content: string) => {
-      if (!file || !config || !hasCredentials) {
-        throw new Error('Missing credentials or file info');
-      }
-
+      if (!file || !config || !hasCredentials) throw new Error('Missing credentials or file info');
       try {
         await uploadContent(config, file.key, content, getContentType(file.name));
         message.success('File saved successfully');
         onFileUpdated?.();
       } catch (err) {
-        console.error('Failed to save file:', err);
         message.error('Failed to save file');
         throw err;
       }
@@ -182,7 +171,6 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
     [file, config, hasCredentials, message, onFileUpdated]
   );
 
-  // Generate signed URL when modal opens or file changes
   useEffect(() => {
     if (!isOpen || !file) {
       setSignedUrl(null);
@@ -200,10 +188,7 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
       setLoading(true);
       generateSignedUrl(config, file.key)
         .then(setSignedUrl)
-        .catch((e) => {
-          console.error('Failed to generate signed URL:', e);
-          setSignedUrl(null);
-        })
+        .catch(() => setSignedUrl(null))
         .finally(() => setLoading(false));
       return;
     }
@@ -214,7 +199,6 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   if (!file) return null;
 
   const fileUrl = signedUrl;
-
   const isImage = isImageFile(file.name);
   const isVideo = isVideoFile(file.name);
   const isAudio = isAudioFile(file.name);
@@ -222,18 +206,17 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   const isText = isTextFile(file.name);
   const { thumbnailSrc: videoPoster } = useVideoThumbnail(isVideo ? fileUrl : null);
 
-  async function handleOpenUrl() {
-    if (!fileUrl) {
-      message.warning('No public domain configured');
-      return;
-    }
-    try {
-      await openUrl(fileUrl);
-    } catch (e) {
-      console.error('Failed to open URL:', e);
-      message.error('Failed to open URL');
-    }
-  }
+  const getModalWidth = () => {
+    const width = windowSize.width || (typeof window !== 'undefined' ? window.innerWidth : 1024);
+    if (width < 640) return '95%';
+    if (width < 1024) return '90%';
+    return 1100;
+  };
+
+  const getPreviewMaxHeight = () => {
+    const height = windowSize.height || (typeof window !== 'undefined' ? window.innerHeight : 768);
+    return `${Math.min(height * 0.55, 700)}px`;
+  };
 
   async function handleCopyUrl() {
     if (!fileUrl) {
@@ -243,63 +226,100 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
     try {
       await navigator.clipboard.writeText(fileUrl);
       message.success('URL copied to clipboard');
-    } catch (e) {
-      console.error('Failed to copy URL:', e);
+    } catch {
       message.error('Failed to copy URL');
     }
   }
 
-  const getModalWidth = () => {
-    const width = windowSize.width || (typeof window !== 'undefined' ? window.innerWidth : 1024);
-    if (width < 640) return '95%';
-    if (width < 1024) return '90%';
-    return '85%';
-  };
+  async function handleOpenUrl() {
+    if (!fileUrl) {
+      message.warning('No public domain configured');
+      return;
+    }
+    try {
+      await openUrl(fileUrl);
+    } catch {
+      message.error('Failed to open URL');
+    }
+  }
 
-  const getPreviewMaxHeight = () => {
-    const height = windowSize.height || (typeof window !== 'undefined' ? window.innerHeight : 768);
-    return `${Math.min(height * 0.6, 800)}px`;
-  };
+  // Build file size + modified subtitle
+  const fileSizeStr = file.size
+    ? file.size < 1024
+      ? `${file.size} B`
+      : file.size < 1024 * 1024
+        ? `${(file.size / 1024).toFixed(1)} KB`
+        : `${(file.size / (1024 * 1024)).toFixed(1)} MB`
+    : null;
+  const modifiedStr = file.lastModified
+    ? new Date(file.lastModified).toLocaleDateString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      })
+    : null;
+  const subtitle = [fileSizeStr, modifiedStr].filter(Boolean).join(' · ') || undefined;
+
+  // Navigation counter
+  const navCounter =
+    previewableFiles.length > 1 ? `${currentIndex + 1} / ${previewableFiles.length}` : undefined;
+
+  const footer = (
+    <>
+      {/* Left: copy URL */}
+      <span className="left" style={{ display: 'flex', gap: 6 }}>
+        <button className="btn" onClick={handleOpenUrl} disabled={!fileUrl}>
+          <LinkOutlined /> Open URL
+        </button>
+        <button className="btn" onClick={handleCopyUrl} disabled={!fileUrl}>
+          <CopyOutlined /> Copy URL
+        </button>
+      </span>
+
+      {/* Navigation */}
+      {previewableFiles.length > 1 && (
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <button className="btn" onClick={() => navigate('prev')} style={{ padding: '0 10px' }}>
+            <LeftOutlined />
+          </button>
+          <span
+            style={{ fontSize: 12, color: 'var(--text-muted)', minWidth: 48, textAlign: 'center' }}
+          >
+            {navCounter}
+          </span>
+          <button className="btn" onClick={() => navigate('next')} style={{ padding: '0 10px' }}>
+            <RightOutlined />
+          </button>
+        </span>
+      )}
+
+      <button className="btn btn-primary" onClick={close}>
+        <DownloadOutlined /> Close
+      </button>
+    </>
+  );
+
+  const modalWidth = getModalWidth();
 
   return (
     <Modal
       open={isOpen}
-      onCancel={close}
-      title={
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span
-            style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-          >
-            {file.name}
-          </span>
-          {previewableFiles.length > 1 && (
-            <Text
-              type="secondary"
-              style={{ fontSize: 12, flexShrink: 0, marginRight: '30px', marginBottom: '30px' }}
-            >
-              {currentIndex + 1} / {previewableFiles.length}
-            </Text>
-          )}
-        </div>
-      }
-      footer={null}
-      width={getModalWidth()}
-      centered
-      destroyOnHidden
-      style={{ maxWidth: 1400 }}
+      onClose={close}
+      title={file.name}
+      subtitle={subtitle}
+      icon={fileTypeIcon(file.name)}
+      width={typeof modalWidth === 'number' ? modalWidth : undefined}
+      footer={footer}
     >
-      <div style={{ textAlign: 'center', marginBottom: 24 }}>
+      {/* Preview area */}
+      <div style={{ textAlign: 'center', marginBottom: 16 }}>
         {loading ? (
           <Spin />
         ) : isImage && fileUrl ? (
           <Image
             src={fileUrl}
             alt={file.name}
-            style={{
-              maxHeight: getPreviewMaxHeight(),
-              maxWidth: '100%',
-              objectFit: 'contain',
-            }}
+            style={{ maxHeight: getPreviewMaxHeight(), maxWidth: '100%', objectFit: 'contain' }}
           />
         ) : isVideo && fileUrl ? (
           <video
@@ -329,78 +349,45 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
             onSave={handleSaveContent}
           />
         ) : isImage ? (
-          <FileImageOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
+          <FileImageOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
         ) : isVideo ? (
-          <PlaySquareOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
+          <PlaySquareOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
         ) : isAudio ? (
-          <SoundOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
+          <SoundOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
         ) : isPdf ? (
-          <FilePdfOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
+          <FilePdfOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
         ) : isText ? (
-          <FileTextOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
+          <FileTextOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
         ) : (
-          <FileOutlined style={{ fontSize: 40, color: 'var(--color-accent)' }} />
+          <FileOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
         )}
       </div>
 
+      {/* URL display */}
       {fileUrl ? (
-        <Paragraph
+        <div
           style={{
-            background: 'var(--ant-color-fill-tertiary)',
-            padding: '12px 16px',
+            background: 'var(--bg-sunken)',
+            padding: '10px 14px',
             borderRadius: 8,
-            marginBottom: 24,
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11.5,
+            color: 'var(--text-muted)',
             wordBreak: 'break-all',
+            lineHeight: 1.5,
           }}
         >
-          <Text copyable={{ text: fileUrl }}>{fileUrl}</Text>
-        </Paragraph>
+          {fileUrl}
+        </div>
       ) : needsCredentials ? (
-        <div style={{ textAlign: 'center', marginBottom: 24 }}>
-          <Paragraph type="secondary">
-            S3 credentials required for signed URL. Configure in Account Settings.
-          </Paragraph>
-        </div>
+        <p style={{ textAlign: 'center', fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
+          S3 credentials required for signed URL. Configure in Account Settings.
+        </p>
       ) : (
-        <Paragraph type="secondary" style={{ textAlign: 'center', marginBottom: 24 }}>
+        <p style={{ textAlign: 'center', fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
           Unable to generate file URL
-        </Paragraph>
+        </p>
       )}
-
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ width: 80 }}>
-          {previewableFiles.length > 1 && (
-            <Button type="text" icon={<LeftOutlined />} onClick={() => navigate('prev')}>
-              Prev
-            </Button>
-          )}
-        </div>
-        <Space>
-          <Button icon={<LinkOutlined />} onClick={handleOpenUrl} disabled={!fileUrl}>
-            Open URL
-          </Button>
-          <Button
-            type="primary"
-            icon={<CopyOutlined />}
-            onClick={handleCopyUrl}
-            disabled={!fileUrl}
-          >
-            Copy URL
-          </Button>
-        </Space>
-        <div style={{ width: 80, textAlign: 'right' }}>
-          {previewableFiles.length > 1 && (
-            <Button
-              type="text"
-              icon={<RightOutlined />}
-              iconPlacement="end"
-              onClick={() => navigate('next')}
-            >
-              Next
-            </Button>
-          )}
-        </div>
-      </div>
     </Modal>
   );
 }

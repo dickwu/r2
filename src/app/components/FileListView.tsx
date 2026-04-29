@@ -1,19 +1,25 @@
-import { Button, Checkbox, Popconfirm, Tooltip } from 'antd';
-import {
-  FolderOutlined,
-  DeleteOutlined,
-  EditOutlined,
-  CaretUpOutlined,
-  CaretDownOutlined,
-  MoreOutlined,
-  DownloadOutlined,
-} from '@ant-design/icons';
-import { Virtuoso } from 'react-virtuoso';
-import dayjs from 'dayjs';
+/**
+ * FileListView — CSS-grid list with sticky headers, density-aware row heights,
+ * inline actions, and react-virtuoso virtualization.
+ *
+ * Layout strategy: PER-ROW GRID
+ * Virtuoso inserts internal spacer divs at the top/bottom of its scroller for
+ * scroll positioning. If the scroller is a `display: grid` container, those
+ * spacers become grid items and are allocated implicit auto-sized rows, which
+ * pushes the visible items down by hundreds of pixels.
+ *
+ * Solution: keep the scroller as a plain block container; make each row an
+ * independent `display: grid; grid-template-columns: GRID_COLS` element. The
+ * header is its own matching grid above the scroller. Both grids use the same
+ * GRID_COLS string and live inside the same width-constrained parent, so the
+ * columns line up visually without needing subgrid.
+ */
+import { forwardRef } from 'react';
+import { Virtuoso, Components } from 'react-virtuoso';
+import { useThemeStore } from '@/app/stores/themeStore';
 import { FileItem } from '@/app/hooks/useR2Files';
-import { formatBytes } from '@/app/utils/formatBytes';
-import { getFileIcon } from '@/app/utils/fileIcon';
 import FileContextMenu from '@/app/components/FileContextMenu';
+import FileListRow, { FlCheckbox } from '@/app/components/FileListRow';
 
 type SortOrder = 'asc' | 'desc' | null;
 
@@ -31,7 +37,7 @@ interface FileListViewProps {
   nameSort: SortOrder;
   sizeSort: SortOrder;
   modifiedSort: SortOrder;
-  showFullPath?: boolean; // Show full path instead of just name (for search results)
+  showFullPath?: boolean;
   onItemClick: (item: FileItem) => void;
   onToggleSelection: (key: string) => void;
   onSelectAll: () => void;
@@ -45,15 +51,57 @@ interface FileListViewProps {
   onFolderDelete?: (item: FileItem) => void;
   onFolderDownload?: (item: FileItem) => void;
   onFolderRename?: (item: FileItem) => void;
+  onMove?: (item: FileItem) => void;
+  onFocus?: (item: FileItem) => void;
 }
 
-function formatDate(date: string): string {
-  return dayjs(date).format('YYYY-MM-DD');
+const GRID_COLS = '28px minmax(280px, 1fr) 110px 160px 70px';
+
+/** Sort arrow indicator */
+function SortArrow({ order }: { order: SortOrder }) {
+  if (!order) return null;
+  return <span className="sort-arrow">{order === 'asc' ? '↑' : '↓'}</span>;
 }
 
-function formatDateTime(date: string): string {
-  return dayjs(date).format('YYYY-MM-DD HH:mm:ss');
-}
+/**
+ * Virtuoso List wrapper — plain block container. Must NOT be a grid:
+ * Virtuoso adds top/bottom scroll spacers as direct children, and a grid
+ * parent allocates implicit auto-sized rows for them, pushing the visible
+ * items down by hundreds of pixels.
+ */
+const VirtuosoList = forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  function VirtuosoList({ children, style, ...props }, ref) {
+    return (
+      <div ref={ref} {...props} style={style}>
+        {children}
+      </div>
+    );
+  }
+);
+
+/**
+ * Virtuoso item wrapper — each row is its own `display: grid` with the same
+ * GRID_COLS as the sticky header. Independent grids per row, but identical
+ * column templates and matching parent width keep the columns visually
+ * aligned without needing subgrid.
+ */
+const VirtuosoItem = forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
+  function VirtuosoItem({ children, style, ...props }, ref) {
+    return (
+      <div
+        ref={ref}
+        {...props}
+        style={{
+          ...style,
+          display: 'grid',
+          gridTemplateColumns: GRID_COLS,
+        }}
+      >
+        {children}
+      </div>
+    );
+  }
+);
 
 export default function FileListView({
   items,
@@ -76,71 +124,70 @@ export default function FileListView({
   onFolderDelete,
   onFolderDownload,
   onFolderRename,
+  onMove,
+  onFocus,
 }: FileListViewProps) {
+  const density = useThemeStore((s) => s.density);
+
+  const allSelected = items.length > 0 && selectedKeys.size === items.length;
+  const someSelected = selectedKeys.size > 0 && selectedKeys.size < items.length;
+
+  const handleMasterCheckbox = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (allSelected || someSelected) {
+      onClearSelection();
+    } else {
+      onSelectAll();
+    }
+  };
+
+  const handleMove = (item: FileItem) => {
+    if (onMove) onMove(item);
+  };
+
+  const virtuosoComponents: Components<FileItem> = {
+    List: VirtuosoList,
+    Item: VirtuosoItem,
+  };
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      {/* Header */}
-      <div className="file-list-header">
-        <span className="col-checkbox">
-          <Checkbox
-            indeterminate={selectedKeys.size > 0 && selectedKeys.size < items.length}
-            checked={selectedKeys.size > 0 && selectedKeys.size === items.length}
-            onChange={(e) => {
-              if (e.target.checked) {
-                onSelectAll();
-              } else {
-                onClearSelection();
-              }
-            }}
+      {/* Sticky header — separate grid with same column widths */}
+      <div
+        className="file-list"
+        style={{
+          gridTemplateColumns: GRID_COLS,
+          flexShrink: 0,
+        }}
+      >
+        <div className="col-h no-pad">
+          <FlCheckbox
+            checked={allSelected}
+            indeterminate={someSelected}
+            onClick={handleMasterCheckbox}
           />
-        </span>
-        <span className="col-name sortable" onClick={onToggleNameSort}>
-          <span>Name</span>
-          {nameSort === 'asc' ? (
-            <CaretUpOutlined style={{ color: 'var(--text-secondary)' }} />
-          ) : null}
-          {nameSort === 'desc' ? (
-            <CaretDownOutlined style={{ color: 'var(--text-secondary)' }} />
-          ) : null}
-          {nameSort === null ? <MoreOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
-        </span>
-        <span className="col-size sortable" onClick={onToggleSizeSort}>
-          <span>Size</span>
-          {sizeSort === 'asc' ? (
-            <CaretUpOutlined style={{ color: 'var(--text-secondary)' }} />
-          ) : null}
-          {sizeSort === 'desc' ? (
-            <CaretDownOutlined style={{ color: 'var(--text-secondary)' }} />
-          ) : null}
-          {sizeSort === null ? <MoreOutlined style={{ color: 'var(--text-secondary)' }} /> : null}
-        </span>
-        <span className="col-date sortable" onClick={onToggleModifiedSort}>
-          Modified
-          {modifiedSort === 'asc' ? (
-            <CaretUpOutlined style={{ color: 'var(--text-secondary)' }} />
-          ) : null}
-          {modifiedSort === 'desc' ? (
-            <CaretDownOutlined style={{ color: 'var(--text-secondary)' }} />
-          ) : null}
-          {modifiedSort === null ? (
-            <MoreOutlined style={{ color: 'var(--text-secondary)' }} />
-          ) : null}
-        </span>
-        <span className="col-actions">Actions</span>
+        </div>
+        <div className="col-h" onClick={onToggleNameSort}>
+          Name <SortArrow order={nameSort} />
+        </div>
+        <div className="col-h" onClick={onToggleSizeSort}>
+          Size <SortArrow order={sizeSort} />
+        </div>
+        <div className="col-h" onClick={onToggleModifiedSort}>
+          Modified <SortArrow order={modifiedSort} />
+        </div>
+        <div className="col-h" style={{ justifyContent: 'flex-end' }}>
+          Actions
+        </div>
       </div>
 
-      {/* Virtualized Items */}
+      {/* Virtualized rows */}
       <Virtuoso
         style={{ flex: 1 }}
         data={items}
-        itemContent={(index, item) => {
+        components={virtuosoComponents}
+        itemContent={(_idx, item) => {
           const folderMeta = item.isFolder ? metadata[item.key] : undefined;
-          const folderCount = folderMeta?.totalFileCount ?? folderMeta?.fileCount;
-          const folderCountTooltip =
-            folderCount != null
-              ? `${folderCount.toLocaleString()} file${folderCount !== 1 ? 's' : ''}`
-              : undefined;
-
           return (
             <FileContextMenu
               item={item}
@@ -151,127 +198,25 @@ export default function FileListView({
               onFolderRename={onFolderRename}
               onFolderDelete={onFolderDelete}
             >
-              <div
-                className={`file-item ${item.isFolder ? 'folder' : 'file'} ${selectedKeys.has(item.key) ? 'selected' : ''}`}
-                onClick={() => onItemClick(item)}
-              >
-                <span className="col-checkbox" onClick={(e) => e.stopPropagation()}>
-                  <Checkbox
-                    checked={selectedKeys.has(item.key)}
-                    onChange={() => onToggleSelection(item.key)}
-                  />
-                </span>
-                <span className="col-name">
-                  {item.isFolder ? (
-                    <FolderOutlined className="icon folder-icon" />
-                  ) : (
-                    getFileIcon(item.name)
-                  )}
-                  <Tooltip title={showFullPath ? item.key : undefined}>
-                    <span className="name">{showFullPath ? item.key : item.name}</span>
-                  </Tooltip>
-                </span>
-                <span className="col-size">
-                  {item.isFolder ? (
-                    folderMeta?.size === 'loading' ? (
-                      '...'
-                    ) : folderMeta?.size === 'error' ? (
-                      'Error'
-                    ) : typeof folderMeta?.size === 'number' ? (
-                      <Tooltip title={folderCountTooltip}>
-                        <span>{formatBytes(folderMeta.size as number)}</span>
-                      </Tooltip>
-                    ) : (
-                      '--'
-                    )
-                  ) : (
-                    formatBytes(item.size || 0)
-                  )}
-                </span>
-                <span className="col-date">
-                  {item.isFolder ? (
-                    folderMeta?.lastModified ? (
-                      <Tooltip title={formatDateTime(folderMeta.lastModified)}>
-                        <span>{formatDate(folderMeta.lastModified)}</span>
-                      </Tooltip>
-                    ) : (
-                      '--'
-                    )
-                  ) : item.lastModified ? (
-                    <Tooltip title={formatDateTime(item.lastModified)}>
-                      <span>{formatDate(item.lastModified)}</span>
-                    </Tooltip>
-                  ) : (
-                    '--'
-                  )}
-                </span>
-                <span className="col-actions" onClick={(e) => e.stopPropagation()}>
-                  {item.isFolder ? (
-                    <>
-                      {onFolderDownload && (
-                        <Tooltip title="Download folder">
-                          <Button
-                            type="text"
-                            size="small"
-                            icon={<DownloadOutlined />}
-                            onClick={() => onFolderDownload(item)}
-                          />
-                        </Tooltip>
-                      )}
-                      {onFolderRename && (
-                        <Tooltip title="Rename folder">
-                          <Button
-                            type="text"
-                            size="small"
-                            icon={<EditOutlined />}
-                            onClick={() => onFolderRename(item)}
-                          />
-                        </Tooltip>
-                      )}
-                      {onFolderDelete && (
-                        <Tooltip title="Delete folder">
-                          <Button
-                            type="text"
-                            size="small"
-                            danger
-                            icon={<DeleteOutlined />}
-                            onClick={() => onFolderDelete(item)}
-                          />
-                        </Tooltip>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      {onDownload && (
-                        <Tooltip title="Download">
-                          <Button
-                            type="text"
-                            size="small"
-                            icon={<DownloadOutlined />}
-                            onClick={() => onDownload(item)}
-                          />
-                        </Tooltip>
-                      )}
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<EditOutlined />}
-                        onClick={() => onRename(item)}
-                      />
-                      <Popconfirm
-                        title="Delete file"
-                        description={`Are you sure you want to delete "${item.name}"?`}
-                        onConfirm={() => onDelete(item)}
-                        okText="Delete"
-                        cancelText="Cancel"
-                        okButtonProps={{ danger: true }}
-                      >
-                        <Button type="text" size="small" danger icon={<DeleteOutlined />} />
-                      </Popconfirm>
-                    </>
-                  )}
-                </span>
-              </div>
+              <FileListRow
+                item={item}
+                isSelected={selectedKeys.has(item.key)}
+                density={density}
+                showFullPath={showFullPath}
+                folderMeta={folderMeta}
+                onItemClick={(i) => {
+                  if (onFocus) onFocus(i);
+                  onItemClick(i);
+                }}
+                onToggleSelection={onToggleSelection}
+                onDownload={onDownload}
+                onRename={onRename}
+                onDelete={onDelete}
+                onFolderDownload={onFolderDownload}
+                onFolderRename={onFolderRename}
+                onFolderDelete={onFolderDelete}
+                onMove={handleMove}
+              />
             </FileContextMenu>
           );
         }}

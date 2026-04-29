@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Modal, Input, Progress, Button, App, Spin, InputNumber } from 'antd';
+import { Progress, App, Spin } from 'antd';
+import { EditOutlined } from '@ant-design/icons';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import {
   batchMoveObjects,
@@ -11,6 +12,7 @@ import {
 } from '@/app/lib/r2cache';
 import { FileItem } from '@/app/hooks/useR2Files';
 import type { FolderMetadata } from '@/app/stores/folderSizeStore';
+import Modal from '@/app/components/ui/Modal';
 
 interface BatchMoveProgress {
   completed: number;
@@ -29,13 +31,9 @@ interface FolderRenameModalProps {
 
 function splitFolderKey(key: string) {
   const trimmed = key.endsWith('/') ? key.slice(0, -1) : key;
-  if (!trimmed) {
-    return { parentPath: '', currentName: '' };
-  }
+  if (!trimmed) return { parentPath: '', currentName: '' };
   const lastSlash = trimmed.lastIndexOf('/');
-  if (lastSlash === -1) {
-    return { parentPath: '', currentName: trimmed };
-  }
+  if (lastSlash === -1) return { parentPath: '', currentName: trimmed };
   return {
     parentPath: trimmed.slice(0, lastSlash + 1),
     currentName: trimmed.slice(lastSlash + 1),
@@ -85,7 +83,6 @@ export default function FolderRenameModal({
           onClose();
         }
       } catch (error) {
-        console.error('Failed to load folder contents:', error);
         message.error(
           `Failed to load folder contents: ${error instanceof Error ? error.message : 'Unknown error'}`
         );
@@ -164,9 +161,6 @@ export default function FolderRenameModal({
         message.warning(
           `Renamed ${result.moved} file${result.moved !== 1 ? 's' : ''}, ${result.failed} failed`
         );
-        if (result.errors.length > 0) {
-          console.error('Folder rename errors:', result.errors);
-        }
       } else {
         message.error('Failed to rename folder');
       }
@@ -174,7 +168,6 @@ export default function FolderRenameModal({
       onSuccess();
     } catch (error) {
       unlisten?.();
-      console.error('Folder rename error:', error);
       setIsRenaming(false);
       onClose();
       message.error(
@@ -203,69 +196,87 @@ export default function FolderRenameModal({
 
   const footer = isRenaming ? null : (
     <>
-      <Button onClick={onClose} disabled={isLoading}>
+      <button className="btn" onClick={onClose} disabled={isLoading}>
         Cancel
-      </Button>
-      <Button type="primary" onClick={handleRename} disabled={!canConfirm || !newName.trim()}>
+      </button>
+      <button
+        className="btn btn-primary"
+        onClick={handleRename}
+        disabled={!canConfirm || !newName.trim()}
+      >
         Rename
-      </Button>
+      </button>
     </>
   );
 
   return (
     <Modal
-      title={isRenaming ? 'Renaming Folder...' : 'Rename Folder'}
       open={open}
-      onCancel={isRenaming ? undefined : onClose}
+      onClose={isRenaming ? () => undefined : onClose}
+      title="Rename folder"
+      icon={<EditOutlined style={{ fontSize: 18 }} />}
+      width={480}
       footer={footer}
-      closable={!isRenaming}
-      mask={{ closable: !isRenaming }}
     >
       {isRenaming ? (
-        <div style={{ padding: '16px 0' }}>
+        <div style={{ padding: '8px 0' }}>
           <Progress percent={percent} status="active" />
-          <p style={{ marginTop: 12, textAlign: 'center', color: 'var(--color-text-secondary)' }}>
+          <p
+            style={{
+              marginTop: 12,
+              textAlign: 'center',
+              fontSize: 12.5,
+              color: 'var(--text-muted)',
+            }}
+          >
             {progress.completed} / {progress.total} files renamed
           </p>
         </div>
       ) : isLoading ? (
         <div style={{ padding: '16px 0', textAlign: 'center' }}>
           <Spin />
-          <p style={{ marginTop: 12, color: 'var(--color-text-secondary)' }}>
-            Loading folder contents...
+          <p style={{ marginTop: 12, fontSize: 12.5, color: 'var(--text-muted)' }}>
+            Loading folder contents…
           </p>
         </div>
       ) : (
         <>
-          <p>
-            Rename folder <strong>{currentName}</strong>
-            {parentPath ? ` in /${parentPath}` : ' in / (root)'}.
-          </p>
-          <Input
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            placeholder="New folder name"
-            autoFocus
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="off"
-            disabled={isLoading}
-          />
-          <p style={{ marginTop: 16 }}>
-            This folder contains <strong>{confirmTarget}</strong> file
-            {confirmCount !== 1 ? 's' : ''}. Type <strong>{confirmTarget}</strong> to confirm:
-          </p>
-          <InputNumber
-            value={Number(confirmInput)}
-            onChange={(value) => setConfirmInput(value?.toString() ?? '')}
-            placeholder={`Type ${confirmTarget} to confirm`}
-            disabled={isLoading}
-            onPressEnter={() => {
-              if (canConfirm && newName.trim()) {
-                handleRename();
-              }
-            }}
-          />
+          <div className="field">
+            <div className="field-label">New name</div>
+            <input
+              className="input mono"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              autoFocus
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              disabled={isLoading}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canConfirm && newName.trim()) handleRename();
+              }}
+            />
+            <div className="field-hint">Renaming triggers a copy + delete on object storage.</div>
+          </div>
+
+          <div className="field" style={{ marginBottom: 0 }}>
+            <div className="field-label">Confirm ({confirmTarget} files)</div>
+            <input
+              className="input mono"
+              type="number"
+              value={confirmInput}
+              onChange={(e) => setConfirmInput(e.target.value)}
+              placeholder={`Type ${confirmTarget} to confirm`}
+              disabled={isLoading}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canConfirm && newName.trim()) handleRename();
+              }}
+            />
+            <div className="field-hint">
+              This folder contains <strong>{confirmTarget}</strong> file
+              {confirmCount !== 1 ? 's' : ''}. Type that number to confirm the rename.
+            </div>
+          </div>
         </>
       )}
     </Modal>
