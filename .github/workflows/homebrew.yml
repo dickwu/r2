@@ -55,7 +55,6 @@ jobs:
             name "R2 Client"
             desc "Desktop client for managing S3-compatible storage (Cloudflare R2, AWS S3, MinIO, RustFS)"
             homepage "https://github.com/dickwu/r2"
-            license "MIT"
 
             app "r2.app"
 
