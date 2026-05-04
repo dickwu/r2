@@ -3,7 +3,7 @@ members = [".", "crates/range-dl"]
 
 [package]
 name = "r2"
-version = "0.2.4"
+version = "0.2.5"
 description = "A desktop application for managing Cloudflare R2 storage buckets."
 authors = ["Peilin Wu"]
 edition = "2021"
