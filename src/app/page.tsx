@@ -1090,7 +1090,6 @@ export default function Home() {
                 whenever any sync pipeline is running. Self-hides when idle. */}
             <SyncBanner />
 
-
             {/* Partial-data search indicator during background sync */}
             {searchQuery.trim() && backgroundSync.isRunning && (
               <div

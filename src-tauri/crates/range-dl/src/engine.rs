@@ -1,13 +1,13 @@
 //! Download engine: orchestrates parallel chunk downloads with auto-tuning,
 //! progress aggregation, retry logic, and pause/resume/cancel support.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::chunk::{download_chunk, ChunkResult, ChunkTracker};
+use crate::chunk::{download_chunk, ChunkDownloadRequest, ChunkResult, ChunkTracker};
 use crate::meta::DownloadMeta;
 use crate::types::{
     ChunkEvent, ChunkProgress, ChunkState, ChunkStatus, DownloadControl, DownloadTarget, ErrorKind,
@@ -170,19 +170,19 @@ impl RangeDownloader {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-fn part_path_for(dest: &PathBuf) -> PathBuf {
+fn part_path_for(dest: &Path) -> PathBuf {
     let mut p = dest.as_os_str().to_owned();
     p.push(".part");
     PathBuf::from(p)
 }
 
-fn meta_path_for(dest: &PathBuf) -> PathBuf {
+fn meta_path_for(dest: &Path) -> PathBuf {
     let mut p = dest.as_os_str().to_owned();
     p.push(".download_meta");
     PathBuf::from(p)
 }
 
-async fn file_matches_expected_size(path: &PathBuf, expected_size: u64) -> Result<bool, String> {
+async fn file_matches_expected_size(path: &Path, expected_size: u64) -> Result<bool, String> {
     let exists = tokio::fs::try_exists(path)
         .await
         .map_err(|e| format!("Failed to inspect file existence: {}", e))?;
@@ -197,8 +197,8 @@ async fn file_matches_expected_size(path: &PathBuf, expected_size: u64) -> Resul
 }
 
 async fn finalize_download_file(
-    part_path: &PathBuf,
-    dest: &PathBuf,
+    part_path: &Path,
+    dest: &Path,
     expected_size: u64,
 ) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
@@ -273,7 +273,7 @@ async fn finalize_download_file(
 }
 
 /// Pre-allocate the .part file. If it already exists (resume), just verify the size.
-async fn preallocate_file(path: &PathBuf, size: u64) -> Result<(), String> {
+async fn preallocate_file(path: &Path, size: u64) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -406,7 +406,7 @@ async fn orchestrate(
     // Build chunk runtime state
     let mut chunks: Vec<ChunkRuntime> = initial_chunks
         .into_iter()
-        .zip(initial_urls.into_iter())
+        .zip(initial_urls)
         .map(|(state, url)| {
             let initial_bytes = state.downloaded_bytes;
             ChunkRuntime {
@@ -699,7 +699,7 @@ fn spawn_chunk(
     idx: usize,
     client: &reqwest::Client,
     chunk: &ChunkRuntime,
-    part_path: &PathBuf,
+    part_path: &Path,
     config: &RangeDownloadConfig,
     cancel: &CancellationToken,
     pause_rx: &watch::Receiver<bool>,
@@ -708,7 +708,7 @@ fn spawn_chunk(
     let client = client.clone();
     let url = chunk.url.clone();
     let state = chunk.state.clone();
-    let path = part_path.clone();
+    let path = part_path.to_path_buf();
     let cfg = config.clone();
     let downloaded = chunk.tracker.downloaded_bytes.clone();
     let speed = chunk.tracker.speed.clone();
@@ -723,9 +723,16 @@ fn spawn_chunk(
     };
 
     tokio::spawn(async move {
-        let result = download_chunk(
-            &client, &url, &state, &path, &cfg, &tracker, &cancel, &pause,
-        )
+        let result = download_chunk(ChunkDownloadRequest {
+            client: &client,
+            url: &url,
+            state: &state,
+            dest_path: &path,
+            config: &cfg,
+            tracker: &tracker,
+            cancel: &cancel,
+            pause: &pause,
+        })
         .await;
         let _ = tx.send((idx, gen, result)).await;
     });

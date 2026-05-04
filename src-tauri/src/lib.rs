@@ -115,7 +115,8 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_connector::init());
     }
 
-    builder.setup(|app| {
+    builder
+        .setup(|app| {
             // Initialize database in app data directory
             let app_data_dir = app
                 .path()

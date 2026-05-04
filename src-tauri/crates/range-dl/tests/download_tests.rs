@@ -36,8 +36,7 @@ async fn setup_range_server(data: &[u8]) -> MockServer {
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
 
-            if range_header.starts_with("bytes=") {
-                let range_str = &range_header[6..];
+            if let Some(range_str) = range_header.strip_prefix("bytes=") {
                 let parts: Vec<&str> = range_str.split('-').collect();
                 let start: usize = parts[0].parse().unwrap_or(0);
                 let end: usize = if parts.len() > 1 && !parts[1].is_empty() {

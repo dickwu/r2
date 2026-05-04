@@ -9,7 +9,10 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev --features connector",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check": "bun run format:check && bun run typecheck && bun test"
   },
   "dependencies": {
     "@ant-design/icons": "^6.2.2",

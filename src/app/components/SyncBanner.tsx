@@ -241,10 +241,7 @@ function computeBannerView(args: {
     const fetched = backgroundSync.objectsFetched;
     return {
       title: 'Synced',
-      detail:
-        fetched > 0
-          ? `${fetched.toLocaleString()} objects up to date`
-          : 'Bucket up to date',
+      detail: fetched > 0 ? `${fetched.toLocaleString()} objects up to date` : 'Bucket up to date',
       icon: <CheckCircleOutlined />,
       tone: 'progress',
     };
@@ -264,9 +261,7 @@ function computeBannerView(args: {
   if (legacyActive) {
     if (phase === 'fetching') {
       const label =
-        processedFiles > 0
-          ? `${processedFiles.toLocaleString()} found`
-          : 'Listing bucket…';
+        processedFiles > 0 ? `${processedFiles.toLocaleString()} found` : 'Listing bucket…';
       return {
         title: 'Fetching files',
         detail: withRate(label, legacyRate),
@@ -342,8 +337,7 @@ function computeBannerView(args: {
       tone: 'progress',
     };
   }
-  const label =
-    fetched > 0 ? `${fetched.toLocaleString()} objects fetched` : 'Listing objects…';
+  const label = fetched > 0 ? `${fetched.toLocaleString()} objects fetched` : 'Listing objects…';
   return {
     title: 'Syncing bucket',
     detail: withRate(label, bgRate),
