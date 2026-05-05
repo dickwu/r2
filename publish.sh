@@ -74,7 +74,16 @@ echo -e "${GREEN}✓ Updated src-tauri/Cargo.lock${NC}"
 
 # Git commit
 git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-git commit -m "chore: bump version to $NEW_VERSION"
+git commit \
+    -m "Prepare release $NEW_VERSION for distribution" \
+    -m "Update all package manifests to the same release version before tagging and publishing desktop artifacts." \
+    -m "Constraint: publish.sh owns version synchronization across package.json, tauri.conf.json, Cargo.toml, and Cargo.lock." \
+    -m "Rejected: Manual version edits | The release script keeps manifest updates atomic." \
+    -m "Confidence: high" \
+    -m "Scope-risk: narrow" \
+    -m "Directive: Keep release metadata aligned before creating tags." \
+    -m "Tested: publish.sh updated package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml, and src-tauri/Cargo.lock." \
+    -m "Not-tested: GitHub Actions release workflow before tag push."
 echo -e "${GREEN}✓ Committed changes${NC}"
 
 # Create and push tag
@@ -88,4 +97,3 @@ echo -e "${GREEN}✓ Pushed to remote${NC}"
 echo ""
 echo -e "${GREEN}Successfully published v$NEW_VERSION${NC}"
 echo -e "GitHub Actions will now build and create the release."
-

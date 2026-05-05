@@ -1,6 +1,8 @@
 use std::path::Path;
+#[cfg(target_os = "macos")]
+use tauri::menu::{PredefinedMenuItem, Submenu};
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
@@ -115,7 +117,8 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_connector::init());
     }
 
-    builder.setup(|app| {
+    builder
+        .setup(|app| {
             // Initialize database in app data directory
             let app_data_dir = app
                 .path()

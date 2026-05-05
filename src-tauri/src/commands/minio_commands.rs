@@ -240,14 +240,9 @@ pub async fn sync_minio_bucket(
         let _ = app_clone.emit("indexing-progress", IndexingProgress { current, total });
     };
 
-    db::build_directory_tree_from_db(
-        &bucket,
-        &account_id,
-        &folder_keys,
-        Some(indexing_callback),
-    )
-    .await
-    .map_err(|e| format!("Failed to build directory tree: {}", e))?;
+    db::build_directory_tree_from_db(&bucket, &account_id, &folder_keys, Some(indexing_callback))
+        .await
+        .map_err(|e| format!("Failed to build directory tree: {}", e))?;
 
     let _ = app.emit("sync-phase", "complete");
 

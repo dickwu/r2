@@ -1,5 +1,6 @@
 //! Single chunk download logic: HTTP Range GET → seek-based write to file.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -47,20 +48,34 @@ impl ChunkTracker {
     }
 }
 
+/// Borrowed inputs for a single chunk download task.
+pub(crate) struct ChunkDownloadRequest<'a> {
+    pub client: &'a Client,
+    pub url: &'a str,
+    pub state: &'a ChunkState,
+    pub dest_path: &'a Path,
+    pub config: &'a RangeDownloadConfig,
+    pub tracker: &'a ChunkTracker,
+    pub cancel: &'a CancellationToken,
+    pub pause: &'a watch::Receiver<bool>,
+}
+
 /// Download a single chunk of a file using an HTTP Range request.
 ///
 /// Each chunk opens its own file handle and seeks to the correct offset.
 /// This avoids shared cursor contention across parallel chunks.
-pub(crate) async fn download_chunk(
-    client: &Client,
-    url: &str,
-    state: &ChunkState,
-    dest_path: &std::path::Path,
-    config: &RangeDownloadConfig,
-    tracker: &ChunkTracker,
-    cancel: &CancellationToken,
-    pause: &watch::Receiver<bool>,
-) -> ChunkResult {
+pub(crate) async fn download_chunk(request: ChunkDownloadRequest<'_>) -> ChunkResult {
+    let ChunkDownloadRequest {
+        client,
+        url,
+        state,
+        dest_path,
+        config,
+        tracker,
+        cancel,
+        pause,
+    } = request;
+
     let resume_offset = state.resume_offset();
     let end_byte = state.end.saturating_sub(1); // Range header is inclusive on both ends
 
@@ -71,12 +86,7 @@ pub(crate) async fn download_chunk(
     // including body transfer. A 13MB chunk at 1MB/s takes 13 seconds, which
     // would exceed a 30s timeout under load. Connection timeout is set on the
     // reqwest::Client builder in the orchestrator instead.
-    let response = match client
-        .get(url)
-        .header("Range", &range_header)
-        .send()
-        .await
-    {
+    let response = match client.get(url).header("Range", &range_header).send().await {
         Ok(resp) => resp,
         Err(e) => {
             return ChunkResult::Failed {

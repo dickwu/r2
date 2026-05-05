@@ -714,7 +714,11 @@ pub async fn begin_sync(bucket: &str, account_id: &str) -> DbResult<()> {
 
 /// Step 2: insert a batch of files into the STAGING table.
 /// The live cached_files table is not modified.
-pub async fn store_file_batch(bucket: &str, account_id: &str, files: &[CachedFile]) -> DbResult<()> {
+pub async fn store_file_batch(
+    bucket: &str,
+    account_id: &str,
+    files: &[CachedFile],
+) -> DbResult<()> {
     if files.is_empty() {
         return Ok(());
     }
