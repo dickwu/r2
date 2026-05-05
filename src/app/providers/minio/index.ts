@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { encodeObjectKeyForUrl } from '@/app/utils/objectKeyUrl';
 import type {
   BatchDeleteResult,
   BatchMoveResult,
@@ -154,6 +155,6 @@ export const minioProvider: StorageProviderAdapter<MinioStorageConfig> = {
   buildPublicUrl: (config, key) => {
     const base = minioProvider.buildBucketBaseUrl(config);
     if (!base) return null;
-    return `${base}/${encodeURI(key)}`;
+    return `${base}/${encodeObjectKeyForUrl(key)}`;
   },
 };

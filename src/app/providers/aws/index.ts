@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { encodeObjectKeyForUrl } from '@/app/utils/objectKeyUrl';
 import type {
   AwsStorageConfig,
   BatchDeleteResult,
@@ -161,6 +162,6 @@ export const awsProvider: StorageProviderAdapter<AwsStorageConfig> = {
   buildPublicUrl: (config, key) => {
     const base = awsProvider.buildBucketBaseUrl(config);
     if (!base) return null;
-    return `${base}/${encodeURI(key)}`;
+    return `${base}/${encodeObjectKeyForUrl(key)}`;
   },
 };

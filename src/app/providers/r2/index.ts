@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { encodeObjectKeyForUrl } from '@/app/utils/objectKeyUrl';
 import type {
   BatchDeleteResult,
   BatchMoveResult,
@@ -144,6 +145,6 @@ export const r2Provider: StorageProviderAdapter<R2StorageConfig> = {
   buildPublicUrl: (config, key) => {
     const base = r2Provider.buildBucketBaseUrl(config);
     if (!base) return null;
-    return `${base}/${encodeURI(key)}`;
+    return `${base}/${encodeObjectKeyForUrl(key)}`;
   },
 };

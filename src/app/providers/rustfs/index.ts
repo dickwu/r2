@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { encodeObjectKeyForUrl } from '@/app/utils/objectKeyUrl';
 import type {
   BatchDeleteResult,
   BatchMoveResult,
@@ -151,6 +152,6 @@ export const rustfsProvider: StorageProviderAdapter<RustfsStorageConfig> = {
   buildPublicUrl: (config, key) => {
     const base = rustfsProvider.buildBucketBaseUrl(config);
     if (!base) return null;
-    return `${base}/${encodeURI(key)}`;
+    return `${base}/${encodeObjectKeyForUrl(key)}`;
   },
 };
