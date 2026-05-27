@@ -1780,13 +1780,33 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   width: 38px;
   height: 38px;
 }
+/* Collapsed footer: the 56px rail is too narrow for a row, so stack the
+   add-account and settings controls vertically as clear, equally-weighted
+   icon buttons (matching the collapse-rail button and account icons). */
 .sidebar.collapsed-sidebar .sb-footer {
+  flex-direction: column;
   justify-content: center;
+  gap: 4px;
+  padding: 8px 0;
 }
-.sidebar.collapsed-sidebar .sb-footer-btn {
-  width: 32px;
+.sidebar.collapsed-sidebar .sb-footer-btn,
+.sidebar.collapsed-sidebar .sb-footer .sb-icon-btn {
+  width: 36px;
+  height: 36px;
   padding: 0;
   flex: none;
+}
+/* Drop the faint dashed "add" border in the rail so both controls read as
+   plain icon buttons with a clearly visible glyph. */
+.sidebar.collapsed-sidebar .sb-footer-btn {
+  border: none;
+  border-radius: 7px;
+  color: var(--text-muted);
+}
+.sidebar.collapsed-sidebar .sb-footer-btn:hover {
+  border: none;
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 /* ── Toolbar / Crumbs / StatusBar (handoff) ── */

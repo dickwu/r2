@@ -345,20 +345,19 @@ export default function AccountSidebar({
           <button
             className="sb-footer-btn"
             onClick={() => onOpenSettings?.('account') ?? onAddAccount()}
+            title={collapsed ? 'Add account' : undefined}
           >
-            <PlusOutlined style={{ fontSize: 11 }} />
+            <PlusOutlined style={{ fontSize: collapsed ? 15 : 11 }} />
             {!collapsed && <span>Add account</span>}
           </button>
-          {!collapsed && (
-            <button
-              className="sb-icon-btn"
-              onClick={() => onOpenSettings?.('account')}
-              title="Settings"
-              style={{ width: 30, height: 30 }}
-            >
-              <SettingOutlined style={{ fontSize: 14 }} />
-            </button>
-          )}
+          <button
+            className="sb-icon-btn"
+            onClick={() => onOpenSettings?.('account')}
+            title="Settings"
+            style={collapsed ? undefined : { width: 30, height: 30 }}
+          >
+            <SettingOutlined style={{ fontSize: collapsed ? 16 : 14 }} />
+          </button>
         </div>
       </aside>
 
