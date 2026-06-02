@@ -1,10 +1,17 @@
 'use client';
 
 import { useState } from 'react';
-import { PlusOutlined, DatabaseOutlined, RightOutlined } from '@ant-design/icons';
+import {
+  PlusOutlined,
+  DatabaseOutlined,
+  RightOutlined,
+  DownloadOutlined,
+  UploadOutlined,
+} from '@ant-design/icons';
 import { useAccountStore, type ProviderAccount } from '@/app/stores/accountStore';
 import type { StorageProvider } from '@/app/lib/r2cache';
 import AccountEditModal from '@/app/components/AccountEditModal';
+import AccountTransferModal, { type TransferMode } from '@/app/components/AccountTransferModal';
 
 export interface SettingsAccountPanelProps {
   /** When provided, immediately open the edit modal for this account on mount. */
@@ -70,6 +77,9 @@ export default function SettingsAccountPanel({ initialAccountId }: SettingsAccou
     initialAccountId ? initialAccountId : undefined
   );
 
+  // Backup & transfer modal: null = closed, otherwise the panel to open first.
+  const [transfer, setTransfer] = useState<TransferMode | null>(null);
+
   return (
     <>
       <div className="settings-section-stack">
@@ -111,6 +121,29 @@ export default function SettingsAccountPanel({ initialAccountId }: SettingsAccou
             </div>
           )}
         </section>
+
+        <section className="settings-section">
+          <div className="settings-section-head">
+            <div>
+              <h3>Backup &amp; transfer</h3>
+              <p>Save your accounts to a JSON file, or restore them on another machine.</p>
+            </div>
+          </div>
+          <div className="tx-backup">
+            <button
+              className="btn"
+              onClick={() => setTransfer('export')}
+              disabled={accounts.length === 0}
+            >
+              <DownloadOutlined style={{ fontSize: 12 }} />
+              Export accounts…
+            </button>
+            <button className="btn" onClick={() => setTransfer('import')}>
+              <UploadOutlined style={{ fontSize: 12 }} />
+              Import accounts…
+            </button>
+          </div>
+        </section>
       </div>
 
       <AccountEditModal
@@ -118,6 +151,10 @@ export default function SettingsAccountPanel({ initialAccountId }: SettingsAccou
         accountId={editing ?? null}
         onClose={() => setEditing(undefined)}
       />
+
+      {transfer !== null && (
+        <AccountTransferModal open initialMode={transfer} onClose={() => setTransfer(null)} />
+      )}
     </>
   );
 }

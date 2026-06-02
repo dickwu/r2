@@ -1,27 +1,21 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
+import { App } from 'antd';
 import {
-  Modal,
-  Alert,
-  Button,
-  Typography,
-  Space,
-  App,
-  Tabs,
-  Collapse,
-  Checkbox,
-  Table,
-  Tag,
-  Select,
-  Tooltip,
-} from 'antd';
-import { DownloadOutlined, UploadOutlined, FileAddOutlined } from '@ant-design/icons';
+  DownloadOutlined,
+  UploadOutlined,
+  FileAddOutlined,
+  CheckOutlined,
+  KeyOutlined,
+  InboxOutlined,
+  SwapOutlined,
+  WarningOutlined,
+} from '@ant-design/icons';
 import { save, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs';
+import Modal from '@/app/components/ui/Modal';
 import { useAccountStore, ProviderAccount } from '@/app/stores/accountStore';
-
-const { Text } = Typography;
 
 const ACCOUNT_EXPORT_VERSION = 2;
 
@@ -34,6 +28,13 @@ const PROVIDER_LABELS: Record<ProviderKey, string> = {
   aws: 'AWS S3',
   minio: 'MinIO',
   rustfs: 'RustFS',
+};
+
+const PROVIDER_BADGE: Record<ProviderKey, string> = {
+  r2: 'R2',
+  aws: 'S3',
+  minio: 'M',
+  rustfs: 'RF',
 };
 
 interface SelectionSummary {
@@ -50,9 +51,13 @@ interface AccountExportPayload {
   accounts: ProviderAccount[];
 }
 
+export type TransferMode = 'export' | 'import';
+
 interface AccountTransferModalProps {
   open: boolean;
   onClose: () => void;
+  /** Which panel to show first. Defaults to export. */
+  initialMode?: TransferMode;
 }
 
 type RowAction = 'skip' | 'import' | 'overwrite' | 'duplicate';
@@ -81,6 +86,10 @@ interface ApplyResult {
 type ValidationResult =
   | { ok: true; account: ProviderAccount }
   | { ok: false; reason: string; providerHint?: ProviderKey };
+
+/* ──────────────────────────────────────────────────────────────────
+   Logic helpers (unchanged behavior — pure account transfer logic)
+   ────────────────────────────────────────────────────────────────── */
 
 function accountIdentity(account: ProviderAccount): string {
   switch (account.provider) {
@@ -425,6 +434,124 @@ async function applyImport(rows: PreviewRow[], existingNames: Set<string>): Prom
   return result;
 }
 
+function buildPreviewRow(entry: unknown, idx: number, existingIdentities: Set<string>): PreviewRow {
+  const validation = validateAccount(entry);
+  const rowId = `row-${idx}`;
+  if (!validation.ok) {
+    const provider = validation.providerHint ?? 'unknown';
+    const fallbackName =
+      entry && typeof entry === 'object' && 'account' in entry
+        ? ((entry as { account?: { name?: string } }).account?.name ?? 'Untitled')
+        : 'Untitled';
+    return {
+      rowId,
+      classification: 'invalid',
+      invalidReason: validation.reason,
+      provider,
+      name: fallbackName,
+      identifierPreview: validation.reason,
+      action: 'skip',
+    };
+  }
+  const account = validation.account;
+  const identity = accountIdentity(account);
+  const isConflict = existingIdentities.has(identity);
+  return {
+    rowId,
+    classification: isConflict ? 'conflict' : 'new',
+    account,
+    identity,
+    provider: account.provider,
+    name: accountDisplayName(account),
+    identifierPreview: accountIdentifierPreview(account),
+    action: isConflict ? 'skip' : 'import',
+  };
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   Presentational primitives (design-token native)
+   ────────────────────────────────────────────────────────────────── */
+
+function ProviderBadge({ provider }: { provider: ProviderKey | 'unknown' }) {
+  if (provider === 'unknown') {
+    return <span className="pi pi-unknown">?</span>;
+  }
+  return <span className={`pi pi-${provider}`}>{PROVIDER_BADGE[provider]}</span>;
+}
+
+function CheckBox({
+  checked,
+  indeterminate,
+  disabled,
+  onChange,
+}: {
+  checked: boolean;
+  indeterminate?: boolean;
+  disabled?: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <span
+      role="checkbox"
+      aria-checked={indeterminate ? 'mixed' : checked}
+      aria-disabled={disabled || undefined}
+      tabIndex={disabled ? -1 : 0}
+      className={[
+        'tx-check',
+        (checked || indeterminate) && 'on',
+        indeterminate && 'mixed',
+        disabled && 'disabled',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!disabled) onChange(!checked);
+      }}
+      onKeyDown={(e) => {
+        if (disabled) return;
+        if (e.key === ' ' || e.key === 'Enter') {
+          e.preventDefault();
+          onChange(!checked);
+        }
+      }}
+    >
+      {indeterminate ? (
+        <span className="tx-check-dash" />
+      ) : checked ? (
+        <CheckOutlined style={{ fontSize: 10 }} />
+      ) : null}
+    </span>
+  );
+}
+
+function StatusPill({ row }: { row: PreviewRow }) {
+  if (row.classification === 'new') return <span className="tx-status is-new">New</span>;
+  if (row.classification === 'conflict')
+    return <span className="tx-status is-conflict">Conflict</span>;
+  return (
+    <span className="tx-status is-invalid" title={row.invalidReason}>
+      Invalid
+    </span>
+  );
+}
+
+function SecurityNote() {
+  return (
+    <div className="tx-note">
+      <KeyOutlined className="tx-note-icon" />
+      <span>
+        Exported files contain <strong>access keys, secrets, and API tokens in plain text</strong>.
+        Store them somewhere safe and delete them once restored.
+      </span>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   Export panel
+   ────────────────────────────────────────────────────────────────── */
+
 function ExportPanel() {
   const accounts = useAccountStore((s) => s.accounts);
   const { message } = App.useApp();
@@ -463,6 +590,13 @@ function ExportPanel() {
     });
   }
 
+  function setAllSelection(value: boolean) {
+    setSelected(() => {
+      if (!value) return new Set();
+      return new Set(accounts.map(accountIdentity));
+    });
+  }
+
   async function handleExport() {
     const picked = accounts.filter((a) => selected.has(accountIdentity(a)));
     if (picked.length === 0) {
@@ -495,107 +629,105 @@ function ExportPanel() {
   }
 
   if (accounts.length === 0) {
-    return <Alert type="info" showIcon title="No accounts to export. Add an account first." />;
+    return (
+      <div className="tx-empty">
+        <InboxOutlined className="tx-empty-icon" />
+        <strong>No accounts to export</strong>
+        <span>Add a storage provider first, then come back to back it up.</span>
+      </div>
+    );
   }
 
-  const collapseItems = PROVIDER_ORDER.map((provider) => {
-    const list = grouped[provider];
-    const allIds = list.map(accountIdentity);
-    const selectedCount = allIds.filter((id) => selected.has(id)).length;
-    const allSelected = list.length > 0 && selectedCount === list.length;
-    const someSelected = selectedCount > 0 && !allSelected;
-    return {
-      key: provider,
-      label: (
-        <Space>
-          <Checkbox
-            disabled={list.length === 0}
-            checked={allSelected}
-            indeterminate={someSelected}
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => setProviderSelection(provider, e.target.checked)}
-          />
-          <span>{PROVIDER_LABELS[provider]}</span>
-          <Tag>
-            {selectedCount}/{list.length}
-          </Tag>
-        </Space>
-      ),
-      children:
-        list.length === 0 ? (
-          <Text type="secondary">No accounts</Text>
-        ) : (
-          <Space orientation="vertical" style={{ width: '100%' }}>
-            {list.map((acc) => {
-              const id = accountIdentity(acc);
-              return (
-                <Checkbox key={id} checked={selected.has(id)} onChange={() => toggle(id)}>
-                  <Space size="small">
-                    <span>{accountDisplayName(acc)}</span>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      {accountIdentifierPreview(acc)}
-                    </Text>
-                  </Space>
-                </Checkbox>
-              );
-            })}
-          </Space>
-        ),
-    };
-  });
-
-  const defaultActiveKeys = PROVIDER_ORDER.filter((p) => grouped[p].length > 0);
+  const allSelected = selected.size === accounts.length;
+  const someSelected = selected.size > 0 && !allSelected;
+  const visibleProviders = PROVIDER_ORDER.filter((p) => grouped[p].length > 0);
 
   return (
-    <Space orientation="vertical" size="middle" style={{ width: '100%' }}>
-      <Collapse defaultActiveKey={defaultActiveKeys} items={collapseItems} />
-      <Button
-        type="primary"
-        block
-        icon={<DownloadOutlined />}
-        loading={exporting}
-        disabled={selected.size === 0}
-        onClick={handleExport}
-      >
-        Export {selected.size} selected
-      </Button>
-    </Space>
+    <div className="tx-panel">
+      <div className="tx-toolbar">
+        <button
+          type="button"
+          className="tx-toolbar-all"
+          onClick={() => setAllSelection(!allSelected)}
+        >
+          <CheckBox
+            checked={allSelected}
+            indeterminate={someSelected}
+            onChange={(v) => setAllSelection(v)}
+          />
+          <span>Select all accounts</span>
+        </button>
+        <span className="tx-toolbar-count">{selected.size} selected</span>
+      </div>
+
+      <div className="tx-groups">
+        {visibleProviders.map((provider) => {
+          const list = grouped[provider];
+          const allIds = list.map(accountIdentity);
+          const selectedCount = allIds.filter((id) => selected.has(id)).length;
+          const groupAll = selectedCount === list.length;
+          const groupSome = selectedCount > 0 && !groupAll;
+          return (
+            <section className="tx-group" key={provider}>
+              <header
+                className="tx-group-head"
+                onClick={() => setProviderSelection(provider, !groupAll)}
+              >
+                <CheckBox
+                  checked={groupAll}
+                  indeterminate={groupSome}
+                  onChange={(v) => setProviderSelection(provider, v)}
+                />
+                <ProviderBadge provider={provider} />
+                <span className="tx-group-name">{PROVIDER_LABELS[provider]}</span>
+                <span className="tx-group-count">
+                  {selectedCount}/{list.length}
+                </span>
+              </header>
+              <div className="tx-group-body">
+                {list.map((acc) => {
+                  const id = accountIdentity(acc);
+                  return (
+                    <div className="tx-acct" key={id} onClick={() => toggle(id)}>
+                      <CheckBox checked={selected.has(id)} onChange={() => toggle(id)} />
+                      <span className="tx-acct-name">{accountDisplayName(acc)}</span>
+                      <span className="tx-acct-id">{accountIdentifierPreview(acc)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+
+      <div className="tx-actionbar">
+        <span className="tx-summary">
+          {selected.size > 0 ? (
+            <span>
+              Exporting <b>{selected.size}</b> account{selected.size !== 1 ? 's' : ''}
+            </span>
+          ) : (
+            <span>Choose accounts to include in the backup.</span>
+          )}
+        </span>
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={selected.size === 0 || exporting}
+          onClick={handleExport}
+        >
+          <DownloadOutlined style={{ fontSize: 12 }} />
+          {exporting ? 'Exporting…' : 'Export to file'}
+        </button>
+      </div>
+    </div>
   );
 }
 
-function buildPreviewRow(entry: unknown, idx: number, existingIdentities: Set<string>): PreviewRow {
-  const validation = validateAccount(entry);
-  const rowId = `row-${idx}`;
-  if (!validation.ok) {
-    const provider = validation.providerHint ?? 'unknown';
-    const fallbackName =
-      entry && typeof entry === 'object' && 'account' in entry
-        ? ((entry as { account?: { name?: string } }).account?.name ?? 'Untitled')
-        : 'Untitled';
-    return {
-      rowId,
-      classification: 'invalid',
-      invalidReason: validation.reason,
-      provider,
-      name: fallbackName,
-      identifierPreview: validation.reason,
-      action: 'skip',
-    };
-  }
-  const account = validation.account;
-  const identity = accountIdentity(account);
-  const isConflict = existingIdentities.has(identity);
-  return {
-    rowId,
-    classification: isConflict ? 'conflict' : 'new',
-    account,
-    identity,
-    provider: account.provider,
-    name: accountDisplayName(account),
-    identifierPreview: accountIdentifierPreview(account),
-    action: isConflict ? 'skip' : 'import',
-  };
-}
+/* ──────────────────────────────────────────────────────────────────
+   Import panel
+   ────────────────────────────────────────────────────────────────── */
 
 function ImportPanel({ onApplied }: { onApplied?: () => void }) {
   const accounts = useAccountStore((s) => s.accounts);
@@ -712,15 +844,16 @@ function ImportPanel({ onApplied }: { onApplied?: () => void }) {
 
   if (!rows) {
     return (
-      <div style={{ textAlign: 'center', padding: '32px 12px' }}>
-        <Button type="primary" icon={<FileAddOutlined />} onClick={handlePickFile}>
-          Choose JSON file…
-        </Button>
-        <div style={{ marginTop: 8 }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            Pick an export file to preview the accounts inside.
-          </Text>
-        </div>
+      <div className="tx-panel">
+        <button type="button" className="tx-empty tx-empty-btn" onClick={handlePickFile}>
+          <InboxOutlined className="tx-empty-icon" />
+          <strong>Choose a backup file</strong>
+          <span>Pick a previously exported JSON file to preview the accounts inside.</span>
+          <span className="btn btn-primary tx-empty-cta">
+            <FileAddOutlined style={{ fontSize: 12 }} />
+            Browse files…
+          </span>
+        </button>
       </div>
     );
   }
@@ -740,185 +873,163 @@ function ImportPanel({ onApplied }: { onApplied?: () => void }) {
   }
   const totalActionable = toImport + toOverwrite + toDuplicate;
 
-  const columns = [
-    {
-      title: 'Provider',
-      dataIndex: 'provider',
-      width: 120,
-      render: (p: ProviderRow['provider']) => (
-        <Tag>{p === 'unknown' ? 'Unknown' : PROVIDER_LABELS[p]}</Tag>
-      ),
-    },
-    {
-      title: 'Name',
-      dataIndex: 'name',
-      ellipsis: true,
-    },
-    {
-      title: 'Identifier',
-      dataIndex: 'identifierPreview',
-      ellipsis: true,
-      render: (v: string) => (
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          {v}
-        </Text>
-      ),
-    },
-    {
-      title: 'Status',
-      dataIndex: 'classification',
-      width: 110,
-      render: (c: Classification, row: PreviewRow) => {
-        if (c === 'new') return <Tag color="green">New</Tag>;
-        if (c === 'conflict') return <Tag color="orange">Conflict</Tag>;
-        return (
-          <Tooltip title={row.invalidReason}>
-            <Tag color="red">Invalid</Tag>
-          </Tooltip>
-        );
-      },
-    },
-    {
-      title: 'Action',
-      key: 'action',
-      width: 200,
-      render: (_: unknown, row: PreviewRow) => {
-        if (row.classification === 'invalid') {
-          return (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {row.invalidReason}
-            </Text>
-          );
-        }
-        const options =
-          row.classification === 'new'
-            ? [
-                { value: 'skip', label: 'Skip' },
-                { value: 'import', label: 'Import' },
-                { value: 'duplicate', label: 'Import as duplicate' },
-              ]
-            : [
-                { value: 'skip', label: 'Skip' },
-                { value: 'overwrite', label: 'Overwrite local' },
-                { value: 'duplicate', label: 'Import as duplicate' },
-              ];
-        return (
-          <Select
-            size="small"
-            style={{ width: '100%' }}
-            value={row.action}
-            options={options}
-            onChange={(v) => setRowAction(row.rowId, v as RowAction)}
-          />
-        );
-      },
-    },
-  ];
-
   return (
-    <Space orientation="vertical" size="middle" style={{ width: '100%' }}>
-      <Space wrap>
-        <Button size="small" onClick={() => bulkSet(() => true, 'skip')}>
-          Skip all
-        </Button>
-        <Button size="small" onClick={() => bulkSet((r) => r.classification === 'new', 'import')}>
-          Import all new
-        </Button>
-        <Button
-          size="small"
-          onClick={() => bulkSet((r) => r.classification === 'conflict', 'skip')}
+    <div className="tx-panel">
+      <div className="tx-bulk">
+        <button
+          className="btn btn-sm"
+          onClick={() => bulkSet((r) => r.classification === 'new', 'import')}
         >
-          Skip all conflicts
-        </Button>
-        <Button
-          size="small"
-          danger
+          Import all new
+        </button>
+        <button
+          className="btn btn-sm"
           onClick={() => bulkSet((r) => r.classification === 'conflict', 'overwrite')}
         >
-          Overwrite all conflicts
-        </Button>
-        <Button
-          size="small"
+          Overwrite conflicts
+        </button>
+        <button
+          className="btn btn-sm"
           onClick={() => bulkSet((r) => r.classification === 'conflict', 'duplicate')}
         >
-          Duplicate all conflicts
-        </Button>
-        <Button size="small" type="link" onClick={() => setRows(null)}>
-          Pick another file
-        </Button>
-      </Space>
-      <Table
-        dataSource={rows}
-        columns={columns}
-        rowKey="rowId"
-        size="small"
-        pagination={false}
-        scroll={{ y: 320 }}
-      />
+          Duplicate conflicts
+        </button>
+        <button className="btn btn-sm" onClick={() => bulkSet(() => true, 'skip')}>
+          Skip all
+        </button>
+        <span className="tx-bulk-spacer" />
+        <button className="btn btn-ghost btn-sm" onClick={() => setRows(null)}>
+          Choose another file
+        </button>
+      </div>
+
+      <div className="tx-preview">
+        {rows.map((row) => {
+          const isInvalid = row.classification === 'invalid';
+          const options =
+            row.classification === 'new'
+              ? [
+                  { value: 'skip', label: 'Skip' },
+                  { value: 'import', label: 'Import' },
+                  { value: 'duplicate', label: 'Import as duplicate' },
+                ]
+              : [
+                  { value: 'skip', label: 'Skip' },
+                  { value: 'overwrite', label: 'Overwrite local' },
+                  { value: 'duplicate', label: 'Import as duplicate' },
+                ];
+          return (
+            <div
+              className={['tx-prow', isInvalid && 'is-invalid-row'].filter(Boolean).join(' ')}
+              key={row.rowId}
+            >
+              <ProviderBadge provider={row.provider} />
+              <div className="tx-prow-main">
+                <span className="tx-prow-name">{row.name}</span>
+                <span className="tx-prow-id">{row.identifierPreview}</span>
+              </div>
+              <StatusPill row={row} />
+              {isInvalid ? (
+                <span className="tx-prow-invalid">Cannot import</span>
+              ) : (
+                <select
+                  className="tx-row-select"
+                  value={row.action}
+                  onChange={(e) => setRowAction(row.rowId, e.target.value as RowAction)}
+                >
+                  {options.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
       {invalidCount > 0 && (
-        <Alert
-          type="warning"
-          showIcon
-          title={`${invalidCount} row${invalidCount !== 1 ? 's' : ''} cannot be imported (invalid).`}
-        />
+        <div className="tx-note tx-note-warn">
+          <WarningOutlined className="tx-note-icon" />
+          <span>
+            {invalidCount} row{invalidCount !== 1 ? 's' : ''} cannot be imported because{' '}
+            {invalidCount !== 1 ? 'they are' : 'it is'} missing required fields.
+          </span>
+        </div>
       )}
-      <Button
-        type="primary"
-        block
-        icon={<UploadOutlined />}
-        loading={applying}
-        disabled={totalActionable === 0}
-        onClick={handleApply}
-      >
-        Apply ({toImport} new · {toOverwrite} overwrite · {toDuplicate} duplicate)
-      </Button>
-    </Space>
+
+      <div className="tx-actionbar">
+        <span className="tx-summary">
+          <span>
+            <b>{toImport}</b> new
+          </span>
+          <span>
+            <b>{toOverwrite}</b> overwrite
+          </span>
+          <span>
+            <b>{toDuplicate}</b> duplicate
+          </span>
+        </span>
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={totalActionable === 0 || applying}
+          onClick={handleApply}
+        >
+          <UploadOutlined style={{ fontSize: 12 }} />
+          {applying
+            ? 'Importing…'
+            : `Import ${totalActionable} account${totalActionable !== 1 ? 's' : ''}`}
+        </button>
+      </div>
+    </div>
   );
 }
 
-type ProviderRow = Pick<PreviewRow, 'provider'>;
+/* ──────────────────────────────────────────────────────────────────
+   Modal shell
+   ────────────────────────────────────────────────────────────────── */
 
-export default function AccountTransferModal({ open, onClose }: AccountTransferModalProps) {
+export default function AccountTransferModal({
+  open,
+  onClose,
+  initialMode = 'export',
+}: AccountTransferModalProps) {
+  const [mode, setMode] = useState<TransferMode>(initialMode);
+
+  const tabs: Array<{ id: TransferMode; label: string; icon: ReactNode }> = [
+    { id: 'export', label: 'Export', icon: <DownloadOutlined style={{ fontSize: 12 }} /> },
+    { id: 'import', label: 'Import', icon: <UploadOutlined style={{ fontSize: 12 }} /> },
+  ];
+
   return (
     <Modal
       open={open}
-      onCancel={onClose}
-      footer={null}
-      title="Import / Export Accounts"
-      centered
-      width={780}
-      destroyOnHidden
+      onClose={onClose}
+      title="Backup & transfer"
+      subtitle="Move your storage accounts between machines as a JSON file"
+      icon={<SwapOutlined style={{ fontSize: 18 }} />}
+      width={720}
     >
-      <Space orientation="vertical" size="middle" style={{ width: '100%' }}>
-        <Alert
-          type="warning"
-          showIcon
-          title="Export includes access keys, secrets, and tokens. Store the JSON securely."
-        />
-        <Tabs
-          defaultActiveKey="export"
-          items={[
-            {
-              key: 'export',
-              label: (
-                <span>
-                  <DownloadOutlined /> Export
-                </span>
-              ),
-              children: <ExportPanel />,
-            },
-            {
-              key: 'import',
-              label: (
-                <span>
-                  <UploadOutlined /> Import
-                </span>
-              ),
-              children: <ImportPanel onApplied={onClose} />,
-            },
-          ]}
-        />
-      </Space>
+      <div className="tx-shell">
+        <div className="segmented tx-toggle">
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              className={mode === t.id ? 'active' : undefined}
+              onClick={() => setMode(t.id)}
+            >
+              {t.icon}
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <SecurityNote />
+
+        {mode === 'export' ? <ExportPanel /> : <ImportPanel onApplied={onClose} />}
+      </div>
     </Modal>
   );
 }
