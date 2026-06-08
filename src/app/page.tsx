@@ -1175,6 +1175,7 @@ export default function Home() {
                   item={focusedItem}
                   bucket={currentConfig?.bucket ?? ''}
                   path={currentPath}
+                  storageConfig={config}
                   onClose={() => setShowInspector(false)}
                   onDownload={handleDownload}
                 />

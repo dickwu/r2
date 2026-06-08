@@ -11,7 +11,9 @@ import {
   FileZipOutlined,
   FileOutlined,
 } from '@ant-design/icons';
+import { App } from 'antd';
 import { FileItem } from '@/app/hooks/useR2Files';
+import { buildPublicUrl, generateSignedUrl, type StorageConfig } from '@/app/lib/r2cache';
 import { formatBytes } from '@/app/utils/formatBytes';
 import dayjs from 'dayjs';
 
@@ -19,6 +21,7 @@ interface InspectorProps {
   item: FileItem;
   bucket: string;
   path: string;
+  storageConfig?: StorageConfig | null;
   onClose: () => void;
   onDownload?: (item: FileItem) => void;
 }
@@ -123,11 +126,43 @@ function KV({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-export default function Inspector({ item, bucket, path, onClose, onDownload }: InspectorProps) {
+export default function Inspector({
+  item,
+  bucket,
+  path,
+  storageConfig,
+  onClose,
+  onDownload,
+}: InspectorProps) {
+  const { message } = App.useApp();
   const type = itemType(item);
 
   const sizeLabel = item.isFolder ? '—' : formatBytes(item.size || 0);
   const modLabel = item.lastModified ? dayjs(item.lastModified).format('YYYY-MM-DD HH:mm') : '—';
+
+  const isPublic = !!storageConfig?.publicDomain;
+  // Only treat as a public link when a public domain is configured. Without one,
+  // buildPublicUrl would return the S3 API endpoint (e.g. *.r2.cloudflarestorage.com),
+  // which requires signing — so we fall back to a temporary signed URL instead.
+  const publicUrl =
+    !item.isFolder && isPublic && storageConfig ? buildPublicUrl(storageConfig, item.key) : null;
+
+  async function handleCopyUrl() {
+    if (item.isFolder || !storageConfig) return;
+    try {
+      const url = publicUrl ?? (await generateSignedUrl(storageConfig, item.key));
+      if (!url) {
+        message.warning('No public domain or credentials available for this bucket');
+        return;
+      }
+      await navigator.clipboard.writeText(url);
+      message.success(
+        publicUrl ? 'Public URL copied to clipboard' : 'Signed URL copied to clipboard'
+      );
+    } catch {
+      message.error('Failed to copy URL');
+    }
+  }
 
   return (
     <div className="inspector">
@@ -162,9 +197,15 @@ export default function Inspector({ item, bucket, path, onClose, onDownload }: I
               <DownloadOutlined style={{ fontSize: 12 }} /> Download
             </button>
           )}
-          <button className="btn btn-sm">
-            <LinkOutlined style={{ fontSize: 12 }} /> Copy URL
-          </button>
+          {!item.isFolder && (
+            <button
+              className="btn btn-sm"
+              onClick={handleCopyUrl}
+              title={isPublic ? 'Copy public URL' : 'Copy temporary signed URL'}
+            >
+              <LinkOutlined style={{ fontSize: 12 }} /> {isPublic ? 'Copy link' : 'Copy URL'}
+            </button>
+          )}
           <button className="btn btn-sm" style={{ padding: '0 8px' }}>
             <MoreOutlined style={{ fontSize: 12 }} />
           </button>
@@ -180,7 +221,16 @@ export default function Inspector({ item, bucket, path, onClose, onDownload }: I
             <KV label="ETag" value="—" />
             <KV label="Storage class" value="STANDARD" />
             <KV label="Encryption" value="AES-256" />
-            <KV label="Visibility" value="private" />
+            <KV
+              label="Visibility"
+              value={
+                isPublic ? (
+                  <span style={{ color: 'var(--accent)', fontWeight: 600 }}>public</span>
+                ) : (
+                  'private'
+                )
+              }
+            />
           </>
         )}
       </div>

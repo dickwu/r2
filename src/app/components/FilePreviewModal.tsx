@@ -17,7 +17,7 @@ import {
 } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import dynamic from 'next/dynamic';
-import { generateSignedUrl, uploadContent, StorageConfig } from '@/app/lib/r2cache';
+import { buildPublicUrl, generateSignedUrl, uploadContent, StorageConfig } from '@/app/lib/r2cache';
 import { TEXT_EXTENSIONS } from '@/app/components/preview/TextViewer';
 import { useVideoThumbnail } from '@/app/hooks/useVideoThumbnail';
 import { usePreviewStore } from '@/app/stores/previewStore';
@@ -178,9 +178,9 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
     }
 
     if (config?.publicDomain) {
-      const domain = config.publicDomain.replace(/\/$/, '');
-      const scheme = config.publicDomainScheme || 'https';
-      setSignedUrl(`${scheme}://${domain}/${file.key}`);
+      // Reuse the provider's URL builder so the object key is encoded
+      // consistently (spaces, unicode, reserved characters).
+      setSignedUrl(buildPublicUrl(config, file.key));
       return;
     }
 

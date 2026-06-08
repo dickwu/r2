@@ -759,6 +759,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         endpointHost: currentConfig.endpoint_host,
         forcePathStyle: currentConfig.force_path_style ?? false,
         bucket: currentConfig.bucket,
+        publicDomain: currentConfig.public_domain || undefined,
+        publicDomainScheme: currentConfig.public_domain_scheme || undefined,
       };
     }
 
@@ -775,6 +777,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         endpointHost: currentConfig.endpoint_host,
         forcePathStyle: true,
         bucket: currentConfig.bucket,
+        publicDomain: currentConfig.public_domain || undefined,
+        publicDomainScheme: currentConfig.public_domain_scheme || undefined,
       };
     }
 

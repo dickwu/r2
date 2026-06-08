@@ -9,6 +9,7 @@ import {
   EyeInvisibleOutlined,
   ReloadOutlined,
   UserOutlined,
+  GlobalOutlined,
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import { useAccountStore, type ProviderAccount } from '@/app/stores/accountStore';
@@ -28,6 +29,10 @@ export interface AccountEditModalProps {
 
 interface BucketRow {
   name: string;
+  /** Public domain host (no scheme), e.g. "cdn.example.com". Empty ⇒ private. */
+  publicDomainHost: string;
+  /** "https" | "http". Only meaningful when a host is set. */
+  publicDomainScheme: string;
 }
 
 /* ── Provider picker ────────────────────────────────────────────── */
@@ -38,36 +43,109 @@ const PROVIDERS: { id: StorageProvider; label: string; desc: string; icon: strin
   { id: 'rustfs', label: 'RustFS', desc: 'Path-style', icon: 'RF' },
 ];
 
+/* ── Domain helpers ──────────────────────────────────────────────── */
+/** Split a pasted value like "https://cdn.example.com/" into scheme + host. */
+function parseDomainInput(value: string): { scheme?: string; host: string } {
+  const trimmed = value.trim();
+  if (!trimmed) return { host: '' };
+  if (trimmed.includes('://')) {
+    try {
+      const url = new URL(trimmed);
+      // The scheme picker only offers http/https — clamp anything else so the
+      // displayed and persisted scheme can't diverge.
+      const scheme = url.protocol.replace(':', '') === 'http' ? 'http' : 'https';
+      return { scheme, host: url.host };
+    } catch {
+      return { host: trimmed.replace(/\/+$/, '') };
+    }
+  }
+  return { host: trimmed.replace(/\/+$/, '') };
+}
+
+/** Build the public base URL a bucket's files will resolve to, or null if private. */
+function buildDomainPreview(scheme: string, host: string): string | null {
+  const cleanHost = host
+    .trim()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '');
+  if (!cleanHost) return null;
+  return `${scheme || 'https'}://${cleanHost}`;
+}
+
 /* ── BucketListRow ───────────────────────────────────────────────── */
 function BucketListRow({
   bucket,
   onDelete,
+  onHostChange,
+  onSchemeChange,
 }: {
   bucket: BucketRow;
   onDelete: (name: string) => void;
+  onHostChange: (name: string, value: string) => void;
+  onSchemeChange: (name: string, scheme: string) => void;
 }) {
+  const preview = buildDomainPreview(bucket.publicDomainScheme, bucket.publicDomainHost);
+  const isPublic = preview !== null;
+
   return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        padding: '8px 12px',
-        background: 'var(--bg-sunken)',
-        borderRadius: 7,
-        border: '1px solid var(--border)',
-        fontSize: 12.5,
-      }}
-    >
-      <DatabaseOutlined style={{ fontSize: 13, color: 'var(--text-muted)' }} />
-      <span style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 12 }}>{bucket.name}</span>
-      <button
-        className="fl-act-btn danger"
-        onClick={() => onDelete(bucket.name)}
-        title="Remove bucket"
-      >
-        <DeleteOutlined style={{ fontSize: 12 }} />
-      </button>
+    <div className={['bkt-card', isPublic && 'is-public'].filter(Boolean).join(' ')}>
+      <div className="bkt-head">
+        <DatabaseOutlined className="bkt-ico" />
+        <span className="bkt-name" title={bucket.name}>
+          {bucket.name}
+        </span>
+        <span className={['bkt-pill', isPublic ? 'public' : 'private'].join(' ')}>
+          {isPublic ? 'Public' : 'Private'}
+        </span>
+        <button
+          className="fl-act-btn danger"
+          onClick={() => onDelete(bucket.name)}
+          title="Remove bucket"
+          type="button"
+        >
+          <DeleteOutlined style={{ fontSize: 12 }} />
+        </button>
+      </div>
+
+      <div className="bkt-domain">
+        <GlobalOutlined className="bkt-domain-ico" />
+        <select
+          className="select bkt-scheme"
+          value={bucket.publicDomainScheme || 'https'}
+          onChange={(e) => onSchemeChange(bucket.name, e.target.value)}
+          aria-label={`Public domain scheme for ${bucket.name}`}
+        >
+          <option value="https">https://</option>
+          <option value="http">http://</option>
+        </select>
+        <input
+          className="input mono bkt-host"
+          value={bucket.publicDomainHost}
+          onChange={(e) => onHostChange(bucket.name, e.target.value)}
+          placeholder="pub-….r2.dev or cdn.example.com"
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          aria-label={`Public domain for ${bucket.name}`}
+        />
+      </div>
+
+      <div className={['bkt-preview', isPublic ? 'is-public' : ''].filter(Boolean).join(' ')}>
+        {isPublic ? (
+          <>
+            <span className="bkt-preview-arrow">↳</span>
+            <span className="bkt-preview-url" title={`${preview}/<object>`}>
+              {preview}
+              <span className="bkt-preview-obj">/&lt;object&gt;</span>
+            </span>
+          </>
+        ) : (
+          <span className="bkt-preview-hint">
+            No public domain — files open via temporary signed URLs.
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -152,7 +230,13 @@ export default function AccountEditModal({
         setSecretAccessKey(firstToken.token.secret_access_key);
         setApiToken(firstToken.token.api_token);
         setTokenName(firstToken.token.name ?? '');
-        setBuckets(firstToken.buckets.map((b) => ({ name: b.name })));
+        setBuckets(
+          firstToken.buckets.map((b) => ({
+            name: b.name,
+            publicDomainHost: b.public_domain ?? '',
+            publicDomainScheme: b.public_domain_scheme ?? 'https',
+          }))
+        );
       } else {
         setAccessKeyId('');
         setSecretAccessKey('');
@@ -169,26 +253,65 @@ export default function AccountEditModal({
       setRegion(acct.account.region);
       setEndpointScheme(acct.account.endpoint_scheme);
       setEndpointHost(acct.account.endpoint_host ?? '');
-      setBuckets(acct.buckets.map((b) => ({ name: b.name })));
+      setBuckets(
+        acct.buckets.map((b) => ({
+          name: b.name,
+          publicDomainHost: b.public_domain_host ?? '',
+          publicDomainScheme: b.public_domain_scheme ?? 'https',
+        }))
+      );
     } else if (acct.provider === 'minio') {
       setAccessKeyId(acct.account.access_key_id);
       setSecretAccessKey(acct.account.secret_access_key);
       setEndpointScheme(acct.account.endpoint_scheme);
       setEndpointHost(acct.account.endpoint_host);
-      setBuckets(acct.buckets.map((b) => ({ name: b.name })));
+      setBuckets(
+        acct.buckets.map((b) => ({
+          name: b.name,
+          publicDomainHost: b.public_domain_host ?? '',
+          publicDomainScheme: b.public_domain_scheme ?? 'https',
+        }))
+      );
       setRegion('');
     } else if (acct.provider === 'rustfs') {
       setAccessKeyId(acct.account.access_key_id);
       setSecretAccessKey(acct.account.secret_access_key);
       setEndpointScheme(acct.account.endpoint_scheme);
       setEndpointHost(acct.account.endpoint_host);
-      setBuckets(acct.buckets.map((b) => ({ name: b.name })));
+      setBuckets(
+        acct.buckets.map((b) => ({
+          name: b.name,
+          publicDomainHost: b.public_domain_host ?? '',
+          publicDomainScheme: b.public_domain_scheme ?? 'https',
+        }))
+      );
       setRegion('');
     }
   }, [open, accountId, accounts, isNew, initialProvider]);
 
   function removeBucket(name: string) {
     setBuckets((prev) => prev.filter((b) => b.name !== name));
+  }
+
+  function setBucketHost(name: string, raw: string) {
+    const parsed = parseDomainInput(raw);
+    setBuckets((prev) =>
+      prev.map((b) =>
+        b.name === name
+          ? {
+              ...b,
+              publicDomainHost: parsed.host,
+              publicDomainScheme: parsed.scheme || b.publicDomainScheme || 'https',
+            }
+          : b
+      )
+    );
+  }
+
+  function setBucketScheme(name: string, scheme: string) {
+    setBuckets((prev) =>
+      prev.map((b) => (b.name === name ? { ...b, publicDomainScheme: scheme } : b))
+    );
   }
 
   const handleLoadBuckets = useCallback(async () => {
@@ -264,9 +387,10 @@ export default function AccountEditModal({
                   forcePathStyle: true,
                 }
       );
+      // Preserve any public-domain config already entered for known buckets.
       const merged = result.map((b) => {
         const existing = buckets.find((eb) => eb.name === b.name);
-        return existing ?? { name: b.name };
+        return existing ?? { name: b.name, publicDomainHost: '', publicDomainScheme: 'https' };
       });
       setBuckets(merged);
       message.success(`Found ${merged.length} bucket(s)`);
@@ -288,6 +412,24 @@ export default function AccountEditModal({
     buckets,
     message,
   ]);
+
+  /** R2 stores domain in `public_domain`; S3-family stores it in `public_domain_host`. */
+  function r2BucketPayload(b: BucketRow) {
+    const host = b.publicDomainHost.trim();
+    return {
+      name: b.name,
+      public_domain: host || null,
+      public_domain_scheme: host ? b.publicDomainScheme || 'https' : null,
+    };
+  }
+  function s3BucketPayload(b: BucketRow) {
+    const host = b.publicDomainHost.trim();
+    return {
+      name: b.name,
+      public_domain_host: host || null,
+      public_domain_scheme: host ? b.publicDomainScheme || 'https' : null,
+    };
+  }
 
   async function handleSave() {
     if (!accountName.trim()) {
@@ -317,14 +459,7 @@ export default function AccountEditModal({
             access_key_id: accessKeyId,
             secret_access_key: secretAccessKey,
           });
-          await saveBuckets(
-            token.id,
-            buckets.map((b) => ({
-              name: b.name,
-              public_domain: null,
-              public_domain_scheme: null,
-            }))
-          );
+          await saveBuckets(token.id, buckets.map(r2BucketPayload));
         } else if (provider === 'aws') {
           if (!region.trim()) {
             message.warning('Region is required');
@@ -340,14 +475,7 @@ export default function AccountEditModal({
             endpoint_host: endpointHost || null,
             force_path_style: false,
           });
-          await saveAwsBuckets(
-            acct.id,
-            buckets.map((b) => ({
-              name: b.name,
-              public_domain_scheme: null,
-              public_domain_host: null,
-            }))
-          );
+          await saveAwsBuckets(acct.id, buckets.map(s3BucketPayload));
         } else if (provider === 'minio') {
           if (!endpointHost.trim()) {
             message.warning('Endpoint host is required');
@@ -362,10 +490,7 @@ export default function AccountEditModal({
             endpoint_host: endpointHost.trim(),
             force_path_style: false,
           });
-          await saveMinioBuckets(
-            acct.id,
-            buckets.map((b) => ({ name: b.name }))
-          );
+          await saveMinioBuckets(acct.id, buckets.map(s3BucketPayload));
         } else if (provider === 'rustfs') {
           if (!endpointHost.trim()) {
             message.warning('Endpoint host is required');
@@ -379,10 +504,7 @@ export default function AccountEditModal({
             endpoint_scheme: endpointScheme || 'https',
             endpoint_host: endpointHost.trim(),
           });
-          await saveRustfsBuckets(
-            acct.id,
-            buckets.map((b) => ({ name: b.name }))
-          );
+          await saveRustfsBuckets(acct.id, buckets.map(s3BucketPayload));
         }
         message.success('Account created');
         onChanged?.();
@@ -403,14 +525,7 @@ export default function AccountEditModal({
                 secret_access_key: secretAccessKey,
               },
             });
-            await saveBuckets(
-              firstToken.token.id,
-              buckets.map((b) => ({
-                name: b.name,
-                public_domain: null,
-                public_domain_scheme: null,
-              }))
-            );
+            await saveBuckets(firstToken.token.id, buckets.map(r2BucketPayload));
           }
         } else if (acct.provider === 'aws') {
           await updateAwsAccount({
@@ -423,14 +538,7 @@ export default function AccountEditModal({
             endpoint_host: endpointHost || null,
             force_path_style: false,
           });
-          await saveAwsBuckets(
-            acct.account.id,
-            buckets.map((b) => ({
-              name: b.name,
-              public_domain_scheme: null,
-              public_domain_host: null,
-            }))
-          );
+          await saveAwsBuckets(acct.account.id, buckets.map(s3BucketPayload));
         } else if (acct.provider === 'minio') {
           await updateMinioAccount({
             id: acct.account.id,
@@ -441,10 +549,7 @@ export default function AccountEditModal({
             endpoint_host: endpointHost.trim(),
             force_path_style: false,
           });
-          await saveMinioBuckets(
-            acct.account.id,
-            buckets.map((b) => ({ name: b.name }))
-          );
+          await saveMinioBuckets(acct.account.id, buckets.map(s3BucketPayload));
         } else if (acct.provider === 'rustfs') {
           await updateRustfsAccount({
             id: acct.account.id,
@@ -454,10 +559,7 @@ export default function AccountEditModal({
             endpoint_scheme: endpointScheme || 'https',
             endpoint_host: endpointHost.trim(),
           });
-          await saveRustfsBuckets(
-            acct.account.id,
-            buckets.map((b) => ({ name: b.name }))
-          );
+          await saveRustfsBuckets(acct.account.id, buckets.map(s3BucketPayload));
         }
         message.success('Account updated');
         onChanged?.();
@@ -494,6 +596,8 @@ export default function AccountEditModal({
       },
     });
   }
+
+  const publicCount = buckets.filter((b) => b.publicDomainHost.trim()).length;
 
   const footer = (
     <>
@@ -697,21 +801,43 @@ export default function AccountEditModal({
           </div>
         </div>
 
-        {/* Buckets */}
-        <div className="field" style={{ marginTop: 6 }}>
-          <div className="field-label">Buckets ({buckets.length})</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {/* Buckets + public access */}
+        <div className="field" style={{ marginTop: 6, marginBottom: 0 }}>
+          <div className="bkt-section-head">
+            <div className="field-label" style={{ margin: 0 }}>
+              Buckets &amp; public access
+            </div>
+            {buckets.length > 0 && (
+              <span className="bkt-section-count">
+                {publicCount > 0
+                  ? `${publicCount} of ${buckets.length} public`
+                  : `${buckets.length} bucket${buckets.length !== 1 ? 's' : ''}`}
+              </span>
+            )}
+          </div>
+          <div className="field-hint" style={{ marginBottom: 10 }}>
+            Attach a public domain (an R2 <span className="mono">r2.dev</span> subdomain or a custom
+            domain) to serve a bucket&apos;s files over a public URL. Leave it blank to keep files
+            private behind temporary signed links.
+          </div>
+
+          <div className="bkt-list">
             {buckets.map((b) => (
-              <BucketListRow key={b.name} bucket={b} onDelete={removeBucket} />
+              <BucketListRow
+                key={b.name}
+                bucket={b}
+                onDelete={removeBucket}
+                onHostChange={setBucketHost}
+                onSchemeChange={setBucketScheme}
+              />
             ))}
             <button
-              className="btn btn-sm"
-              style={{ alignSelf: 'flex-start', marginTop: 4 }}
+              className="btn btn-sm bkt-load-btn"
               onClick={handleLoadBuckets}
               disabled={loadingBuckets}
             >
               <ReloadOutlined spin={loadingBuckets} style={{ fontSize: 11 }} />
-              Load buckets from API
+              {buckets.length > 0 ? 'Reload buckets from API' : 'Load buckets from API'}
             </button>
           </div>
         </div>
