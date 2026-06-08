@@ -482,6 +482,11 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         })),
       });
       await get().loadAccounts();
+      // Refresh the live config so a public-domain change on the currently
+      // selected bucket takes effect immediately, not just after a restart.
+      if (get().currentConfig?.token_id === tokenId) {
+        await get().loadCurrentConfig();
+      }
       return savedBuckets;
     } catch (e) {
       console.error('Failed to save buckets:', e);
@@ -557,6 +562,12 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         })),
       });
       await get().loadAccounts();
+      // Refresh the live config so a public-domain change on the currently
+      // selected bucket takes effect immediately, not just after a restart.
+      const cfg = get().currentConfig;
+      if (cfg?.provider === 'aws' && cfg.account_id === accountId) {
+        await get().loadCurrentConfig();
+      }
       return savedBuckets;
     } catch (e) {
       console.error('Failed to save AWS buckets:', e);
@@ -630,6 +641,12 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         })),
       });
       await get().loadAccounts();
+      // Refresh the live config so a public-domain change on the currently
+      // selected bucket takes effect immediately, not just after a restart.
+      const cfg = get().currentConfig;
+      if (cfg?.provider === 'minio' && cfg.account_id === accountId) {
+        await get().loadCurrentConfig();
+      }
       return savedBuckets;
     } catch (e) {
       console.error('Failed to save MinIO buckets:', e);
@@ -701,6 +718,12 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         })),
       });
       await get().loadAccounts();
+      // Refresh the live config so a public-domain change on the currently
+      // selected bucket takes effect immediately, not just after a restart.
+      const cfg = get().currentConfig;
+      if (cfg?.provider === 'rustfs' && cfg.account_id === accountId) {
+        await get().loadCurrentConfig();
+      }
       return savedBuckets;
     } catch (e) {
       console.error('Failed to save RustFS buckets:', e);
