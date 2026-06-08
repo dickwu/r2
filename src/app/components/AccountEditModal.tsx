@@ -432,11 +432,6 @@ export default function AccountEditModal({
   }
 
   async function handleSave() {
-    if (!accountName.trim()) {
-      message.warning('Account name is required');
-      return;
-    }
-
     setSaving(true);
     try {
       if (isNew) {
@@ -680,12 +675,12 @@ export default function AccountEditModal({
         {/* Account name + provider-specific ID field */}
         <div className="field-row">
           <div className="field">
-            <div className="field-label field-required">Account name</div>
+            <div className="field-label">Account name</div>
             <input
               className="input"
               value={accountName}
               onChange={(e) => setAccountName(e.target.value)}
-              placeholder="My account"
+              placeholder="My account (optional)"
             />
           </div>
           {provider === 'r2' && isNew && (
