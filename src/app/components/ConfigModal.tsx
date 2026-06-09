@@ -29,6 +29,8 @@ export interface BucketConfig {
   name: string;
   publicDomainHost?: string;
   publicDomainScheme?: string;
+  isPublic?: boolean;
+  publicPathPrefix?: string;
 }
 
 interface FormValues {
@@ -99,7 +101,8 @@ export default function ConfigModal({
   const isAccountMode = mode === 'add-account' || mode === 'edit-account';
   const isEditMode = mode === 'edit-account' || mode === 'edit-token';
   const isR2Provider = provider === 'r2';
-  const showDomainSettings = provider === 'r2' || provider === 'aws';
+  // All providers now support an optional public domain + path prefix.
+  const showDomainSettings = true;
   const showImportOption = mode === 'add-account' && accounts.length === 0;
 
   useEffect(() => {
@@ -183,6 +186,8 @@ export default function ConfigModal({
         name: b.name,
         publicDomainHost: b.public_domain || undefined,
         publicDomainScheme: b.public_domain_scheme || undefined,
+        isPublic: b.is_public ?? false,
+        publicPathPrefix: b.public_path_prefix || undefined,
       }));
       setBuckets(bucketConfigs);
       if (bucketConfigs.length > 0) {
@@ -200,6 +205,8 @@ export default function ConfigModal({
         name: b.name,
         publicDomainHost: b.public_domain_host || undefined,
         publicDomainScheme: b.public_domain_scheme || undefined,
+        isPublic: b.is_public ?? false,
+        publicPathPrefix: b.public_path_prefix || undefined,
       }));
       setBuckets(bucketConfigs);
       if (bucketConfigs.length > 0) {
@@ -217,6 +224,10 @@ export default function ConfigModal({
       });
       const bucketConfigs = existingBuckets.map((b) => ({
         name: b.name,
+        publicDomainHost: b.public_domain_host || undefined,
+        publicDomainScheme: b.public_domain_scheme || undefined,
+        isPublic: b.is_public ?? false,
+        publicPathPrefix: b.public_path_prefix || undefined,
       }));
       setBuckets(bucketConfigs);
       if (bucketConfigs.length > 0) {
@@ -234,6 +245,10 @@ export default function ConfigModal({
       });
       const bucketConfigs = existingBuckets.map((b) => ({
         name: b.name,
+        publicDomainHost: b.public_domain_host || undefined,
+        publicDomainScheme: b.public_domain_scheme || undefined,
+        isPublic: b.is_public ?? false,
+        publicPathPrefix: b.public_path_prefix || undefined,
       }));
       setBuckets(bucketConfigs);
       if (bucketConfigs.length > 0) {
@@ -249,7 +264,7 @@ export default function ConfigModal({
     if (name && !buckets.some((b) => b.name === name)) {
       setBuckets([
         ...buckets,
-        showDomainSettings ? { name, publicDomainScheme: 'https' } : { name },
+        showDomainSettings ? { name, publicDomainScheme: 'https', isPublic: false } : { name, isPublic: false },
       ]);
       if (!selectedBucket) {
         form.setFieldValue('selectedBucket', name);
@@ -303,6 +318,14 @@ export default function ConfigModal({
     setBuckets(
       buckets.map((b) => (b.name === bucketName ? { ...b, publicDomainScheme: scheme } : b))
     );
+  }
+
+  function handleTogglePublic(bucketName: string, value: boolean) {
+    setBuckets(buckets.map((b) => (b.name === bucketName ? { ...b, isPublic: value } : b)));
+  }
+
+  function handlePrefixChange(bucketName: string, prefix: string) {
+    setBuckets(buckets.map((b) => (b.name === bucketName ? { ...b, publicPathPrefix: prefix } : b)));
   }
 
   async function handleLoadBuckets() {
@@ -431,6 +454,8 @@ export default function ConfigModal({
               name: b.name,
               public_domain_scheme: b.publicDomainScheme || null,
               public_domain_host: b.publicDomainHost || null,
+              is_public: b.isPublic ?? false,
+              public_path_prefix: b.publicPathPrefix || null,
             }))
           );
           message.success('Account updated');
@@ -448,6 +473,10 @@ export default function ConfigModal({
             editAccount.account.id,
             buckets.map((b) => ({
               name: b.name,
+              public_domain_scheme: b.publicDomainScheme || null,
+              public_domain_host: b.publicDomainHost || null,
+              is_public: b.isPublic ?? false,
+              public_path_prefix: b.publicPathPrefix || null,
             }))
           );
           message.success('Account updated');
@@ -464,6 +493,10 @@ export default function ConfigModal({
             editAccount.account.id,
             buckets.map((b) => ({
               name: b.name,
+              public_domain_scheme: b.publicDomainScheme || null,
+              public_domain_host: b.publicDomainHost || null,
+              is_public: b.isPublic ?? false,
+              public_path_prefix: b.publicPathPrefix || null,
             }))
           );
           message.success('Account updated');
@@ -491,6 +524,8 @@ export default function ConfigModal({
               name: b.name,
               public_domain: b.publicDomainHost || null,
               public_domain_scheme: b.publicDomainScheme || null,
+              is_public: b.isPublic ?? false,
+              public_path_prefix: b.publicPathPrefix || null,
             }))
           );
 
@@ -513,6 +548,8 @@ export default function ConfigModal({
               name: b.name,
               public_domain_scheme: b.publicDomainScheme || null,
               public_domain_host: b.publicDomainHost || null,
+              is_public: b.isPublic ?? false,
+              public_path_prefix: b.publicPathPrefix || null,
             }))
           );
 
@@ -532,6 +569,10 @@ export default function ConfigModal({
             account.id,
             buckets.map((b) => ({
               name: b.name,
+              public_domain_scheme: b.publicDomainScheme || null,
+              public_domain_host: b.publicDomainHost || null,
+              is_public: b.isPublic ?? false,
+              public_path_prefix: b.publicPathPrefix || null,
             }))
           );
 
@@ -550,6 +591,10 @@ export default function ConfigModal({
             account.id,
             buckets.map((b) => ({
               name: b.name,
+              public_domain_scheme: b.publicDomainScheme || null,
+              public_domain_host: b.publicDomainHost || null,
+              is_public: b.isPublic ?? false,
+              public_path_prefix: b.publicPathPrefix || null,
             }))
           );
 
@@ -579,6 +624,8 @@ export default function ConfigModal({
             name: b.name,
             public_domain: b.publicDomainHost || null,
             public_domain_scheme: b.publicDomainScheme || null,
+            is_public: b.isPublic ?? false,
+            public_path_prefix: b.publicPathPrefix || null,
           }))
         );
 
@@ -601,6 +648,8 @@ export default function ConfigModal({
               name: b.name,
               public_domain: b.publicDomainHost || null,
               public_domain_scheme: b.publicDomainScheme || null,
+              is_public: b.isPublic ?? false,
+              public_path_prefix: b.publicPathPrefix || null,
             }))
           );
         }
@@ -686,6 +735,8 @@ export default function ConfigModal({
                       name: bucket.name,
                       public_domain: bucket.public_domain ?? null,
                       public_domain_scheme: bucket.public_domain_scheme ?? null,
+                      is_public: bucket.is_public ?? false,
+                      public_path_prefix: bucket.public_path_prefix ?? null,
                     }))
                 );
               }
@@ -725,6 +776,8 @@ export default function ConfigModal({
                   name: bucket.name,
                   public_domain_scheme: bucket.public_domain_scheme ?? null,
                   public_domain_host: bucket.public_domain_host ?? null,
+                  is_public: bucket.is_public ?? false,
+                  public_path_prefix: bucket.public_path_prefix ?? null,
                 }))
             );
           }
@@ -758,6 +811,8 @@ export default function ConfigModal({
                   name: bucket.name,
                   public_domain_scheme: bucket.public_domain_scheme ?? null,
                   public_domain_host: bucket.public_domain_host ?? null,
+                  is_public: bucket.is_public ?? false,
+                  public_path_prefix: bucket.public_path_prefix ?? null,
                 }))
             );
           }
@@ -790,6 +845,8 @@ export default function ConfigModal({
                   name: bucket.name,
                   public_domain_scheme: bucket.public_domain_scheme ?? null,
                   public_domain_host: bucket.public_domain_host ?? null,
+                  is_public: bucket.is_public ?? false,
+                  public_path_prefix: bucket.public_path_prefix ?? null,
                 }))
             );
           }
@@ -1167,30 +1224,47 @@ export default function ConfigModal({
                     >
                       {bucket.name}
                     </span>
-                    {showDomainSettings ? (
-                      <Space.Compact size="small" style={{ flex: 1 }}>
-                        <Select
-                          size="small"
-                          value={bucket.publicDomainScheme || 'https'}
-                          onChange={(value) => handleDomainSchemeChange(bucket.name, value)}
-                          onClick={(e) => e.stopPropagation()}
-                          style={{ width: 90 }}
-                          options={[{ value: 'https' }, { value: 'http' }]}
-                        />
-                        <Input
-                          placeholder="domain.com"
-                          value={bucket.publicDomainHost || ''}
-                          onChange={(e) => handleDomainChange(bucket.name, e.target.value)}
-                          onClick={(e) => e.stopPropagation()}
-                          style={{ flex: 1, fontSize: 12 }}
-                          autoComplete="off"
-                          autoCorrect="off"
-                          autoCapitalize="off"
-                        />
-                      </Space.Compact>
-                    ) : (
-                      <div style={{ flex: 1 }} />
-                    )}
+                    <div
+                      style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Switch
+                        size="small"
+                        checked={!!bucket.isPublic}
+                        onChange={(checked) => handleTogglePublic(bucket.name, checked)}
+                        checkedChildren="Public"
+                        unCheckedChildren="Private"
+                      />
+                      {showDomainSettings && bucket.isPublic && (
+                        <Space.Compact size="small" style={{ flex: 1 }}>
+                          <Select
+                            size="small"
+                            value={bucket.publicDomainScheme || 'https'}
+                            onChange={(value) => handleDomainSchemeChange(bucket.name, value)}
+                            style={{ width: 78 }}
+                            options={[{ value: 'https' }, { value: 'http' }]}
+                          />
+                          <Input
+                            placeholder="cdn.example.com"
+                            value={bucket.publicDomainHost || ''}
+                            onChange={(e) => handleDomainChange(bucket.name, e.target.value)}
+                            style={{ flex: 1, fontSize: 12 }}
+                            autoComplete="off"
+                            autoCorrect="off"
+                            autoCapitalize="off"
+                          />
+                          <Input
+                            placeholder="prefix (optional)"
+                            value={bucket.publicPathPrefix || ''}
+                            onChange={(e) => handlePrefixChange(bucket.name, e.target.value)}
+                            style={{ width: 110, fontSize: 12 }}
+                            autoComplete="off"
+                            autoCorrect="off"
+                            autoCapitalize="off"
+                          />
+                        </Space.Compact>
+                      )}
+                    </div>
                     <Button
                       type="text"
                       size="small"

@@ -211,6 +211,8 @@ async function createAccountWithBuckets(
             name: b.name,
             public_domain: b.public_domain ?? null,
             public_domain_scheme: b.public_domain_scheme ?? null,
+            is_public: b.is_public ?? false,
+            public_path_prefix: b.public_path_prefix ?? null,
           }))
         );
       }
@@ -264,6 +266,8 @@ async function saveS3Buckets(
     name: string;
     public_domain_scheme?: string | null;
     public_domain_host?: string | null;
+    is_public?: boolean;
+    public_path_prefix?: string | null;
   }[]
 ) {
   const store = useAccountStore.getState();
@@ -273,6 +277,8 @@ async function saveS3Buckets(
       name: b.name,
       public_domain_scheme: b.public_domain_scheme ?? null,
       public_domain_host: b.public_domain_host ?? null,
+      is_public: b.is_public ?? false,
+      public_path_prefix: b.public_path_prefix ?? null,
     }));
   if (filtered.length === 0) return;
   if (provider === 'aws') await store.saveAwsBuckets(accountId, filtered);
@@ -325,6 +331,8 @@ async function overwriteAccountWithBuckets(account: ProviderAccount) {
             name: b.name,
             public_domain: b.public_domain ?? null,
             public_domain_scheme: b.public_domain_scheme ?? null,
+            is_public: b.is_public ?? false,
+            public_path_prefix: b.public_path_prefix ?? null,
           }))
         );
       }

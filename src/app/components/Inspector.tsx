@@ -13,7 +13,12 @@ import {
 } from '@ant-design/icons';
 import { App } from 'antd';
 import { FileItem } from '@/app/hooks/useR2Files';
-import { buildPublicUrl, generateSignedUrl, type StorageConfig } from '@/app/lib/r2cache';
+import {
+  buildPublicUrl,
+  generateSignedUrl,
+  isBucketPublic,
+  type StorageConfig,
+} from '@/app/lib/r2cache';
 import { formatBytes } from '@/app/utils/formatBytes';
 import dayjs from 'dayjs';
 
@@ -140,10 +145,11 @@ export default function Inspector({
   const sizeLabel = item.isFolder ? '—' : formatBytes(item.size || 0);
   const modLabel = item.lastModified ? dayjs(item.lastModified).format('YYYY-MM-DD HH:mm') : '—';
 
-  const isPublic = !!storageConfig?.publicDomain;
-  // Only treat as a public link when a public domain is configured. Without one,
-  // buildPublicUrl would return the S3 API endpoint (e.g. *.r2.cloudflarestorage.com),
-  // which requires signing — so we fall back to a temporary signed URL instead.
+  const isPublic = isBucketPublic(storageConfig);
+  // Only treat as a public link when the bucket is marked public (and, for R2, a
+  // public domain is configured). Otherwise buildPublicUrl would return the S3 API
+  // endpoint (e.g. *.r2.cloudflarestorage.com), which requires signing — so we fall
+  // back to a temporary signed URL instead.
   const publicUrl =
     !item.isFolder && isPublic && storageConfig ? buildPublicUrl(storageConfig, item.key) : null;
 

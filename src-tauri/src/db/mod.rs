@@ -95,6 +95,8 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
             name TEXT NOT NULL,
             public_domain TEXT,
             public_domain_scheme TEXT,
+            is_public INTEGER NOT NULL DEFAULT 0,
+            public_path_prefix TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             UNIQUE(token_id, name)
@@ -120,6 +122,26 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
         )
         .await;
 
+    // Add explicit public-access flag + R2 public path prefix for existing DBs
+    // (idempotent: the ADD COLUMN fails harmlessly once the column exists).
+    let _ = conn
+        .execute(
+            "ALTER TABLE buckets ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0",
+            (),
+        )
+        .await;
+    let _ = conn
+        .execute("ALTER TABLE buckets ADD COLUMN public_path_prefix TEXT", ())
+        .await;
+    // Buckets that already carried a public domain were served publicly before
+    // this flag existed — preserve that behavior on upgrade.
+    let _ = conn
+        .execute(
+            "UPDATE buckets SET is_public = 1 WHERE public_domain IS NOT NULL AND public_domain <> ''",
+            (),
+        )
+        .await;
+
     // Provider-specific tables
     conn.execute_batch(&format!(
         "{}{}",
@@ -141,6 +163,32 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
         rustfs_buckets::get_table_sql()
     ))
     .await?;
+
+    // Add the explicit public-access flag to S3-family bucket tables for
+    // existing DBs (idempotent). Backfill: any bucket that already had a custom
+    // public domain host was served publicly before the flag existed.
+    for table in ["aws_buckets", "minio_buckets", "rustfs_buckets"] {
+        let _ = conn
+            .execute(
+                &format!("ALTER TABLE {table} ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0"),
+                (),
+            )
+            .await;
+        let _ = conn
+            .execute(
+                &format!("ALTER TABLE {table} ADD COLUMN public_path_prefix TEXT"),
+                (),
+            )
+            .await;
+        let _ = conn
+            .execute(
+                &format!(
+                    "UPDATE {table} SET is_public = 1 WHERE public_domain_host IS NOT NULL AND public_domain_host <> ''"
+                ),
+                (),
+            )
+            .await;
+    }
 
     // Create app_state table
     conn.execute_batch(app_state::get_table_sql()).await?;

@@ -29,10 +29,14 @@ export interface AccountEditModalProps {
 
 interface BucketRow {
   name: string;
-  /** Public domain host (no scheme), e.g. "cdn.example.com". Empty ⇒ private. */
+  /** When true, objects are served via direct (unsigned) public URLs. */
+  isPublic: boolean;
+  /** Public domain host (no scheme), e.g. "cdn.example.com". R2 only. */
   publicDomainHost: string;
   /** "https" | "http". Only meaningful when a host is set. */
   publicDomainScheme: string;
+  /** R2 only: optional path segment prepended to the object key. */
+  publicPathPrefix: string;
 }
 
 /* ── Provider picker ────────────────────────────────────────────── */
@@ -75,17 +79,26 @@ function buildDomainPreview(scheme: string, host: string): string | null {
 /* ── BucketListRow ───────────────────────────────────────────────── */
 function BucketListRow({
   bucket,
+  provider,
   onDelete,
+  onTogglePublic,
   onHostChange,
   onSchemeChange,
+  onPrefixChange,
 }: {
   bucket: BucketRow;
+  provider: StorageProvider;
   onDelete: (name: string) => void;
+  onTogglePublic: (name: string, value: boolean) => void;
   onHostChange: (name: string, value: string) => void;
   onSchemeChange: (name: string, scheme: string) => void;
+  onPrefixChange: (name: string, value: string) => void;
 }) {
-  const preview = buildDomainPreview(bucket.publicDomainScheme, bucket.publicDomainHost);
-  const isPublic = preview !== null;
+  const isR2 = provider === 'r2';
+  const isPublic = bucket.isPublic;
+  const base = buildDomainPreview(bucket.publicDomainScheme, bucket.publicDomainHost);
+  const cleanPrefix = bucket.publicPathPrefix.trim().replace(/^\/+|\/+$/g, '');
+  const previewUrl = base ? (cleanPrefix ? `${base}/${cleanPrefix}` : base) : null;
 
   return (
     <div className={['bkt-card', isPublic && 'is-public'].filter(Boolean).join(' ')}>
@@ -94,9 +107,21 @@ function BucketListRow({
         <span className="bkt-name" title={bucket.name}>
           {bucket.name}
         </span>
-        <span className={['bkt-pill', isPublic ? 'public' : 'private'].join(' ')}>
-          {isPublic ? 'Public' : 'Private'}
-        </span>
+        <label
+          className="bkt-public-toggle"
+          title="When public, files are served via direct URLs. When private, previews use temporary signed URLs."
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+        >
+          <input
+            type="checkbox"
+            checked={isPublic}
+            onChange={(e) => onTogglePublic(bucket.name, e.target.checked)}
+            aria-label={`Public access for ${bucket.name}`}
+          />
+          <span className={['bkt-pill', isPublic ? 'public' : 'private'].join(' ')}>
+            {isPublic ? 'Public' : 'Private'}
+          </span>
+        </label>
         <button
           className="fl-act-btn danger"
           onClick={() => onDelete(bucket.name)}
@@ -107,42 +132,64 @@ function BucketListRow({
         </button>
       </div>
 
-      <div className="bkt-domain">
-        <GlobalOutlined className="bkt-domain-ico" />
-        <select
-          className="select bkt-scheme"
-          value={bucket.publicDomainScheme || 'https'}
-          onChange={(e) => onSchemeChange(bucket.name, e.target.value)}
-          aria-label={`Public domain scheme for ${bucket.name}`}
-        >
-          <option value="https">https://</option>
-          <option value="http">http://</option>
-        </select>
-        <input
-          className="input mono bkt-host"
-          value={bucket.publicDomainHost}
-          onChange={(e) => onHostChange(bucket.name, e.target.value)}
-          placeholder="pub-….r2.dev or cdn.example.com"
-          autoComplete="off"
-          autoCorrect="off"
-          autoCapitalize="off"
-          spellCheck={false}
-          aria-label={`Public domain for ${bucket.name}`}
-        />
-      </div>
+      {isPublic && (
+        <div className="bkt-domain">
+          <GlobalOutlined className="bkt-domain-ico" />
+          <select
+            className="select bkt-scheme"
+            value={bucket.publicDomainScheme || 'https'}
+            onChange={(e) => onSchemeChange(bucket.name, e.target.value)}
+            aria-label={`Public domain scheme for ${bucket.name}`}
+          >
+            <option value="https">https://</option>
+            <option value="http">http://</option>
+          </select>
+          <input
+            className="input mono bkt-host"
+            value={bucket.publicDomainHost}
+            onChange={(e) => onHostChange(bucket.name, e.target.value)}
+            placeholder="pub-….r2.dev or cdn.example.com"
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            aria-label={`Public domain for ${bucket.name}`}
+          />
+          <input
+            className="input mono bkt-host"
+            style={{ maxWidth: 140 }}
+            value={bucket.publicPathPrefix}
+            onChange={(e) => onPrefixChange(bucket.name, e.target.value)}
+            placeholder="prefix (optional)"
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            aria-label={`Public path prefix for ${bucket.name}`}
+          />
+        </div>
+      )}
 
       <div className={['bkt-preview', isPublic ? 'is-public' : ''].filter(Boolean).join(' ')}>
-        {isPublic ? (
+        {!isPublic ? (
+          <span className="bkt-preview-hint">
+            Private — files open via temporary signed URLs.
+          </span>
+        ) : previewUrl ? (
           <>
             <span className="bkt-preview-arrow">↳</span>
-            <span className="bkt-preview-url" title={`${preview}/<object>`}>
-              {preview}
+            <span className="bkt-preview-url" title={`${previewUrl}/<object>`}>
+              {previewUrl}
               <span className="bkt-preview-obj">/&lt;object&gt;</span>
             </span>
           </>
+        ) : isR2 ? (
+          <span className="bkt-preview-hint">
+            Add a public domain (r2.dev subdomain or custom domain) to serve files publicly.
+          </span>
         ) : (
           <span className="bkt-preview-hint">
-            No public domain — files open via temporary signed URLs.
+            Served directly from the bucket endpoint — add a custom domain above to override.
           </span>
         )}
       </div>
@@ -233,8 +280,10 @@ export default function AccountEditModal({
         setBuckets(
           firstToken.buckets.map((b) => ({
             name: b.name,
+            isPublic: b.is_public ?? false,
             publicDomainHost: b.public_domain ?? '',
             publicDomainScheme: b.public_domain_scheme ?? 'https',
+            publicPathPrefix: b.public_path_prefix ?? '',
           }))
         );
       } else {
@@ -256,8 +305,10 @@ export default function AccountEditModal({
       setBuckets(
         acct.buckets.map((b) => ({
           name: b.name,
+          isPublic: b.is_public ?? false,
           publicDomainHost: b.public_domain_host ?? '',
           publicDomainScheme: b.public_domain_scheme ?? 'https',
+          publicPathPrefix: b.public_path_prefix ?? '',
         }))
       );
     } else if (acct.provider === 'minio') {
@@ -268,8 +319,10 @@ export default function AccountEditModal({
       setBuckets(
         acct.buckets.map((b) => ({
           name: b.name,
+          isPublic: b.is_public ?? false,
           publicDomainHost: b.public_domain_host ?? '',
           publicDomainScheme: b.public_domain_scheme ?? 'https',
+          publicPathPrefix: b.public_path_prefix ?? '',
         }))
       );
       setRegion('');
@@ -281,8 +334,10 @@ export default function AccountEditModal({
       setBuckets(
         acct.buckets.map((b) => ({
           name: b.name,
+          isPublic: b.is_public ?? false,
           publicDomainHost: b.public_domain_host ?? '',
           publicDomainScheme: b.public_domain_scheme ?? 'https',
+          publicPathPrefix: b.public_path_prefix ?? '',
         }))
       );
       setRegion('');
@@ -311,6 +366,16 @@ export default function AccountEditModal({
   function setBucketScheme(name: string, scheme: string) {
     setBuckets((prev) =>
       prev.map((b) => (b.name === name ? { ...b, publicDomainScheme: scheme } : b))
+    );
+  }
+
+  function setBucketPublic(name: string, value: boolean) {
+    setBuckets((prev) => prev.map((b) => (b.name === name ? { ...b, isPublic: value } : b)));
+  }
+
+  function setBucketPrefix(name: string, prefix: string) {
+    setBuckets((prev) =>
+      prev.map((b) => (b.name === name ? { ...b, publicPathPrefix: prefix } : b))
     );
   }
 
@@ -390,7 +455,15 @@ export default function AccountEditModal({
       // Preserve any public-domain config already entered for known buckets.
       const merged = result.map((b) => {
         const existing = buckets.find((eb) => eb.name === b.name);
-        return existing ?? { name: b.name, publicDomainHost: '', publicDomainScheme: 'https' };
+        return (
+          existing ?? {
+            name: b.name,
+            isPublic: false,
+            publicDomainHost: '',
+            publicDomainScheme: 'https',
+            publicPathPrefix: '',
+          }
+        );
       });
       setBuckets(merged);
       message.success(`Found ${merged.length} bucket(s)`);
@@ -416,18 +489,24 @@ export default function AccountEditModal({
   /** R2 stores domain in `public_domain`; S3-family stores it in `public_domain_host`. */
   function r2BucketPayload(b: BucketRow) {
     const host = b.publicDomainHost.trim();
+    const prefix = b.publicPathPrefix.trim();
     return {
       name: b.name,
       public_domain: host || null,
       public_domain_scheme: host ? b.publicDomainScheme || 'https' : null,
+      is_public: b.isPublic,
+      public_path_prefix: prefix || null,
     };
   }
   function s3BucketPayload(b: BucketRow) {
     const host = b.publicDomainHost.trim();
+    const prefix = b.publicPathPrefix.trim();
     return {
       name: b.name,
       public_domain_host: host || null,
       public_domain_scheme: host ? b.publicDomainScheme || 'https' : null,
+      is_public: b.isPublic,
+      public_path_prefix: prefix || null,
     };
   }
 
@@ -592,7 +671,7 @@ export default function AccountEditModal({
     });
   }
 
-  const publicCount = buckets.filter((b) => b.publicDomainHost.trim()).length;
+  const publicCount = buckets.filter((b) => b.isPublic).length;
 
   const footer = (
     <>
@@ -811,9 +890,11 @@ export default function AccountEditModal({
             )}
           </div>
           <div className="field-hint" style={{ marginBottom: 10 }}>
-            Attach a public domain (an R2 <span className="mono">r2.dev</span> subdomain or a custom
-            domain) to serve a bucket&apos;s files over a public URL. Leave it blank to keep files
-            private behind temporary signed links.
+            Toggle a bucket <strong>Public</strong> to serve its files via direct URLs without
+            signing, and optionally attach a custom domain (an <span className="mono">r2.dev</span>{' '}
+            subdomain or your own) plus a path prefix. R2 needs a domain to be public; S3-compatible
+            providers can also serve straight from their endpoint. Private buckets open via temporary
+            signed links.
           </div>
 
           <div className="bkt-list">
@@ -821,9 +902,12 @@ export default function AccountEditModal({
               <BucketListRow
                 key={b.name}
                 bucket={b}
+                provider={provider}
                 onDelete={removeBucket}
+                onTogglePublic={setBucketPublic}
                 onHostChange={setBucketHost}
                 onSchemeChange={setBucketScheme}
+                onPrefixChange={setBucketPrefix}
               />
             ))}
             <button

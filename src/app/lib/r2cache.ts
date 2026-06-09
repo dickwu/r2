@@ -154,6 +154,21 @@ export function buildPublicUrl(config: StorageConfig, key: string): string | nul
   return getProviderAdapter(config).buildPublicUrl(config, key);
 }
 
+/**
+ * Whether a bucket's objects should be served via direct (unsigned) public URLs.
+ *
+ * This is the single source of truth for the public-vs-signed decision used by
+ * the preview, inspector, grid thumbnails and status bar. A bucket is public
+ * only when its `isPublic` flag is set AND a usable public URL can be built:
+ * R2 has no implicit public endpoint, so it additionally requires a custom
+ * public domain; S3-compatible providers can derive the URL from their endpoint.
+ */
+export function isBucketPublic(config: StorageConfig | null | undefined): boolean {
+  if (!config?.isPublic) return false;
+  if (config.provider === 'r2') return !!config.publicDomain;
+  return true;
+}
+
 // ============ Folder Contents (from cache) ============
 
 export interface FolderContents {

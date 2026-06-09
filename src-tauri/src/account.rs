@@ -112,6 +112,10 @@ pub struct BucketInput {
     pub name: String,
     pub public_domain: Option<String>,
     pub public_domain_scheme: Option<String>,
+    #[serde(default)]
+    pub is_public: bool,
+    #[serde(default)]
+    pub public_path_prefix: Option<String>,
 }
 
 #[tauri::command]
@@ -119,9 +123,17 @@ pub async fn save_buckets(
     token_id: i64,
     buckets: Vec<BucketInput>,
 ) -> Result<Vec<db::Bucket>, String> {
-    let bucket_data: Vec<(String, Option<String>, Option<String>)> = buckets
+    let bucket_data: Vec<(String, Option<String>, Option<String>, bool, Option<String>)> = buckets
         .into_iter()
-        .map(|b| (b.name, b.public_domain, b.public_domain_scheme))
+        .map(|b| {
+            (
+                b.name,
+                b.public_domain,
+                b.public_domain_scheme,
+                b.is_public,
+                b.public_path_prefix,
+            )
+        })
         .collect();
 
     db::save_buckets_for_token(token_id, &bucket_data)
@@ -134,11 +146,15 @@ pub async fn update_bucket(
     id: i64,
     public_domain: Option<String>,
     public_domain_scheme: Option<String>,
+    is_public: bool,
+    public_path_prefix: Option<String>,
 ) -> Result<(), String> {
     db::update_bucket(
         id,
         public_domain.as_deref(),
         public_domain_scheme.as_deref(),
+        is_public,
+        public_path_prefix.as_deref(),
     )
     .await
     .map_err(|e| format!("Failed to update bucket: {}", e))
@@ -226,6 +242,10 @@ pub struct AwsBucketInput {
     pub name: String,
     pub public_domain_scheme: Option<String>,
     pub public_domain_host: Option<String>,
+    #[serde(default)]
+    pub is_public: bool,
+    #[serde(default)]
+    pub public_path_prefix: Option<String>,
 }
 
 #[tauri::command]
@@ -240,9 +260,17 @@ pub async fn save_aws_bucket_configs(
     account_id: String,
     buckets: Vec<AwsBucketInput>,
 ) -> Result<Vec<db::AwsBucket>, String> {
-    let bucket_data: Vec<(String, Option<String>, Option<String>)> = buckets
+    let bucket_data: Vec<(String, Option<String>, Option<String>, bool, Option<String>)> = buckets
         .into_iter()
-        .map(|b| (b.name, b.public_domain_scheme, b.public_domain_host))
+        .map(|b| {
+            (
+                b.name,
+                b.public_domain_scheme,
+                b.public_domain_host,
+                b.is_public,
+                b.public_path_prefix,
+            )
+        })
         .collect();
 
     db::save_aws_buckets_for_account(&account_id, &bucket_data)
@@ -323,6 +351,10 @@ pub struct MinioBucketInput {
     pub name: String,
     pub public_domain_scheme: Option<String>,
     pub public_domain_host: Option<String>,
+    #[serde(default)]
+    pub is_public: bool,
+    #[serde(default)]
+    pub public_path_prefix: Option<String>,
 }
 
 #[tauri::command]
@@ -337,9 +369,17 @@ pub async fn save_minio_bucket_configs(
     account_id: String,
     buckets: Vec<MinioBucketInput>,
 ) -> Result<Vec<db::MinioBucket>, String> {
-    let bucket_data: Vec<(String, Option<String>, Option<String>)> = buckets
+    let bucket_data: Vec<(String, Option<String>, Option<String>, bool, Option<String>)> = buckets
         .into_iter()
-        .map(|b| (b.name, b.public_domain_scheme, b.public_domain_host))
+        .map(|b| {
+            (
+                b.name,
+                b.public_domain_scheme,
+                b.public_domain_host,
+                b.is_public,
+                b.public_path_prefix,
+            )
+        })
         .collect();
 
     db::save_minio_buckets_for_account(&account_id, &bucket_data)
@@ -418,6 +458,10 @@ pub struct RustfsBucketInput {
     pub name: String,
     pub public_domain_scheme: Option<String>,
     pub public_domain_host: Option<String>,
+    #[serde(default)]
+    pub is_public: bool,
+    #[serde(default)]
+    pub public_path_prefix: Option<String>,
 }
 
 #[tauri::command]
@@ -434,9 +478,17 @@ pub async fn save_rustfs_bucket_configs(
     account_id: String,
     buckets: Vec<RustfsBucketInput>,
 ) -> Result<Vec<db::RustfsBucket>, String> {
-    let bucket_data: Vec<(String, Option<String>, Option<String>)> = buckets
+    let bucket_data: Vec<(String, Option<String>, Option<String>, bool, Option<String>)> = buckets
         .into_iter()
-        .map(|b| (b.name, b.public_domain_scheme, b.public_domain_host))
+        .map(|b| {
+            (
+                b.name,
+                b.public_domain_scheme,
+                b.public_domain_host,
+                b.is_public,
+                b.public_path_prefix,
+            )
+        })
         .collect();
 
     db::save_rustfs_buckets_for_account(&account_id, &bucket_data)

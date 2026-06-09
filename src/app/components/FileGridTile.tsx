@@ -14,7 +14,7 @@ import { FolderMetadata } from '@/app/stores/folderSizeStore';
 import { formatBytes } from '@/app/utils/formatBytes';
 import VideoThumbnail from '@/app/components/VideoThumbnail';
 import FileContextMenu from '@/app/components/FileContextMenu';
-import { buildPublicUrl, StorageConfig } from '@/app/lib/r2cache';
+import { buildPublicUrl, isBucketPublic, StorageConfig } from '@/app/lib/r2cache';
 import dayjs from 'dayjs';
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
@@ -180,7 +180,8 @@ const FileGridTile = memo(function FileGridTile({
   const tone = tileType(item);
   const hasImage = !item.isFolder && isImage(item.name);
   const hasVideo = !item.isFolder && isVideo(item.name);
-  const fileUrl = storageConfig?.publicDomain ? buildPublicUrl(storageConfig, item.key) : null;
+  const fileUrl =
+    storageConfig && isBucketPublic(storageConfig) ? buildPublicUrl(storageConfig, item.key) : null;
   const hasPreview = fileUrl && (hasImage || hasVideo);
 
   const handleClick = useCallback(() => {

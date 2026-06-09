@@ -17,7 +17,13 @@ import {
 } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import dynamic from 'next/dynamic';
-import { buildPublicUrl, generateSignedUrl, uploadContent, StorageConfig } from '@/app/lib/r2cache';
+import {
+  buildPublicUrl,
+  generateSignedUrl,
+  uploadContent,
+  isBucketPublic,
+  StorageConfig,
+} from '@/app/lib/r2cache';
 import { TEXT_EXTENSIONS } from '@/app/components/preview/TextViewer';
 import { useVideoThumbnail } from '@/app/hooks/useVideoThumbnail';
 import { usePreviewStore } from '@/app/stores/previewStore';
@@ -153,7 +159,8 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
     (config.provider !== 'aws' || !!config.region) &&
     (config.provider !== 'minio' || (!!config.endpointHost && !!config.endpointScheme)) &&
     (config.provider !== 'rustfs' || (!!config.endpointHost && !!config.endpointScheme));
-  const needsCredentials = !config?.publicDomain && !hasCredentials;
+  const isPublic = isBucketPublic(config);
+  const needsCredentials = !isPublic && !hasCredentials;
   const canEdit = !!(config?.bucket && hasCredentials);
 
   const handleSaveContent = useCallback(
@@ -177,14 +184,15 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
       return;
     }
 
-    if (config?.publicDomain) {
-      // Reuse the provider's URL builder so the object key is encoded
-      // consistently (spaces, unicode, reserved characters).
+    if (isPublic && config) {
+      // Public bucket: reuse the provider's URL builder so the object key is
+      // encoded consistently (spaces, unicode, reserved characters) — no signing.
       setSignedUrl(buildPublicUrl(config, file.key));
       return;
     }
 
     if (config && hasCredentials) {
+      // Private bucket: auto-sign the URL for the preview.
       setLoading(true);
       generateSignedUrl(config, file.key)
         .then(setSignedUrl)
@@ -194,7 +202,7 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
     }
 
     setSignedUrl(null);
-  }, [isOpen, file, config, hasCredentials]);
+  }, [isOpen, file, config, hasCredentials, isPublic]);
 
   if (!file) return null;
 

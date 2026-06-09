@@ -1,6 +1,6 @@
 'use client';
 
-import { buildBucketBaseUrl, StorageConfig } from '@/app/lib/r2cache';
+import { buildBucketBaseUrl, isBucketPublic, StorageConfig } from '@/app/lib/r2cache';
 
 interface DomainInfoProps {
   storageConfig: StorageConfig | null;
@@ -12,7 +12,7 @@ export default function DomainInfo({ storageConfig }: DomainInfoProps) {
   }
 
   const baseUrl = buildBucketBaseUrl(storageConfig);
-  const isSigned = !storageConfig.publicDomain;
+  const isSigned = !isBucketPublic(storageConfig);
 
   return (
     <span className="domain">

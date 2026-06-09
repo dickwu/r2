@@ -136,7 +136,10 @@ export const r2Provider: StorageProviderAdapter<R2StorageConfig> = {
   buildBucketBaseUrl: (config) => {
     if (config.publicDomain) {
       const scheme = config.publicDomainScheme || 'https';
-      return `${scheme}://${config.publicDomain.replace(/\/+$/, '')}`;
+      const base = `${scheme}://${config.publicDomain.replace(/\/+$/, '')}`;
+      // Optional path prefix maps a custom domain onto a sub-path of the bucket.
+      const prefix = (config.publicPathPrefix || '').replace(/^\/+|\/+$/g, '');
+      return prefix ? `${base}/${prefix}` : base;
     }
     if (!config.accountId || !config.bucket) return null;
     return `https://${config.accountId}.r2.cloudflarestorage.com/${config.bucket}`;

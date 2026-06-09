@@ -8,6 +8,8 @@ pub struct Bucket {
     pub name: String,
     pub public_domain: Option<String>,
     pub public_domain_scheme: Option<String>,
+    pub is_public: bool,
+    pub public_path_prefix: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -19,13 +21,15 @@ pub async fn create_bucket(
     name: &str,
     public_domain: Option<&str>,
     public_domain_scheme: Option<&str>,
+    is_public: bool,
+    public_path_prefix: Option<&str>,
 ) -> DbResult<Bucket> {
     let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
-        "INSERT INTO buckets (token_id, name, public_domain, public_domain_scheme, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        turso::params![token_id, name, public_domain, public_domain_scheme, now, now],
+        "INSERT INTO buckets (token_id, name, public_domain, public_domain_scheme, is_public, public_path_prefix, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        turso::params![token_id, name, public_domain, public_domain_scheme, is_public as i64, public_path_prefix, now, now],
     ).await?;
     let id = conn.last_insert_rowid();
     Ok(Bucket {
@@ -34,6 +38,8 @@ pub async fn create_bucket(
         name: name.to_string(),
         public_domain: public_domain.map(|s| s.to_string()),
         public_domain_scheme: public_domain_scheme.map(|s| s.to_string()),
+        is_public,
+        public_path_prefix: public_path_prefix.map(|s| s.to_string()),
         created_at: now,
         updated_at: now,
     })
@@ -44,19 +50,22 @@ pub async fn create_bucket(
 pub async fn get_bucket(id: i64) -> DbResult<Option<Bucket>> {
     let conn = get_connection()?.lock().await;
     let mut rows = conn.query(
-        "SELECT id, token_id, name, public_domain, public_domain_scheme, created_at, updated_at FROM buckets WHERE id = ?1",
+        "SELECT id, token_id, name, public_domain, public_domain_scheme, is_public, public_path_prefix, created_at, updated_at FROM buckets WHERE id = ?1",
         turso::params![id]
     ).await?;
 
     if let Some(row) = rows.next().await? {
+        let is_public: i64 = row.get(5)?;
         Ok(Some(Bucket {
             id: row.get(0)?,
             token_id: row.get(1)?,
             name: row.get(2)?,
             public_domain: row.get(3)?,
             public_domain_scheme: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            is_public: is_public != 0,
+            public_path_prefix: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         }))
     } else {
         Ok(None)
@@ -68,7 +77,7 @@ pub async fn list_buckets_by_token(token_id: i64) -> DbResult<Vec<Bucket>> {
     let conn = get_connection()?.lock().await;
     let mut rows = conn
         .query(
-            "SELECT id, token_id, name, public_domain, public_domain_scheme, created_at, updated_at
+            "SELECT id, token_id, name, public_domain, public_domain_scheme, is_public, public_path_prefix, created_at, updated_at
          FROM buckets WHERE token_id = ?1 ORDER BY name",
             turso::params![token_id],
         )
@@ -76,14 +85,17 @@ pub async fn list_buckets_by_token(token_id: i64) -> DbResult<Vec<Bucket>> {
 
     let mut buckets = Vec::new();
     while let Some(row) = rows.next().await? {
+        let is_public: i64 = row.get(5)?;
         buckets.push(Bucket {
             id: row.get(0)?,
             token_id: row.get(1)?,
             name: row.get(2)?,
             public_domain: row.get(3)?,
             public_domain_scheme: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            is_public: is_public != 0,
+            public_path_prefix: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         });
     }
     Ok(buckets)
@@ -94,12 +106,14 @@ pub async fn update_bucket(
     id: i64,
     public_domain: Option<&str>,
     public_domain_scheme: Option<&str>,
+    is_public: bool,
+    public_path_prefix: Option<&str>,
 ) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
-        "UPDATE buckets SET public_domain = ?1, public_domain_scheme = ?2, updated_at = ?3 WHERE id = ?4",
-        turso::params![public_domain, public_domain_scheme, now, id],
+        "UPDATE buckets SET public_domain = ?1, public_domain_scheme = ?2, is_public = ?3, public_path_prefix = ?4, updated_at = ?5 WHERE id = ?6",
+        turso::params![public_domain, public_domain_scheme, is_public as i64, public_path_prefix, now, id],
     ).await?;
     Ok(())
 }
@@ -113,9 +127,10 @@ pub async fn delete_bucket(id: i64) -> DbResult<()> {
 }
 
 /// Save multiple buckets for a token (replace existing)
+#[allow(clippy::type_complexity)]
 pub async fn save_buckets_for_token(
     token_id: i64,
-    buckets: &[(String, Option<String>, Option<String>)],
+    buckets: &[(String, Option<String>, Option<String>, bool, Option<String>)],
 ) -> DbResult<Vec<Bucket>> {
     let conn = get_connection()?.lock().await;
     let now = chrono::Utc::now().timestamp();
@@ -129,15 +144,17 @@ pub async fn save_buckets_for_token(
 
     // Insert new buckets
     let mut result = Vec::new();
-    for (name, public_domain, public_domain_scheme) in buckets {
+    for (name, public_domain, public_domain_scheme, is_public, public_path_prefix) in buckets {
         conn.execute(
-            "INSERT INTO buckets (token_id, name, public_domain, public_domain_scheme, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO buckets (token_id, name, public_domain, public_domain_scheme, is_public, public_path_prefix, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             turso::params![
                 token_id,
                 name.clone(),
                 public_domain.clone(),
                 public_domain_scheme.clone(),
+                *is_public as i64,
+                public_path_prefix.clone(),
                 now,
                 now
             ],
@@ -149,6 +166,8 @@ pub async fn save_buckets_for_token(
             name: name.clone(),
             public_domain: public_domain.clone(),
             public_domain_scheme: public_domain_scheme.clone(),
+            is_public: *is_public,
+            public_path_prefix: public_path_prefix.clone(),
             created_at: now,
             updated_at: now,
         });

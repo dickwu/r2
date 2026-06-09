@@ -27,6 +27,8 @@ export interface Bucket {
   name: string;
   public_domain: string | null;
   public_domain_scheme: string | null;
+  is_public: boolean;
+  public_path_prefix: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -60,6 +62,8 @@ export interface AwsBucket {
   name: string;
   public_domain_scheme: string | null;
   public_domain_host: string | null;
+  is_public: boolean;
+  public_path_prefix: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -87,6 +91,8 @@ export interface MinioBucket {
   name: string;
   public_domain_scheme: string | null;
   public_domain_host: string | null;
+  is_public: boolean;
+  public_path_prefix: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -114,6 +120,8 @@ export interface RustfsBucket {
   name: string;
   public_domain_scheme: string | null;
   public_domain_host: string | null;
+  is_public: boolean;
+  public_path_prefix: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -141,6 +149,8 @@ export interface CurrentConfig {
   bucket: string;
   public_domain: string | null;
   public_domain_scheme?: string | null;
+  is_public?: boolean;
+  public_path_prefix?: string | null;
   region?: string | null;
   endpoint_scheme?: string | null;
   endpoint_host?: string | null;
@@ -190,7 +200,13 @@ interface AccountStore {
   // Bucket CRUD
   saveBuckets: (
     tokenId: number,
-    buckets: { name: string; public_domain?: string | null; public_domain_scheme?: string | null }[]
+    buckets: {
+      name: string;
+      public_domain?: string | null;
+      public_domain_scheme?: string | null;
+      is_public?: boolean;
+      public_path_prefix?: string | null;
+    }[]
   ) => Promise<Bucket[]>;
 
   // AWS Account CRUD
@@ -220,6 +236,8 @@ interface AccountStore {
       name: string;
       public_domain_scheme?: string | null;
       public_domain_host?: string | null;
+      is_public?: boolean;
+      public_path_prefix?: string | null;
     }[]
   ) => Promise<AwsBucket[]>;
 
@@ -248,6 +266,8 @@ interface AccountStore {
       name: string;
       public_domain_scheme?: string | null;
       public_domain_host?: string | null;
+      is_public?: boolean;
+      public_path_prefix?: string | null;
     }[]
   ) => Promise<MinioBucket[]>;
 
@@ -274,6 +294,8 @@ interface AccountStore {
       name: string;
       public_domain_scheme?: string | null;
       public_domain_host?: string | null;
+      is_public?: boolean;
+      public_path_prefix?: string | null;
     }[]
   ) => Promise<RustfsBucket[]>;
 
@@ -479,6 +501,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
           name: b.name,
           public_domain: b.public_domain || null,
           public_domain_scheme: b.public_domain_scheme || null,
+          is_public: b.is_public ?? false,
+          public_path_prefix: b.public_path_prefix || null,
         })),
       });
       await get().loadAccounts();
@@ -559,6 +583,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
           name: b.name,
           public_domain_scheme: b.public_domain_scheme ?? null,
           public_domain_host: b.public_domain_host ?? null,
+          is_public: b.is_public ?? false,
+          public_path_prefix: b.public_path_prefix || null,
         })),
       });
       await get().loadAccounts();
@@ -638,6 +664,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
           name: b.name,
           public_domain_scheme: b.public_domain_scheme ?? null,
           public_domain_host: b.public_domain_host ?? null,
+          is_public: b.is_public ?? false,
+          public_path_prefix: b.public_path_prefix || null,
         })),
       });
       await get().loadAccounts();
@@ -715,6 +743,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
           name: b.name,
           public_domain_scheme: b.public_domain_scheme ?? null,
           public_domain_host: b.public_domain_host ?? null,
+          is_public: b.is_public ?? false,
+          public_path_prefix: b.public_path_prefix || null,
         })),
       });
       await get().loadAccounts();
@@ -749,6 +779,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         bucket: currentConfig.bucket,
         publicDomain: currentConfig.public_domain || undefined,
         publicDomainScheme: currentConfig.public_domain_scheme || undefined,
+        isPublic: currentConfig.is_public ?? false,
+        publicPathPrefix: currentConfig.public_path_prefix || undefined,
       };
     }
 
@@ -766,6 +798,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         bucket: currentConfig.bucket,
         publicDomain: currentConfig.public_domain || undefined,
         publicDomainScheme: currentConfig.public_domain_scheme || undefined,
+        isPublic: currentConfig.is_public ?? false,
+        publicPathPrefix: currentConfig.public_path_prefix || undefined,
       };
     }
 
@@ -784,6 +818,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         bucket: currentConfig.bucket,
         publicDomain: currentConfig.public_domain || undefined,
         publicDomainScheme: currentConfig.public_domain_scheme || undefined,
+        isPublic: currentConfig.is_public ?? false,
+        publicPathPrefix: currentConfig.public_path_prefix || undefined,
       };
     }
 
@@ -802,6 +838,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         bucket: currentConfig.bucket,
         publicDomain: currentConfig.public_domain || undefined,
         publicDomainScheme: currentConfig.public_domain_scheme || undefined,
+        isPublic: currentConfig.is_public ?? false,
+        publicPathPrefix: currentConfig.public_path_prefix || undefined,
       };
     }
 

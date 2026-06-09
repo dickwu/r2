@@ -145,7 +145,9 @@ export const rustfsProvider: StorageProviderAdapter<RustfsStorageConfig> = {
   buildBucketBaseUrl: (config) => {
     if (config.publicDomain) {
       const scheme = config.publicDomainScheme || 'https';
-      return `${scheme}://${config.publicDomain.replace(/\/+$/, '')}`;
+      const base = `${scheme}://${config.publicDomain.replace(/\/+$/, '')}`;
+      const prefix = (config.publicPathPrefix || '').replace(/^\/+|\/+$/g, '');
+      return prefix ? `${base}/${prefix}` : base;
     }
     if (!config.bucket || !config.endpointHost) return null;
     const scheme = config.endpointScheme || 'https';

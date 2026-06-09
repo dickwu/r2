@@ -167,3 +167,81 @@ describe('saveAwsBuckets refreshes the live config', () => {
     expect(calls).not.toContain('get_current_config');
   });
 });
+
+describe('is_public flows through saving and the live config', () => {
+  test('saveBuckets (R2) forwards is_public and public_path_prefix to the backend', async () => {
+    let savedArgs: Record<string, unknown> | undefined;
+    handleInvoke = async (cmd, args) => {
+      if (EMPTY_ACCOUNT_LISTS.has(cmd)) return [];
+      if (cmd === 'save_buckets') {
+        savedArgs = args;
+        return [];
+      }
+      if (cmd === 'get_current_config') return r2Config();
+      return undefined;
+    };
+
+    useAccountStore.setState({ currentConfig: r2Config({ token_id: 7 }) });
+
+    await useAccountStore.getState().saveBuckets(7, [
+      {
+        name: 'mybucket',
+        public_domain: 'cdn.example.com',
+        public_domain_scheme: 'https',
+        is_public: true,
+        public_path_prefix: 'assets',
+      },
+    ]);
+
+    const sent = (savedArgs as { buckets: Array<Record<string, unknown>> }).buckets[0];
+    expect(sent.is_public).toBe(true);
+    expect(sent.public_path_prefix).toBe('assets');
+  });
+
+  test('saveAwsBuckets forwards is_public to the backend', async () => {
+    let savedArgs: Record<string, unknown> | undefined;
+    handleInvoke = async (cmd, args) => {
+      if (EMPTY_ACCOUNT_LISTS.has(cmd)) return [];
+      if (cmd === 'save_aws_bucket_configs') {
+        savedArgs = args;
+        return [];
+      }
+      if (cmd === 'get_current_config') return awsConfig();
+      return undefined;
+    };
+
+    useAccountStore.setState({ currentConfig: awsConfig() });
+
+    await useAccountStore
+      .getState()
+      .saveAwsBuckets('aws-1', [{ name: 'b', is_public: true }]);
+
+    const sent = (savedArgs as { buckets: Array<Record<string, unknown>> }).buckets[0];
+    expect(sent.is_public).toBe(true);
+  });
+
+  test('toStorageConfig maps is_public + public_path_prefix into the live StorageConfig (R2)', () => {
+    useAccountStore.setState({
+      currentConfig: r2Config({
+        public_domain: 'cdn.example.com',
+        is_public: true,
+        public_path_prefix: 'assets',
+      }),
+    });
+    const cfg = useAccountStore.getState().toStorageConfig();
+    expect(cfg?.isPublic).toBe(true);
+    expect(cfg?.publicPathPrefix).toBe('assets');
+  });
+
+  test('toStorageConfig defaults isPublic to false when the flag is absent', () => {
+    useAccountStore.setState({ currentConfig: r2Config() });
+    const cfg = useAccountStore.getState().toStorageConfig();
+    expect(cfg?.isPublic).toBe(false);
+  });
+
+  test('toStorageConfig maps is_public for S3-family providers (AWS)', () => {
+    useAccountStore.setState({ currentConfig: awsConfig({ is_public: true }) });
+    const cfg = useAccountStore.getState().toStorageConfig();
+    expect(cfg?.isPublic).toBe(true);
+  });
+});

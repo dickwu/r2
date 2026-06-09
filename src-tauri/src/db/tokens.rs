@@ -38,6 +38,8 @@ pub struct CurrentConfig {
     pub bucket: String,
     pub public_domain: Option<String>,
     pub public_domain_scheme: Option<String>,
+    pub is_public: bool,
+    pub public_path_prefix: Option<String>,
     pub region: Option<String>,
     pub endpoint_scheme: Option<String>,
     pub endpoint_host: Option<String>,
@@ -243,19 +245,29 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
                 .await?;
 
             if let Some(row) = rows.next().await? {
-                // Get bucket's public domain
+                // Get bucket's public domain + access settings
                 let mut bucket_rows = conn
                     .query(
-                        "SELECT public_domain, public_domain_scheme FROM buckets WHERE token_id = ?1 AND name = ?2",
+                        "SELECT public_domain, public_domain_scheme, is_public, public_path_prefix FROM buckets WHERE token_id = ?1 AND name = ?2",
                         turso::params![token_id, bucket_name.clone()],
                     )
                     .await?;
-                let (public_domain, public_domain_scheme): (Option<String>, Option<String>) =
-                    if let Some(bucket_row) = bucket_rows.next().await? {
-                        (bucket_row.get(0)?, bucket_row.get(1)?)
-                    } else {
-                        (None, None)
-                    };
+                let (public_domain, public_domain_scheme, is_public, public_path_prefix): (
+                    Option<String>,
+                    Option<String>,
+                    bool,
+                    Option<String>,
+                ) = if let Some(bucket_row) = bucket_rows.next().await? {
+                    let is_public: i64 = bucket_row.get(2)?;
+                    (
+                        bucket_row.get(0)?,
+                        bucket_row.get(1)?,
+                        is_public != 0,
+                        bucket_row.get(3)?,
+                    )
+                } else {
+                    (None, None, false, None)
+                };
 
                 Ok(Some(CurrentConfig {
                     provider: StorageProvider::R2,
@@ -269,6 +281,8 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
                     bucket: bucket_name,
                     public_domain,
                     public_domain_scheme,
+                    is_public,
+                    public_path_prefix,
                     region: None,
                     endpoint_scheme: None,
                     endpoint_host: None,
@@ -315,16 +329,26 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
 
                 let mut bucket_rows = conn
                     .query(
-                        "SELECT public_domain_scheme, public_domain_host FROM aws_buckets WHERE account_id = ?1 AND name = ?2",
+                        "SELECT public_domain_scheme, public_domain_host, is_public, public_path_prefix FROM aws_buckets WHERE account_id = ?1 AND name = ?2",
                         turso::params![account_id.as_str(), bucket_name.as_str()],
                     )
                     .await?;
-                let (public_domain_scheme, public_domain_host): (Option<String>, Option<String>) =
-                    if let Some(bucket_row) = bucket_rows.next().await? {
-                        (bucket_row.get(0)?, bucket_row.get(1)?)
-                    } else {
-                        (None, None)
-                    };
+                let (public_domain_scheme, public_domain_host, is_public, public_path_prefix): (
+                    Option<String>,
+                    Option<String>,
+                    bool,
+                    Option<String>,
+                ) = if let Some(bucket_row) = bucket_rows.next().await? {
+                    let is_public: i64 = bucket_row.get(2)?;
+                    (
+                        bucket_row.get(0)?,
+                        bucket_row.get(1)?,
+                        is_public != 0,
+                        bucket_row.get(3)?,
+                    )
+                } else {
+                    (None, None, false, None)
+                };
 
                 Ok(Some(CurrentConfig {
                     provider: StorageProvider::Aws,
@@ -338,6 +362,8 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
                     bucket: bucket_name,
                     public_domain: public_domain_host,
                     public_domain_scheme,
+                    is_public,
+                    public_path_prefix,
                     region: Some(row.get(4)?),
                     endpoint_scheme: Some(row.get(5)?),
                     endpoint_host: row.get(6)?,
@@ -384,16 +410,26 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
 
                 let mut bucket_rows = conn
                     .query(
-                        "SELECT public_domain_scheme, public_domain_host FROM minio_buckets WHERE account_id = ?1 AND name = ?2",
+                        "SELECT public_domain_scheme, public_domain_host, is_public, public_path_prefix FROM minio_buckets WHERE account_id = ?1 AND name = ?2",
                         turso::params![account_id.as_str(), bucket_name.as_str()],
                     )
                     .await?;
-                let (public_domain_scheme, public_domain_host): (Option<String>, Option<String>) =
-                    if let Some(bucket_row) = bucket_rows.next().await? {
-                        (bucket_row.get(0)?, bucket_row.get(1)?)
-                    } else {
-                        (None, None)
-                    };
+                let (public_domain_scheme, public_domain_host, is_public, public_path_prefix): (
+                    Option<String>,
+                    Option<String>,
+                    bool,
+                    Option<String>,
+                ) = if let Some(bucket_row) = bucket_rows.next().await? {
+                    let is_public: i64 = bucket_row.get(2)?;
+                    (
+                        bucket_row.get(0)?,
+                        bucket_row.get(1)?,
+                        is_public != 0,
+                        bucket_row.get(3)?,
+                    )
+                } else {
+                    (None, None, false, None)
+                };
 
                 Ok(Some(CurrentConfig {
                     provider: StorageProvider::Minio,
@@ -407,6 +443,8 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
                     bucket: bucket_name,
                     public_domain: public_domain_host,
                     public_domain_scheme,
+                    is_public,
+                    public_path_prefix,
                     region: None,
                     endpoint_scheme: Some(row.get(4)?),
                     endpoint_host: Some(row.get(5)?),
@@ -453,16 +491,26 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
 
                 let mut bucket_rows = conn
                     .query(
-                        "SELECT public_domain_scheme, public_domain_host FROM rustfs_buckets WHERE account_id = ?1 AND name = ?2",
+                        "SELECT public_domain_scheme, public_domain_host, is_public, public_path_prefix FROM rustfs_buckets WHERE account_id = ?1 AND name = ?2",
                         turso::params![account_id.as_str(), bucket_name.as_str()],
                     )
                     .await?;
-                let (public_domain_scheme, public_domain_host): (Option<String>, Option<String>) =
-                    if let Some(bucket_row) = bucket_rows.next().await? {
-                        (bucket_row.get(0)?, bucket_row.get(1)?)
-                    } else {
-                        (None, None)
-                    };
+                let (public_domain_scheme, public_domain_host, is_public, public_path_prefix): (
+                    Option<String>,
+                    Option<String>,
+                    bool,
+                    Option<String>,
+                ) = if let Some(bucket_row) = bucket_rows.next().await? {
+                    let is_public: i64 = bucket_row.get(2)?;
+                    (
+                        bucket_row.get(0)?,
+                        bucket_row.get(1)?,
+                        is_public != 0,
+                        bucket_row.get(3)?,
+                    )
+                } else {
+                    (None, None, false, None)
+                };
 
                 Ok(Some(CurrentConfig {
                     provider: StorageProvider::Rustfs,
@@ -476,6 +524,8 @@ pub async fn get_current_config() -> DbResult<Option<CurrentConfig>> {
                     bucket: bucket_name,
                     public_domain: public_domain_host,
                     public_domain_scheme,
+                    is_public,
+                    public_path_prefix,
                     region: None,
                     endpoint_scheme: Some(row.get(4)?),
                     endpoint_host: Some(row.get(5)?),

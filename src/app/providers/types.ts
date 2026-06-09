@@ -32,6 +32,13 @@ export interface BaseStorageConfig {
   bucket: string;
   publicDomain?: string;
   publicDomainScheme?: string;
+  /** When true, object URLs are served publicly (unsigned). When false, the
+   *  preview/copy actions generate temporary signed URLs instead. */
+  isPublic?: boolean;
+  /** R2 only: optional path segment prepended to the object key under the
+   *  public domain, e.g. domain "cdn.example.com" + prefix "assets" →
+   *  https://cdn.example.com/assets/<key>. */
+  publicPathPrefix?: string;
 }
 
 export interface R2StorageConfig extends BaseStorageConfig {
