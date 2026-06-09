@@ -6,7 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -764,6 +764,27 @@ pub async fn get_file_info(file_path: String) -> Result<(u64, String), String> {
     Ok((metadata.len(), file_name))
 }
 
+/// Build an R2/S3 object key for a file inside an uploaded folder.
+///
+/// `root_name` is the selected folder's own name, preserved as the first key
+/// segment when present (so `/Desktop/site` uploads as `site/...`); `relative`
+/// is the file's path relative to that folder. The key is assembled from path
+/// *components* joined with `/` rather than `Path::to_string_lossy()`, which on
+/// Windows emits backslashes and would collapse the whole directory tree into a
+/// single flat filename.
+fn build_relative_key(root_name: Option<&str>, relative: &Path) -> String {
+    root_name
+        .into_iter()
+        .map(|name| name.to_string())
+        .chain(
+            relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned()),
+        )
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FolderFileInfo {
     pub file_path: String,
@@ -778,6 +799,16 @@ pub async fn get_folder_files(folder_path: String) -> Result<Vec<FolderFileInfo>
     if !root.is_dir() {
         return Err(format!("Not a directory: {}", folder_path));
     }
+
+    // Preserve the selected folder's own name as the first segment of every
+    // object key, so uploading `/Desktop/site` yields `site/index.html` rather
+    // than dropping `index.html` loose into the destination ("like moving the
+    // directory" the user expects). Folder pickers always yield a named
+    // directory; fall back gracefully (no prefix) for edge cases such as a
+    // filesystem root that has no final path component.
+    let root_name = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
 
     let mut files = Vec::new();
     let mut stack = vec![root.clone()];
@@ -810,9 +841,11 @@ pub async fn get_folder_files(folder_path: String) -> Result<Vec<FolderFileInfo>
                     .strip_prefix(&root)
                     .map_err(|e| format!("Failed to get relative path: {}", e))?;
 
+                let relative_path = build_relative_key(root_name.as_deref(), relative);
+
                 files.push(FolderFileInfo {
                     file_path: path.to_string_lossy().to_string(),
-                    relative_path: relative.to_string_lossy().to_string(),
+                    relative_path,
                     file_size: metadata.len(),
                 });
             } else if metadata.is_dir() {
@@ -909,5 +942,46 @@ pub async fn check_resumable_upload(
     {
         Ok(result) => Ok(result),
         Err(e) => Err(format!("Failed to check resumable session: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_relative_key;
+    use std::path::Path;
+
+    #[test]
+    fn prepends_selected_folder_name() {
+        let key = build_relative_key(Some("site"), Path::new("index.html"));
+        assert_eq!(key, "site/index.html");
+    }
+
+    #[test]
+    fn preserves_nested_structure() {
+        let key = build_relative_key(Some("site"), Path::new("css/app.css"));
+        assert_eq!(key, "site/css/app.css");
+    }
+
+    #[test]
+    fn handles_deeply_nested_paths() {
+        let key = build_relative_key(Some("project"), Path::new("src/components/Button.tsx"));
+        assert_eq!(key, "project/src/components/Button.tsx");
+    }
+
+    #[test]
+    fn omits_prefix_when_root_name_absent() {
+        let key = build_relative_key(None, Path::new("docs/readme.md"));
+        assert_eq!(key, "docs/readme.md");
+    }
+
+    #[test]
+    fn keys_use_forward_slashes_only() {
+        // Keys are re-assembled from path components joined with `/`, so the
+        // result is forward-slash separated on every platform. This is the
+        // core fix for the Windows folder-upload bug, where the old
+        // `to_string_lossy()` emitted backslashes and flattened the tree.
+        let key = build_relative_key(Some("site"), Path::new("assets/img/logo.png"));
+        assert!(!key.contains('\\'));
+        assert_eq!(key, "site/assets/img/logo.png");
     }
 }
