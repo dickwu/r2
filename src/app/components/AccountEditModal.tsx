@@ -132,43 +132,41 @@ function BucketListRow({
         </button>
       </div>
 
-      {isPublic && (
-        <div className="bkt-domain">
-          <GlobalOutlined className="bkt-domain-ico" />
-          <select
-            className="select bkt-scheme"
-            value={bucket.publicDomainScheme || 'https'}
-            onChange={(e) => onSchemeChange(bucket.name, e.target.value)}
-            aria-label={`Public domain scheme for ${bucket.name}`}
-          >
-            <option value="https">https://</option>
-            <option value="http">http://</option>
-          </select>
-          <input
-            className="input mono bkt-host"
-            value={bucket.publicDomainHost}
-            onChange={(e) => onHostChange(bucket.name, e.target.value)}
-            placeholder="pub-….r2.dev or cdn.example.com"
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="off"
-            spellCheck={false}
-            aria-label={`Public domain for ${bucket.name}`}
-          />
-          <input
-            className="input mono bkt-host"
-            style={{ maxWidth: 140 }}
-            value={bucket.publicPathPrefix}
-            onChange={(e) => onPrefixChange(bucket.name, e.target.value)}
-            placeholder="prefix (optional)"
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="off"
-            spellCheck={false}
-            aria-label={`Public path prefix for ${bucket.name}`}
-          />
-        </div>
-      )}
+      <div className="bkt-domain">
+        <GlobalOutlined className="bkt-domain-ico" />
+        <select
+          className="select bkt-scheme"
+          value={bucket.publicDomainScheme || 'https'}
+          onChange={(e) => onSchemeChange(bucket.name, e.target.value)}
+          aria-label={`Public domain scheme for ${bucket.name}`}
+        >
+          <option value="https">https://</option>
+          <option value="http">http://</option>
+        </select>
+        <input
+          className="input mono bkt-host"
+          value={bucket.publicDomainHost}
+          onChange={(e) => onHostChange(bucket.name, e.target.value)}
+          placeholder="pub-….r2.dev or cdn.example.com"
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          aria-label={`Public domain for ${bucket.name}`}
+        />
+        <input
+          className="input mono bkt-host"
+          style={{ maxWidth: 140 }}
+          value={bucket.publicPathPrefix}
+          onChange={(e) => onPrefixChange(bucket.name, e.target.value)}
+          placeholder="prefix (optional)"
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          aria-label={`Public path prefix for ${bucket.name}`}
+        />
+      </div>
 
       <div className={['bkt-preview', isPublic ? 'is-public' : ''].filter(Boolean).join(' ')}>
         {!isPublic ? (

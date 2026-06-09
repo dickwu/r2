@@ -1239,7 +1239,7 @@ export default function ConfigModal({
                         checkedChildren="Public"
                         unCheckedChildren="Private"
                       />
-                      {showDomainSettings && bucket.isPublic && (
+                      {showDomainSettings && (
                         <Space.Compact size="small" style={{ flex: 1 }}>
                           <Select
                             size="small"
