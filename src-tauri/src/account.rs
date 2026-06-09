@@ -123,6 +123,7 @@ pub async fn save_buckets(
     token_id: i64,
     buckets: Vec<BucketInput>,
 ) -> Result<Vec<db::Bucket>, String> {
+    #[allow(clippy::type_complexity)]
     let bucket_data: Vec<(String, Option<String>, Option<String>, bool, Option<String>)> = buckets
         .into_iter()
         .map(|b| {
@@ -260,6 +261,7 @@ pub async fn save_aws_bucket_configs(
     account_id: String,
     buckets: Vec<AwsBucketInput>,
 ) -> Result<Vec<db::AwsBucket>, String> {
+    #[allow(clippy::type_complexity)]
     let bucket_data: Vec<(String, Option<String>, Option<String>, bool, Option<String>)> = buckets
         .into_iter()
         .map(|b| {
@@ -369,6 +371,7 @@ pub async fn save_minio_bucket_configs(
     account_id: String,
     buckets: Vec<MinioBucketInput>,
 ) -> Result<Vec<db::MinioBucket>, String> {
+    #[allow(clippy::type_complexity)]
     let bucket_data: Vec<(String, Option<String>, Option<String>, bool, Option<String>)> = buckets
         .into_iter()
         .map(|b| {
@@ -478,6 +481,7 @@ pub async fn save_rustfs_bucket_configs(
     account_id: String,
     buckets: Vec<RustfsBucketInput>,
 ) -> Result<Vec<db::RustfsBucket>, String> {
+    #[allow(clippy::type_complexity)]
     let bucket_data: Vec<(String, Option<String>, Option<String>, bool, Option<String>)> = buckets
         .into_iter()
         .map(|b| {
