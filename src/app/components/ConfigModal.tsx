@@ -264,7 +264,9 @@ export default function ConfigModal({
     if (name && !buckets.some((b) => b.name === name)) {
       setBuckets([
         ...buckets,
-        showDomainSettings ? { name, publicDomainScheme: 'https', isPublic: false } : { name, isPublic: false },
+        showDomainSettings
+          ? { name, publicDomainScheme: 'https', isPublic: false }
+          : { name, isPublic: false },
       ]);
       if (!selectedBucket) {
         form.setFieldValue('selectedBucket', name);
@@ -325,7 +327,9 @@ export default function ConfigModal({
   }
 
   function handlePrefixChange(bucketName: string, prefix: string) {
-    setBuckets(buckets.map((b) => (b.name === bucketName ? { ...b, publicPathPrefix: prefix } : b)));
+    setBuckets(
+      buckets.map((b) => (b.name === bucketName ? { ...b, publicPathPrefix: prefix } : b))
+    );
   }
 
   async function handleLoadBuckets() {

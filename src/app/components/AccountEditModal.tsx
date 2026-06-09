@@ -172,9 +172,7 @@ function BucketListRow({
 
       <div className={['bkt-preview', isPublic ? 'is-public' : ''].filter(Boolean).join(' ')}>
         {!isPublic ? (
-          <span className="bkt-preview-hint">
-            Private — files open via temporary signed URLs.
-          </span>
+          <span className="bkt-preview-hint">Private — files open via temporary signed URLs.</span>
         ) : previewUrl ? (
           <>
             <span className="bkt-preview-arrow">↳</span>
@@ -893,8 +891,8 @@ export default function AccountEditModal({
             Toggle a bucket <strong>Public</strong> to serve its files via direct URLs without
             signing, and optionally attach a custom domain (an <span className="mono">r2.dev</span>{' '}
             subdomain or your own) plus a path prefix. R2 needs a domain to be public; S3-compatible
-            providers can also serve straight from their endpoint. Private buckets open via temporary
-            signed links.
+            providers can also serve straight from their endpoint. Private buckets open via
+            temporary signed links.
           </div>
 
           <div className="bkt-list">

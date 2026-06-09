@@ -1,9 +1,5 @@
 import { describe, expect, test, mock } from 'bun:test';
-import type {
-  AwsStorageConfig,
-  R2StorageConfig,
-  StorageConfig,
-} from '@/app/providers/types';
+import type { AwsStorageConfig, R2StorageConfig, StorageConfig } from '@/app/providers/types';
 
 // Provider adapters import the Tauri core at module load; stub it so importing
 // r2cache works in a plain test environment. None of the functions under test

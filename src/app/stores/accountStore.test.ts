@@ -212,9 +212,7 @@ describe('is_public flows through saving and the live config', () => {
 
     useAccountStore.setState({ currentConfig: awsConfig() });
 
-    await useAccountStore
-      .getState()
-      .saveAwsBuckets('aws-1', [{ name: 'b', is_public: true }]);
+    await useAccountStore.getState().saveAwsBuckets('aws-1', [{ name: 'b', is_public: true }]);
 
     const sent = (savedArgs as { buckets: Array<Record<string, unknown>> }).buckets[0];
     expect(sent.is_public).toBe(true);
