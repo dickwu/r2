@@ -42,6 +42,7 @@ import { useCurrentPathStore } from '@/app/stores/currentPathStore';
 import { useSyncStore } from '@/app/stores/syncStore';
 import { useBatchOperationStore } from '@/app/stores/batchOperationStore';
 import { setupGlobalDownloadListeners, useDownloadStore } from '@/app/stores/downloadStore';
+import { setupGlobalRenameListeners, useRenameStore } from '@/app/stores/renameStore';
 import { useKeyboardShortcuts } from '@/app/hooks/useKeyboardShortcuts';
 import { useGlobalShortcuts } from '@/app/hooks/useGlobalShortcuts';
 import CommandPalette, { type CommandAction } from '@/app/components/CommandPalette';
@@ -430,6 +431,7 @@ export default function Home() {
   // Ensure the download store owns the real-time task state even before the modal opens.
   useEffect(() => {
     setupGlobalDownloadListeners();
+    setupGlobalRenameListeners();
   }, []);
 
   // Refill the queue whenever a running download reaches a terminal state.
@@ -977,6 +979,14 @@ export default function Home() {
   const handleFolderRenameSuccess = useCallback(async () => {
     await Promise.all([refresh(), refreshSync()]);
   }, [refresh, refreshSync]);
+
+  // Refresh the file list whenever a rename batch finishes in the background
+  // (the modal may have been closed while the batch kept running in the dock).
+  const renameCompletedAt = useRenameStore((s) => s.lastCompletedAt);
+  useEffect(() => {
+    if (renameCompletedAt === 0) return;
+    Promise.all([refresh(), refreshSync()]);
+  }, [renameCompletedAt, refresh, refreshSync]);
 
   function toggleSizeSort() {
     setSizeSort((prev) => {

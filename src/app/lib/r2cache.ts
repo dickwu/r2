@@ -111,9 +111,10 @@ export async function renameObject(
 
 export async function batchMoveObjects(
   config: StorageConfig,
-  operations: MoveOperation[]
+  operations: MoveOperation[],
+  batchId?: string
 ): Promise<BatchMoveResult> {
-  return getProviderAdapter(config).batchMoveObjects(config, operations);
+  return getProviderAdapter(config).batchMoveObjects(config, operations, batchId);
 }
 
 export async function generateSignedUrl(

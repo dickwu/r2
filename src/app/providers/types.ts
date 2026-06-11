@@ -126,7 +126,11 @@ export interface StorageProviderAdapter<TConfig extends StorageConfig = StorageC
   deleteObject: (config: TConfig, key: string) => Promise<void>;
   batchDeleteObjects: (config: TConfig, keys: string[]) => Promise<BatchDeleteResult>;
   renameObject: (config: TConfig, oldKey: string, newKey: string) => Promise<void>;
-  batchMoveObjects: (config: TConfig, operations: MoveOperation[]) => Promise<BatchMoveResult>;
+  batchMoveObjects: (
+    config: TConfig,
+    operations: MoveOperation[],
+    batchId?: string
+  ) => Promise<BatchMoveResult>;
   generateSignedUrl: (config: TConfig, key: string, expiresIn?: number) => Promise<string>;
   uploadFile: (config: TConfig, input: UploadFileInput) => Promise<UploadFileResult>;
   uploadContent: (

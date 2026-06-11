@@ -132,10 +132,11 @@ pub async fn rename_rustfs_object(
 #[tauri::command]
 pub async fn batch_move_rustfs_objects(
     config: RustfsConfigInput,
-    operations: Vec<minio_commands::MoveOperation>,
+    operations: Vec<crate::commands::batch_move::MoveOperation>,
+    batch_id: Option<String>,
     app: tauri::AppHandle,
-) -> Result<minio_commands::BatchMoveResult, String> {
-    minio_commands::batch_move_minio_objects(config.into(), operations, app).await
+) -> Result<crate::commands::batch_move::BatchMoveResult, String> {
+    minio_commands::batch_move_minio_objects(config.into(), operations, batch_id, app).await
 }
 
 #[tauri::command]

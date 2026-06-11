@@ -1,24 +1,14 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Progress, App, Spin } from 'antd';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { App, Spin } from 'antd';
 import { EditOutlined } from '@ant-design/icons';
-import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import {
-  batchMoveObjects,
-  listAllObjectsUnderPrefix,
-  MoveOperation,
-  StorageConfig,
-} from '@/app/lib/r2cache';
+import { listAllObjectsUnderPrefix, MoveOperation, StorageConfig } from '@/app/lib/r2cache';
+import { runRenameBatch, useRenameStore } from '@/app/stores/renameStore';
+import { formatEta } from '@/app/utils/formatBytes';
 import { FileItem } from '@/app/hooks/useR2Files';
 import type { FolderMetadata } from '@/app/stores/folderSizeStore';
 import Modal from '@/app/components/ui/Modal';
-
-interface BatchMoveProgress {
-  completed: number;
-  total: number;
-  failed: number;
-}
 
 interface FolderRenameModalProps {
   open: boolean;
@@ -40,6 +30,12 @@ function splitFolderKey(key: string) {
   };
 }
 
+/** Keep the tail of a long object key visible (the part being renamed). */
+function truncateKey(key: string, max = 56): string {
+  if (key.length <= max) return key;
+  return `…${key.slice(key.length - max + 1)}`;
+}
+
 export default function FolderRenameModal({
   open,
   folder,
@@ -59,8 +55,13 @@ export default function FolderRenameModal({
   const [confirmInput, setConfirmInput] = useState('');
   const [objectKeys, setObjectKeys] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [isRenaming, setIsRenaming] = useState(false);
-  const [progress, setProgress] = useState({ completed: 0, total: 0 });
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
+  const backgroundedRef = useRef(false);
+
+  const batch = useRenameStore((s) =>
+    activeBatchId ? s.batches.find((b) => b.id === activeBatchId) : undefined
+  );
+  const isRenaming = !!activeBatchId;
 
   const confirmCount = useMemo(() => {
     if (objectKeys.length > 0) return objectKeys.length;
@@ -140,19 +141,18 @@ export default function FolderRenameModal({
       return;
     }
 
-    setIsRenaming(true);
-    setProgress({ completed: 0, total: operations.length });
+    backgroundedRef.current = false;
+    const { id, done } = runRenameBatch(config, operations, `${currentName}/ → ${trimmedName}/`);
+    setActiveBatchId(id);
 
-    let unlisten: UnlistenFn | undefined;
     try {
-      unlisten = await listen<BatchMoveProgress>('batch-move-progress', (event) => {
-        setProgress({ completed: event.payload.completed, total: event.payload.total });
-      });
+      const result = await done;
 
-      const result = await batchMoveObjects(config, operations);
+      // If the user sent the batch to the background, the dock owns the
+      // completion UX and the page-level effect refreshes the file list.
+      if (backgroundedRef.current) return;
 
-      unlisten?.();
-      setIsRenaming(false);
+      setActiveBatchId(null);
       onClose();
 
       if (result.failed === 0) {
@@ -167,8 +167,8 @@ export default function FolderRenameModal({
 
       onSuccess();
     } catch (error) {
-      unlisten?.();
-      setIsRenaming(false);
+      if (backgroundedRef.current) return;
+      setActiveBatchId(null);
       onClose();
       message.error(
         `Failed to rename folder: ${error instanceof Error ? error.message : 'Unknown error'}`
@@ -181,6 +181,7 @@ export default function FolderRenameModal({
     isLoading,
     newName,
     parentPath,
+    currentName,
     objectKeys,
     confirmInput,
     confirmCount,
@@ -189,12 +190,32 @@ export default function FolderRenameModal({
     onSuccess,
   ]);
 
-  const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+  const handleContinueInBackground = useCallback(() => {
+    backgroundedRef.current = true;
+    message.info('Rename continues in the transfer panel');
+    onClose();
+  }, [message, onClose]);
+
+  const completed = batch?.completed ?? 0;
+  const totalOps = batch?.total ?? 0;
+  const percent = totalOps > 0 ? Math.round((completed / totalOps) * 100) : 0;
   const confirmTarget = confirmCount.toLocaleString();
   const canConfirm =
     !isLoading && !isRenaming && objectKeys.length > 0 && confirmInput === confirmCount.toString();
 
-  const footer = isRenaming ? null : (
+  const renameStats: string[] = [];
+  if (batch) {
+    renameStats.push(`${completed.toLocaleString()} / ${totalOps.toLocaleString()} files`);
+    if (batch.opsPerSec > 0.1) renameStats.push(`${batch.opsPerSec.toFixed(1)} files/s`);
+    if (batch.etaMs > 0) renameStats.push(formatEta(batch.etaMs / 1000));
+    if (batch.failed > 0) renameStats.push(`${batch.failed} failed`);
+  }
+
+  const footer = isRenaming ? (
+    <button className="btn" onClick={handleContinueInBackground}>
+      Continue in background
+    </button>
+  ) : (
     <>
       <button className="btn" onClick={onClose} disabled={isLoading}>
         Cancel
@@ -212,25 +233,26 @@ export default function FolderRenameModal({
   return (
     <Modal
       open={open}
-      onClose={isRenaming ? () => undefined : onClose}
+      onClose={isRenaming ? handleContinueInBackground : onClose}
       title="Rename folder"
       icon={<EditOutlined style={{ fontSize: 18 }} />}
       width={480}
       footer={footer}
     >
       {isRenaming ? (
-        <div style={{ padding: '8px 0' }}>
-          <Progress percent={percent} status="active" />
-          <p
-            style={{
-              marginTop: 12,
-              textAlign: 'center',
-              fontSize: 12.5,
-              color: 'var(--text-muted)',
-            }}
-          >
-            {progress.completed} / {progress.total} files renamed
-          </p>
+        <div style={{ padding: '8px 0 4px' }}>
+          <div className="rename-progress-bar">
+            <div className="rename-progress-fill active" style={{ width: `${percent}%` }} />
+          </div>
+          <div className="rename-progress-stats">
+            <span>{renameStats.join(' · ')}</span>
+            <span>{percent}%</span>
+          </div>
+          {batch?.currentKey && (
+            <p className="rename-progress-current" title={batch.currentKey}>
+              {truncateKey(batch.currentKey)}
+            </p>
+          )}
         </div>
       ) : isLoading ? (
         <div style={{ padding: '16px 0', textAlign: 'center' }}>

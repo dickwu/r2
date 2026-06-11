@@ -89,10 +89,11 @@ export const r2Provider: StorageProviderAdapter<R2StorageConfig> = {
     });
   },
 
-  batchMoveObjects: async (config, operations: MoveOperation[]) => {
+  batchMoveObjects: async (config, operations: MoveOperation[], batchId?: string) => {
     return invoke<BatchMoveResult>('batch_move_r2_objects', {
       config: toR2ConfigInput(config),
       operations,
+      batchId,
     });
   },
 

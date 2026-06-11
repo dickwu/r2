@@ -95,10 +95,11 @@ export const minioProvider: StorageProviderAdapter<MinioStorageConfig> = {
     });
   },
 
-  batchMoveObjects: async (config, operations: MoveOperation[]) => {
+  batchMoveObjects: async (config, operations: MoveOperation[], batchId?: string) => {
     return invoke<BatchMoveResult>('batch_move_minio_objects', {
       config: toMinioConfigInput(config),
       operations,
+      batchId,
     });
   },
 

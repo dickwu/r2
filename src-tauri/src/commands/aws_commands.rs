@@ -1,3 +1,6 @@
+use crate::commands::batch_move::{
+    fallback_batch_id, run_batch_move, BatchMoveResult, MoveOperation,
+};
 use crate::commands::cache_events::{get_unique_parent_paths, CacheUpdatedEvent};
 use crate::commands::delete_cache::{update_cache_after_batch_delete, update_cache_after_delete};
 use crate::commands::move_cache::{update_cache_after_batch_move, update_cache_after_move};
@@ -6,10 +9,7 @@ use crate::db::{self, CachedFile};
 use crate::providers::aws;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use tauri::Emitter;
-use tokio::sync::Semaphore;
 
 #[derive(Debug, Deserialize)]
 pub struct AwsConfigInput {
@@ -379,26 +379,6 @@ pub async fn batch_delete_aws_objects(
     })
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct BatchMoveProgress {
-    pub completed: usize,
-    pub total: usize,
-    pub failed: usize,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MoveOperation {
-    pub old_key: String,
-    pub new_key: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct BatchMoveResult {
-    pub moved: usize,
-    pub failed: usize,
-    pub errors: Vec<String>,
-}
-
 #[tauri::command]
 pub async fn rename_aws_object(
     config: AwsConfigInput,
@@ -424,105 +404,38 @@ pub async fn rename_aws_object(
 pub async fn batch_move_aws_objects(
     config: AwsConfigInput,
     operations: Vec<MoveOperation>,
+    batch_id: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<BatchMoveResult, String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
     let aws_config: aws::AwsConfig = config.into();
-    let total = operations.len();
+    let batch_id = batch_id.unwrap_or_else(fallback_batch_id);
 
-    if total == 0 {
-        return Ok(BatchMoveResult {
-            moved: 0,
-            failed: 0,
-            errors: vec![],
-        });
-    }
-
-    const CONCURRENCY: usize = 6;
-    let semaphore = Arc::new(Semaphore::new(CONCURRENCY));
-    let completed = Arc::new(AtomicUsize::new(0));
-    let failed = Arc::new(AtomicUsize::new(0));
-    let errors = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
-    let successful_moves = Arc::new(tokio::sync::Mutex::new(Vec::<MoveOperation>::new()));
-
-    let mut handles = Vec::new();
-
-    for op in operations {
-        let permit = semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| e.to_string())?;
+    let rename = move |op: MoveOperation| {
         let config = aws_config.clone();
-        let completed = completed.clone();
-        let failed = failed.clone();
-        let errors = errors.clone();
-        let successful_moves = successful_moves.clone();
-        let app = app.clone();
-
-        let handle = tokio::spawn(async move {
-            let _permit = permit;
-
-            if op.old_key == op.new_key {
-                completed.fetch_add(1, Ordering::SeqCst);
-            } else {
-                match aws::rename_object(&config, &op.old_key, &op.new_key).await {
-                    Ok(_) => {
-                        completed.fetch_add(1, Ordering::SeqCst);
-                        let mut moves = successful_moves.lock().await;
-                        moves.push(op);
-                    }
-                    Err(e) => {
-                        failed.fetch_add(1, Ordering::SeqCst);
-                        let mut errs = errors.lock().await;
-                        errs.push(format!("{}: {}", op.old_key, e));
-                    }
-                }
-            }
-
-            let current_completed = completed.load(Ordering::SeqCst);
-            let current_failed = failed.load(Ordering::SeqCst);
-            let _ = app.emit(
-                "batch-move-progress",
-                BatchMoveProgress {
-                    completed: current_completed + current_failed,
-                    total,
-                    failed: current_failed,
-                },
-            );
-        });
-
-        handles.push(handle);
-    }
-
-    for handle in handles {
-        let _ = handle.await;
-    }
-
-    let operations: Vec<(String, String)> = {
-        let moves = successful_moves.lock().await;
-        moves
-            .iter()
-            .map(|op| (op.old_key.clone(), op.new_key.clone()))
-            .collect()
+        async move {
+            aws::rename_object(&config, &op.old_key, &op.new_key)
+                .await
+                .map_err(|e| e.to_string())
+        }
     };
-    if !operations.is_empty() {
-        if let Err(e) = update_cache_after_batch_move(&app, &bucket, &account_id, &operations).await
+
+    let outcome = run_batch_move(&app, batch_id, operations, rename).await;
+
+    let mut errors = outcome.errors;
+    if !outcome.successful.is_empty() {
+        if let Err(e) =
+            update_cache_after_batch_move(&app, &bucket, &account_id, &outcome.successful).await
         {
-            let mut errs = errors.lock().await;
-            errs.push(e);
+            errors.push(e);
         }
     }
 
-    let final_completed = completed.load(Ordering::SeqCst);
-    let final_failed = failed.load(Ordering::SeqCst);
-    let final_errors = errors.lock().await.clone();
-
     Ok(BatchMoveResult {
-        moved: final_completed,
-        failed: final_failed,
-        errors: final_errors,
+        moved: outcome.moved,
+        failed: outcome.failed,
+        errors,
     })
 }
 

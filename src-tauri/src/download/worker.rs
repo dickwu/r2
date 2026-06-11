@@ -7,6 +7,7 @@
 use crate::db::{self, DownloadSession};
 use crate::providers::{aws, minio, rustfs};
 use crate::r2::R2Config;
+use crate::transfer_progress::SpeedWindow;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -132,10 +133,10 @@ pub(crate) async fn download_file_internal(
             .map_err(|e| format!("Failed to create file: {}", e))?
     };
 
-    // Track progress
+    // Track progress; the speed window is seeded at the resume offset so the
+    // reported rate covers only bytes from this session.
     let downloaded_bytes = Arc::new(AtomicU64::new(existing_bytes));
-    let start_time = std::time::Instant::now();
-    let start_bytes = existing_bytes;
+    let speed_window = SpeedWindow::with_baseline(existing_bytes);
 
     // Emit initial progress event to show download has started
     let initial_percent = if total_bytes > 0 {
@@ -252,13 +253,7 @@ pub(crate) async fn download_file_internal(
                 0
             };
 
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let bytes_this_session = current_downloaded.saturating_sub(start_bytes);
-            let speed = if elapsed > 0.0 {
-                bytes_this_session as f64 / elapsed
-            } else {
-                0.0
-            };
+            let speed = speed_window.sample(current_downloaded);
 
             let _ = app.emit(
                 "download-progress",
@@ -289,14 +284,8 @@ pub(crate) async fn download_file_internal(
         .map_err(|e| format!("Failed to flush file: {}", e))?;
 
     // Final progress update
-    let elapsed = start_time.elapsed().as_secs_f64();
     let final_downloaded = downloaded_bytes.load(Ordering::SeqCst);
-    let bytes_this_session = final_downloaded - start_bytes;
-    let speed = if elapsed > 0.0 {
-        bytes_this_session as f64 / elapsed
-    } else {
-        0.0
-    };
+    let speed = speed_window.sample(final_downloaded);
 
     // Emit global progress event (100% complete)
     let _ = app.emit(

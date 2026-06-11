@@ -1,18 +1,14 @@
 import { create } from 'zustand';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { createProgressBatcher, smoothSpeed } from '@/app/lib/progressThrottle';
 
 // Maximum concurrent downloads
 export const MAX_CONCURRENT_DOWNLOADS = 5;
 
-// Throttle progress updates to max once per 200ms per task
+// Coalescing windows for high-frequency progress events
 const PROGRESS_THROTTLE_MS = 200;
 const CHUNK_THROTTLE_MS = 500;
-const progressThrottleMap = new Map<string, number>();
-const pendingProgressUpdates = new Map<string, DownloadProgressEvent>();
-const pendingChunkUpdates = new Map<string, DownloadChunkProgressEvent>();
-let progressFlushTimer: ReturnType<typeof setTimeout> | null = null;
-let chunkFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Global listener state - persists across component unmounts
 let globalListenersSetup = false;
@@ -208,254 +204,195 @@ function applyChunkUpdate(t: DownloadTask, evt: DownloadChunkProgressEvent): Dow
   };
 }
 
-export const useDownloadStore = create<DownloadStore>((set, get) => ({
-  tasks: [],
-  modalOpen: false,
+// Apply an aggregate progress update to a task (monotonic progress, smoothed speed)
+function applyProgressUpdate(t: DownloadTask, evt: DownloadProgressEvent): DownloadTask {
+  return {
+    ...t,
+    progress: Math.max(t.progress, evt.percent),
+    downloadedBytes: Math.max(t.downloadedBytes, evt.downloaded_bytes),
+    fileSize: t.fileSize > 0 ? t.fileSize : evt.total_bytes,
+    speed: smoothSpeed(t.speed, evt.speed),
+  };
+}
 
-  addTask: (task) => {
-    const newTask: DownloadTask = {
-      ...task,
-      status: 'pending',
-      progress: 0,
-      downloadedBytes: 0,
-      speed: 0,
-      chunks: [],
-      speedHistory: [],
-      peakSpeed: 0,
-    };
-    set((state) => ({ tasks: [...state.tasks, newTask] }));
-  },
-
-  addTasks: (tasks) => {
-    const newTasks: DownloadTask[] = tasks.map((task) => ({
-      ...task,
-      status: 'pending',
-      progress: 0,
-      downloadedBytes: 0,
-      speed: 0,
-      chunks: [],
-      speedHistory: [],
-      peakSpeed: 0,
-    }));
-    set((state) => ({ tasks: [...state.tasks, ...newTasks] }));
-  },
-
-  removeTask: (id) => {
-    set((state) => ({ tasks: state.tasks.filter((t) => t.id !== id) }));
-  },
-
-  updateTask: (id, updates) => {
-    set((state) => ({
-      tasks: state.tasks.map((t) => (t.id === id ? { ...t, ...updates } : t)),
-    }));
-  },
-
-  clearFinished: () => {
-    set((state) => ({
-      tasks: state.tasks.filter(
-        (t) => t.status === 'pending' || t.status === 'downloading' || t.status === 'paused'
-      ),
-    }));
-  },
-
-  clearAll: () => {
-    set({ tasks: [] });
-  },
-
-  setModalOpen: (open) => {
-    set({ modalOpen: open });
-  },
-
-  loadFromDatabase: (sessions) => {
-    const currentTasks = get().tasks;
-    const tasks: DownloadTask[] = sessions.map((session) => {
-      // Find existing task to preserve real-time data (progress, speed)
-      const existing = currentTasks.find((t) => t.id === session.id);
-      const dbStatus = mapStatus(session.status);
-
-      // If task is actively downloading, preserve real-time progress/speed from events
-      const isActiveDownload = existing?.status === 'downloading' || dbStatus === 'downloading';
-
-      // Get values from database with fallbacks
-      const dbDownloadedBytes = session.downloaded_bytes || 0;
-      const dbFileSize = session.file_size || 0;
-
-      // Calculate progress from database values
-      const dbProgress =
-        dbFileSize > 0 ? Math.min(Math.round((dbDownloadedBytes / dbFileSize) * 100), 100) : 0;
-
-      return {
-        id: session.id,
-        key: session.object_key,
-        fileName: session.file_name,
-        fileSize: dbFileSize,
-        localPath: session.local_path,
-        status: dbStatus,
-        // For active downloads, use existing real-time data; otherwise use DB values
-        progress: isActiveDownload && existing ? existing.progress : dbProgress,
-        downloadedBytes:
-          isActiveDownload && existing ? existing.downloadedBytes : dbDownloadedBytes,
-        speed: isActiveDownload && existing ? existing.speed : 0,
-        error: session.error || undefined,
-        // Preserve chunk data from real-time events
-        chunks: isActiveDownload && existing ? existing.chunks : [],
-        speedHistory: isActiveDownload && existing ? existing.speedHistory : [],
-        peakSpeed: isActiveDownload && existing ? existing.peakSpeed : 0,
-      };
-    });
-    set({ tasks });
-  },
-
-  // Event handler for progress updates - throttled to prevent excessive re-renders
-  handleProgressEvent: (event) => {
-    const now = Date.now();
-    const lastUpdate = progressThrottleMap.get(event.task_id) || 0;
-
-    // Store the latest event for this task
-    pendingProgressUpdates.set(event.task_id, event);
-
-    // If within throttle window, schedule a flush instead of immediate update
-    if (now - lastUpdate < PROGRESS_THROTTLE_MS) {
-      if (!progressFlushTimer) {
-        progressFlushTimer = setTimeout(() => {
-          progressFlushTimer = null;
-          const updates = new Map(pendingProgressUpdates);
-          pendingProgressUpdates.clear();
-
-          if (updates.size === 0) return;
-
-          set((state) => ({
-            tasks: state.tasks.map((t) => {
-              const pendingEvent = updates.get(t.id);
-              if (!pendingEvent) return t;
-
-              progressThrottleMap.set(t.id, Date.now());
-              const newProgress = Math.max(t.progress, pendingEvent.percent);
-              const newDownloadedBytes = Math.max(t.downloadedBytes, pendingEvent.downloaded_bytes);
-              const newFileSize = t.fileSize > 0 ? t.fileSize : pendingEvent.total_bytes;
-
-              return {
-                ...t,
-                progress: newProgress,
-                downloadedBytes: newDownloadedBytes,
-                fileSize: newFileSize,
-                speed: pendingEvent.speed,
-              };
-            }),
-          }));
-        }, PROGRESS_THROTTLE_MS);
-      }
-      return;
+export const useDownloadStore = create<DownloadStore>((set, get) => {
+  // Coalesce bursts of progress events into single batched store updates so a
+  // five-way parallel download triggers at most one re-render per window.
+  const progressBatcher = createProgressBatcher<DownloadProgressEvent>(
+    PROGRESS_THROTTLE_MS,
+    (updates) => {
+      set((state) => ({
+        tasks: state.tasks.map((t) => {
+          const evt = updates.get(t.id);
+          return evt ? applyProgressUpdate(t, evt) : t;
+        }),
+      }));
     }
+  );
+  const chunkBatcher = createProgressBatcher<DownloadChunkProgressEvent>(
+    CHUNK_THROTTLE_MS,
+    (updates) => {
+      set((state) => ({
+        tasks: state.tasks.map((t) => {
+          const evt = updates.get(t.id);
+          return evt ? applyChunkUpdate(t, evt) : t;
+        }),
+      }));
+    }
+  );
 
-    // Immediate update (first update or outside throttle window)
-    progressThrottleMap.set(event.task_id, now);
-    pendingProgressUpdates.delete(event.task_id);
+  return {
+    tasks: [],
+    modalOpen: false,
 
-    set((state) => ({
-      tasks: state.tasks.map((t) => {
-        if (t.id !== event.task_id) return t;
+    addTask: (task) => {
+      const newTask: DownloadTask = {
+        ...task,
+        status: 'pending',
+        progress: 0,
+        downloadedBytes: 0,
+        speed: 0,
+        chunks: [],
+        speedHistory: [],
+        peakSpeed: 0,
+      };
+      set((state) => ({ tasks: [...state.tasks, newTask] }));
+    },
 
-        const newProgress = Math.max(t.progress, event.percent);
-        const newDownloadedBytes = Math.max(t.downloadedBytes, event.downloaded_bytes);
-        const newFileSize = t.fileSize > 0 ? t.fileSize : event.total_bytes;
+    addTasks: (tasks) => {
+      const newTasks: DownloadTask[] = tasks.map((task) => ({
+        ...task,
+        status: 'pending',
+        progress: 0,
+        downloadedBytes: 0,
+        speed: 0,
+        chunks: [],
+        speedHistory: [],
+        peakSpeed: 0,
+      }));
+      set((state) => ({ tasks: [...state.tasks, ...newTasks] }));
+    },
+
+    removeTask: (id) => {
+      set((state) => ({ tasks: state.tasks.filter((t) => t.id !== id) }));
+    },
+
+    updateTask: (id, updates) => {
+      set((state) => ({
+        tasks: state.tasks.map((t) => (t.id === id ? { ...t, ...updates } : t)),
+      }));
+    },
+
+    clearFinished: () => {
+      set((state) => ({
+        tasks: state.tasks.filter(
+          (t) => t.status === 'pending' || t.status === 'downloading' || t.status === 'paused'
+        ),
+      }));
+    },
+
+    clearAll: () => {
+      set({ tasks: [] });
+    },
+
+    setModalOpen: (open) => {
+      set({ modalOpen: open });
+    },
+
+    loadFromDatabase: (sessions) => {
+      const currentTasks = get().tasks;
+      const tasks: DownloadTask[] = sessions.map((session) => {
+        // Find existing task to preserve real-time data (progress, speed)
+        const existing = currentTasks.find((t) => t.id === session.id);
+        const dbStatus = mapStatus(session.status);
+
+        // If task is actively downloading, preserve real-time progress/speed from events
+        const isActiveDownload = existing?.status === 'downloading' || dbStatus === 'downloading';
+
+        // Get values from database with fallbacks
+        const dbDownloadedBytes = session.downloaded_bytes || 0;
+        const dbFileSize = session.file_size || 0;
+
+        // Calculate progress from database values
+        const dbProgress =
+          dbFileSize > 0 ? Math.min(Math.round((dbDownloadedBytes / dbFileSize) * 100), 100) : 0;
 
         return {
-          ...t,
-          progress: newProgress,
-          downloadedBytes: newDownloadedBytes,
-          fileSize: newFileSize,
-          speed: event.speed,
+          id: session.id,
+          key: session.object_key,
+          fileName: session.file_name,
+          fileSize: dbFileSize,
+          localPath: session.local_path,
+          status: dbStatus,
+          // For active downloads, use existing real-time data; otherwise use DB values
+          progress: isActiveDownload && existing ? existing.progress : dbProgress,
+          downloadedBytes:
+            isActiveDownload && existing ? existing.downloadedBytes : dbDownloadedBytes,
+          speed: isActiveDownload && existing ? existing.speed : 0,
+          error: session.error || undefined,
+          // Preserve chunk data from real-time events
+          chunks: isActiveDownload && existing ? existing.chunks : [],
+          speedHistory: isActiveDownload && existing ? existing.speedHistory : [],
+          peakSpeed: isActiveDownload && existing ? existing.peakSpeed : 0,
         };
-      }),
-    }));
-  },
+      });
+      set({ tasks });
+    },
 
-  // Event handler for chunk-level progress (from range-dl, already aggregated at 200ms)
-  // Throttled to prevent cascading re-renders — only updates chunk data every 500ms
-  handleChunkProgressEvent: (event) => {
-    const now = Date.now();
-    const key = `chunk:${event.task_id}`;
-    const lastUpdate = progressThrottleMap.get(key) || 0;
+    // Event handler for progress updates - coalesced to prevent excessive re-renders
+    handleProgressEvent: (event) => {
+      progressBatcher.push(event.task_id, event);
+    },
 
-    // Store latest event
-    pendingChunkUpdates.set(event.task_id, event);
+    // Event handler for chunk-level progress (from range-dl, already aggregated at 200ms)
+    // Coalesced again client-side so chunk grids re-render at most every 500ms
+    handleChunkProgressEvent: (event) => {
+      chunkBatcher.push(event.task_id, event);
+    },
 
-    if (now - lastUpdate < CHUNK_THROTTLE_MS) {
-      if (!chunkFlushTimer) {
-        chunkFlushTimer = setTimeout(() => {
-          chunkFlushTimer = null;
-          const updates = new Map(pendingChunkUpdates);
-          pendingChunkUpdates.clear();
-          if (updates.size === 0) return;
-
-          set((state) => ({
-            tasks: state.tasks.map((t) => {
-              const evt = updates.get(t.id);
-              if (!evt) return t;
-              progressThrottleMap.set(`chunk:${t.id}`, Date.now());
-              return applyChunkUpdate(t, evt);
-            }),
-          }));
-        }, CHUNK_THROTTLE_MS);
+    // Event handler for status changes (bails early if nothing changed to prevent loops)
+    handleStatusChanged: (event) => {
+      const newStatus = mapStatus(event.status);
+      const current = get().tasks.find((t) => t.id === event.task_id);
+      if (current && current.status === newStatus && current.error === (event.error || undefined)) {
+        return; // No change — skip update to prevent re-render cascade
       }
-      return;
-    }
+      set((state) => ({
+        tasks: state.tasks.map((t) =>
+          t.id === event.task_id
+            ? {
+                ...t,
+                status: newStatus,
+                error: event.error || undefined,
+                // Reset speed when not downloading
+                speed: newStatus === 'downloading' ? t.speed : 0,
+              }
+            : t
+        ),
+      }));
+    },
 
-    // Immediate update
-    progressThrottleMap.set(key, now);
-    pendingChunkUpdates.delete(event.task_id);
+    // Event handler for task deletion
+    handleTaskDeleted: (event) => {
+      set((state) => ({
+        tasks: state.tasks.filter((t) => t.id !== event.task_id),
+      }));
+    },
 
-    set((state) => ({
-      tasks: state.tasks.map((t) => {
-        if (t.id !== event.task_id) return t;
-        return applyChunkUpdate(t, event);
-      }),
-    }));
-  },
+    // Get tasks that should be started (up to MAX_CONCURRENT_DOWNLOADS)
+    getTasksToStart: () => {
+      const { tasks } = get();
+      const activeCount = tasks.filter((t) => t.status === 'downloading').length;
+      const slotsAvailable = MAX_CONCURRENT_DOWNLOADS - activeCount;
 
-  // Event handler for status changes (bails early if nothing changed to prevent loops)
-  handleStatusChanged: (event) => {
-    const newStatus = mapStatus(event.status);
-    const current = get().tasks.find((t) => t.id === event.task_id);
-    if (current && current.status === newStatus && current.error === (event.error || undefined)) {
-      return; // No change — skip update to prevent re-render cascade
-    }
-    set((state) => ({
-      tasks: state.tasks.map((t) =>
-        t.id === event.task_id
-          ? {
-              ...t,
-              status: newStatus,
-              error: event.error || undefined,
-              // Reset speed when not downloading
-              speed: newStatus === 'downloading' ? t.speed : 0,
-            }
-          : t
-      ),
-    }));
-  },
+      if (slotsAvailable <= 0) return [];
 
-  // Event handler for task deletion
-  handleTaskDeleted: (event) => {
-    set((state) => ({
-      tasks: state.tasks.filter((t) => t.id !== event.task_id),
-    }));
-  },
-
-  // Get tasks that should be started (up to MAX_CONCURRENT_DOWNLOADS)
-  getTasksToStart: () => {
-    const { tasks } = get();
-    const activeCount = tasks.filter((t) => t.status === 'downloading').length;
-    const slotsAvailable = MAX_CONCURRENT_DOWNLOADS - activeCount;
-
-    if (slotsAvailable <= 0) return [];
-
-    // Get pending tasks (not paused - those need manual resume)
-    const pendingTasks = tasks.filter((t) => t.status === 'pending');
-    return pendingTasks.slice(0, slotsAvailable);
-  },
-}));
+      // Get pending tasks (not paused - those need manual resume)
+      const pendingTasks = tasks.filter((t) => t.status === 'pending');
+      return pendingTasks.slice(0, slotsAvailable);
+    },
+  };
+});
 
 // Selectors
 export const selectPendingCount = (state: DownloadStore) =>

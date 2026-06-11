@@ -15,6 +15,7 @@ mod download;
 mod move_transfer;
 mod providers;
 mod r2;
+mod transfer_progress;
 mod upload;
 
 const APP_NAME: &str = "R2 Uploader";

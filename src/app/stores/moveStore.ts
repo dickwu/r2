@@ -1,14 +1,12 @@
 import { create } from 'zustand';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { createProgressBatcher, smoothSpeed } from '@/app/lib/progressThrottle';
 
 export const MAX_CONCURRENT_MOVES = 5;
 
-// Throttle progress updates to max once per 200ms per task
+// Coalescing window for high-frequency progress events
 const PROGRESS_THROTTLE_MS = 200;
-const progressThrottleMap = new Map<string, number>();
-const pendingProgressUpdates = new Map<string, MoveProgressEvent>();
-let progressFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Global listener state - persists across component unmounts
 let globalListenersSetup = false;
@@ -149,212 +147,173 @@ function isFinishedStatus(status: MoveStatus): boolean {
   return status === 'success' || status === 'error' || status === 'cancelled';
 }
 
-export const useMoveStore = create<MoveStore>((set, get) => ({
-  tasks: [],
-  modalOpen: false,
+// Apply a progress update to a move task (monotonic while active, smoothed speed)
+function applyMoveProgress(t: MoveTask, evt: MoveProgressEvent): MoveTask {
+  // Only use Math.max if task is already active, not if just starting
+  const isActive = t.status === 'downloading' || t.status === 'uploading';
+  const newProgress = isActive ? Math.max(t.progress, evt.percent) : evt.percent;
+  const newTransferred = isActive
+    ? Math.max(t.transferredBytes, evt.transferred_bytes)
+    : evt.transferred_bytes;
+  const newFileSize = t.fileSize > 0 ? t.fileSize : evt.total_bytes;
+  return {
+    ...t,
+    progress: newProgress,
+    transferredBytes: newTransferred,
+    fileSize: newFileSize,
+    speed: smoothSpeed(t.speed, evt.speed),
+    phase: evt.phase || t.phase,
+    // Update status to match phase if task was pending
+    status: t.status === 'pending' && evt.phase ? mapStatus(evt.phase) : t.status,
+  };
+}
 
-  setModalOpen: (open) => {
-    set({ modalOpen: open });
-  },
-
-  loadFromDatabase: (sessions) => {
-    const currentTasks = get().tasks;
-    const tasks: MoveTask[] = sessions.map((session) => {
-      const existing = currentTasks.find((t) => t.id === session.id);
-      const dbStatus = mapStatus(session.status);
-      const dbProgress = Math.min(Math.max(session.progress || 0, 0), 100);
-
-      // Determine if task just started (was pending, now active) - reset progress
-      const taskJustStarted =
-        existing?.status === 'pending' && (dbStatus === 'downloading' || dbStatus === 'uploading');
-
-      // Use existing progress only if task was already active (not just started)
-      const progress = taskJustStarted
-        ? dbProgress
-        : existing
-          ? Math.max(existing.progress, dbProgress)
-          : dbProgress;
-
-      return {
-        id: session.id,
-        sourceKey: session.source_key,
-        destKey: session.dest_key,
-        sourceBucket: session.source_bucket,
-        sourceAccountId: session.source_account_id,
-        sourceProvider: session.source_provider,
-        destBucket: session.dest_bucket,
-        destAccountId: session.dest_account_id,
-        destProvider: session.dest_provider,
-        deleteOriginal: session.delete_original,
-        fileSize: session.file_size || 0,
-        progress,
-        transferredBytes: taskJustStarted ? 0 : existing?.transferredBytes || 0,
-        speed: taskJustStarted ? 0 : existing?.speed || 0,
-        phase: derivePhase(dbStatus, taskJustStarted ? undefined : existing?.phase),
-        status: dbStatus,
-        error: session.error || undefined,
-      };
-    });
-    set({ tasks });
-  },
-
-  clearAllTasks: () => {
-    set({ tasks: [] });
-  },
-
-  clearFinishedTasks: () => {
-    set((state) => ({
-      tasks: state.tasks.filter((task) => !isFinishedStatus(task.status)),
-    }));
-  },
-
-  handleProgressEvent: (event) => {
-    const now = Date.now();
-    const lastUpdate = progressThrottleMap.get(event.task_id) || 0;
-
-    // Check if task exists in store
-    const taskExists = get().tasks.some((t) => t.id === event.task_id);
-    if (!taskExists) {
-      // Task not in store - reload from database to get it
-      invoke<MoveSession[]>('get_all_active_move_tasks')
-        .then((sessions) => {
-          useMoveStore.getState().loadFromDatabase(sessions);
-        })
-        .catch((e) => console.error('Failed to reload tasks:', e));
-      return;
+export const useMoveStore = create<MoveStore>((set, get) => {
+  // Coalesce bursts of progress events into single batched store updates
+  const progressBatcher = createProgressBatcher<MoveProgressEvent>(
+    PROGRESS_THROTTLE_MS,
+    (updates) => {
+      set((state) => ({
+        tasks: state.tasks.map((t) => {
+          const evt = updates.get(t.id);
+          return evt ? applyMoveProgress(t, evt) : t;
+        }),
+      }));
     }
+  );
 
-    // Store the latest event for this task
-    pendingProgressUpdates.set(event.task_id, event);
+  return {
+    tasks: [],
+    modalOpen: false,
 
-    // If within throttle window, schedule a flush instead of immediate update
-    if (now - lastUpdate < PROGRESS_THROTTLE_MS) {
-      if (!progressFlushTimer) {
-        progressFlushTimer = setTimeout(() => {
-          progressFlushTimer = null;
-          const updates = new Map(pendingProgressUpdates);
-          pendingProgressUpdates.clear();
+    setModalOpen: (open) => {
+      set({ modalOpen: open });
+    },
 
-          if (updates.size === 0) return;
+    loadFromDatabase: (sessions) => {
+      const currentTasks = get().tasks;
+      const tasks: MoveTask[] = sessions.map((session) => {
+        const existing = currentTasks.find((t) => t.id === session.id);
+        const dbStatus = mapStatus(session.status);
+        const dbProgress = Math.min(Math.max(session.progress || 0, 0), 100);
 
-          set((state) => ({
-            tasks: state.tasks.map((t) => {
-              const pendingEvent = updates.get(t.id);
-              if (!pendingEvent) return t;
+        // Determine if task just started (was pending, now active) - reset progress
+        const taskJustStarted =
+          existing?.status === 'pending' &&
+          (dbStatus === 'downloading' || dbStatus === 'uploading');
 
-              progressThrottleMap.set(t.id, Date.now());
-              // Only use Math.max if task is already active, not if just starting
-              const isActive = t.status === 'downloading' || t.status === 'uploading';
-              const newProgress = isActive
-                ? Math.max(t.progress, pendingEvent.percent)
-                : pendingEvent.percent;
-              const newTransferred = isActive
-                ? Math.max(t.transferredBytes, pendingEvent.transferred_bytes)
-                : pendingEvent.transferred_bytes;
-              const newFileSize = t.fileSize > 0 ? t.fileSize : pendingEvent.total_bytes;
-              return {
-                ...t,
-                progress: newProgress,
-                transferredBytes: newTransferred,
-                fileSize: newFileSize,
-                speed: pendingEvent.speed,
-                phase: pendingEvent.phase || t.phase,
-                // Update status to match phase if task was pending
-                status:
-                  t.status === 'pending' && pendingEvent.phase
-                    ? mapStatus(pendingEvent.phase)
-                    : t.status,
-              };
-            }),
-          }));
-        }, PROGRESS_THROTTLE_MS);
+        // Use existing progress only if task was already active (not just started)
+        const progress = taskJustStarted
+          ? dbProgress
+          : existing
+            ? Math.max(existing.progress, dbProgress)
+            : dbProgress;
+
+        return {
+          id: session.id,
+          sourceKey: session.source_key,
+          destKey: session.dest_key,
+          sourceBucket: session.source_bucket,
+          sourceAccountId: session.source_account_id,
+          sourceProvider: session.source_provider,
+          destBucket: session.dest_bucket,
+          destAccountId: session.dest_account_id,
+          destProvider: session.dest_provider,
+          deleteOriginal: session.delete_original,
+          fileSize: session.file_size || 0,
+          progress,
+          transferredBytes: taskJustStarted ? 0 : existing?.transferredBytes || 0,
+          speed: taskJustStarted ? 0 : existing?.speed || 0,
+          phase: derivePhase(dbStatus, taskJustStarted ? undefined : existing?.phase),
+          status: dbStatus,
+          error: session.error || undefined,
+        };
+      });
+      set({ tasks });
+    },
+
+    clearAllTasks: () => {
+      set({ tasks: [] });
+    },
+
+    clearFinishedTasks: () => {
+      set((state) => ({
+        tasks: state.tasks.filter((task) => !isFinishedStatus(task.status)),
+      }));
+    },
+
+    handleProgressEvent: (event) => {
+      // Check if task exists in store
+      const taskExists = get().tasks.some((t) => t.id === event.task_id);
+      if (!taskExists) {
+        // Task not in store - reload from database to get it
+        invoke<MoveSession[]>('get_all_active_move_tasks')
+          .then((sessions) => {
+            useMoveStore.getState().loadFromDatabase(sessions);
+          })
+          .catch((e) => console.error('Failed to reload tasks:', e));
+        return;
       }
-      return;
-    }
 
-    // Immediate update (first update or outside throttle window)
-    progressThrottleMap.set(event.task_id, now);
-    pendingProgressUpdates.delete(event.task_id);
+      progressBatcher.push(event.task_id, event);
+    },
 
-    set((state) => ({
-      tasks: state.tasks.map((t) => {
-        if (t.id !== event.task_id) return t;
-        // Only use Math.max if task is already active, not if just starting
-        const isActive = t.status === 'downloading' || t.status === 'uploading';
-        const newProgress = isActive ? Math.max(t.progress, event.percent) : event.percent;
-        const newTransferred = isActive
-          ? Math.max(t.transferredBytes, event.transferred_bytes)
-          : event.transferred_bytes;
-        const newFileSize = t.fileSize > 0 ? t.fileSize : event.total_bytes;
-        return {
-          ...t,
-          progress: newProgress,
-          transferredBytes: newTransferred,
-          fileSize: newFileSize,
-          speed: event.speed,
-          phase: event.phase || t.phase,
-          // Update status to match phase if task was pending
-          status: t.status === 'pending' && event.phase ? mapStatus(event.phase) : t.status,
-        };
-      }),
-    }));
-  },
+    handleStatusChanged: (event) => {
+      const newStatus = mapStatus(event.status);
+      const taskExists = useMoveStore.getState().tasks.some((t) => t.id === event.task_id);
 
-  handleStatusChanged: (event) => {
-    const newStatus = mapStatus(event.status);
-    const taskExists = useMoveStore.getState().tasks.some((t) => t.id === event.task_id);
+      // If task doesn't exist in store (new task started from queue), reload from database
+      if (!taskExists && (newStatus === 'downloading' || newStatus === 'uploading')) {
+        // Reload all active tasks to get the new task
+        invoke<MoveSession[]>('get_all_active_move_tasks')
+          .then((sessions) => {
+            useMoveStore.getState().loadFromDatabase(sessions);
+          })
+          .catch((e) => console.error('Failed to reload tasks:', e));
+        return;
+      }
 
-    // If task doesn't exist in store (new task started from queue), reload from database
-    if (!taskExists && (newStatus === 'downloading' || newStatus === 'uploading')) {
-      // Reload all active tasks to get the new task
-      invoke<MoveSession[]>('get_all_active_move_tasks')
-        .then((sessions) => {
-          useMoveStore.getState().loadFromDatabase(sessions);
-        })
-        .catch((e) => console.error('Failed to reload tasks:', e));
-      return;
-    }
+      set((state) => ({
+        tasks: state.tasks.map((t) => {
+          if (t.id !== event.task_id) return t;
 
-    set((state) => ({
-      tasks: state.tasks.map((t) => {
-        if (t.id !== event.task_id) return t;
+          const isTerminal = t.status === 'success' || t.status === 'cancelled';
+          if (isTerminal && newStatus !== t.status) {
+            return t;
+          }
 
-        const isTerminal = t.status === 'success' || t.status === 'cancelled';
-        if (isTerminal && newStatus !== t.status) {
-          return t;
-        }
+          if (t.status === 'error' && newStatus !== 'pending' && newStatus !== 'cancelled') {
+            return t;
+          }
 
-        if (t.status === 'error' && newStatus !== 'pending' && newStatus !== 'cancelled') {
-          return t;
-        }
+          if (
+            (t.status === 'finishing' || t.status === 'deleting') &&
+            (newStatus === 'uploading' || newStatus === 'downloading')
+          ) {
+            return t;
+          }
 
-        if (
-          (t.status === 'finishing' || t.status === 'deleting') &&
-          (newStatus === 'uploading' || newStatus === 'downloading')
-        ) {
-          return t;
-        }
+          return {
+            ...t,
+            status: newStatus,
+            error: event.error || undefined,
+            // Reset speed when task finishes, keep when active
+            speed: newStatus === 'downloading' || newStatus === 'uploading' ? t.speed : 0,
+            // Reset progress to 0 when task starts (pending → downloading)
+            progress: t.status === 'pending' && newStatus === 'downloading' ? 0 : t.progress,
+            phase: derivePhase(newStatus, t.phase),
+          };
+        }),
+      }));
+    },
 
-        return {
-          ...t,
-          status: newStatus,
-          error: event.error || undefined,
-          // Reset speed when task finishes, keep when active
-          speed: newStatus === 'downloading' || newStatus === 'uploading' ? t.speed : 0,
-          // Reset progress to 0 when task starts (pending → downloading)
-          progress: t.status === 'pending' && newStatus === 'downloading' ? 0 : t.progress,
-          phase: derivePhase(newStatus, t.phase),
-        };
-      }),
-    }));
-  },
-
-  handleTaskDeleted: (event) => {
-    set((state) => ({
-      tasks: state.tasks.filter((t) => t.id !== event.task_id),
-    }));
-  },
-}));
+    handleTaskDeleted: (event) => {
+      set((state) => ({
+        tasks: state.tasks.filter((t) => t.id !== event.task_id),
+      }));
+    },
+  };
+});
 
 export const selectPendingCount = (state: MoveStore) =>
   state.tasks.filter((t) => t.status === 'pending').length;

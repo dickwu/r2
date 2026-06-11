@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { App } from 'antd';
+import { useEffect, useState } from 'react';
+import { App, Spin } from 'antd';
 import { EditOutlined, FolderOutlined, SwapOutlined } from '@ant-design/icons';
 import FolderPickerModal from '@/app/components/folder/FolderPickerModal';
 import { renameObject, StorageConfig } from '@/app/lib/r2cache';
@@ -24,8 +24,23 @@ export default function FileRenameModal({
   onSuccess,
 }: FileRenameModalProps) {
   const [loading, setLoading] = useState(false);
+  const [elapsedSec, setElapsedSec] = useState(0);
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const { message } = App.useApp();
+
+  // Elapsed-time ticker while the remote copy + delete runs (no byte-level
+  // progress exists for a server-side CopyObject, so show time instead).
+  useEffect(() => {
+    if (!loading) {
+      setElapsedSec(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [loading]);
 
   const currentDir = file.key.substring(0, file.key.lastIndexOf('/') + 1);
   const currentDirDisplay = currentDir ? currentDir.replace(/\/$/, '') : '';
@@ -145,6 +160,14 @@ export default function FileRenameModal({
             </button>
           </div>
         </div>
+
+        {loading && (
+          <div className="rename-busy">
+            <Spin size="small" />
+            <span>Copying on remote storage…</span>
+            {elapsedSec > 0 && <span className="rename-busy-elapsed">{elapsedSec}s</span>}
+          </div>
+        )}
       </Modal>
 
       {folderPickerOpen && (

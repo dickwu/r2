@@ -97,10 +97,11 @@ export const awsProvider: StorageProviderAdapter<AwsStorageConfig> = {
     });
   },
 
-  batchMoveObjects: async (config, operations: MoveOperation[]) => {
+  batchMoveObjects: async (config, operations: MoveOperation[], batchId?: string) => {
     return invoke<BatchMoveResult>('batch_move_aws_objects', {
       config: toAwsConfigInput(config),
       operations,
+      batchId,
     });
   },
 

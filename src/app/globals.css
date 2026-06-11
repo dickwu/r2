@@ -4394,20 +4394,6 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   flex-wrap: wrap;
 }
 
-/* dock-task-bar for upload progress */
-.dock-task-bar {
-  height: 3px;
-  background: var(--border);
-  border-radius: 2px;
-  overflow: hidden;
-}
-.dock-task-fill {
-  height: 100%;
-  border-radius: 2px;
-  background: var(--accent);
-  transition: width 300ms ease;
-}
-
 /* ── Command Palette / Dock / Toast (handoff) ── */
 
 /* Command palette */
@@ -4525,12 +4511,16 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   margin: 0 2px;
 }
 
-/* Transfer dock */
+/* ── Transfer dock — live telemetry panel ─────────────────────────
+   Unified progress surface for uploads, downloads, moves and batch
+   renames. Each lane is hue-coded (--tx / --tx-soft) and active bars
+   carry a travelling sheen so motion reads at a glance.
+   ─────────────────────────────────────────────────────────────── */
 .dock {
   position: fixed;
   bottom: calc(var(--statusbar-h) + 16px);
   right: 18px;
-  width: 360px;
+  width: 392px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -4552,15 +4542,19 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
 .dock-header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
+  gap: 8px;
+  padding: 9px 12px;
   background: var(--bg-sunken);
 }
 .dock-title {
   font-size: 12.5px;
   font-weight: 600;
+}
+.dock-header-total {
   flex: 1;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-subtle);
 }
 .dock-close {
   width: 22px;
@@ -4576,19 +4570,104 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   color: var(--text);
   background: var(--bg-hover);
 }
+
+/* Aggregate byte-weighted progress strip */
+.dock-overall {
+  height: 4px;
+  background: var(--border);
+  overflow: hidden;
+}
+.dock-overall-fill {
+  position: relative;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+  transition: width 300ms ease;
+  overflow: hidden;
+}
+
+/* Mono telemetry readout: combined rate / data / eta */
+.dock-telemetry {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.dock-telemetry-cell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+.dock-telemetry-label {
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--text-subtle);
+}
+
 .dock-body {
   max-height: 320px;
   overflow-y: auto;
 }
+
+/* Per-kind lane hues */
+.dock-task[data-kind='upload'] {
+  --tx: var(--accent);
+  --tx-soft: var(--accent-soft);
+}
+.dock-task[data-kind='download'] {
+  --tx: #3f8cff;
+  --tx-soft: rgba(63, 140, 255, 0.12);
+}
+.dock-task[data-kind='move'] {
+  --tx: #8f6bff;
+  --tx-soft: rgba(143, 107, 255, 0.12);
+}
+.dock-task[data-kind='rename'] {
+  --tx: #0fa98e;
+  --tx-soft: rgba(15, 169, 142, 0.13);
+}
+[data-theme='dark'] .dock-task[data-kind='download'] {
+  --tx: #5ea0ff;
+  --tx-soft: rgba(94, 160, 255, 0.16);
+}
+[data-theme='dark'] .dock-task[data-kind='move'] {
+  --tx: #a78bfa;
+  --tx-soft: rgba(167, 139, 250, 0.16);
+}
+[data-theme='dark'] .dock-task[data-kind='rename'] {
+  --tx: #2dd4bf;
+  --tx-soft: rgba(45, 212, 191, 0.15);
+}
+
 .dock-task {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 14px;
+  gap: 5px;
+  padding: 9px 12px 8px;
   border-bottom: 1px solid var(--border);
 }
 .dock-task:last-child {
   border-bottom: none;
+}
+.dock-task.done {
+  animation: dockDonePulse 700ms ease;
+}
+@keyframes dockDonePulse {
+  0% {
+    background: rgba(76, 175, 80, 0.12);
+  }
+  100% {
+    background: transparent;
+  }
 }
 .dock-task-row {
   display: flex;
@@ -4602,8 +4681,8 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   border-radius: 5px;
   display: grid;
   place-items: center;
-  background: var(--bg-sunken);
-  color: var(--text-muted);
+  background: var(--tx-soft, var(--bg-sunken));
+  color: var(--tx, var(--text-muted));
   flex-shrink: 0;
 }
 .dock-task-name {
@@ -4613,10 +4692,65 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   white-space: nowrap;
   font-weight: 500;
 }
+.dock-chip {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: var(--tx, var(--text-muted));
+  background: var(--tx-soft, var(--bg-sunken));
+}
 .dock-task-pct {
   font-family: var(--font-mono);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
+}
+.dock-state-ok {
+  color: #4caf50;
+  font-size: 11px;
+}
+.dock-state-err {
+  color: #d4493a;
+  font-size: 11px;
+}
+
+/* Lane progress bar with travelling sheen while active */
+.dock-task-bar {
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.dock-task-fill {
+  position: relative;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--tx, var(--accent));
+  transition: width 300ms ease;
+  overflow: hidden;
+}
+.dock-task-fill.active::after,
+.dock-overall-fill.active::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+  animation: dockSheen 1.6s ease-in-out infinite;
+}
+@keyframes dockSheen {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
 }
 .dock-task.done .dock-task-fill {
   background: #4caf50;
@@ -4624,16 +4758,31 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
 .dock-task.error .dock-task-fill {
   background: #d4493a;
 }
-.dock-task-meta {
-  display: flex;
-  justify-content: space-between;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--text-subtle);
+.dock-task.paused .dock-task-fill {
+  opacity: 0.45;
 }
+
+/* Mono stats line under each lane */
+.dock-task-stats {
+  padding-left: 30px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Hover-revealed lane controls */
 .dock-actions {
   display: flex;
-  gap: 4px;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.dock-task:hover .dock-actions {
+  opacity: 1;
 }
 .dock-act {
   width: 22px;
@@ -4649,6 +4798,120 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   background: var(--bg-hover);
   color: var(--text);
   border-color: var(--border);
+}
+
+/* Aggregate progress ring (header + collapsed pill) */
+.dock-ring {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.dock-ring-track {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 2.5;
+}
+.dock-ring-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: stroke-dasharray 300ms ease;
+}
+.dock-ring.active .dock-ring-fill {
+  filter: drop-shadow(0 0 2px var(--accent-soft-hover));
+}
+
+/* Collapsed dock: compact floating pill */
+.dock-pill {
+  position: fixed;
+  bottom: calc(var(--statusbar-h) + 16px);
+  right: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px 0 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-md);
+  z-index: 40;
+  cursor: pointer;
+  color: var(--text);
+  animation: dockIn 180ms ease;
+}
+.dock-pill:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-lg);
+}
+.dock-pill-count {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.dock-pill-speed {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+/* Rename modal live progress (shares the dock sheen animation) */
+.rename-progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.rename-progress-fill {
+  position: relative;
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #0fa98e, #2dd4bf);
+  transition: width 300ms ease;
+  overflow: hidden;
+}
+.rename-progress-fill.active::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+  animation: dockSheen 1.6s ease-in-out infinite;
+}
+.rename-progress-stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.rename-progress-current {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rename-busy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.rename-busy-elapsed {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-subtle);
 }
 
 /* Toast */

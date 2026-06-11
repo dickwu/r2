@@ -5,6 +5,7 @@
 //! - `file_cache`: File caching operations (store, search, directory tree)
 
 mod aws_commands;
+pub(crate) mod batch_move;
 mod cache_events;
 pub(crate) mod delete_cache;
 mod file_cache;

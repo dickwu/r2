@@ -95,10 +95,11 @@ export const rustfsProvider: StorageProviderAdapter<RustfsStorageConfig> = {
     });
   },
 
-  batchMoveObjects: async (config, operations: MoveOperation[]) => {
+  batchMoveObjects: async (config, operations: MoveOperation[], batchId?: string) => {
     return invoke<BatchMoveResult>('batch_move_rustfs_objects', {
       config: toRustfsConfigInput(config),
       operations,
+      batchId,
     });
   },
 

@@ -1,6 +1,7 @@
 use crate::db;
 use crate::providers::{aws, minio};
 use crate::r2;
+use crate::transfer_progress::{SpeedWindow, ThrottleGate};
 use futures_util::{future::join_all, StreamExt};
 use log::{debug, info};
 use reqwest::{Body, Client};
@@ -8,9 +9,13 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Semaphore;
+
+/// Minimum interval between move-progress IPC emissions for streaming paths.
+/// Network streams yield ~16-64KB chunks; emitting per chunk floods the bridge.
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(150);
 
 use super::config::MoveConfig;
 use super::state::update_move_status;
@@ -220,7 +225,8 @@ async fn stream_single_put(
     let abort_reason_for_stream = abort_reason.clone();
     let cancelled = cancelled.clone();
     let paused = paused.clone();
-    let start_time = std::time::Instant::now();
+    let speed_window = Arc::new(SpeedWindow::new());
+    let emit_gate = Arc::new(ThrottleGate::new(PROGRESS_EMIT_INTERVAL));
     let task_id = session.id.clone();
     let app_handle = app.clone();
     let next_log_percent = Arc::new(AtomicU8::new(10));
@@ -253,12 +259,7 @@ async fn stream_single_put(
             0
         };
         let display_percent = if percent >= 100 { 99 } else { percent };
-        let elapsed = start_time.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 {
-            new_total as f64 / elapsed
-        } else {
-            0.0
-        };
+        let speed = speed_window.sample(new_total);
 
         let next_threshold = next_log_percent_for_stream.load(Ordering::SeqCst);
         if display_percent >= next_threshold as u32
@@ -299,17 +300,20 @@ async fn stream_single_put(
             should_persist = true;
         }
 
-        let _ = app_handle.emit(
-            "move-progress",
-            MoveProgress {
-                task_id: task_id.clone(),
-                phase: "uploading".to_string(),
-                percent: display_percent,
-                transferred_bytes: new_total,
-                total_bytes,
-                speed,
-            },
-        );
+        // Rate-limited IPC emission — the frontend interpolates between events.
+        if emit_gate.try_pass() {
+            let _ = app_handle.emit(
+                "move-progress",
+                MoveProgress {
+                    task_id: task_id.clone(),
+                    phase: "uploading".to_string(),
+                    percent: display_percent,
+                    transferred_bytes: new_total,
+                    total_bytes,
+                    speed,
+                },
+            );
+        }
 
         if should_persist {
             let task_id_update = task_id.clone();
@@ -425,10 +429,10 @@ async fn stream_multipart(
         }
     }
 
-    let uploaded_bytes = Arc::new(AtomicU64::new(
-        completed_sizes.values().map(|s| *s as u64).sum(),
-    ));
-    let start_time = std::time::Instant::now();
+    let resumed_bytes: u64 = completed_sizes.values().map(|s| *s as u64).sum();
+    let uploaded_bytes = Arc::new(AtomicU64::new(resumed_bytes));
+    // Seed the window at the resumed offset so speed reflects only new bytes.
+    let speed_window = Arc::new(SpeedWindow::with_baseline(resumed_bytes));
 
     // Collect parts that need to be uploaded
     let pending_parts: Vec<i32> = (1..=total_parts)
@@ -477,6 +481,7 @@ async fn stream_multipart(
         let cancelled = cancelled.clone();
         let paused = paused.clone();
         let uploaded_bytes = uploaded_bytes.clone();
+        let speed_window = speed_window.clone();
         let error_flag = error_flag.clone();
 
         let handle = tokio::spawn(async move {
@@ -564,13 +569,7 @@ async fn stream_multipart(
                 0
             };
             let display_percent = if percent >= 100 { 99 } else { percent };
-
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let speed = if elapsed > 0.0 {
-                new_uploaded as f64 / elapsed
-            } else {
-                0.0
-            };
+            let speed = speed_window.sample(new_uploaded);
 
             // Update DB progress BEFORE emitting event (throttled - only every 5%)
             // This avoids race condition where frontend shows progress but DB hasn't updated
