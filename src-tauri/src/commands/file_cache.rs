@@ -39,6 +39,18 @@ pub struct SearchResultResponse {
     pub total_count: i32,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BucketSummaryResponse {
+    #[serde(rename = "totalFiles")]
+    pub total_files: i64,
+    #[serde(rename = "totalSize")]
+    pub total_size: i64,
+    #[serde(rename = "lastModified")]
+    pub last_modified: Option<String>,
+    #[serde(rename = "isComplete")]
+    pub is_complete: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct IndexingProgress {
     current: usize,
@@ -135,6 +147,25 @@ pub async fn search_cached_files(query: String) -> Result<SearchResultResponse, 
     Ok(SearchResultResponse {
         files: result.files.into_iter().map(|f| f.into()).collect(),
         total_count: result.total_count,
+    })
+}
+
+/// Bucket-wide summary (total files + size) for the status bar.
+/// Cheap: single-row directory-tree lookup after a full sync, falling back to
+/// one SQL aggregate over the partial lazy cache — never a LIKE scan.
+#[tauri::command]
+pub async fn get_bucket_summary() -> Result<BucketSummaryResponse, String> {
+    let (bucket, account_id) = get_current_bucket_info().await?;
+
+    let summary = db::get_bucket_summary(&bucket, &account_id)
+        .await
+        .map_err(|e| format!("Failed to get bucket summary: {}", e))?;
+
+    Ok(BucketSummaryResponse {
+        total_files: summary.total_files,
+        total_size: summary.total_size,
+        last_modified: summary.last_modified,
+        is_complete: summary.is_complete,
     })
 }
 

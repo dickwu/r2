@@ -16,6 +16,7 @@ interface FolderLoadProgress {
 export interface BackgroundSyncState {
   isRunning: boolean;
   objectsFetched: number;
+  bytesFetched: number;
   estimatedTotal: number | null;
   startedAt: number | null;
   completedAt: number | null;
@@ -26,6 +27,7 @@ export interface BackgroundSyncState {
 const initialBackgroundSync: BackgroundSyncState = {
   isRunning: false,
   objectsFetched: 0,
+  bytesFetched: 0,
   estimatedTotal: null,
   startedAt: null,
   completedAt: null,
@@ -80,7 +82,7 @@ interface SyncStore {
   backgroundSync: BackgroundSyncState;
   setBackgroundSyncProgress: (progress: Partial<BackgroundSyncState>) => void;
   startBackgroundSync: () => void;
-  completeBackgroundSync: (totalObjects: number) => void;
+  completeBackgroundSync: (totalObjects: number, totalBytes?: number) => void;
   failBackgroundSync: (error: string) => void;
   resetBackgroundSync: () => void;
 }
@@ -203,6 +205,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
       backgroundSync: {
         isRunning: true,
         objectsFetched: 0,
+        bytesFetched: 0,
         estimatedTotal: null,
         startedAt: Date.now(),
         completedAt: null,
@@ -218,12 +221,13 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     }));
   },
 
-  completeBackgroundSync: (totalObjects) => {
+  completeBackgroundSync: (totalObjects, totalBytes) => {
     set((state) => ({
       backgroundSync: {
         ...state.backgroundSync,
         isRunning: false,
         objectsFetched: totalObjects,
+        bytesFetched: totalBytes ?? state.backgroundSync.bytesFetched,
         estimatedTotal: totalObjects,
         completedAt: Date.now(),
       },

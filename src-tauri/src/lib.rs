@@ -393,6 +393,7 @@ pub fn run() {
             commands::store_all_files,
             commands::get_all_cached_files,
             commands::search_cached_files,
+            commands::get_bucket_summary,
             commands::calculate_folder_size,
             commands::build_directory_tree,
             commands::get_directory_node,

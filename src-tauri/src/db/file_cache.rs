@@ -520,6 +520,80 @@ pub async fn calculate_folder_size(bucket: &str, account_id: &str, prefix: &str)
     }
 }
 
+/// Bucket-wide summary of cached contents.
+#[derive(Debug, Clone)]
+pub struct BucketSummary {
+    pub total_files: i64,
+    pub total_size: i64,
+    pub last_modified: Option<String>,
+    /// True when the numbers describe the whole bucket (directory tree root
+    /// from a finished sync, or a sync_meta row proving a full sync completed).
+    /// False for partial data gathered by lazy per-folder browsing.
+    pub is_complete: bool,
+}
+
+/// Get a bucket-wide summary (total file count + total size).
+///
+/// Resolution order:
+/// 1. directory_tree root node — exact totals, but only trusted once a
+///    sync_meta row proves a full sync completed (incremental upload/delete
+///    deltas can create a partial root node before any full sync).
+/// 2. SQL aggregate over cached_files — covers lazy-browsed partial data.
+///    Exact-match on indexed columns, no LIKE.
+pub async fn get_bucket_summary(bucket: &str, account_id: &str) -> DbResult<BucketSummary> {
+    // sync_meta only exists after a full sync finished — it both gates the
+    // directory-tree shortcut and distinguishes a genuinely empty bucket
+    // (complete) from not-yet-synced lazy data in the aggregate fallback.
+    let has_full_sync = {
+        let conn = get_connection()?.lock().await;
+        let mut meta_rows = conn
+            .query(
+                "SELECT 1 FROM sync_meta WHERE bucket = ?1 AND account_id = ?2",
+                turso::params![bucket, account_id],
+            )
+            .await?;
+        meta_rows.next().await?.is_some()
+    };
+
+    if has_full_sync {
+        if let Some(root) = get_directory_node(bucket, account_id, "").await? {
+            return Ok(BucketSummary {
+                total_files: root.total_file_count as i64,
+                total_size: root.total_size,
+                last_modified: root.last_modified,
+                is_complete: true,
+            });
+        }
+    }
+
+    let conn = get_connection()?.lock().await;
+
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*), COALESCE(SUM(size), 0), MAX(last_modified)
+             FROM cached_files
+             WHERE bucket = ?1 AND account_id = ?2",
+            turso::params![bucket, account_id],
+        )
+        .await?;
+
+    if let Some(row) = rows.next().await? {
+        Ok(BucketSummary {
+            total_files: row.get(0)?,
+            total_size: row.get(1)?,
+            last_modified: row.get(2)?,
+            is_complete: has_full_sync,
+        })
+    } else {
+        Ok(BucketSummary {
+            total_files: 0,
+            total_size: 0,
+            last_modified: None,
+            is_complete: has_full_sync,
+        })
+    }
+}
+
 /// Get directory node by path
 pub async fn get_directory_node(
     bucket: &str,

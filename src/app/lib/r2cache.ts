@@ -205,6 +205,19 @@ export async function calculateFolderSize(folderPrefix: string): Promise<number>
   return invoke('calculate_folder_size', { prefix: folderPrefix });
 }
 
+export interface BucketSummary {
+  totalFiles: number;
+  // i64 on the Rust side; exact in JS up to 2^53 (~9 PB), fine for display.
+  totalSize: number;
+  lastModified: string | null;
+  /** False while only partial lazy-browsed data is cached (no full sync yet). */
+  isComplete: boolean;
+}
+
+export async function getBucketSummary(): Promise<BucketSummary> {
+  return invoke('get_bucket_summary');
+}
+
 /** @deprecated Use syncBucket() instead - directory tree is now built during sync */
 export async function buildDirectoryTree(files: StoredFile[]): Promise<void> {
   // Files are already in DB, just need to build the tree

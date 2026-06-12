@@ -9,6 +9,7 @@ import { useDownloadStore } from '@/app/stores/downloadStore';
 import { useMoveStore } from '@/app/stores/moveStore';
 import SyncOverlay from '@/app/components/SyncOverlay';
 import UpdateChecker from '@/app/components/UpdateChecker';
+import BucketStats from '@/app/components/status-bar-parts/BucketStats';
 import type { StorageConfig } from '@/app/lib/r2cache';
 
 interface StatusBarProps {
@@ -135,6 +136,14 @@ export default function StatusBar({
             {storageConfig.bucket}
           </span>
         )}
+
+        {/* Bucket-wide summary (live while a big bucket is syncing) */}
+        <BucketStats
+          hasConfig={hasConfig}
+          provider={storageConfig?.provider}
+          accountId={storageConfig?.accountId}
+          bucket={storageConfig?.bucket}
+        />
 
         <span className="spacer" />
 

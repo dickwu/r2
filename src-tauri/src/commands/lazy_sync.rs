@@ -290,6 +290,7 @@ fn is_background_run_active(run_id: u64) -> bool {
 #[derive(Debug, Clone, Serialize)]
 pub struct BackgroundSyncProgress {
     pub objects_fetched: usize,
+    pub bytes_fetched: i64,
     pub estimated_total: Option<usize>,
     pub is_running: bool,
     pub speed: f64, // objects/second
@@ -298,6 +299,7 @@ pub struct BackgroundSyncProgress {
 #[derive(Debug, Clone, Serialize)]
 pub struct BackgroundSyncResult {
     pub total_objects: usize,
+    pub total_bytes: i64,
     pub cancelled: bool,
 }
 
@@ -343,6 +345,7 @@ async fn run_background_sync(
     if !is_background_run_active(run_id) {
         return Ok(BackgroundSyncResult {
             total_objects: 0,
+            total_bytes: 0,
             cancelled: true,
         });
     }
@@ -355,6 +358,7 @@ async fn run_background_sync(
     if !is_background_run_active(run_id) {
         return Ok(BackgroundSyncResult {
             total_objects: 0,
+            total_bytes: 0,
             cancelled: true,
         });
     }
@@ -384,6 +388,7 @@ async fn run_background_sync(
 
     // Fetch loop with progress emission
     let mut fetched_count: usize = 0;
+    let mut fetched_bytes: i64 = 0;
     let mut folder_keys: Vec<String> = Vec::new();
     let start_time = std::time::Instant::now();
     let use_delimiter_crawl = input.provider.as_deref() == Some("rustfs");
@@ -399,6 +404,7 @@ async fn run_background_sync(
                 drop(tx);
                 return Ok(BackgroundSyncResult {
                     total_objects: fetched_count,
+                    total_bytes: fetched_bytes,
                     cancelled: true,
                 });
             }
@@ -437,6 +443,7 @@ async fn run_background_sync(
                 drop(tx);
                 return Ok(BackgroundSyncResult {
                     total_objects: fetched_count,
+                    total_bytes: fetched_bytes,
                     cancelled: true,
                 });
             }
@@ -483,6 +490,7 @@ async fn run_background_sync(
             }
 
             fetched_count += batch.len();
+            fetched_bytes += batch.iter().map(|f| f.size).sum::<i64>();
 
             // Calculate speed
             let elapsed = start_time.elapsed().as_secs_f64().max(0.001);
@@ -493,6 +501,7 @@ async fn run_background_sync(
                 "background-sync-progress",
                 BackgroundSyncProgress {
                     objects_fetched: fetched_count,
+                    bytes_fetched: fetched_bytes,
                     estimated_total: {
                         let has_pending_prefixes =
                             use_delimiter_crawl && !pending_prefixes.is_empty();
@@ -534,6 +543,7 @@ async fn run_background_sync(
     if !is_background_run_active(run_id) {
         return Ok(BackgroundSyncResult {
             total_objects: fetched_count,
+            total_bytes: fetched_bytes,
             cancelled: true,
         });
     }
@@ -546,6 +556,7 @@ async fn run_background_sync(
     if !is_background_run_active(run_id) {
         return Ok(BackgroundSyncResult {
             total_objects: fetched_count,
+            total_bytes: fetched_bytes,
             cancelled: true,
         });
     }
@@ -557,6 +568,7 @@ async fn run_background_sync(
 
     Ok(BackgroundSyncResult {
         total_objects: fetched_count,
+        total_bytes: fetched_bytes,
         cancelled: false,
     })
 }

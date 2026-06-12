@@ -6,6 +6,7 @@ import { useSyncStore } from '@/app/stores/syncStore';
 
 interface BackgroundSyncProgressEvent {
   objects_fetched: number;
+  bytes_fetched: number;
   estimated_total: number | null;
   is_running: boolean;
   speed: number;
@@ -13,6 +14,7 @@ interface BackgroundSyncProgressEvent {
 
 interface BackgroundSyncCompleteEvent {
   total_objects: number;
+  total_bytes: number;
   cancelled: boolean;
 }
 
@@ -32,6 +34,7 @@ export function useBackgroundSync(config: StorageConfig | null) {
       (event) => {
         store.getState().setBackgroundSyncProgress({
           objectsFetched: event.payload.objects_fetched,
+          bytesFetched: event.payload.bytes_fetched,
           estimatedTotal: event.payload.estimated_total,
           speed: event.payload.speed,
           isRunning: event.payload.is_running,
@@ -42,7 +45,9 @@ export function useBackgroundSync(config: StorageConfig | null) {
     const unlistenComplete = listen<BackgroundSyncCompleteEvent>(
       'background-sync-complete',
       (event) => {
-        store.getState().completeBackgroundSync(event.payload.total_objects);
+        store
+          .getState()
+          .completeBackgroundSync(event.payload.total_objects, event.payload.total_bytes);
 
         // Invalidate all folder-contents queries so they refetch with full data
         if (config) {

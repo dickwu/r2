@@ -7,6 +7,7 @@ import { useSyncStore, SyncPhase } from '@/app/stores/syncStore';
 
 interface BackgroundSyncProgressEvent {
   objects_fetched: number;
+  bytes_fetched: number;
   estimated_total: number | null;
   is_running: boolean;
   speed: number;
@@ -14,6 +15,7 @@ interface BackgroundSyncProgressEvent {
 
 interface BackgroundSyncCompleteEvent {
   total_objects: number;
+  total_bytes: number;
   cancelled: boolean;
 }
 
@@ -51,6 +53,7 @@ export function useFilesSync(config: StorageConfig | null) {
       (event) => {
         useSyncStore.getState().setBackgroundSyncProgress({
           objectsFetched: event.payload.objects_fetched,
+          bytesFetched: event.payload.bytes_fetched,
           estimatedTotal: event.payload.estimated_total,
           speed: event.payload.speed,
           isRunning: event.payload.is_running,
@@ -61,7 +64,9 @@ export function useFilesSync(config: StorageConfig | null) {
     const unlistenComplete = listen<BackgroundSyncCompleteEvent>(
       'background-sync-complete',
       (event) => {
-        useSyncStore.getState().completeBackgroundSync(event.payload.total_objects);
+        useSyncStore
+          .getState()
+          .completeBackgroundSync(event.payload.total_objects, event.payload.total_bytes);
         useSyncStore.getState().setTotalFiles(event.payload.total_objects);
 
         // Update sync time
