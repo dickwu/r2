@@ -111,6 +111,15 @@ jobs:
 
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --workspace
+        env:
+          # The vs2026 preview image's system CRT trails its own toolchain:
+          # freshly linked test binaries die at load with
+          # STATUS_ENTRYPOINT_NOT_FOUND, and even the toolchain's matching
+          # redist staged beside the exe (step above) does not satisfy the
+          # loader — the missing export is outside the VC redist set. Linking
+          # the CRT statically removes the runtime dependency entirely. Scoped
+          # to this step so clippy and the Tauri build keep default linkage.
+          RUSTFLAGS: ${{ contains(matrix.platform, 'windows') && '-C target-feature=+crt-static' || '' }}
 
       # STATUS_ENTRYPOINT_NOT_FOUND carries no DLL name; when the Windows test
       # binary dies at load time this shows, in PATH order, every copy of each
@@ -125,6 +134,11 @@ jobs:
           }
           Write-Host "=== choco ffmpeg bin ==="
           Get-ChildItem "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+          Write-Host "=== test exe dependents ==="
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $exe = Get-ChildItem src-tauri\target\debug\deps\r2_lib-*.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($dumpbin -and $exe) { & $dumpbin.FullName /dependents $exe.FullName }
 
       - name: Build frontend
         run: bun run build
