@@ -14,26 +14,6 @@ const MOUNT_ROOT: &str = "CloudMounts";
 /// Folder under the app's cache directory holding one staging folder per mount.
 const STAGING_ROOT: &str = "mount-stage";
 
-/// Message returned when mounting is attempted on Windows.
-///
-/// Windows has no way to reach the server we start: its NFS client resolves the
-/// export through the portmapper and accepts no port option, while the server
-/// binds an ephemeral loopback port. Kept as a constant so the wording is pinned
-/// by a test on every platform.
-#[cfg(any(windows, test))]
-pub const WINDOWS_UNSUPPORTED: &str = "Mounting isn't supported on Windows yet.";
-
-/// Gate for platforms where mounting cannot work at all.
-#[cfg(windows)]
-fn ensure_mount_supported() -> Result<(), String> {
-    Err(WINDOWS_UNSUPPORTED.to_string())
-}
-
-#[cfg(not(windows))]
-fn ensure_mount_supported() -> Result<(), String> {
-    Ok(())
-}
-
 /// Everything needed to mount one bucket. Commands are stateless: the frontend
 /// pushes the full credentials on every call, like the other provider commands.
 ///
@@ -243,8 +223,6 @@ pub async fn mount_bucket(
     input: MountBucketInput,
     app: tauri::AppHandle,
 ) -> Result<MountInfo, String> {
-    ensure_mount_supported()?;
-
     let local_path = match non_empty(&input.local_path) {
         Some(path) => expand_home(&app, path)?,
         None => default_mount_path_for(&app, &input.bucket)?,
@@ -471,30 +449,6 @@ mod tests {
         // including every field added after this test was written.
         assert!(rendered.contains("photos"), "{}", rendered);
         assert!(rendered.contains("read_only"), "{}", rendered);
-    }
-
-    #[test]
-    fn the_windows_unsupported_message_is_exact() {
-        assert_eq!(
-            WINDOWS_UNSUPPORTED,
-            "Mounting isn't supported on Windows yet."
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_refuses_to_mount() {
-        assert_eq!(
-            ensure_mount_supported().unwrap_err(),
-            WINDOWS_UNSUPPORTED,
-            "Windows cannot reach the ephemeral loopback port the server binds"
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn mounting_is_allowed_off_windows() {
-        assert!(ensure_mount_supported().is_ok());
     }
 
     #[test]

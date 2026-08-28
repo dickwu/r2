@@ -54,7 +54,14 @@ const {
   flushErrorMessage,
   shouldReportFlushError,
   FLUSH_ERROR_QUIET_MS,
+  applyTransferEvent,
+  transferName,
+  pruneDeadMountTransfers,
+  TRANSFER_RETAIN_MS,
+  MAX_TRANSFER_ROWS,
 } = await import('./mountStore');
+type MountTransferEvent = import('./mountStore').MountTransferEvent;
+type MountTransfer = import('./mountStore').MountTransfer;
 const { useToastStore } = await import('./toastStore');
 
 function payload(overrides: Record<string, unknown> = {}) {
@@ -418,5 +425,160 @@ describe('defaultMountPath', () => {
 
     expect(await defaultMountPath('photos')).toBe('/Users/me/CloudMounts/photos');
     expect(sent).toEqual({ bucket: 'photos' });
+  });
+});
+
+describe('transfer progress', () => {
+  function transferEvent(overrides: Partial<MountTransferEvent> = {}): MountTransferEvent {
+    return {
+      mount_id: 'm-1',
+      bucket: 'photos',
+      transfer_id: 'm-1:42:up',
+      key: 'trips/2024/beach.jpg',
+      kind: 'upload',
+      state: 'active',
+      bytes_done: 10,
+      bytes_total: 100,
+      speed: 5,
+      ...overrides,
+    };
+  }
+
+  test('a transfer is named after the last segment of its key', () => {
+    expect(transferName('trips/2024/beach.jpg')).toBe('beach.jpg');
+    expect(transferName('beach.jpg')).toBe('beach.jpg');
+    expect(transferName('')).toBe('');
+  });
+
+  test('events upsert one row per transfer id, in place', () => {
+    const first = applyTransferEvent([], transferEvent({ state: 'waiting', bytes_done: 0 }), 1_000);
+    expect(first.length).toBe(1);
+    expect(first[0].state).toBe('waiting');
+    expect(first[0].name).toBe('beach.jpg');
+
+    const second = applyTransferEvent(
+      first,
+      transferEvent({ transfer_id: 'm-1:43:up', key: 'other.txt' }),
+      2_000
+    );
+    const third = applyTransferEvent(
+      second,
+      transferEvent({ bytes_done: 50, state: 'active' }),
+      3_000
+    );
+
+    expect(third.length).toBe(2);
+    // The updated row keeps its position so the dock does not reshuffle.
+    expect(third[0].id).toBe('m-1:42:up');
+    expect(third[0].bytesDone).toBe(50);
+    expect(third[0].state).toBe('active');
+    expect(third[1].id).toBe('m-1:43:up');
+    // Immutability: the input array still holds the pre-update row.
+    expect(second[0].bytesDone).toBe(0);
+    expect(second[0].state).toBe('waiting');
+  });
+
+  test('a removed transfer disappears rather than reading as done', () => {
+    const one = applyTransferEvent([], transferEvent({ state: 'waiting' }), 1_000);
+    const gone = applyTransferEvent(one, transferEvent({ state: 'removed' }), 2_000);
+    expect(gone.length).toBe(0);
+  });
+
+  test('finished rows are pruned once they have lingered past the retain window', () => {
+    const done = applyTransferEvent([], transferEvent({ state: 'done', bytes_done: 100 }), 1_000);
+    // Still shown while fresh…
+    const kept = applyTransferEvent(
+      done,
+      transferEvent({ transfer_id: 'm-1:43:up' }),
+      1_000 + TRANSFER_RETAIN_MS - 1
+    );
+    expect(kept.map((t: MountTransfer) => t.id)).toContain('m-1:42:up');
+    // …and dropped when stale, while live rows always survive.
+    const pruned = applyTransferEvent(
+      kept,
+      transferEvent({ transfer_id: 'm-1:44:down', kind: 'download' }),
+      1_000 + TRANSFER_RETAIN_MS + 1
+    );
+    expect(pruned.map((t: MountTransfer) => t.id)).not.toContain('m-1:42:up');
+    expect(pruned.map((t: MountTransfer) => t.id)).toContain('m-1:43:up');
+  });
+
+  test('the row count is capped, evicting finished then queued rows first', () => {
+    let transfers: MountTransfer[] = [];
+    // One old finished row, one old queued row, then a flood of queued rows.
+    transfers = applyTransferEvent(
+      transfers,
+      transferEvent({ transfer_id: 'old-done', state: 'done' }),
+      1_000
+    );
+    transfers = applyTransferEvent(
+      transfers,
+      transferEvent({ transfer_id: 'old-waiting', state: 'waiting' }),
+      1_001
+    );
+    for (let i = 0; i < MAX_TRANSFER_ROWS; i += 1) {
+      transfers = applyTransferEvent(
+        transfers,
+        transferEvent({ transfer_id: `m-1:${i}:up`, state: 'waiting' }),
+        2_000 + i
+      );
+    }
+
+    expect(transfers.length).toBe(MAX_TRANSFER_ROWS);
+    const ids = transfers.map((t: MountTransfer) => t.id);
+    // The finished row went first, then the oldest queued row.
+    expect(ids).not.toContain('old-done');
+    expect(ids).not.toContain('old-waiting');
+    expect(ids).toContain(`m-1:${MAX_TRANSFER_ROWS - 1}:up`);
+  });
+
+  test('active rows survive the cap', () => {
+    let transfers: MountTransfer[] = [];
+    transfers = applyTransferEvent(
+      transfers,
+      transferEvent({ transfer_id: 'busy', state: 'active' }),
+      1_000
+    );
+    for (let i = 0; i < MAX_TRANSFER_ROWS + 5; i += 1) {
+      transfers = applyTransferEvent(
+        transfers,
+        transferEvent({ transfer_id: `w-${i}`, state: 'waiting' }),
+        2_000 + i
+      );
+    }
+    expect(transfers.map((t: MountTransfer) => t.id)).toContain('busy');
+    expect(transfers.length).toBe(MAX_TRANSFER_ROWS);
+  });
+
+  test('live rows of a vanished mount are pruned, finished rows kept to age out', () => {
+    const transfers = [
+      applyTransferEvent([], transferEvent({ transfer_id: 'live', state: 'waiting' }), 1_000)[0],
+      applyTransferEvent([], transferEvent({ transfer_id: 'ended', state: 'done' }), 1_000)[0],
+    ];
+
+    // The mount list no longer contains m-1 (unmounted).
+    const pruned = pruneDeadMountTransfers(transfers, []);
+    const ids = pruned.map((t: MountTransfer) => t.id);
+    expect(ids).not.toContain('live');
+    expect(ids).toContain('ended');
+
+    // With the mount still present nothing is pruned.
+    const kept = pruneDeadMountTransfers(transfers, [toMountInfo(payload())]);
+    expect(kept.length).toBe(2);
+  });
+
+  test('the store folds mount-transfer events through the reducer', async () => {
+    await setupGlobalMountListeners();
+    const handler = eventHandlers['mount-transfer'];
+    expect(typeof handler).toBe('function');
+
+    handler({ payload: transferEvent({ state: 'waiting', bytes_done: 0 }) });
+    expect(useMountStore.getState().transfers.length).toBe(1);
+
+    handler({ payload: transferEvent({ state: 'done', bytes_done: 100 }) });
+    expect(useMountStore.getState().transfers[0].state).toBe('done');
+
+    useMountStore.getState().clearFinishedTransfers();
+    expect(useMountStore.getState().transfers.length).toBe(0);
   });
 });

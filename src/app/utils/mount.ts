@@ -26,7 +26,8 @@ export function revealActionLabel(os: OsKind): string {
 
 /** One line on what mounting needs from this OS, shown before the user commits. */
 export function mountRequirementHint(os: OsKind): string {
-  if (os === 'windows') return 'Not supported on Windows yet.';
+  if (os === 'windows')
+    return 'Requires the "Client for NFS" Windows feature (Pro/Enterprise); mounts to a drive letter. Read-only mode is enforced by the app — Explorer still shows the drive as writable.';
   if (os === 'linux') return 'Requires nfs-utils; may prompt for sudo.';
   return 'Mounts instantly — no extra software needed.';
 }

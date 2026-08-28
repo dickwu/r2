@@ -45,7 +45,9 @@ describe('per-OS copy', () => {
   test('states what each OS needs before mounting', () => {
     expect(mountRequirementHint('macos')).toContain('no extra software');
     expect(mountRequirementHint('linux')).toContain('nfs-utils');
-    expect(mountRequirementHint('windows')).toContain('Not supported on Windows yet');
+    // Windows mounts through the built-in NFS client, a Pro/Enterprise feature.
+    expect(mountRequirementHint('windows')).toContain('Client for NFS');
+    expect(mountRequirementHint('windows')).not.toContain('Not supported');
   });
 });
 

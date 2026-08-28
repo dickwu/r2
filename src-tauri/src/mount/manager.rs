@@ -216,10 +216,29 @@ impl MountManager {
             request.read_only,
             staging_dir,
         );
-        let listener = NFSTcpListener::bind("127.0.0.1:0", fs.clone())
+        fs.set_progress(request.app.clone(), mount_id.clone());
+
+        // The Windows NFS client cannot be pointed at a port: it asks the
+        // portmapper on port 111 of the host it mounts. So on Windows the
+        // server takes port 111 on a private loopback IP of its own
+        // (127.88.x.y, nfsserve's "auto" mode) — which also lets every mount
+        // keep its own server. Unix clients accept a port option, so there an
+        // ephemeral port on 127.0.0.1 does.
+        let bind_addr = match platform {
+            MountPlatform::Windows => "auto:111",
+            _ => "127.0.0.1:0",
+        };
+        let listener = NFSTcpListener::bind(bind_addr, fs.clone())
             .await
-            .map_err(|e| format!("Failed to start local NFS server: {}", e))?;
+            .map_err(|e| match platform {
+                MountPlatform::Windows => format!(
+                    "Failed to start the local NFS server on port 111: {}. Another NFS or portmapper service may be using it.",
+                    e
+                ),
+                _ => format!("Failed to start local NFS server: {}", e),
+            })?;
         let port = listener.get_listen_port();
+        let server_ip = listener.get_listen_ip().to_string();
 
         let server = tokio::spawn(async move {
             if let Err(e) = listener.handle_forever().await {
@@ -227,7 +246,9 @@ impl MountManager {
             }
         });
 
-        if let Err(e) = run_mount_command(platform, port, &target, request.read_only).await {
+        if let Err(e) =
+            run_mount_command(platform, &server_ip, port, &target, request.read_only).await
+        {
             server.abort();
             let _ = tokio::fs::remove_dir(fs.staging_root()).await;
             if created_dir {
@@ -749,11 +770,12 @@ async fn run_with_timeout(
 
 async fn run_mount_command(
     platform: MountPlatform,
+    server_ip: &str,
     port: u16,
     target: &str,
     read_only: bool,
 ) -> Result<(), String> {
-    let argv = platform::mount_argv(platform, port, target, read_only);
+    let argv = platform::mount_argv(platform, server_ip, port, target, read_only);
 
     match run_with_timeout(&argv, MOUNT_COMMAND_TIMEOUT).await {
         Ok(output) if output.status.success() => Ok(()),
@@ -765,13 +787,14 @@ async fn run_mount_command(
                 stderr
             };
             Err(mount_failure_message(
-                platform, port, target, read_only, &detail,
+                platform, server_ip, port, target, read_only, &detail,
             ))
         }
         // A timeout still carries the manual command, since running it by hand
         // is exactly how the user sees what the mount is waiting on.
         Err(CommandFailure::TimedOut) => Err(mount_failure_message(
             platform,
+            server_ip,
             port,
             target,
             read_only,
@@ -793,6 +816,7 @@ async fn run_mount_command(
 /// `sudo mount`, which is exactly what the frontend keys its extraction on.
 fn mount_failure_message(
     platform: MountPlatform,
+    server_ip: &str,
     port: u16,
     target: &str,
     read_only: bool,
@@ -802,7 +826,7 @@ fn mount_failure_message(
         "Failed to mount at \"{}\": {}\n\nRun this command manually to mount it yourself:\n{}",
         target,
         detail,
-        platform::manual_mount_command(platform, port, target, read_only)
+        platform::manual_mount_command(platform, server_ip, port, target, read_only)
     )
 }
 
@@ -1002,6 +1026,7 @@ mod tests {
     fn a_linux_mount_failure_puts_the_sudo_command_on_its_own_line() {
         let message = mount_failure_message(
             MountPlatform::Linux,
+            "127.0.0.1",
             51234,
             "/home/me/CloudMounts/photos",
             false,
@@ -1013,7 +1038,7 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("sudo mount"))
             .expect("a line starting with \"sudo mount\"");
-        assert!(command.contains("localhost:/"));
+        assert!(command.contains("127.0.0.1:/"));
         assert!(command.ends_with("/home/me/CloudMounts/photos"));
         assert_eq!(message.lines().last(), Some(command));
     }
@@ -1022,6 +1047,7 @@ mod tests {
     fn a_macos_mount_failure_carries_the_command_without_sudo() {
         let message = mount_failure_message(
             MountPlatform::MacOs,
+            "127.0.0.1",
             51234,
             "/Users/me/CloudMounts/photos",
             false,

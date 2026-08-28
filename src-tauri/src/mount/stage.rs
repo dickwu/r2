@@ -156,6 +156,9 @@ pub struct Stage {
     /// Set by the `utimes` a client sends at the end of a copy — the closest
     /// thing NFSv3 offers to a close notification — to skip the debounce.
     pub flush_requested: bool,
+    /// Staged size the last queued-transfer event reported, so the progress
+    /// row's total can follow a growing copy without an event per write.
+    pub reported_size: u64,
     pub state: FlushState,
     /// Tombstone: this stage has been unpublished and its backing file deleted.
     ///
@@ -193,6 +196,7 @@ impl Stage {
             dirty_gen: 0,
             last_write: Instant::now(),
             flush_requested: false,
+            reported_size: 0,
             state: FlushState::Idle,
             evicted: false,
         })

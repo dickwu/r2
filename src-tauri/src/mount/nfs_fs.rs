@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -36,6 +36,8 @@ use tauri::Emitter;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, Semaphore};
 use tokio::task::JoinHandle;
 
+use super::progress::{MountProgress, TransferKind, TransferTracker};
+use super::read_cache::{self, ReadCache};
 use super::stage::{self, FlushState, Stage, StageInit};
 
 /// Reserved root id. `0` is reserved by the protocol and must never be used.
@@ -43,6 +45,10 @@ const ROOT_ID: fileid3 = 1;
 /// How long a directory listing is served before it is re-fetched from S3.
 const DIR_CACHE_TTL: Duration = Duration::from_secs(30);
 const LIST_PAGE_SIZE: i32 = 1000;
+/// Staged-size growth that earns a queued transfer another progress event.
+/// A 1 GiB copy reports ~128 times over its whole staging phase — enough for
+/// a live total, nowhere near one event per 128 KiB write.
+const WAITING_REPORT_STEP: u64 = 8 * 1024 * 1024;
 /// Synthetic size reported for directories, matching a typical unix filesystem.
 const DIR_SIZE: u64 = 4096;
 const DIR_MODE: u32 = 0o755;
@@ -459,6 +465,13 @@ pub struct FsInner {
     /// ever `try_lock`s the stage.
     stages: AsyncMutex<HashMap<fileid3, Arc<AsyncMutex<Stage>>>>,
     flush_slots: Arc<Semaphore>,
+    /// Chunked cache behind the read path; see [`super::read_cache`].
+    read_cache: ReadCache,
+    /// Bounds background chunk prefetches so they never crowd out demand reads.
+    prefetch_slots: Arc<Semaphore>,
+    /// Reporter for the `mount-transfer` events, attached by the manager once
+    /// the mount id exists. Absent in unit tests, which have no Tauri app.
+    progress: OnceLock<MountProgress>,
     uid: u32,
     gid: u32,
     fsid: u64,
@@ -480,11 +493,27 @@ impl S3NfsFs {
                 dirs: RwLock::new(HashMap::new()),
                 stages: AsyncMutex::new(HashMap::new()),
                 flush_slots: Arc::new(Semaphore::new(stage::MAX_CONCURRENT_FLUSHES)),
+                read_cache: ReadCache::new(),
+                prefetch_slots: Arc::new(Semaphore::new(read_cache::PREFETCH_CONCURRENCY)),
+                progress: OnceLock::new(),
                 uid: current_uid(),
                 gid: current_gid(),
                 fsid,
             }),
         }
+    }
+
+    /// Attaches the transfer-progress reporter. Called once by the manager,
+    /// after the mount id is minted and before the server starts serving.
+    pub fn set_progress(&self, app: tauri::AppHandle, mount_id: String) {
+        let _ =
+            self.inner
+                .progress
+                .set(MountProgress::new(app, mount_id, self.inner.bucket.clone()));
+    }
+
+    fn progress(&self) -> Option<&MountProgress> {
+        self.inner.progress.get()
     }
 
     pub fn staging_root(&self) -> &Path {
@@ -838,6 +867,95 @@ impl S3NfsFs {
         Some((size, u32::try_from(mtime.max(0)).unwrap_or(u32::MAX)))
     }
 
+    // ---- Reading ----
+
+    /// Chunk `index` of the object behind `id`, from the cache or from S3.
+    ///
+    /// The first reader to want a chunk fetches it; every concurrent reader
+    /// awaits that same fetch through the chunk's cell. A failed fetch drops
+    /// the slot so the next read retries rather than inheriting the error.
+    async fn chunk_bytes(
+        &self,
+        id: fileid3,
+        key: &str,
+        index: u64,
+        object_size: u64,
+    ) -> Result<Arc<Vec<u8>>, nfsstat3> {
+        let slot = self.inner.read_cache.slot(id, index);
+        let result = slot
+            .cell
+            .get_or_try_init(|| async {
+                let start = read_cache::chunk_start(index);
+                let len = read_cache::chunk_len(index, object_size);
+                let range = format!("bytes={}-{}", start, start + len.max(1) - 1);
+
+                let response = self
+                    .inner
+                    .client
+                    .get_object()
+                    .bucket(&self.inner.bucket)
+                    .key(key)
+                    .range(range)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        log::error!("mount: failed to read \"{}\": {}", key, e);
+                        map_s3_error(&e)
+                    })?;
+
+                let bytes = response
+                    .body
+                    .collect()
+                    .await
+                    .map_err(|e| {
+                        log::error!("mount: failed to buffer \"{}\": {}", key, e);
+                        nfsstat3::NFS3ERR_IO
+                    })?
+                    .into_bytes()
+                    .to_vec();
+
+                let bytes = Arc::new(bytes);
+                self.inner
+                    .read_cache
+                    .note_filled(id, index, &slot, bytes.len() as u64);
+                Ok(bytes)
+            })
+            .await;
+
+        match result {
+            Ok(bytes) => Ok(bytes.clone()),
+            Err(status) => {
+                self.inner.read_cache.remove_slot(id, index);
+                Err(status)
+            }
+        }
+    }
+
+    /// Warms the chunks after `served` in the background, so a sequential
+    /// reader finds the next chunk already arriving. Cheap for everyone else:
+    /// a chunk that exists is skipped, and when the prefetch slots are busy
+    /// nothing is queued.
+    fn prefetch_after(&self, id: fileid3, key: &str, served: u64, object_size: u64) {
+        for step in 1..=read_cache::PREFETCH_CHUNKS {
+            let index = served + step;
+            if read_cache::chunk_len(index, object_size) == 0 {
+                return;
+            }
+            if self.inner.read_cache.is_present(id, index) {
+                continue;
+            }
+            let Ok(permit) = self.inner.prefetch_slots.clone().try_acquire_owned() else {
+                return;
+            };
+            let fs = self.clone();
+            let key = key.to_string();
+            tokio::spawn(async move {
+                let _permit = permit;
+                let _ = fs.chunk_bytes(id, &key, index, object_size).await;
+            });
+        }
+    }
+
     // ---- S3 mutations ----
 
     /// Writes a zero-byte object, used for both `create` and the folder markers
@@ -1030,11 +1148,14 @@ impl S3NfsFs {
             let handle = Arc::new(AsyncMutex::new(created));
             let guard = handle.clone().lock_owned().await;
             stages.insert(id, handle);
+            // The stage is the content now; chunks of the pre-edit object must
+            // not survive it, or a read after the upload could see old bytes.
+            self.inner.read_cache.forget_file(id);
             break guard;
         };
 
         if prime {
-            if let Err(status) = self.prime_stage(&mut guard, inode).await {
+            if let Err(status) = self.prime_stage(id, &mut guard, inode).await {
                 // A half-primed stage would shadow the real object with a
                 // truncated copy of it, so it is unpublished before the lock is
                 // released and nobody can ever read it.
@@ -1058,6 +1179,12 @@ impl S3NfsFs {
         guard.evicted = true;
         let _ = tokio::fs::remove_file(guard.path()).await;
         stages.remove(&id);
+        drop(stages);
+        // Any transfer row this stage had is moot now — the content it was
+        // going to upload no longer exists.
+        if let Some(progress) = self.progress() {
+            progress.removed(id, &guard.key);
+        }
     }
 
     async fn ensure_stage(
@@ -1093,8 +1220,14 @@ impl S3NfsFs {
     ///
     /// S3 cannot update part of an object, so a write into the middle of an
     /// existing file has to become a full rewrite, and the old bytes have to be
-    /// here for that rewrite to preserve them.
-    async fn prime_stage(&self, stage: &mut Stage, inode: &Inode) -> Result<(), nfsstat3> {
+    /// here for that rewrite to preserve them. The download is reported as a
+    /// live transfer: from the file manager it is an inexplicable stall.
+    async fn prime_stage(
+        &self,
+        id: fileid3,
+        stage: &mut Stage,
+        inode: &Inode,
+    ) -> Result<(), nfsstat3> {
         match stage::stage_init(inode.size) {
             StageInit::Empty => Ok(()),
             StageInit::TooLarge => {
@@ -1107,35 +1240,59 @@ impl S3NfsFs {
                 Err(nfsstat3::NFS3ERR_IO)
             }
             StageInit::Download => {
-                let response = self
-                    .inner
-                    .client
-                    .get_object()
-                    .bucket(&self.inner.bucket)
-                    .key(&inode.key)
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        log::error!("mount: failed to stage \"{}\": {}", inode.key, e);
-                        map_s3_error(&e)
-                    })?;
-
-                let mut body = response.body;
-                let mut offset = 0u64;
-                while let Some(chunk) = body.next().await {
-                    let chunk = chunk.map_err(|e| {
-                        log::error!("mount: failed to stage \"{}\": {}", inode.key, e);
-                        nfsstat3::NFS3ERR_IO
-                    })?;
-                    stage.write_at(offset, &chunk).await.map_err(|e| {
-                        log::error!("mount: failed to stage \"{}\": {}", inode.key, e);
-                        nfsstat3::NFS3ERR_IO
-                    })?;
-                    offset = offset.saturating_add(chunk.len() as u64);
+                let tracker = self
+                    .progress()
+                    .map(|p| p.track(id, &inode.key, TransferKind::Download, inode.size));
+                let outcome = self
+                    .download_into_stage(stage, inode, tracker.as_ref())
+                    .await;
+                if let Some(tracker) = &tracker {
+                    match &outcome {
+                        Ok(()) => tracker.done(),
+                        Err(_) => tracker.failed("Could not download the object for editing"),
+                    }
                 }
-                Ok(())
+                outcome
             }
         }
+    }
+
+    async fn download_into_stage(
+        &self,
+        stage: &mut Stage,
+        inode: &Inode,
+        tracker: Option<&TransferTracker>,
+    ) -> Result<(), nfsstat3> {
+        let response = self
+            .inner
+            .client
+            .get_object()
+            .bucket(&self.inner.bucket)
+            .key(&inode.key)
+            .send()
+            .await
+            .map_err(|e| {
+                log::error!("mount: failed to stage \"{}\": {}", inode.key, e);
+                map_s3_error(&e)
+            })?;
+
+        let mut body = response.body;
+        let mut offset = 0u64;
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.map_err(|e| {
+                log::error!("mount: failed to stage \"{}\": {}", inode.key, e);
+                nfsstat3::NFS3ERR_IO
+            })?;
+            stage.write_at(offset, &chunk).await.map_err(|e| {
+                log::error!("mount: failed to stage \"{}\": {}", inode.key, e);
+                nfsstat3::NFS3ERR_IO
+            })?;
+            offset = offset.saturating_add(chunk.len() as u64);
+            if let Some(tracker) = tracker {
+                tracker.set(offset);
+            }
+        }
+        Ok(())
     }
 
     /// Unpublishes a stage and deletes its backing file, used when the object is
@@ -1175,23 +1332,52 @@ impl S3NfsFs {
 
     // ---- Uploads ----
 
-    async fn upload_with_retries(&self, key: &str, path: &Path, size: u64) -> Result<(), String> {
-        self.upload_with_attempts(key, path, size, stage::UPLOAD_ATTEMPTS)
+    /// Uploads one staged file, reporting it as a live transfer from first
+    /// attempt to final outcome.
+    async fn upload_with_retries(
+        &self,
+        id: fileid3,
+        key: &str,
+        path: &Path,
+        size: u64,
+    ) -> Result<(), String> {
+        self.upload_with_attempts(id, key, path, size, stage::UPLOAD_ATTEMPTS)
             .await
     }
 
     async fn upload_with_attempts(
         &self,
+        id: fileid3,
         key: &str,
         path: &Path,
         size: u64,
         attempts: u32,
     ) -> Result<(), String> {
+        let tracker = self
+            .progress()
+            .map(|p| p.track(id, key, TransferKind::Upload, size));
+
         let attempts = attempts.max(1);
         let mut last_error = String::new();
         for attempt in 1..=attempts {
-            match self.upload_stage_file(key, path, size).await {
-                Ok(()) => return Ok(()),
+            if attempt > 1 {
+                if let Some(tracker) = &tracker {
+                    tracker.restart();
+                }
+            }
+            match self
+                .upload_stage_file(key, path, size, tracker.as_ref())
+                .await
+            {
+                Ok(()) => {
+                    // The bucket now holds different bytes than any cached
+                    // chunk of this file.
+                    self.inner.read_cache.forget_file(id);
+                    if let Some(tracker) = &tracker {
+                        tracker.done();
+                    }
+                    return Ok(());
+                }
                 Err(error) => {
                     last_error = error;
                     if attempt < attempts {
@@ -1200,12 +1386,25 @@ impl S3NfsFs {
                 }
             }
         }
+        if let Some(tracker) = &tracker {
+            tracker.failed(&last_error);
+        }
         Err(last_error)
     }
 
     /// Uploads the staging file, streaming from disk so a large file never
     /// passes through memory.
-    async fn upload_stage_file(&self, key: &str, path: &Path, size: u64) -> Result<(), String> {
+    ///
+    /// A file under the multipart threshold goes up as a single `PutObject`,
+    /// which offers no mid-flight byte count — its transfer row jumps from
+    /// started to done. Multipart uploads report per finished part.
+    async fn upload_stage_file(
+        &self,
+        key: &str,
+        path: &Path,
+        size: u64,
+        tracker: Option<&TransferTracker>,
+    ) -> Result<(), String> {
         if size <= stage::MULTIPART_THRESHOLD {
             let body = ByteStream::from_path(path)
                 .await
@@ -1222,7 +1421,7 @@ impl S3NfsFs {
             return Ok(());
         }
 
-        self.upload_stage_multipart(key, path, size).await
+        self.upload_stage_multipart(key, path, size, tracker).await
     }
 
     async fn upload_stage_multipart(
@@ -1230,6 +1429,7 @@ impl S3NfsFs {
         key: &str,
         path: &Path,
         size: u64,
+        tracker: Option<&TransferTracker>,
     ) -> Result<(), String> {
         let created = self
             .inner
@@ -1275,6 +1475,10 @@ impl S3NfsFs {
                         .send()
                         .await
                         .map_err(|e| describe(&e))?;
+
+                    if let Some(tracker) = tracker {
+                        tracker.add(length);
+                    }
 
                     Ok(CompletedPart::builder()
                         .part_number(part_number)
@@ -1398,7 +1602,7 @@ impl S3NfsFs {
         mount_id: &str,
     ) {
         let outcome = self
-            .upload_with_retries(&job.key, &job.path, job.size)
+            .upload_with_retries(job.id, &job.key, &job.path, job.size)
             .await;
 
         let mut guard = handle.lock_owned().await;
@@ -1412,6 +1616,11 @@ impl S3NfsFs {
                 guard.state = FlushState::Idle;
                 if !stage::upload_settles_stage(job.generation, guard.dirty_gen) {
                     // More was written mid-upload; the next tick re-uploads it.
+                    // The tracker already announced "done", so put the row
+                    // back to queued or it would read finished while dirty.
+                    if let Some(progress) = self.progress() {
+                        progress.waiting(job.id, &guard.key, guard.size);
+                    }
                     return;
                 }
                 guard.dirty = false;
@@ -1454,7 +1663,7 @@ impl S3NfsFs {
         let key = guard.key.clone();
         let path = guard.path().to_path_buf();
         let size = guard.size;
-        self.upload_with_retries(&key, &path, size)
+        self.upload_with_retries(id, &key, &path, size)
             .await
             .map_err(|error| {
                 log::error!("mount: failed to upload \"{}\": {}", key, error);
@@ -1588,7 +1797,7 @@ impl S3NfsFs {
             let key = guard.key.clone();
             let path = guard.path().to_path_buf();
             let size = guard.size;
-            match self.upload_with_attempts(&key, &path, size, attempts).await {
+            match self.upload_with_attempts(id, &key, &path, size, attempts).await {
                 Ok(()) => {
                     guard.dirty = false;
                     guard.state = FlushState::Idle;
@@ -1723,8 +1932,15 @@ impl NFSFileSystem for S3NfsFs {
                 log::error!("mount: failed to resize \"{}\": {}", inode.key, e);
                 nfsstat3::NFS3ERR_IO
             })?;
+            let newly_dirty = !guard.dirty;
             guard.mark_dirty(now_secs());
             guard.flush_requested = times_touched;
+            if newly_dirty {
+                guard.reported_size = guard.size;
+                if let Some(progress) = self.progress() {
+                    progress.waiting(id, &guard.key, guard.size);
+                }
+            }
             return Ok(self.staged_attr(id, &inode, guard.size, guard.mtime_secs));
         }
 
@@ -1734,6 +1950,12 @@ impl NFSFileSystem for S3NfsFs {
             // debounce instead of waiting the file out.
             if guard.dirty && times_touched {
                 guard.flush_requested = true;
+                // The copy is over, so the staged size is final — bring the
+                // queued transfer row up to date before the upload starts.
+                guard.reported_size = guard.size;
+                if let Some(progress) = self.progress() {
+                    progress.waiting(id, &guard.key, guard.size);
+                }
             }
             return Ok(self.staged_attr(id, &inode, guard.size, guard.mtime_secs));
         }
@@ -1773,38 +1995,45 @@ impl NFSFileSystem for S3NfsFs {
             return Ok((Vec::new(), offset >= inode.size));
         }
 
-        let last = offset
-            .saturating_add(u64::from(count))
-            .min(inode.size)
-            .saturating_sub(1);
-        let range = format!("bytes={}-{}", offset, last);
+        // Served from the chunk cache: one object fetch covers dozens of
+        // client transfers, and concurrent transfers share a fetch instead of
+        // each paying an S3 round trip.
+        let end = offset.saturating_add(u64::from(count)).min(inode.size);
+        let (first, last) = read_cache::chunks_covering(offset, end);
 
-        let response = self
-            .inner
-            .client
-            .get_object()
-            .bucket(&self.inner.bucket)
-            .key(&inode.key)
-            .range(range)
-            .send()
-            .await
-            .map_err(|e| {
-                log::error!("mount: failed to read \"{}\": {}", inode.key, e);
-                map_s3_error(&e)
-            })?;
+        let mut data = Vec::with_capacity((end - offset) as usize);
+        for index in first..=last {
+            let mut chunk = self.chunk_bytes(id, &inode.key, index, inode.size).await?;
+            // A cached chunk shorter than the current size implies is stale —
+            // the object was replaced with a bigger one after the chunk was
+            // fetched. Refetch once; the second answer is the object as it is
+            // now, whatever length that turns out to be.
+            if (chunk.len() as u64) < read_cache::chunk_len(index, inode.size) {
+                self.inner.read_cache.remove_slot(id, index);
+                chunk = self.chunk_bytes(id, &inode.key, index, inode.size).await?;
+            }
+            let chunk_start = read_cache::chunk_start(index);
+            let from = offset.max(chunk_start) - chunk_start;
+            let to = (end - chunk_start).min(chunk.len() as u64);
+            if to > from {
+                data.extend_from_slice(&chunk[from as usize..to as usize]);
+            }
+        }
 
-        let data = response
-            .body
-            .collect()
-            .await
-            .map_err(|e| {
-                log::error!("mount: failed to buffer \"{}\": {}", inode.key, e);
-                nfsstat3::NFS3ERR_IO
-            })?
-            .into_bytes()
-            .to_vec();
+        // Read-ahead only once this reader has proven sequential: a cold peek
+        // — a preview thumbnail, a magic-byte sniff — must not cost
+        // speculative megabytes on a metered backend.
+        let bytes_into_last = end - read_cache::chunk_start(last);
+        if self.inner.read_cache.note_read(id, last, bytes_into_last) {
+            self.prefetch_after(id, &inode.key, last, inode.size);
+        }
 
-        let eof = offset.saturating_add(data.len() as u64) >= inode.size;
+        // Producing fewer bytes than the request spans means the object ends
+        // before `inode.size` says it does. That is the true end of file:
+        // answering "no data, not EOF" would make the client re-issue the same
+        // read forever.
+        let produced_end = offset.saturating_add(data.len() as u64);
+        let eof = produced_end >= inode.size || produced_end < end;
         Ok((data, eof))
     }
 
@@ -1820,7 +2049,19 @@ impl NFSFileSystem for S3NfsFs {
             log::error!("mount: failed to stage a write to \"{}\": {}", inode.key, e);
             nfsstat3::NFS3ERR_IO
         })?;
+        let newly_dirty = !guard.dirty;
         guard.mark_dirty(now_secs());
+
+        // The copy is surfaced as a queued upload from its first write, and
+        // its reported total follows the staged size in steps — the first
+        // event alone would freeze the row at one transfer's worth (128 KiB)
+        // for the whole copy, and the dock's aggregate math with it.
+        if newly_dirty || guard.size.saturating_sub(guard.reported_size) >= WAITING_REPORT_STEP {
+            guard.reported_size = guard.size;
+            if let Some(progress) = self.progress() {
+                progress.waiting(id, &guard.key, guard.size);
+            }
+        }
 
         Ok(self.staged_attr(id, &inode, guard.size, guard.mtime_secs))
     }
@@ -1858,8 +2099,9 @@ impl NFSFileSystem for S3NfsFs {
         self.put_empty_object(&key).await?;
 
         let id = self.intern_child(&key, dirid, EntryKind::File, 0, now_secs())?;
-        // Whatever was staged belonged to the content just replaced.
+        // Whatever was staged or cached belonged to the content just replaced.
         self.discard_stage(id).await;
+        self.inner.read_cache.forget_file(id);
         self.invalidate_dir(dirid);
 
         let inode = self.inode(id)?;
@@ -1932,8 +2174,9 @@ impl NFSFileSystem for S3NfsFs {
             EntryKind::File => {
                 self.delete_object(&target.key).await?;
                 // Deleting the file is an explicit instruction to throw the
-                // unuploaded content away.
+                // unuploaded content away, cached reads included.
                 self.discard_stage(id).await;
+                self.inner.read_cache.forget_file(id);
             }
             EntryKind::Dir => {
                 let target_key = normalize_dir_key(&target.key);
@@ -2002,6 +2245,18 @@ impl NFSFileSystem for S3NfsFs {
         } else {
             self.rename_file(id, &source.key, &target_key, to_dirid)
                 .await?;
+        }
+
+        // A replaced file's cached chunks and staged content both belong to a
+        // file that no longer exists. Dropping the stage matters most: left
+        // alone, its debounced flusher would later upload the replaced file's
+        // old bytes over the freshly renamed object. The moved file keeps its
+        // own cache: its id and bytes did not change.
+        if let Some((dest_id, dest_inode)) = &destination {
+            if dest_inode.kind == EntryKind::File {
+                self.discard_stage(*dest_id).await;
+                self.inner.read_cache.forget_file(*dest_id);
+            }
         }
 
         self.invalidate_dir(from_dirid);

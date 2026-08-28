@@ -19,6 +19,7 @@ import { useUploadStore } from '@/app/stores/uploadStore';
 import { useDownloadStore } from '@/app/stores/downloadStore';
 import { useMoveStore } from '@/app/stores/moveStore';
 import { useRenameStore } from '@/app/stores/renameStore';
+import { useMountStore } from '@/app/stores/mountStore';
 import { formatBytes, formatSpeed, formatEta } from '@/app/utils/formatBytes';
 import { etaSeconds } from '@/app/lib/progressThrottle';
 
@@ -86,11 +87,13 @@ export default function TransferDock() {
   const downloadTasks = useDownloadStore((s) => s.tasks);
   const moveTasks = useMoveStore((s) => s.tasks);
   const renameBatches = useRenameStore((s) => s.batches);
+  const mountTransfers = useMountStore((s) => s.transfers);
 
   const clearFinishedUploads = useUploadStore((s) => s.clearFinished);
   const clearFinishedDownloads = useDownloadStore((s) => s.clearFinished);
   const clearFinishedMoves = useMoveStore((s) => s.clearFinishedTasks);
   const clearFinishedRenames = useRenameStore((s) => s.clearFinished);
+  const clearFinishedMountTransfers = useMountStore((s) => s.clearFinishedTransfers);
 
   // "dismissed" resets when a NEW task arrives
   const [dismissed, setDismissed] = useState(false);
@@ -177,9 +180,32 @@ export default function TransferDock() {
         canCancel: false,
       });
     }
+    // Mounted-folder transfers: staged uploads on their way to the bucket and
+    // edit-time downloads. They cannot be paused or cancelled — the mount's
+    // write-back semantics own their lifecycle — so no row actions.
+    for (const t of mountTransfers) {
+      const state: TaskState =
+        t.state === 'done' ? 'done' : t.state === 'error' ? 'error' : 'active';
+      const active = t.state === 'active';
+      out.push({
+        id: t.id,
+        kind: t.kind === 'download' ? 'download' : 'upload',
+        name: t.name,
+        phase: state === 'active' ? (t.state === 'waiting' ? 'QUEUED' : 'MOUNT') : undefined,
+        progress: t.bytesTotal > 0 ? (t.bytesDone / t.bytesTotal) * 100 : 0,
+        state,
+        speed: active ? t.speed : 0,
+        transferred: t.bytesDone,
+        total: t.bytesTotal,
+        etaSec: active ? etaSeconds(t.bytesTotal, t.bytesDone, t.speed) : 0,
+        canPause: false,
+        canResume: false,
+        canCancel: false,
+      });
+    }
 
     return out;
-  }, [uploadTasks, downloadTasks, moveTasks, renameBatches]);
+  }, [uploadTasks, downloadTasks, moveTasks, renameBatches, mountTransfers]);
 
   const total = dockTasks.length;
   const running = dockTasks.filter((t) => t.state === 'active').length;
@@ -237,7 +263,14 @@ export default function TransferDock() {
     clearFinishedDownloads();
     clearFinishedMoves();
     clearFinishedRenames();
-  }, [clearFinishedUploads, clearFinishedDownloads, clearFinishedMoves, clearFinishedRenames]);
+    clearFinishedMountTransfers();
+  }, [
+    clearFinishedUploads,
+    clearFinishedDownloads,
+    clearFinishedMoves,
+    clearFinishedRenames,
+    clearFinishedMountTransfers,
+  ]);
 
   // Reset dismissed flag whenever a new task arrives
   useEffect(() => {

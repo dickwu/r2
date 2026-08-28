@@ -176,7 +176,7 @@ export default function MountModal() {
       <button
         className="btn btn-primary"
         onClick={handleMount}
-        disabled={isMounting || !localPath.trim() || os === 'windows'}
+        disabled={isMounting || !localPath.trim()}
       >
         {isMounting ? 'Mounting…' : 'Mount'}
       </button>
