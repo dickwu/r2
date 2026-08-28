@@ -20,7 +20,12 @@ jobs:
             args: --target aarch64-apple-darwin
           - platform: macos-latest
             args: --target x86_64-apple-darwin
-          - platform: windows-latest
+          # Pinned: windows-latest currently resolves to the windows-2025-vs2026
+          # preview image, whose VS2026 toolchain links test binaries against
+          # CRT exports its own System32 vcruntime does not carry yet — every
+          # test exe dies at load with STATUS_ENTRYPOINT_NOT_FOUND. Re-evaluate
+          # once windows-latest leaves the vs2026 preview.
+          - platform: windows-2025
             args: ''
           - platform: ubuntu-22.04
             args: ''
@@ -60,7 +65,7 @@ jobs:
         run: brew install ffmpeg pkg-config cmake ninja
 
       - name: Install dependencies (Windows)
-        if: matrix.platform == 'windows-latest'
+        if: contains(matrix.platform, 'windows')
         run: |
           choco install ffmpeg sqlite -y
           echo "FFMPEG_DIR=C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg" >> $env:GITHUB_ENV
@@ -92,7 +97,7 @@ jobs:
       # binary dies at load time this shows, in PATH order, every copy of each
       # DLL it could have resolved — the shadowing copy is the first line.
       - name: Diagnose Windows DLL resolution
-        if: failure() && matrix.platform == 'windows-latest'
+        if: failure() && contains(matrix.platform, 'windows')
         shell: pwsh
         run: |
           foreach ($dll in 'avcodec*.dll','avformat*.dll','avutil*.dll','swscale*.dll','swresample*.dll','sqlite3.dll','vcruntime140.dll') {
