@@ -90,6 +90,25 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets -- -D warnings
 
+      # The vs2026 preview image links binaries against CRT exports its own
+      # System32 vcruntime does not carry, so every test exe dies at load with
+      # STATUS_ENTRYPOINT_NOT_FOUND. The loader searches the exe's directory
+      # before System32, so placing the toolchain's own matching redist DLLs
+      # next to the test binaries makes them loadable no matter how far the
+      # image's system runtime lags.
+      - name: Stage matching CRT next to test binaries (Windows)
+        if: contains(matrix.platform, 'windows')
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\*.CRT" -Directory | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $crt) { Write-Host "No VC redist found under $vs"; exit 1 }
+          Write-Host "Staging CRT from $($crt.FullName)"
+          New-Item -ItemType Directory -Force src-tauri\target\debug\deps | Out-Null
+          Copy-Item "$($crt.FullName)\*.dll" src-tauri\target\debug\deps\ -Force
+          Get-ChildItem src-tauri\target\debug\deps\*.dll | Select-Object -ExpandProperty Name
+
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --workspace
 
