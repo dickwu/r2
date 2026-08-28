@@ -61,6 +61,13 @@ jobs:
           choco install ffmpeg sqlite -y
           echo "FFMPEG_DIR=C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg" >> $env:GITHUB_ENV
           echo "SQLITE3_LIB_DIR=C:\ProgramData\chocolatey\lib\SQLite\tools" >> $env:GITHUB_ENV
+          # Test binaries link against the choco ffmpeg/sqlite import libs, but
+          # Windows resolves their DLLs through PATH at load time. Runner image
+          # 20260824 put mismatched copies of those DLLs earlier on PATH, which
+          # kills the test exe with STATUS_ENTRYPOINT_NOT_FOUND before any test
+          # runs. GITHUB_PATH entries are prepended, so the linked copies win.
+          echo "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin" >> $env:GITHUB_PATH
+          echo "C:\ProgramData\chocolatey\lib\SQLite\tools" >> $env:GITHUB_PATH
 
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
