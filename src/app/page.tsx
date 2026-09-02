@@ -52,6 +52,8 @@ import MountModal from '@/app/components/MountModal';
 import { useKeyboardShortcuts } from '@/app/hooks/useKeyboardShortcuts';
 import { useGlobalShortcuts } from '@/app/hooks/useGlobalShortcuts';
 import CommandPalette, { type CommandAction } from '@/app/components/CommandPalette';
+import ReportProblemModal from '@/app/components/report/ReportProblemModal';
+import { useReportStore } from '@/app/stores/reportStore';
 import TransferDock from '@/app/components/TransferDock';
 import Toast from '@/app/components/Toast';
 import { useToastStore } from '@/app/stores/toastStore';
@@ -919,6 +921,8 @@ export default function Home() {
         else if (action.value === 'settings') {
           setSettingsTab('appearance');
           setSettingsOpen(true);
+        } else if (action.value === 'report') {
+          useReportStore.getState().open();
         }
         // 'dock' — TransferDock auto-shows when tasks are running; no extra state needed
       } else if (action.type === 'refresh') {
@@ -1299,6 +1303,9 @@ export default function Home() {
           </div>
         </div>
       </div>
+
+      {/* Report a problem — portal to body, opened from the status bar or the palette */}
+      <ReportProblemModal />
 
       {/* Command palette — portal to body */}
       <CommandPalette

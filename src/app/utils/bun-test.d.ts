@@ -14,6 +14,11 @@ declare module 'bun:test' {
     toBeUndefined(): void;
     toBeTruthy(): void;
     toBeFalsy(): void;
+    toHaveLength(expected: number): void;
+    toBeGreaterThan(expected: number): void;
+    toBeLessThan(expected: number): void;
+    toBeLessThanOrEqual(expected: number): void;
+    toMatch(expected: string | RegExp): void;
   }
 
   export const expect: {

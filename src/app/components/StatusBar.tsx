@@ -9,6 +9,7 @@ import { useDownloadStore } from '@/app/stores/downloadStore';
 import { useMoveStore } from '@/app/stores/moveStore';
 import SyncOverlay from '@/app/components/SyncOverlay';
 import UpdateChecker from '@/app/components/UpdateChecker';
+import ReportProblemButton from '@/app/components/report/ReportProblemButton';
 import BucketStats from '@/app/components/status-bar-parts/BucketStats';
 import type { StorageConfig } from '@/app/lib/r2cache';
 
@@ -154,6 +155,9 @@ export default function StatusBar({
             {transferCount} transfer{transferCount > 1 ? 's' : ''} active
           </span>
         )}
+
+        {/* Report a problem (opens a prefilled GitHub issue) */}
+        <ReportProblemButton />
 
         {/* Update checker (shows app version + update-available badge) */}
         <UpdateChecker />

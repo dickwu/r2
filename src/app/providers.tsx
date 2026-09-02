@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { useThemeStore, initializeTheme } from '@/app/stores/themeStore';
 import { applyAccent } from '@/app/lib/accent';
+import { installSessionLog } from '@/app/lib/diagnostics/installSessionLog';
 
 export default function Providers({ children }: { children: React.ReactNode }) {
   const currentTheme = useThemeStore((s) => s.theme);
@@ -13,6 +14,9 @@ export default function Providers({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    // Record warnings and errors from the first render on, so a problem
+    // report can carry what the app was doing before it went wrong.
+    installSessionLog();
     initializeTheme();
     setMounted(true);
   }, []);

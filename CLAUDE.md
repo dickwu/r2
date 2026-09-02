@@ -47,9 +47,11 @@ cargo clippy --workspace --all-targets -- -D warnings  # CI gate
 
 Key directories:
 
-- `stores/` — Zustand stores: `accountStore`, `syncStore`, `uploadStore`, `downloadStore`, `moveStore`, `batchOperationStore`, `currentPathStore`, `themeStore`, `folderSizeStore`, `previewStore`, `renameStore`, `toastStore`
+- `stores/` — Zustand stores: `accountStore`, `syncStore`, `uploadStore`, `downloadStore`, `moveStore`, `batchOperationStore`, `currentPathStore`, `themeStore`, `folderSizeStore`, `previewStore`, `renameStore`, `toastStore`, `reportStore`
 - `hooks/` — `useFilesSync.ts` (sync orchestration), `useR2Files.ts` (cached file listing), `useLazySync.ts` + `useBackgroundSync.ts` (sync pipeline)
 - `lib/` — `r2cache.ts` (routes sync to provider adapters)
+- `lib/diagnostics/` — in-memory session log (console warn/error, uncaught errors, secrets redacted at write time) installed from `providers.tsx`; `lib/report/` builds the app-info block and the prefilled GitHub new-issue URL (kept under `MAX_ISSUE_URL_LENGTH`; log lines drop before the description)
+- `components/report/` — "Report a problem" status-bar button + modal (also reachable from the command palette via `reportStore`); it opens the prefilled issue in the browser, nothing is posted from the app
 - `providers/` — per-provider frontend sync adapters (`r2/`, `aws/`, `minio/`, `rustfs/`); distinct from `providers.tsx` (React context providers)
 - `components/` — Feature-specific modals and views (ConfigModal, BatchMoveModal, FilePreviewModal, etc.)
 - `utils/` — Helpers (`formatBytes`, `fileIcon`)
@@ -106,3 +108,13 @@ tauri-connector state        # App metadata
 - **Static export outputs to `dist/`** (`distDir` in next.config.ts); Tauri consumes `../dist` — there is no `out/`
 - **`src-tauri/capabilities/connector.json` is generated** by build.rs under the connector feature and gitignored — never hand-edit
 - **AGENTS.md**: gitignored near-copy of this file for Codex — mirror CLAUDE.md edits into it
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

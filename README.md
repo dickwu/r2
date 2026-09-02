@@ -49,6 +49,7 @@
 - Copy signed or public URLs to clipboard (provider-aware link building)
 - Dark mode support
 - Auto-updates
+- One-click "Report a problem" that opens a pre-filled GitHub issue draft with app version, OS, and the last 5 minutes of app errors (access keys and secrets redacted; you review it and nothing is filed until you press Submit)
 
 ## Install
 

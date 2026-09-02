@@ -6,6 +6,9 @@
   "permissions": [
     "core:default",
     "opener:default",
+    "os:allow-platform",
+    "os:allow-version",
+    "os:allow-arch",
     "http:default",
     "updater:default",
     "process:allow-restart",

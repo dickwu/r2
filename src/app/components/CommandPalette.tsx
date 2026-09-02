@@ -13,6 +13,7 @@ import {
   DownloadOutlined,
   FolderOutlined,
   SwitcherOutlined,
+  BugOutlined,
 } from '@ant-design/icons';
 import { useAccountStore } from '@/app/stores/accountStore';
 import { useCurrentPathStore } from '@/app/stores/currentPathStore';
@@ -21,7 +22,7 @@ import { useCurrentPathStore } from '@/app/stores/currentPathStore';
 
 export type CommandAction =
   | { type: 'bucket'; provider: string; accountId: string; bucket: string; tokenId?: number }
-  | { type: 'open'; value: 'upload' | 'settings' | 'dock' }
+  | { type: 'open'; value: 'upload' | 'settings' | 'dock' | 'report' }
   | { type: 'refresh' }
   | { type: 'theme' }
   | { type: 'view' }
@@ -86,6 +87,12 @@ const STATIC_ACTIONS: Omit<PaletteItem, 'id'>[] = [
     label: 'Show transfer dock',
     icon: <DownloadOutlined />,
     action: { type: 'open', value: 'dock' },
+    section: 'Actions',
+  },
+  {
+    label: 'Report a problem',
+    icon: <BugOutlined />,
+    action: { type: 'open', value: 'report' },
     section: 'Actions',
   },
 ];
