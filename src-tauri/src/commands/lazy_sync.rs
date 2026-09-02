@@ -1,6 +1,7 @@
 use crate::db::{self, CachedFile};
 use crate::providers::aws;
 use crate::providers::minio;
+use crate::providers::s3_client::describe_s3_error;
 use crate::r2;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
@@ -183,7 +184,8 @@ pub async fn list_prefix(
                 Err(first_error) => create_request().send().await.map_err(|retry_error| {
                     format!(
                         "S3 list failed after retry: {}; first attempt: {}",
-                        retry_error, first_error
+                        describe_s3_error(&retry_error),
+                        describe_s3_error(&first_error)
                     )
                 })?,
             }
@@ -442,7 +444,8 @@ async fn run_background_sync(
                     Err(first_error) => create_request().send().await.map_err(|retry_error| {
                         format!(
                             "S3 list failed after retry: {}; first attempt: {}",
-                            retry_error, first_error
+                            describe_s3_error(&retry_error),
+                            describe_s3_error(&first_error)
                         )
                     })?,
                 }

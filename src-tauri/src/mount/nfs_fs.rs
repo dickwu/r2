@@ -25,6 +25,8 @@ use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::primitives::{ByteStream, Length};
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client;
+
+use crate::providers::s3_client::describe_s3_error;
 use futures_util::{stream, StreamExt};
 use nfsserve::nfs::{
     fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfstime3, sattr3, set_atime, set_mtime,
@@ -232,34 +234,6 @@ where
         _ => None,
     };
     status_for_s3_code(code)
-}
-
-/// One line describing an S3 failure for the user.
-///
-/// The outermost `Display` of an SDK error is only ever "service error", so the
-/// service's own code and message win when there is one — that is the part a
-/// user can act on — and otherwise the cause chain is walked, which is where a
-/// connection failure keeps its explanation.
-fn describe<E, R>(error: &SdkError<E, R>) -> String
-where
-    E: std::error::Error + ProvideErrorMetadata + 'static,
-    R: std::fmt::Debug,
-{
-    if let Some(message) = error.message() {
-        return match error.code() {
-            Some(code) => format!("{}: {}", code, message),
-            None => message.to_string(),
-        };
-    }
-
-    let mut description = error.to_string();
-    let mut source = std::error::Error::source(error);
-    while let Some(cause) = source {
-        description.push_str(": ");
-        description.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    description
 }
 
 // ============ Inode table ============
@@ -1417,7 +1391,7 @@ impl S3NfsFs {
                 .body(body)
                 .send()
                 .await
-                .map_err(|e| describe(&e))?;
+                .map_err(|e| describe_s3_error(&e))?;
             return Ok(());
         }
 
@@ -1439,7 +1413,7 @@ impl S3NfsFs {
             .key(key)
             .send()
             .await
-            .map_err(|e| describe(&e))?;
+            .map_err(|e| describe_s3_error(&e))?;
         let upload_id = created
             .upload_id()
             .ok_or_else(|| "The storage provider did not return an upload id".to_string())?
@@ -1474,7 +1448,7 @@ impl S3NfsFs {
                         .body(body)
                         .send()
                         .await
-                        .map_err(|e| describe(&e))?;
+                        .map_err(|e| describe_s3_error(&e))?;
 
                     if let Some(tracker) = tracker {
                         tracker.add(length);
@@ -1524,7 +1498,7 @@ impl S3NfsFs {
             )
             .send()
             .await
-            .map_err(|e| describe(&e))?;
+            .map_err(|e| describe_s3_error(&e))?;
 
         Ok(())
     }

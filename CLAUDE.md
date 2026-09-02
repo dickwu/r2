@@ -60,7 +60,7 @@ Key directories:
 - **Entry**: `main.rs` → `lib.rs` (plugin registration, IPC commands, window management)
 - **Database**: SQLite via Turso (`turso` crate). Schema/queries in `db/`
 - **Provider commands**: `commands/{r2,aws,minio,rustfs}_commands.rs`, plus `commands/batch_move.rs`, `commands/lazy_sync.rs`, `commands/file_cache.rs` and cache-maintenance modules
-- **S3 client**: `providers/s3_client.rs` — shared AWS SDK S3 client factory; provider adapters in `providers/aws/`, `providers/minio/`, `providers/rustfs.rs`. The R2 adapter is NOT under `providers/` — it lives at top-level `src-tauri/src/r2/`
+- **S3 client**: `providers/s3_client.rs` — shared AWS SDK S3 client factory plus `describe_s3_error` (the only way to turn an `SdkError` into user-facing text — plain `Display` prints just "service error" and drops the code/message); provider adapters in `providers/aws/`, `providers/minio/`, `providers/rustfs.rs`. The R2 adapter is NOT under `providers/` — it lives at top-level `src-tauri/src/r2/`
 - **File operations**: `upload.rs`, `download/`, `move_transfer/`, `transfer_progress.rs`
 - **Workspace crate**: `crates/range-dl/` — multi-threaded ranged download engine; the reason cargo commands need `--workspace`
 - **DB modules**: `db/` — per-provider account/bucket modules (`aws_accounts.rs`, `minio_buckets.rs`, …) following the provider pattern, plus `file_cache.rs`, `dir_tree.rs`, `downloads.rs`, `move_sessions.rs`, `tokens.rs`, `prefix_sync.rs`, `sessions.rs`, `app_state.rs`
