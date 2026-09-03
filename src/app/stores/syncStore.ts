@@ -230,6 +230,10 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
         bytesFetched: totalBytes ?? state.backgroundSync.bytesFetched,
         estimatedTotal: totalObjects,
         completedAt: Date.now(),
+        // A run that finished supersedes whatever the last one failed with —
+        // otherwise a late error from a cancelled run leaves the banner
+        // reading "Sync failed" over a bucket that synced fine.
+        error: null,
       },
     }));
   },

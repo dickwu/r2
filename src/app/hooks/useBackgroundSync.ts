@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { useQueryClient } from '@tanstack/react-query';
 import { startBackgroundSync, cancelBackgroundSync, StorageConfig } from '@/app/lib/r2cache';
 import { useSyncStore } from '@/app/stores/syncStore';
+import { logSession } from '@/app/lib/diagnostics/sessionLog';
 
 interface BackgroundSyncProgressEvent {
   objects_fetched: number;
@@ -89,7 +90,11 @@ export function useBackgroundSync(config: StorageConfig | null) {
     try {
       await cancelBackgroundSync();
     } catch (error) {
-      console.error('Failed to cancel background sync:', error);
+      logSession(
+        'app',
+        'error',
+        `Failed to cancel background sync: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }, []);
 

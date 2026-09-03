@@ -4,6 +4,10 @@ import { listen } from '@tauri-apps/api/event';
 import { startBackgroundSync, cancelBackgroundSync, StorageConfig } from '@/app/lib/r2cache';
 import { useFolderSizeStore } from '@/app/stores/folderSizeStore';
 import { useSyncStore, SyncPhase } from '@/app/stores/syncStore';
+import { logSession } from '@/app/lib/diagnostics/sessionLog';
+
+/** An unknown thrown value as a line of text. */
+const describeError = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 interface BackgroundSyncProgressEvent {
   objects_fetched: number;
@@ -17,6 +21,8 @@ interface BackgroundSyncCompleteEvent {
   total_objects: number;
   total_bytes: number;
   cancelled: boolean;
+  /** Folders the provider refused to list; the rest of the bucket still synced. */
+  skipped_prefixes?: string[];
 }
 
 /**
@@ -69,6 +75,18 @@ export function useFilesSync(config: StorageConfig | null) {
           .completeBackgroundSync(event.payload.total_objects, event.payload.total_bytes);
         useSyncStore.getState().setTotalFiles(event.payload.total_objects);
 
+        // The sync succeeded, but the provider would not list these folders, so
+        // their contents are missing from the cache. Worth saying plainly —
+        // otherwise the only clue is a file count that looks slightly short.
+        const skipped = event.payload.skipped_prefixes ?? [];
+        if (skipped.length > 0) {
+          logSession(
+            'app',
+            'warn',
+            `Sync finished, but ${skipped.length} folder(s) could not be listed and were skipped: ${skipped.join(', ')}`
+          );
+        }
+
         // Update sync time
         if (config?.accountId && config?.bucket) {
           useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, Date.now());
@@ -88,7 +106,11 @@ export function useFilesSync(config: StorageConfig | null) {
 
     const unlistenError = listen<string>('background-sync-error', (event) => {
       useSyncStore.getState().failBackgroundSync(event.payload);
-      console.error('Background sync error:', event.payload);
+      // Recorded straight to the session log rather than through `console`.
+      // The sync banner already shows this failure and the backend prints the
+      // per-attempt detail to stderr, so a console line would only be a third
+      // copy — one that the dev overlay turns into a fault the app did not have.
+      logSession('app', 'error', `Background sync error: ${event.payload}`);
     });
 
     // Also listen for legacy sync events (used by SyncProgress component)
@@ -154,7 +176,7 @@ export function useFilesSync(config: StorageConfig | null) {
       try {
         await startBackgroundSync(config);
       } catch (err) {
-        console.error('Failed to start background sync:', err);
+        logSession('app', 'error', `Failed to start background sync: ${describeError(err)}`);
         useSyncStore
           .getState()
           .failBackgroundSync(err instanceof Error ? err.message : String(err));
@@ -201,7 +223,8 @@ export function useFilesSync(config: StorageConfig | null) {
     try {
       await startBackgroundSync(config);
     } catch (err) {
-      console.error('Failed to restart background sync:', err);
+      logSession('app', 'error', `Failed to restart background sync: ${describeError(err)}`);
+      useSyncStore.getState().failBackgroundSync(err instanceof Error ? err.message : String(err));
     }
 
     // Also invalidate folder-contents so useR2Files refetches current folder

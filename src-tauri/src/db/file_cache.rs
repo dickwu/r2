@@ -682,6 +682,22 @@ pub async fn get_all_directory_nodes(
     Ok(nodes)
 }
 
+/// Stop a bucket's cache from claiming to be complete, without discarding it.
+///
+/// Browsing then falls back to per-prefix listing, which is slower but cannot
+/// present a folder as empty on the strength of a completeness claim the cache
+/// can no longer back up. The rows themselves are kept: they are still the
+/// best answer available until the next sync.
+pub async fn clear_full_sync_marker(bucket: &str, account_id: &str) -> DbResult<()> {
+    let conn = get_connection()?.lock().await;
+    conn.execute(
+        "DELETE FROM sync_meta WHERE bucket = ?1 AND account_id = ?2",
+        turso::params![bucket, account_id],
+    )
+    .await?;
+    Ok(())
+}
+
 /// Clear all cached data for a bucket
 pub async fn clear_file_cache(bucket: &str, account_id: &str) -> DbResult<()> {
     let conn = get_connection()?.lock().await;

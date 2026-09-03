@@ -178,10 +178,12 @@ pub async fn sync_aws_bucket(
             request = request.continuation_token(token);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| format!("Failed to list objects: {}", e))?;
+        let response = request.send().await.map_err(|e| {
+            format!(
+                "Failed to list objects: {}",
+                crate::providers::s3_client::describe_s3_error(&e)
+            )
+        })?;
         let is_truncated = response.is_truncated().unwrap_or(false);
         let next_token = response.next_continuation_token().map(|s| s.to_string());
 

@@ -71,6 +71,10 @@ async-trait = "0.1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+# Paused-clock tests (`#[tokio::test(start_paused = true)]`) for the list retry backoff
+tokio = { version = "1", features = ["test-util"] }
+
 [features]
 default = []
 connector = ["tauri-plugin-connector"]
