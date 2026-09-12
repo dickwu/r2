@@ -119,7 +119,7 @@ pub struct ReadCache {
 }
 
 struct CacheInner {
-    chunks: HashMap<(u64, u64), Arc<Chunk>>,
+    chunks: HashMap<(u64, String, u64), Arc<Chunk>>,
     /// Chunk index of the last read served per file, for the sequential-read
     /// detection behind [`should_prefetch`].
     last_read: HashMap<u64, u64>,
@@ -150,35 +150,43 @@ impl ReadCache {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The slot for `(file, index)`, created empty on first sight and
+    /// The slot for `(file, version.to_string(), index)`, created empty on first sight and
     /// re-created when the existing chunk has outlived [`CHUNK_TTL`].
     /// Touching a slot marks it most recently used.
+    #[cfg(test)]
     pub fn slot(&self, file: u64, index: u64) -> Arc<Chunk> {
-        self.slot_at(file, index, Instant::now())
+        self.slot_version(file, "", index)
+    }
+    pub fn slot_version(&self, file: u64, version: &str, index: u64) -> Arc<Chunk> {
+        self.slot_version_at(file, version, index, Instant::now())
+    }
+    #[cfg(test)]
+    fn slot_at(&self, file: u64, index: u64, now: Instant) -> Arc<Chunk> {
+        self.slot_version_at(file, "", index, now)
     }
 
     /// [`Self::slot`] against an explicit clock, so the TTL boundary is
     /// testable without waiting it out.
-    fn slot_at(&self, file: u64, index: u64, now: Instant) -> Arc<Chunk> {
+    fn slot_version_at(&self, file: u64, version: &str, index: u64, now: Instant) -> Arc<Chunk> {
         let mut inner = self.lock();
         inner.tick += 1;
         let tick = inner.tick;
 
-        if let Some(existing) = inner.chunks.get(&(file, index)) {
+        if let Some(existing) = inner.chunks.get(&(file, version.to_string(), index)) {
             // Only a *filled* chunk expires: an in-flight fetch is as fresh
             // as a replacement would be.
             if existing.cell.initialized()
                 && now.saturating_duration_since(existing.fetched_at) >= CHUNK_TTL
             {
                 let freed = existing.len.load(Ordering::Relaxed);
-                inner.chunks.remove(&(file, index));
+                inner.chunks.remove(&(file, version.to_string(), index));
                 inner.total_bytes = inner.total_bytes.saturating_sub(freed);
             }
         }
 
         let slot = inner
             .chunks
-            .entry((file, index))
+            .entry((file, version.to_string(), index))
             .or_insert_with(|| {
                 Arc::new(Chunk {
                     cell: OnceCell::new(),
@@ -194,9 +202,13 @@ impl ReadCache {
 
     /// Whether a live (unexpired) slot exists — filled or mid-fetch — without
     /// creating one. Prefetchers use this so probing costs nothing.
+    #[cfg(test)]
     pub fn is_present(&self, file: u64, index: u64) -> bool {
+        self.is_present_version(file, "", index)
+    }
+    pub fn is_present_version(&self, file: u64, version: &str, index: u64) -> bool {
         let inner = self.lock();
-        match inner.chunks.get(&(file, index)) {
+        match inner.chunks.get(&(file, version.to_string(), index)) {
             Some(slot) => !slot.cell.initialized() || slot.fetched_at.elapsed() < CHUNK_TTL,
             None => false,
         }
@@ -219,14 +231,25 @@ impl ReadCache {
     /// orphan would inflate the total for the life of the mount. Eviction only
     /// drops map entries: a reader holding the chunk's `Arc` keeps the bytes
     /// alive until it is done with them.
+    #[cfg(test)]
     pub fn note_filled(&self, file: u64, index: u64, slot: &Arc<Chunk>, len: u64) {
+        self.note_filled_version(file, "", index, slot, len);
+    }
+    pub fn note_filled_version(
+        &self,
+        file: u64,
+        version: &str,
+        index: u64,
+        slot: &Arc<Chunk>,
+        len: u64,
+    ) {
         let mut inner = self.lock();
         // Recorded under the lock so every removal path sees the same number
         // this fill adds to the total.
         slot.len.store(len, Ordering::Relaxed);
         let still_mapped = inner
             .chunks
-            .get(&(file, index))
+            .get(&(file, version.to_string(), index))
             .map(|mapped| Arc::ptr_eq(mapped, slot))
             .unwrap_or(false);
         if still_mapped {
@@ -237,9 +260,11 @@ impl ReadCache {
             let oldest = inner
                 .chunks
                 .iter()
-                .filter(|(key, slot)| **key != (file, index) && slot.cell.initialized())
+                .filter(|(key, slot)| {
+                    **key != (file, version.to_string(), index) && slot.cell.initialized()
+                })
                 .min_by_key(|(_, slot)| slot.last_access.load(Ordering::Relaxed))
-                .map(|(key, _)| *key);
+                .map(|(key, _)| key.clone());
             let Some(key) = oldest else {
                 break;
             };
@@ -252,9 +277,13 @@ impl ReadCache {
 
     /// Drops one slot, used when its fetch failed (so the next read retries)
     /// or when its content proved stale.
+    #[cfg(test)]
     pub fn remove_slot(&self, file: u64, index: u64) {
+        self.remove_slot_version(file, "", index);
+    }
+    pub fn remove_slot_version(&self, file: u64, version: &str, index: u64) {
         let mut inner = self.lock();
-        if let Some(slot) = inner.chunks.remove(&(file, index)) {
+        if let Some(slot) = inner.chunks.remove(&(file, version.to_string(), index)) {
             let freed = slot.len.load(Ordering::Relaxed);
             inner.total_bytes = inner.total_bytes.saturating_sub(freed);
         }
@@ -265,11 +294,11 @@ impl ReadCache {
     /// later read cannot see the old bytes.
     pub fn forget_file(&self, file: u64) {
         let mut inner = self.lock();
-        let doomed: Vec<(u64, u64)> = inner
+        let doomed: Vec<(u64, String, u64)> = inner
             .chunks
             .keys()
-            .filter(|(f, _)| *f == file)
-            .copied()
+            .filter(|(f, _, _)| *f == file)
+            .cloned()
             .collect();
         for key in doomed {
             if let Some(slot) = inner.chunks.remove(&key) {

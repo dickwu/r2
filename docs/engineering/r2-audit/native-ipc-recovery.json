@@ -1,0 +1,10 @@
+{
+  "scope": "Actual Tauri IPC and persistent SQLite across app restart; two local HTTP storage fixtures, not real provider deployments",
+  "app_id": "com.lifefarmer.r2.audit-01a096c3-20260912",
+  "before_restart": "needs_auth",
+  "after_restart": "success",
+  "source_gets": 1,
+  "destination_puts": 1,
+  "destination_content": "correct-data",
+  "source_removed_only_after_resume": true
+}

@@ -1,0 +1,158 @@
+{
+  "captured_at": "2026-09-12T22:34:28.950857+00:00",
+  "baseline": "f81deec37488b5dcf79b0518ead3cad0263e79d0",
+  "branch": "main",
+  "uncommitted": true,
+  "source_fingerprint_sha256": "7b967f27e34abd41f95953996a83e28f58b5b424d68751ac4f8a43a37f2d5c6a",
+  "source_files": {
+    "scripts/audit-listing-benchmark.ts": "45e8c9a531f42be7d07787d41b9dd78d2a778b800d894ca4c7487b3c6b8a0fe0",
+    "scripts/native-ipc-audit.py": "05a047b8f461c46390c15b8400e52e0e8bbe99765cb6db20a797b6f3c4e0c00d",
+    "scripts/native-minio-audit.mjs": "97f3ddf7eff78d63b690d9c32bd61ec8bfa6a1a2595a03b65c88dc30aee58298",
+    "src-tauri/src/commands/lazy_sync.rs": "026437fdd88a4da6bdd66516456c070dd69f2fc0797d8aaf69f6f8bacb1d0a3c",
+    "src-tauri/src/commands/mount_commands.rs": "5aa57152fec4a36f4ac28669427b5240f4ddfd17a9334a6b0c527b3754d1c704",
+    "src-tauri/src/db/dir_tree.rs": "280f5f2c7e8eacdc12cff309d64a849b6b1a8cb42748e07f46688a361997e199",
+    "src-tauri/src/db/file_cache.rs": "f4c0f8209925901d82893e5d9d9018d480bf3872a51eb8f59cdd46fcf9f1e5b2",
+    "src-tauri/src/db/mod.rs": "7dd009a752c547cd20ca856b5177e1058d817e0444507d6d20da126b7ee73c43",
+    "src-tauri/src/db/move_sessions.rs": "ba0311a52dbb76abc5215b88bb2204d9dd18e44f5f23cd6ec9332070a1dac8e1",
+    "src-tauri/src/db/prefix_sync.rs": "ac2fe7a5d8031c45e2e757d814683a5a94fc70c57a01984892c6ea3c151a5af8",
+    "src-tauri/src/lib.rs": "32e85e1ca5d14e5acb5b925fd7a914075a34f21dfd1cb1864d023f7cb5e13d89",
+    "src-tauri/src/mount/manager.rs": "b4b391b7007dcc34deff2fe93a02f8482f8334d5d644359a5f52eb47bcd0c30a",
+    "src-tauri/src/mount/mod.rs": "85b99542ca7e1b5e7d71213da2cd5e2c815c2b5a5448f236cb1156dfafef2e2c",
+    "src-tauri/src/mount/namespace_recovery.rs": "b850f64bdc182d3f1dcefce205f0a0b46c81f43d3e90a761ce637447a3c73a05",
+    "src-tauri/src/mount/native_smoke_tests.rs": "2d467904f50d79ef6ca93858a8b0eb62c8cab4000d329c42215753e25577c4f6",
+    "src-tauri/src/mount/nfs_fs.rs": "795b247eed6b1ced34ae2b826fccfb6e08df5f654130ec3f256719c35737f238",
+    "src-tauri/src/mount/nfs_protocol_tests.rs": "1b112aee0d1439384664f5185aef9acb9f37f4d6c1f75fbc69bce190f4f49534",
+    "src-tauri/src/mount/platform.rs": "ce263704654b002cf12c21921c75b9f9e60dc9ae214ff292018ccfa05b5e42c8",
+    "src-tauri/src/mount/progress.rs": "d6068733399d3a1c428aa27ecc486dd7132eb79484bd8c7144093083ff2835e4",
+    "src-tauri/src/mount/quota.rs": "d8467d556803b89f54b3c5a1e95d891960d236a46249f1d33b90dc0dc9ebf6ee",
+    "src-tauri/src/mount/read_cache.rs": "0d99fc501227d200d494346c350569e8b12e454dc13e35e83d1b80e144e67403",
+    "src-tauri/src/mount/recovery.rs": "0bdb6e943cd3f7ea4cec25f41a91499eaffe08e9cbdb99160382ca3526e58875",
+    "src-tauri/src/mount/rename_copy.rs": "4b7de61473a6692d5860128e93ec42cb1ab425d5d1c6a1a0c16a4931f9c5b731",
+    "src-tauri/src/mount/stage.rs": "d1a84a185f8aee8f311c2a0b6936ec6f109f9ac39434a41500b81796c4dd2b34",
+    "src-tauri/src/move_transfer/commands.rs": "973c0091e4ad2c161976e6408006cfc08472f6235c2c058f74a339318d54c15f",
+    "src-tauri/src/move_transfer/config.rs": "4a371bafa824b9ee1f80c4d6284bd39621adb0bdbbf93524f85063dcb1041e2f",
+    "src-tauri/src/move_transfer/finishing.rs": "d9cf08545071f88b638dcf6a524900fe08a7295883af48d929f31aa44035d048",
+    "src-tauri/src/move_transfer/mod.rs": "44aca47d80ec98000f56180a9b009431b9a3a24e6e9810d6558cb7a2fa6daae5",
+    "src-tauri/src/move_transfer/planner.rs": "2d42a8babdd2aecaee2d77a3f98fcdd326f68702e4c810dcca0da6b0b0f0eb42",
+    "src-tauri/src/move_transfer/relay_protocol.rs": "d27924a8fb02837a953398c44edd12cfb72e4b1f20b52a396c978da67443cdfc",
+    "src-tauri/src/move_transfer/server_copy.rs": "b8ebcc6b9c550fbd9ed7426d858d97cd5853c874f589818acb4c4aa3fcd5a082",
+    "src-tauri/src/move_transfer/state.rs": "828d228661ae89349e853e2358d3344275392e2fd19ea1d8295466ab9f3d70b4",
+    "src-tauri/src/move_transfer/stream.rs": "4746f4acbeecb271f98ba14f0470606f898a206979c2321a1375ade830b52aba",
+    "src-tauri/src/move_transfer/types.rs": "2d8c355e29f05d3823e427cff823699ade60b8182e7511d8ed6a73aa2210a251",
+    "src-tauri/src/move_transfer/worker.rs": "f91765bd84e4708e14cf4fc7000614d655a319e458f338b8dac9cba08d781694",
+    "src-tauri/src/providers/aws/mod.rs": "7cd7ebc33c8cb0c5db889a778e8a6b811582c7a80d7c864a68af5325dc71c895",
+    "src-tauri/src/providers/aws/objects.rs": "b2c6ac5e160c810afdb5ab9c7c66d0834f0387b3a9daac055391fdfaf82339b3",
+    "src-tauri/src/providers/aws/presigned.rs": "6b2935e0b4d64f72d1848651959c3bdad5d9a8d59fc58f191c72c79f4ae0fe8f",
+    "src-tauri/src/providers/conditional.rs": "1554ef02c79375d6a1cafe5ce6c937e0370da2aa5fa2dab705e54e8070db5acc",
+    "src-tauri/src/providers/minio/mod.rs": "9819ead109d16ad4c98cbfa5ed11766cf2580411ff652db424f1b5c01171028e",
+    "src-tauri/src/providers/minio/objects.rs": "9033655f2c6f74ca0bf1ab57c88ea38e8147455fb156485ffc4768475ef794bd",
+    "src-tauri/src/providers/minio/presigned.rs": "b29358e61bf8820b6bbab8554729c2d6123346d0a7bef892444c3fbd431a439e",
+    "src-tauri/src/providers/mod.rs": "b9740bf10aec12671ecbf44590ed324b6381700061b38dd260d0f661daa9c0b0",
+    "src-tauri/src/providers/s3_client.rs": "2a2f60c77f653f6766931533ea846040be8980758130497dc0ed7cbc33723aea",
+    "src-tauri/src/r2/mod.rs": "bd4c0789da1ca1046154d706ac979701feda127643603d65a10987a39f9aadc2",
+    "src-tauri/src/r2/objects.rs": "aa7146667640eb067cd6c23c27d9815c6e40729a795958bd53f557e50532dfc5",
+    "src-tauri/src/r2/presigned.rs": "0281eb0b68a2e90a423023f2de1959a308471b50d44438b11a565ff269a9f2b3",
+    "src-tauri/src/test_s3.rs": "87ef22b5a888846c29166cf2be039df83ce027ad885f70e80c17d11785c7b516",
+    "src/app/components/BatchMoveModal.tsx": "0d7b6f2940893637142dd0c0abc8739cbab261d0bb708c741486c59a0fb9c96c",
+    "src/app/components/FileListView.tsx": "c7ea2f03225174e7e60ba985f357fe71f957d76fe49f5b62558fe063300b429d",
+    "src/app/components/MountModal.tsx": "26d05b0b101a6af1ecef97d7aa45158e654f443eaa1feaca0fe862c0592151ac",
+    "src/app/components/MoveTaskItem.tsx": "31bda1858cc7a27e0e800c4034ed6ae235470d94248553067100391e29a99f73",
+    "src/app/components/MoveTaskModal.tsx": "743bbfa8b4b0e5f672f1c128364f10f2b2f8493bfc375175793f4bdf4795119c",
+    "src/app/components/SettingsMountsPanel.tsx": "6df19eeca31cd0e97b23c33947eaa0e5765cd14be6fc3fc80253122054197c42",
+    "src/app/components/StatusBar.tsx": "876401438097ab744cd621b440af6feaf235a594d5aa821e76dc42abd80b56bf",
+    "src/app/components/TransferDock.tsx": "68ed6ad7d14aa07fa2e4f51e3507af981da06d113ef4cefcb5f7278d5b89578a",
+    "src/app/components/status-bar-parts/BucketStats.tsx": "cd9ba7218483301699bde4e936239ac27a21c635ff47d3acff48265d7d980c31",
+    "src/app/components/status-bar-parts/MoveProgress.tsx": "aa87cd938e1fcb8112aee4d4bda369a9c463e89308fae5a6367903583962f753",
+    "src/app/hooks/useBackgroundSync.ts": "deleted",
+    "src/app/hooks/useFilesSync.ts": "0c93c38deb226a1dfa9c2fec07fdc20606f0119c8aa7ac8b3781ae0c968de227",
+    "src/app/hooks/useR2Files.ts": "c942d63af6eee50f2d0cae44e23ae184b30bf28ac7a4ffdcfae05b0adee1a930",
+    "src/app/lib/folderStream.test.ts": "b9fc2c51234712222c8bcf96447d4f86e703897db9ee8da77d9831c72e9c26b3",
+    "src/app/lib/folderStream.ts": "d8a59272ebf08d33b28bb95de5b7286c0e7546d560dbeb63e39252d9691d5de3",
+    "src/app/lib/moveRecovery.ts": "ae4bea8cefb4cef1e2b766929169fffc2fdf0c2a7cd837be8650c184477e128f",
+    "src/app/lib/r2cache.ts": "56783f174a9066a69de91a17890cd63b64cccb63cff6d713faa91f2f23a02d04",
+    "src/app/page.tsx": "571a79f074b4e58456d6409a7cc7086ea5d19833726c8701841007a9dffa56ea",
+    "src/app/stores/mountStore.test.ts": "6d848813c0e63a8bc4eeb114687d1ba0589f7b441360283a3bc5b577468ccc59",
+    "src/app/stores/mountStore.ts": "5830134c10d30c643bba1fb822f290dc9bb70745a6814263ac6e1bb291e55ab9",
+    "src/app/stores/moveStore.test.ts": "72821cef7f6c6bd1dca5cc9b0158a63eb5627f51bd1e98b75cd2fc8b4e3679ef",
+    "src/app/stores/moveStore.ts": "a49640ebf5dbf59fd9116a7e0f97ebf1adc1d5e7c0d2e3cb4c77f0a5dc209427",
+    "src/app/utils/folderItems.test.ts": "cba21561451c00a8f0f82994215c252f7ef025756068e57a88925a0090c59b2f",
+    "src/app/utils/folderItems.ts": "9dc505c3ade0a92a4cf4082c92c6a8492e9d4215eb0f6230ae6bbebf6cf90289",
+    "src/app/utils/moveConfig.ts": "ad3c2280616f2724f201009b1923435546a434c262816eedf0115488b90215f8",
+    "src/app/utils/moveOperations.test.ts": "ebfd93422785a0e42348e78a1e4d2bbdc0466c68674f50238ea561dbf7a6c523",
+    "src/app/utils/moveOperations.ts": "6280e80278ff062244f27e17a59a033f566a049d211a4b4816f04d4293a75491",
+    "src/app/utils/syncScope.test.ts": "a6150ed9aacf9c6865898e94512602c05deb9f8917003ba79e79da47a37b0d41",
+    "src/app/utils/syncScope.ts": "9cfaa0adde25ef95367bfee2810f624546cc224a1711befc91f5b1e8fb8bf468"
+  },
+  "checks": [
+    {
+      "command": "bun run check",
+      "result": "passed",
+      "tests": 180,
+      "typecheck": "passed",
+      "prettier": "passed"
+    },
+    {
+      "command": "bun run build",
+      "result": "passed"
+    },
+    {
+      "command": "cargo fmt --all --check; explicit rustfmt checks for native test modules",
+      "result": "passed"
+    },
+    {
+      "command": "cargo test --workspace",
+      "result": "passed",
+      "tests": 259,
+      "ignored_application_tests": 3,
+      "ignored_doctests": 1
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "result": "passed"
+    },
+    {
+      "command": "cargo test native_nfs_write_read_rename_unmount -- --ignored --nocapture",
+      "result": "passed",
+      "scope": "macOS kernel NFS + local HTTP storage fixture"
+    },
+    {
+      "command": "python3 scripts/native-ipc-audit.py with isolated audit profile and local fixture",
+      "result": "passed",
+      "artifact": "native-ipc-recovery.json"
+    },
+    {
+      "command": "MINIO_AUDIT_BINARY=<pinned local binary> bun scripts/native-minio-audit.mjs",
+      "result": "passed explicit assertions, with unsupported mutation limitations",
+      "artifact": "real-minio.json"
+    },
+    {
+      "command": "bun tauri build --debug --no-bundle -- --locked",
+      "result": "passed",
+      "normal_identifier_restored": true
+    },
+    {
+      "command": "react-doctor --verbose --diff",
+      "score": 68,
+      "bug_warnings": 0,
+      "complexity_warnings": 9,
+      "intentional_sequential_credential_install_warnings": 1
+    },
+    {
+      "command": "git diff --check",
+      "result": "passed"
+    }
+  ],
+  "cleanup": {
+    "owned_test_processes_stopped": true,
+    "isolated_profile_removed": true,
+    "normal_user_profile_untouched": true,
+    "generated_next_env_restored": true,
+    "minio_binary_retained_in_ignored_artifacts": true
+  },
+  "acceptance": "incomplete; see verification.md open requirements",
+  "publication": {
+    "committed": false,
+    "pushed": false,
+    "released": false
+  }
+}

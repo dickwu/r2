@@ -1,7 +1,8 @@
 //! Write-back staging for writable mounts.
 //!
-//! NFSv3 has no close, commit or flush hook: the client sends a stream of
-//! ≤1 MiB WRITEs and expects each one acknowledged immediately. Uploading per
+//! nfsserve 0.11 has no close/commit VFS hook and reports every successful
+//! WRITE as FILE_SYNC. Callers must persist bytes and the stage manifest
+//! before returning success; remote publication remains asynchronous. Uploading per
 //! write would publish a torn object and cost a round trip per megabyte, so a
 //! dirty file is written to a local staging file first and uploaded once the
 //! client has gone quiet. Timing the upload is therefore entirely our problem,
@@ -14,6 +15,7 @@ use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
@@ -29,9 +31,6 @@ pub const FLUSH_RETRY_COOLDOWN: Duration = Duration::from_secs(15);
 pub const MAX_CONCURRENT_FLUSHES: usize = 3;
 /// Attempts inside a single flush before it is marked failed.
 pub const UPLOAD_ATTEMPTS: u32 = 3;
-/// Backoff between those attempts.
-pub const UPLOAD_RETRY_BACKOFF: Duration = Duration::from_secs(1);
-
 /// Largest object that will be pulled down to be modified in place.
 ///
 /// A write to the middle of an existing object has to become a full rewrite —
@@ -52,6 +51,8 @@ pub const PART_CONCURRENCY: usize = 4;
 pub enum FlushState {
     Idle,
     Uploading,
+    /// Requires explicit recovery after a permanent or uncertain failure.
+    Paused,
     /// The last upload failed; the scanner leaves this stage alone until the
     /// cooldown expires so a broken bucket cannot spin the flusher.
     Failed {
@@ -74,7 +75,7 @@ pub fn should_flush(
         return false;
     }
     match state {
-        FlushState::Uploading => false,
+        FlushState::Uploading | FlushState::Paused => false,
         FlushState::Failed { retry_after } if now < retry_after => false,
         _ => flush_requested || idle_for >= FLUSH_DEBOUNCE,
     }
@@ -123,14 +124,21 @@ pub fn stage_init(object_size: u64) -> StageInit {
 }
 
 /// Number of parts a multipart upload of `size` bytes is split into.
+pub fn planned_part_size(size: u64) -> u64 {
+    // Round up to a MiB while staying within S3's 10,000 part limit.
+    let mib = 1024 * 1024;
+    PART_SIZE.max(size.div_ceil(10_000).div_ceil(mib) * mib)
+}
+
 pub fn part_count(size: u64) -> u64 {
-    size.div_ceil(PART_SIZE).max(1)
+    size.div_ceil(planned_part_size(size)).max(1)
 }
 
 /// Byte range of part `index` (zero-based) of a `size`-byte upload.
 pub fn part_range(size: u64, index: u64) -> (u64, u64) {
-    let start = index * PART_SIZE;
-    let end = start.saturating_add(PART_SIZE).min(size);
+    let part_size = planned_part_size(size);
+    let start = index.saturating_mul(part_size);
+    let end = start.saturating_add(part_size).min(size);
     (start, end.saturating_sub(start))
 }
 
@@ -169,6 +177,353 @@ pub struct Stage {
     /// stage and finds it set knows the handle is stale and the map is the
     /// place to look again.
     pub evicted: bool,
+    pub last_error: Option<String>,
+    pub snapshot: Option<UploadSnapshot>,
+    pub publication_guard: Option<PublicationGuard>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PublicationGuard {
+    Absent,
+    Match { etag: String },
+}
+impl PublicationGuard {
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::Absent => true,
+            Self::Match { etag } => !etag.trim().is_empty(),
+        }
+    }
+    pub fn matches(&self, etag: Option<&str>) -> bool {
+        match self {
+            Self::Absent => etag.is_none(),
+            Self::Match { etag: expected } => self.is_valid() && etag == Some(expected.as_str()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadSnapshot {
+    pub path: PathBuf,
+    pub generation: u64,
+    pub size: u64,
+    #[serde(default)]
+    pub publication_guard: Option<PublicationGuard>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MultipartJournal {
+    pub upload_id: Option<String>,
+    pub part_size: u64,
+    pub parts: std::collections::BTreeMap<i32, String>,
+    pub completing: bool,
+    #[serde(default)]
+    pub precondition: Option<PublicationGuard>,
+    #[serde(default)]
+    pub published_etag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageRecovery {
+    pub key: String,
+    pub size: u64,
+    pub mtime_secs: u32,
+    pub generation: u64,
+    pub dirty: bool,
+    pub state: String,
+    pub error: Option<String>,
+    pub path: PathBuf,
+    pub snapshot: Option<UploadSnapshot>,
+    #[serde(default)]
+    pub publication_guard: Option<PublicationGuard>,
+}
+
+#[derive(Serialize, Deserialize)]
+enum DurableChange {
+    Write { offset: u64, data: Vec<u8> },
+    Resize { size: u64 },
+}
+
+#[derive(Serialize, Deserialize)]
+struct WriteIntent {
+    state: StageRecovery,
+    change: DurableChange,
+}
+
+async fn replay_write(root: &Path, intent_path: &Path) -> std::io::Result<StageRecovery> {
+    let metadata = tokio::fs::symlink_metadata(intent_path).await?;
+    // A single NFS WRITE is bounded to 1 MiB; JSON byte arrays need at most
+    // four bytes per byte plus a small identity record.
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 8 * 1024 * 1024
+    {
+        return Err(std::io::Error::other("Invalid durable write intent"));
+    }
+    let mut intent: WriteIntent = serde_json::from_slice(&tokio::fs::read(intent_path).await?)
+        .map_err(std::io::Error::other)?;
+    let name = intent
+        .state
+        .path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("Missing stage identity"))?;
+    intent.state.path = root.join(name);
+    let metadata = tokio::fs::symlink_metadata(&intent.state.path).await?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other("Invalid stage data file"));
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .read(true)
+        .open(&intent.state.path)
+        .await?;
+    match intent.change {
+        DurableChange::Write { offset, data } => {
+            file.seek(SeekFrom::Start(offset)).await?;
+            file.write_all(&data).await?;
+        }
+        DurableChange::Resize { size } => file.set_len(size).await?,
+    }
+    file.flush().await?;
+    file.sync_all().await?;
+    if file.metadata().await?.len() != intent.state.size {
+        return Err(std::io::Error::other("Replayed write size mismatch"));
+    }
+    write_json_atomic(
+        &intent.state.path.with_extension("stage.json"),
+        &intent.state,
+    )
+    .await?;
+    tokio::fs::remove_file(intent_path).await?;
+    sync_parent(intent_path).await?;
+    Ok(intent.state)
+}
+
+/// Atomic replacement + file and directory sync: a successful FILE_SYNC NFS
+/// WRITE must survive process restart with both content and its object mapping.
+pub async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(value).map_err(std::io::Error::other)?;
+    let temporary = path.with_extension("tmp");
+    let mut file = File::create(&temporary).await?;
+    file.write_all(&bytes).await?;
+    file.sync_all().await?;
+    drop(file);
+    tokio::fs::rename(&temporary, path).await?;
+    sync_parent(path).await
+}
+
+pub async fn sync_parent(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        File::open(parent).await?.sync_all().await?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+pub async fn replay_write_intents(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
+    let mut errors = Vec::new();
+    let mut dir = tokio::fs::read_dir(root).await.map_err(|e| e.to_string())?;
+    while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
+        if entry.file_name().to_string_lossy().ends_with(".write.json") {
+            if let Err(error) = replay_write(root, &entry.path()).await {
+                errors.push((entry.path(), error.to_string()));
+            }
+        }
+    }
+    Ok(errors)
+}
+
+pub fn unreadable_record(path: PathBuf, key: String, error: String) -> StageRecovery {
+    StageRecovery {
+        key,
+        size: 0,
+        mtime_secs: 0,
+        generation: 0,
+        dirty: false,
+        state: "unreadable".into(),
+        error: Some(error),
+        path,
+        snapshot: None,
+        publication_guard: None,
+    }
+}
+
+async fn read_recovery_record(
+    root: &Path,
+    path: &Path,
+    write: bool,
+) -> Result<StageRecovery, String> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let limit = if write { 8 * 1024 * 1024 } else { 1024 * 1024 };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
+        return Err("Invalid recovery record file".into());
+    }
+    let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
+    let mut record = if write {
+        serde_json::from_slice::<WriteIntent>(&bytes)
+            .map_err(|e| e.to_string())?
+            .state
+    } else {
+        serde_json::from_slice::<StageRecovery>(&bytes).map_err(|e| e.to_string())?
+    };
+    if record.key.is_empty() {
+        return Err("Recovery record has no object key".into());
+    }
+    record.path = root.join(record.path.file_name().ok_or("Stage data path missing")?);
+    if write {
+        let metadata = tokio::fs::symlink_metadata(&record.path)
+            .await
+            .map_err(|e| e.to_string())?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err("Invalid stage data file".into());
+        }
+        record.state = "replay_pending".into();
+    }
+    Ok(record)
+}
+
+pub async fn recovery_entries(root: &Path) -> Result<Vec<StageRecovery>, String> {
+    let mut entries = Vec::new();
+    let mut pending = std::collections::HashMap::new();
+    let mut write_errors = std::collections::HashMap::new();
+    let mut paths = Vec::new();
+    let mut dir = match tokio::fs::read_dir(root).await {
+        Ok(dir) => dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
+        Err(error) => return Err(error.to_string()),
+    };
+    while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
+        paths.push(entry.path());
+    }
+    for path in paths
+        .iter()
+        .filter(|path| path.to_string_lossy().ends_with(".write.json"))
+    {
+        match read_recovery_record(root, path, true).await {
+            Ok(record) => {
+                pending.insert(record.path.clone(), record);
+            }
+            Err(error) => {
+                if tokio::fs::try_exists(path).await.unwrap_or(true) {
+                    let name = path
+                        .file_name()
+                        .ok_or("Recovery filename missing")?
+                        .to_string_lossy();
+                    let manifest = path.with_file_name(format!(
+                        "{}.stage.json",
+                        name.trim_end_matches(".write.json")
+                    ));
+                    write_errors.insert(manifest, (path.clone(), error));
+                }
+            }
+        }
+    }
+    for path in paths
+        .iter()
+        .filter(|path| path.to_string_lossy().ends_with(".stage.json"))
+    {
+        let mut record = match read_recovery_record(root, path, false).await {
+            Ok(record) => record,
+            Err(error) => {
+                if tokio::fs::try_exists(path).await.unwrap_or(true) {
+                    entries.push(unreadable_record(path.clone(), String::new(), error));
+                }
+                continue;
+            }
+        };
+        if let Some((_, error)) = write_errors.remove(path) {
+            entries.push(unreadable_record(
+                path.clone(),
+                record.key,
+                format!("Interrupted write is unreadable: {error}"),
+            ));
+            continue;
+        }
+        if let Some(record) = pending.remove(&record.path) {
+            entries.push(record);
+            continue;
+        }
+        if !record.dirty {
+            continue;
+        }
+        let validation = async {
+            validate_data_file(&record.path, record.size).await?;
+            if let Some(snapshot) = &mut record.snapshot {
+                snapshot.path = root.join(
+                    snapshot
+                        .path
+                        .file_name()
+                        .ok_or_else(|| std::io::Error::other("Snapshot identity missing"))?,
+                );
+                validate_data_file(&snapshot.path, snapshot.size).await?;
+            }
+            Ok::<(), std::io::Error>(())
+        }
+        .await;
+        match validation {
+            Ok(()) => entries.push(record),
+            Err(error) => {
+                if tokio::fs::try_exists(path).await.unwrap_or(true) {
+                    entries.push(unreadable_record(
+                        path.clone(),
+                        record.key,
+                        error.to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    entries.extend(pending.into_values());
+    entries.extend(
+        write_errors
+            .into_values()
+            .map(|(path, error)| unreadable_record(path, String::new(), error)),
+    );
+    Ok(entries)
+}
+
+async fn validate_data_file(path: &Path, expected_size: u64) -> std::io::Result<()> {
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != expected_size {
+        return Err(std::io::Error::other(
+            "Stage content does not match its durable manifest",
+        ));
+    }
+    Ok(())
+}
+
+impl UploadSnapshot {
+    pub fn token(&self) -> String {
+        self.path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    }
+    pub fn journal_path(&self) -> PathBuf {
+        self.path.with_extension("upload.json")
+    }
+    pub async fn journal(&self) -> std::io::Result<MultipartJournal> {
+        match tokio::fs::read(self.journal_path()).await {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(MultipartJournal {
+                part_size: planned_part_size(self.size),
+                precondition: self.publication_guard.clone(),
+                ..Default::default()
+            }),
+            Err(e) => Err(e),
+        }
+    }
+    pub async fn save_journal(&self, journal: &MultipartJournal) -> std::io::Result<()> {
+        write_json_atomic(&self.journal_path(), journal).await
+    }
+    pub async fn remove(&self) {
+        let _ = tokio::fs::remove_file(&self.path).await;
+        let _ = tokio::fs::remove_file(self.journal_path()).await;
+    }
 }
 
 impl Stage {
@@ -179,10 +534,9 @@ impl Stage {
             tokio::fs::create_dir_all(parent).await?;
         }
         let file = OpenOptions::new()
-            .create(true)
+            .create_new(true)
             .read(true)
             .write(true)
-            .truncate(true)
             .open(&path)
             .await?;
 
@@ -199,9 +553,202 @@ impl Stage {
             reported_size: 0,
             state: FlushState::Idle,
             evicted: false,
+            last_error: None,
+            snapshot: None,
+            publication_guard: None,
         })
     }
 
+    pub async fn restore(record: StageRecovery) -> std::io::Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&record.path)
+            .await?;
+        if file.metadata().await?.len() != record.size {
+            return Err(std::io::Error::other(
+                "Stage size does not match its durable journal",
+            ));
+        }
+        Ok(Self {
+            file,
+            path: record.path,
+            key: record.key,
+            size: record.size,
+            mtime_secs: record.mtime_secs,
+            dirty: record.dirty,
+            dirty_gen: record.generation,
+            last_write: Instant::now(),
+            flush_requested: true,
+            reported_size: record.size,
+            // This path is an explicit user recovery request. Retry repaired
+            // credentials, but never release a pending rename target fence.
+            state: if record.error.as_deref()
+                == Some("Destination replacement pending; retained for recovery")
+            {
+                FlushState::Paused
+            } else {
+                FlushState::Idle
+            },
+            evicted: false,
+            last_error: record.error,
+            snapshot: record.snapshot,
+            publication_guard: record.publication_guard,
+        })
+    }
+
+    pub fn manifest_path(&self) -> PathBuf {
+        self.path.with_extension("stage.json")
+    }
+
+    pub async fn persist(&mut self) -> std::io::Result<()> {
+        self.file.flush().await?;
+        self.file.sync_all().await?;
+        let state = match self.state {
+            FlushState::Uploading => "uploading",
+            FlushState::Paused => "paused",
+            FlushState::Failed { .. } => "failed",
+            FlushState::Idle => "waiting",
+        };
+        write_json_atomic(
+            &self.manifest_path(),
+            &StageRecovery {
+                key: self.key.clone(),
+                size: self.size,
+                mtime_secs: self.mtime_secs,
+                generation: self.dirty_gen,
+                dirty: self.dirty,
+                state: state.to_string(),
+                error: self.last_error.clone(),
+                path: self.path.clone(),
+                snapshot: self.snapshot.clone(),
+                publication_guard: self.publication_guard.clone(),
+            },
+        )
+        .await
+    }
+
+    pub async fn replay_pending_write(&mut self) -> std::io::Result<()> {
+        let path = self.path.with_extension("write.json");
+        if tokio::fs::try_exists(&path).await? {
+            let record = replay_write(
+                self.path
+                    .parent()
+                    .ok_or_else(|| std::io::Error::other("Missing staging folder"))?,
+                &path,
+            )
+            .await?;
+            self.size = record.size;
+            self.dirty_gen = record.generation;
+            self.dirty = record.dirty;
+            self.mtime_secs = record.mtime_secs;
+            self.publication_guard = record.publication_guard;
+            self.last_write = Instant::now();
+        }
+        Ok(())
+    }
+
+    async fn durable_change(
+        &mut self,
+        change: DurableChange,
+        size: u64,
+        mtime: u32,
+    ) -> std::io::Result<()> {
+        self.replay_pending_write().await?;
+        let intent = WriteIntent {
+            state: StageRecovery {
+                key: self.key.clone(),
+                size,
+                mtime_secs: mtime,
+                generation: self.dirty_gen.saturating_add(1),
+                dirty: true,
+                state: "waiting".into(),
+                error: None,
+                path: self.path.clone(),
+                snapshot: self.snapshot.clone(),
+                publication_guard: self.publication_guard.clone(),
+            },
+            change,
+        };
+        let path = self.path.with_extension("write.json");
+        write_json_atomic(&path, &intent).await?;
+        // Once the intent is durable, an older in-flight upload must no longer
+        // be allowed to mark this stage clean, even if disk I/O now fails.
+        self.dirty = true;
+        self.dirty_gen = intent.state.generation;
+        self.last_write = Instant::now();
+        self.size = size;
+        self.mtime_secs = mtime;
+        self.replay_pending_write().await
+    }
+
+    pub async fn write_durable(
+        &mut self,
+        offset: u64,
+        data: &[u8],
+        mtime: u32,
+    ) -> std::io::Result<()> {
+        if data.len() > 1024 * 1024 {
+            return Err(std::io::Error::other(
+                "NFS write exceeds the advertised request limit",
+            ));
+        }
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| std::io::Error::other("Write offset overflow"))?;
+        self.durable_change(
+            DurableChange::Write {
+                offset,
+                data: data.to_vec(),
+            },
+            self.size.max(end),
+            mtime,
+        )
+        .await
+    }
+
+    pub async fn truncate_durable(&mut self, size: u64, mtime: u32) -> std::io::Result<()> {
+        self.durable_change(DurableChange::Resize { size }, size, mtime)
+            .await
+    }
+
+    /// Called with this stage locked, never under the stage-registry lock.
+    /// A separate inode prevents subsequent write/truncate from changing an
+    /// in-flight request body or a resumed multipart part.
+    pub async fn upload_snapshot(&mut self) -> std::io::Result<UploadSnapshot> {
+        self.replay_pending_write().await?;
+        if let Some(snapshot) = &self.snapshot {
+            return Ok(snapshot.clone());
+        }
+        self.file.flush().await?;
+        self.file.sync_all().await?;
+        let path = self
+            .path
+            .with_extension(format!("g{}.snapshot", self.dirty_gen));
+        tokio::fs::copy(&self.path, &path).await?;
+        File::open(&path).await?.sync_all().await?;
+        let snapshot = UploadSnapshot {
+            path,
+            generation: self.dirty_gen,
+            size: self.size,
+            publication_guard: self.publication_guard.clone(),
+        };
+        self.snapshot = Some(snapshot.clone());
+        self.persist().await?;
+        Ok(snapshot)
+    }
+
+    pub async fn remove_files(&self) {
+        let _ = tokio::fs::remove_file(self.path.with_extension("write.json")).await;
+        let _ = tokio::fs::remove_file(self.manifest_path()).await;
+        let _ = tokio::fs::remove_file(&self.path).await;
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.remove().await;
+        }
+        let _ = sync_parent(&self.path).await;
+    }
+
+    #[cfg(test)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -239,6 +786,7 @@ impl Stage {
         Ok(buffer)
     }
 
+    #[cfg(test)]
     pub async fn truncate(&mut self, size: u64) -> std::io::Result<()> {
         self.file.set_len(size).await?;
         self.file.flush().await?;
@@ -247,6 +795,7 @@ impl Stage {
     }
 
     /// Records that the content changed and restarts the debounce window.
+    #[cfg(test)]
     pub fn mark_dirty(&mut self, mtime_secs: u32) {
         self.dirty = true;
         self.dirty_gen = self.dirty_gen.wrapping_add(1);
@@ -270,6 +819,84 @@ impl Stage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_interrupted_local_write_replays_before_stage_recovery() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-write-replay-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let mut stage = Stage::create(path.clone(), "original/key".into(), 1)
+            .await
+            .unwrap();
+        stage.write_durable(0, b"old", 1).await.unwrap();
+        let intent = WriteIntent {
+            state: StageRecovery {
+                key: "original/key".into(),
+                size: 8,
+                mtime_secs: 2,
+                generation: 2,
+                dirty: true,
+                state: "waiting".into(),
+                error: None,
+                path: path.clone(),
+                snapshot: None,
+                publication_guard: None,
+            },
+            change: DurableChange::Write {
+                offset: 0,
+                data: b"complete".to_vec(),
+            },
+        };
+        write_json_atomic(&path.with_extension("write.json"), &intent)
+            .await
+            .unwrap();
+        // Simulate a crash after part of the file update but before its manifest.
+        stage.file.seek(SeekFrom::Start(0)).await.unwrap();
+        stage.file.write_all(b"comp").await.unwrap();
+        stage.file.sync_all().await.unwrap();
+        drop(stage);
+        let inventory = recovery_entries(&root).await.unwrap();
+        assert_eq!(inventory[0].state, "replay_pending");
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            b"comp",
+            "inventory is read-only"
+        );
+        replay_write_intents(&root).await.unwrap();
+        let records = recovery_entries(&root).await.unwrap();
+        assert_eq!(records[0].key, "original/key");
+        assert_eq!(records[0].generation, 2);
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"complete");
+        assert!(!tokio::fs::try_exists(path.with_extension("write.json"))
+            .await
+            .unwrap());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_durable_resize_restores_the_exact_acknowledged_size() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-resize-replay-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let mut stage = Stage::create(root.join("record.data"), "key".into(), 1)
+            .await
+            .unwrap();
+        stage.write_durable(0, b"content", 1).await.unwrap();
+        stage.truncate_durable(2, 2).await.unwrap();
+        drop(stage);
+        let records = recovery_entries(&root).await.unwrap();
+        let mut restored = Stage::restore(records.into_iter().next().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(restored.read_at(0, 100).await.unwrap(), b"co");
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 
     fn idle_stage() -> (bool, bool, FlushState) {
         (true, false, FlushState::Idle)

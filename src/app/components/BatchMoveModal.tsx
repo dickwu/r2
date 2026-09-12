@@ -7,7 +7,8 @@ import { invoke } from '@tauri-apps/api/core';
 import type { StorageConfig, StorageProvider } from '@/app/lib/r2cache';
 import FolderPickerModal from '@/app/components/folder/FolderPickerModal';
 import { useAccountStore } from '@/app/stores/accountStore';
-import { runRenameBatch } from '@/app/stores/renameStore';
+import { buildMoveOperations } from '@/app/utils/moveOperations';
+import { loadAllActiveMoves } from '@/app/stores/moveStore';
 import Modal from '@/app/components/ui/Modal';
 
 interface DestinationBucket {
@@ -185,12 +186,13 @@ export default function BatchMoveModal({
       return;
     }
 
-    const keys = Array.from(selectedKeys);
-    const operations = keys.map((key) => {
-      const filename = key.split('/').pop() || key;
-      const newPath = targetDirectory ? `${targetDirectory}/${filename}` : filename;
-      return { source_key: key, dest_key: newPath };
-    });
+    let operations: ReturnType<typeof buildMoveOperations>;
+    try {
+      operations = buildMoveOperations(selectedKeys, targetDirectory);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : String(error));
+      return;
+    }
 
     const actionLabel = deleteOriginal ? 'Move' : 'Copy';
     setIsStartingQueue(true);
@@ -198,30 +200,6 @@ export default function BatchMoveModal({
       content: `Queuing ${operations.length} file${operations.length > 1 ? 's' : ''} for ${actionLabel.toLowerCase()}...`,
       key: 'batch-move',
     });
-
-    // Moves within the same bucket don't need the 5-wide streaming pipeline
-    // (download → re-upload → delete): the server-side copy+delete executor
-    // used by folder rename does them 6-12 wide with a single batched cache
-    // update. The dock tracks the batch and the file list refreshes when it
-    // finishes.
-    if (isSameDestination && deleteOriginal) {
-      const { done } = runRenameBatch(
-        config,
-        operations.map((op) => ({ old_key: op.source_key, new_key: op.dest_key })),
-        `Move ${operations.length} item${operations.length > 1 ? 's' : ''}`
-      );
-      // Failures surface in the dock via the store; keep the rejection from
-      // bubbling as an unhandled promise.
-      done.catch(() => {});
-      message.success({
-        content: `Moving ${operations.length} file${operations.length > 1 ? 's' : ''} in background`,
-        key: 'batch-move',
-      });
-      setIsStartingQueue(false);
-      onClose();
-      onSuccess();
-      return;
-    }
 
     try {
       await invoke('start_batch_move', {
@@ -254,6 +232,7 @@ export default function BatchMoveModal({
         deleteOriginal,
       });
 
+      await loadAllActiveMoves();
       message.success({
         content: `${actionLabel} started for ${operations.length} file${operations.length > 1 ? 's' : ''}`,
         key: 'batch-move',
@@ -275,7 +254,6 @@ export default function BatchMoveModal({
     selectedDestination,
     selectedBucket,
     deleteOriginal,
-    isSameDestination,
     isStartingQueue,
     message,
     onClose,
@@ -325,6 +303,9 @@ export default function BatchMoveModal({
         width={640}
         footer={footer}
       >
+        <p style={{ color: 'var(--text-secondary)', fontSize: 12 }}>
+          Existing destination files are preserved. A name conflict stops that file for review.
+        </p>
         {/* Destination account + bucket */}
         <div className="field">
           <div className="field-label">Destination account</div>

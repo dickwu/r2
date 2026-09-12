@@ -242,24 +242,6 @@ impl TransferTracker {
         );
     }
 
-    /// A retry is starting over from zero — without the reset the bar would
-    /// stick at wherever the failed attempt died.
-    pub fn restart(&self) {
-        self.bytes_done.store(0, Ordering::Relaxed);
-        self.progress.emit(
-            self.fileid,
-            &self.key,
-            self.kind,
-            Frame {
-                state: TransferState::Active,
-                bytes_done: 0,
-                bytes_total: self.bytes_total,
-                speed: 0.0,
-                error: None,
-            },
-        );
-    }
-
     pub fn done(&self) {
         self.progress.emit(
             self.fileid,

@@ -918,35 +918,62 @@ pub async fn update_directory_tree_for_move(
     })
 }
 
-/// Ensure a directory node exists in the tree (creates with zero counts if missing).
-/// Used by lazy sync when discovering folders via common prefixes.
-pub async fn ensure_directory_node(bucket: &str, account_id: &str, path: &str) -> DbResult<()> {
+/// Replace immediate child membership after a complete LIST while retaining
+/// aggregate metadata for surviving directories. Called inside the caller's
+/// transaction and connection mutex, so the temporary staging set is isolated.
+pub(super) async fn replace_prefix_children_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    prefix: &str,
+    folders: &[String],
+) -> DbResult<()> {
     let now = chrono::Utc::now().timestamp();
-    let parent = compute_parent_path(path);
-    let conn = get_connection()?.lock().await;
-
+    let mut paths = BTreeSet::new();
+    for folder in folders {
+        if compute_parent_path(folder) != prefix {
+            return Err("Listing includes a directory outside the requested prefix".into());
+        }
+        let mut path = folder.clone();
+        while !path.is_empty() {
+            paths.insert(path.clone());
+            path = compute_parent_path(&path);
+        }
+    }
     conn.execute(
-        "INSERT INTO directory_tree (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated)
-         VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 0, NULL, ?5)
-         ON CONFLICT (bucket, account_id, path) DO NOTHING",
-        turso::params![bucket, account_id, path, parent.clone(), now],
+        "CREATE TEMP TABLE IF NOT EXISTS lazy_directory_paths (path TEXT PRIMARY KEY)",
+        (),
     )
     .await?;
-
-    // Also ensure all ancestor paths exist
-    let mut current_parent = parent;
-    while !current_parent.is_empty() {
-        let grandparent = compute_parent_path(&current_parent);
+    conn.execute("DELETE FROM lazy_directory_paths", ()).await?;
+    let paths: Vec<_> = paths.into_iter().collect();
+    for chunk in paths.chunks(500) {
+        let values = chunk.iter().map(|_| "(?)").collect::<Vec<_>>().join(",");
+        let params: Vec<turso::Value> = chunk.iter().map(|path| path.clone().into()).collect();
         conn.execute(
-            "INSERT INTO directory_tree (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated)
-             VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 0, NULL, ?5)
-             ON CONFLICT (bucket, account_id, path) DO NOTHING",
-            turso::params![bucket, account_id, current_parent, grandparent.clone(), now],
+            &format!("INSERT INTO lazy_directory_paths (path) VALUES {values}"),
+            params,
         )
         .await?;
-        current_parent = grandparent;
+        let values = chunk
+            .iter()
+            .map(|_| "(?, ?, ?, ?, 0, 0, 0, 0, NULL, ?)")
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 5);
+        for path in chunk {
+            params.extend([
+                bucket.to_string().into(),
+                account_id.to_string().into(),
+                path.clone().into(),
+                compute_parent_path(path).into(),
+                now.into(),
+            ]);
+        }
+        conn.execute(&format!("INSERT INTO directory_tree (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated) VALUES {values} ON CONFLICT (bucket, account_id, path) DO NOTHING"), params).await?;
     }
-
+    conn.execute("DELETE FROM directory_tree WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3 AND path NOT IN (SELECT path FROM lazy_directory_paths)", turso::params![bucket, account_id, prefix]).await?;
+    conn.execute("DELETE FROM lazy_directory_paths", ()).await?;
     Ok(())
 }
 

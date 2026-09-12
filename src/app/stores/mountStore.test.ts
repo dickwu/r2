@@ -49,6 +49,10 @@ const {
   findMount,
   isBucketMounted,
   toMountInfo,
+  toMountRecovery,
+  recoveryMatchesTarget,
+  canResumeRecovery,
+  resolveRecoveryTarget,
   defaultMountPath,
   flushErrorKey,
   flushErrorMessage,
@@ -96,6 +100,10 @@ beforeEach(() => {
     isMounting: false,
     isUnmounting: false,
     error: null,
+    recoveries: [],
+    recoveryError: null,
+    isLoadingRecoveries: false,
+    selectedRecoveryId: null,
   });
 });
 
@@ -110,7 +118,233 @@ describe('payload mapping', () => {
       port: 51234,
       readOnly: true,
       mountedAt: 1_700_000_000,
+      health: 'mounted',
+      healthError: null,
+      pendingUploads: 0,
     });
+  });
+
+  test('preserves degraded health and pending writes from the backend', () => {
+    const info = toMountInfo(
+      payload({ health: 'degraded', health_error: 'Upload unavailable', pending_uploads: 3 })
+    );
+    expect(info.health).toBe('degraded');
+    expect(info.healthError).toBe('Upload unavailable');
+    expect(info.pendingUploads).toBe(3);
+  });
+});
+
+const RECOVERY_PAYLOAD = {
+  recovery_id: 'saved-1',
+  provider: 'r2' as const,
+  account_id: 'acc-1',
+  bucket: 'photos',
+  namespace_id: 'namespace-1',
+  path: '/staging/saved-1',
+  active: false,
+  files: [
+    {
+      key: 'photo.jpg',
+      path: '/staging/saved-1/1',
+      size: 128,
+      generation: 2,
+      state: 'dirty',
+      error: null,
+    },
+  ],
+};
+const RECOVERY_TARGET = {
+  provider: 'r2' as const,
+  accountId: 'acc-1',
+  accountLabel: 'Photos',
+  bucket: 'photos',
+  accessKeyId: 'ak',
+  secretAccessKey: 'sk',
+};
+
+describe('mount recovery', () => {
+  test('maps recovery identity and preserves invalid entries for export', () => {
+    const recovery = toMountRecovery(RECOVERY_PAYLOAD);
+    expect(recovery.recoveryId).toBe('saved-1');
+    expect(recovery.accountId).toBe('acc-1');
+    expect(recovery.namespaceId).toBe('namespace-1');
+    expect(recovery.active).toBe(false);
+    const invalid = toMountRecovery({
+      recovery_id: 'legacy',
+      path: '/legacy',
+      files: [],
+      active: false,
+      error: 'Missing journal',
+    });
+    expect(invalid.error).toBe('Missing journal');
+    expect(canResumeRecovery(invalid)).toBe(false);
+  });
+
+  test('resume requires an inactive valid recovery for the same provider, account and bucket', () => {
+    const recovery = toMountRecovery(RECOVERY_PAYLOAD);
+    expect(recoveryMatchesTarget(recovery, RECOVERY_TARGET)).toBe(true);
+    expect(recoveryMatchesTarget(recovery, { ...RECOVERY_TARGET, accountId: 'other' })).toBe(false);
+    expect(recoveryMatchesTarget({ ...recovery, provider: 'aws' }, RECOVERY_TARGET)).toBe(false);
+    expect(recoveryMatchesTarget({ ...recovery, active: true }, RECOVERY_TARGET)).toBe(false);
+    expect(recoveryMatchesTarget({ ...recovery, error: 'Corrupt metadata' }, RECOVERY_TARGET)).toBe(
+      false
+    );
+  });
+
+  test('opening another bucket clears the selected recovery', () => {
+    useMountStore.setState({ recoveries: [toMountRecovery(RECOVERY_PAYLOAD)] });
+    useMountStore.getState().openMountModal(RECOVERY_TARGET, 'saved-1');
+    expect(useMountStore.getState().selectedRecoveryId).toBe('saved-1');
+    useMountStore.getState().openMountModal({ ...RECOVERY_TARGET, bucket: 'other' });
+    expect(useMountStore.getState().selectedRecoveryId).toBeNull();
+    useMountStore.getState().setRecoverySelection('saved-1');
+    expect(useMountStore.getState().selectedRecoveryId).toBeNull();
+  });
+
+  test('failed refresh preserves recovery rows and exposes the failure', async () => {
+    useMountStore.setState({ recoveries: [toMountRecovery(RECOVERY_PAYLOAD)] });
+    handleInvoke = async () => {
+      throw 'Cannot read saved writes';
+    };
+    await useMountStore.getState().refreshRecoveries();
+    expect(useMountStore.getState().recoveries).toHaveLength(1);
+    expect(useMountStore.getState().recoveryError).toBe('Cannot read saved writes');
+    expect(useMountStore.getState().isLoadingRecoveries).toBe(false);
+  });
+
+  test('refresh maps rows and clears a recovery selection that became active', async () => {
+    useMountStore.setState({ recoveries: [toMountRecovery(RECOVERY_PAYLOAD)] });
+    useMountStore.getState().openMountModal(RECOVERY_TARGET, 'saved-1');
+    handleInvoke = async () => [{ ...RECOVERY_PAYLOAD, active: true }];
+    await useMountStore.getState().refreshRecoveries();
+    expect(useMountStore.getState().recoveries[0].active).toBe(true);
+    expect(useMountStore.getState().selectedRecoveryId).toBeNull();
+  });
+
+  test('exports legacy data without deleting it; discard only removes after backend success', async () => {
+    const recovery = toMountRecovery({ ...RECOVERY_PAYLOAD, error: 'Legacy journal' });
+    useMountStore.setState({ recoveries: [recovery] });
+    const calls: [string, InvokeArgs][] = [];
+    handleInvoke = async (cmd, args) => {
+      calls.push([cmd, args]);
+      return '/export/saved-1';
+    };
+    expect(await useMountStore.getState().exportRecovery('saved-1', '/export')).toBe(
+      '/export/saved-1'
+    );
+    expect(calls[0]).toEqual([
+      'export_mount_recovery',
+      { recoveryId: 'saved-1', destination: '/export' },
+    ]);
+    expect(useMountStore.getState().recoveries).toHaveLength(1);
+    expect(await useMountStore.getState().discardRecovery('saved-1')).toBe(false);
+    useMountStore.setState({ recoveries: [toMountRecovery(RECOVERY_PAYLOAD)] });
+    handleInvoke = async () => {
+      throw 'Disk unavailable';
+    };
+    expect(await useMountStore.getState().discardRecovery('saved-1')).toBe(false);
+    expect(useMountStore.getState().recoveries).toHaveLength(1);
+    handleInvoke = async () => undefined;
+    expect(await useMountStore.getState().discardRecovery('saved-1')).toBe(true);
+    expect(useMountStore.getState().recoveries).toHaveLength(0);
+  });
+
+  test('never exports or discards an active recovery', async () => {
+    useMountStore.setState({
+      recoveries: [toMountRecovery({ ...RECOVERY_PAYLOAD, active: true })],
+    });
+    let calls = 0;
+    handleInvoke = async () => {
+      calls++;
+    };
+    expect(await useMountStore.getState().exportRecovery('saved-1', '/export')).toBeNull();
+    expect(await useMountStore.getState().discardRecovery('saved-1')).toBe(false);
+    expect(calls).toBe(0);
+  });
+
+  test('legacy folders cannot resume or discard even when identity fields are present', async () => {
+    const recovery = toMountRecovery({ ...RECOVERY_PAYLOAD, recovery_id: 'legacy:saved-1' });
+    useMountStore.setState({ recoveries: [recovery] });
+    expect(canResumeRecovery(recovery)).toBe(false);
+    expect(await useMountStore.getState().discardRecovery(recovery.recoveryId)).toBe(false);
+  });
+
+  test('resuming sends the recovery id and marks saved writes active only after success', async () => {
+    useMountStore.setState({ recoveries: [toMountRecovery(RECOVERY_PAYLOAD)] });
+    useMountStore.getState().openMountModal(RECOVERY_TARGET, 'saved-1');
+    const input = { ...MOUNT_INPUT, read_only: false, recovery_id: 'saved-1' };
+    let sent: InvokeArgs;
+    handleInvoke = async (cmd, args) => {
+      sent = args;
+      return payload();
+    };
+    expect((await useMountStore.getState().mount(input))?.mountId).toBe('m-1');
+    expect(sent).toEqual({ input });
+    expect(useMountStore.getState().recoveries[0].active).toBe(true);
+    expect(useMountStore.getState().selectedRecoveryId).toBeNull();
+  });
+
+  test('wrong account or read-only resumes never invoke the mount command', async () => {
+    useMountStore.setState({ recoveries: [toMountRecovery(RECOVERY_PAYLOAD)] });
+    let calls = 0;
+    handleInvoke = async () => {
+      calls++;
+      return payload();
+    };
+    expect(
+      await useMountStore
+        .getState()
+        .mount({ ...MOUNT_INPUT, account_id: 'other', recovery_id: 'saved-1' })
+    ).toBeNull();
+    expect(
+      await useMountStore
+        .getState()
+        .mount({ ...MOUNT_INPUT, read_only: true, recovery_id: 'saved-1' })
+    ).toBeNull();
+    expect(calls).toBe(0);
+    expect(useMountStore.getState().recoveries[0].active).toBe(false);
+  });
+
+  test('resolves an R2 token only when the saved bucket uniquely identifies it', () => {
+    const account = {
+      provider: 'r2' as const,
+      account: { id: 'acc-1', name: 'Photos', created_at: 0, updated_at: 0 },
+      tokens: [
+        {
+          token: {
+            id: 1,
+            account_id: 'acc-1',
+            name: null,
+            api_token: '',
+            access_key_id: 'ak',
+            secret_access_key: 'sk',
+            created_at: 0,
+            updated_at: 0,
+          },
+          buckets: [
+            {
+              id: 1,
+              token_id: 1,
+              name: 'photos',
+              public_domain: null,
+              public_domain_scheme: null,
+              is_public: false,
+              public_path_prefix: null,
+              created_at: 0,
+              updated_at: 0,
+            },
+          ],
+        },
+      ],
+    };
+    const recovery = toMountRecovery(RECOVERY_PAYLOAD);
+    expect(resolveRecoveryTarget(recovery, [account])).toEqual(RECOVERY_TARGET);
+    expect(
+      resolveRecoveryTarget(recovery, [
+        { ...account, tokens: [account.tokens[0], account.tokens[0]] },
+      ])
+    ).toBeNull();
+    expect(resolveRecoveryTarget(recovery, [])).toBeNull();
   });
 });
 

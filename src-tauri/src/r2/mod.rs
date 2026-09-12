@@ -22,11 +22,10 @@ pub use types::{create_r2_client, ListObjectsResult, R2Bucket, R2Config, R2Objec
 pub use list::{list_all_objects_recursive, list_buckets, list_folder_objects, list_objects};
 
 // Re-export object operations
-pub(crate) use objects::copy_object_between_buckets;
 pub use objects::{delete_object, delete_objects, rename_object};
 
 // Re-export presigned URL
-pub use presigned::{generate_presigned_put_url, generate_presigned_url};
+pub use presigned::generate_presigned_url;
 
 // Re-export upload operations
 pub use upload::upload_content;

@@ -255,11 +255,10 @@ pub use file_cache::{
     get_all_directory_nodes, get_bucket_summary, get_cached_file_size, get_directory_node,
     get_directory_nodes, get_folder_contents, has_full_sync, move_cached_file, parse_key,
     search_cached_files, store_all_files, store_file_batch, update_cached_file,
-    upsert_prefix_files,
 };
 // Re-export directory tree builder
 pub use dir_tree::{
-    build_directory_tree_from_db, ensure_directory_node, update_directory_tree_for_delete,
+    build_directory_tree_from_db, update_directory_tree_for_delete,
     update_directory_tree_for_delete_batch, update_directory_tree_for_file,
     update_directory_tree_for_move,
 };
@@ -275,8 +274,8 @@ pub use downloads::{
 pub use move_sessions::{
     count_active_moves, count_in_progress_moves, create_move_sessions_batch, delete_all_moves,
     delete_finished_moves, delete_move_session, delete_move_upload_parts,
-    delete_move_upload_session, get_all_active_move_sessions, get_move_sessions_for_source,
-    get_move_upload_parts, get_move_upload_session, get_pending_moves_for_source, pause_all_moves,
-    resume_all_moves, save_move_upload_part, save_move_upload_session, update_move_progress,
-    update_move_status, update_move_status_and_progress,
+    get_all_active_move_sessions, get_move_sessions_for_source, get_move_upload_parts,
+    get_move_upload_session, get_pending_moves_for_source, pause_all_moves, resume_all_moves,
+    save_move_upload_part, save_move_upload_session, update_move_progress, update_move_status,
+    update_move_status_and_progress,
 };

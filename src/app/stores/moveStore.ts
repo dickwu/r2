@@ -25,6 +25,15 @@ export interface MoveStatusChangedEvent {
   task_id: string;
   status: string;
   error: string | null;
+  source_provider?: string;
+  source_account_id?: string;
+  source_bucket?: string;
+  source_key?: string;
+  dest_provider?: string;
+  dest_account_id?: string;
+  dest_bucket?: string;
+  dest_key?: string;
+  delete_original?: boolean;
 }
 
 export interface MoveTaskDeletedEvent {
@@ -44,6 +53,11 @@ export type MoveStatus =
   | 'finishing'
   | 'deleting'
   | 'paused'
+  | 'delete_pending'
+  | 'outcome_unknown'
+  | 'needs_auth'
+  | 'conflict'
+  | 'needs_action'
   | 'success'
   | 'error'
   | 'cancelled';
@@ -114,6 +128,12 @@ function mapStatus(dbStatus: string): MoveStatus {
       return 'deleting';
     case 'paused':
       return 'paused';
+    case 'delete_pending':
+    case 'outcome_unknown':
+    case 'needs_auth':
+    case 'conflict':
+    case 'needs_action':
+      return dbStatus;
     case 'success':
       return 'success';
     case 'error':
@@ -143,12 +163,31 @@ function derivePhase(status: MoveStatus, existingPhase?: string): string {
   }
 }
 
+export function isMoveAwaitingAction(status: string): boolean {
+  return (
+    status === 'delete_pending' ||
+    status === 'outcome_unknown' ||
+    status === 'needs_auth' ||
+    status === 'conflict' ||
+    status === 'needs_action'
+  );
+}
+
+export const MOVE_RECOVERY_LABELS: Record<string, string> = {
+  delete_pending: 'Copy verified; source retained until deletion succeeds',
+  outcome_unknown: 'Remote result uncertain; resume to reconcile before continuing',
+  needs_auth: 'Credentials or permissions need attention; source deletion stopped',
+  conflict: 'Object changed; source deletion stopped for review',
+  needs_action: 'Copy or cleanup needs review; the recovery record is retained',
+};
+
 function isFinishedStatus(status: MoveStatus): boolean {
   return status === 'success' || status === 'error' || status === 'cancelled';
 }
 
 // Apply a progress update to a move task (monotonic while active, smoothed speed)
 function applyMoveProgress(t: MoveTask, evt: MoveProgressEvent): MoveTask {
+  if (isMoveAwaitingAction(t.status)) return t;
   // Only use Math.max if task is already active, not if just starting
   const isActive = t.status === 'downloading' || t.status === 'uploading';
   const newProgress = isActive ? Math.max(t.progress, evt.percent) : evt.percent;
@@ -263,7 +302,12 @@ export const useMoveStore = create<MoveStore>((set, get) => {
       const taskExists = useMoveStore.getState().tasks.some((t) => t.id === event.task_id);
 
       // If task doesn't exist in store (new task started from queue), reload from database
-      if (!taskExists && (newStatus === 'downloading' || newStatus === 'uploading')) {
+      if (
+        !taskExists &&
+        (newStatus === 'downloading' ||
+          newStatus === 'uploading' ||
+          isMoveAwaitingAction(newStatus))
+      ) {
         // Reload all active tasks to get the new task
         invoke<MoveSession[]>('get_all_active_move_tasks')
           .then((sessions) => {
@@ -344,6 +388,9 @@ export const selectDeletingCount = selectFinishingCount;
 
 export const selectPausedCount = (state: MoveStore) =>
   state.tasks.filter((t) => t.status === 'paused').length;
+
+export const selectAttentionCount = (state: MoveStore) =>
+  state.tasks.filter((task) => isMoveAwaitingAction(task.status)).length;
 
 export const selectFinishedCount = (state: MoveStore) =>
   state.tasks.filter(

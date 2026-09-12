@@ -81,6 +81,37 @@ pub struct MoveStatusChanged {
     pub task_id: String,
     pub status: String,
     pub error: Option<String>,
+    #[serde(flatten)]
+    pub scope: Option<MoveEventScope>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MoveEventScope {
+    pub source_provider: String,
+    pub source_account_id: String,
+    pub source_bucket: String,
+    pub source_key: String,
+    pub dest_provider: String,
+    pub dest_account_id: String,
+    pub dest_bucket: String,
+    pub dest_key: String,
+    pub delete_original: bool,
+}
+
+impl From<crate::db::MoveSession> for MoveEventScope {
+    fn from(session: crate::db::MoveSession) -> Self {
+        Self {
+            source_provider: session.source_provider,
+            source_account_id: session.source_account_id,
+            source_bucket: session.source_bucket,
+            source_key: session.source_key,
+            dest_provider: session.dest_provider,
+            dest_account_id: session.dest_account_id,
+            dest_bucket: session.dest_bucket,
+            dest_key: session.dest_key,
+            delete_original: session.delete_original,
+        }
+    }
 }
 
 /// Task deleted event payload

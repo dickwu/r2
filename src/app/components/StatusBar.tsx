@@ -6,7 +6,7 @@ import { DatabaseOutlined, SwapOutlined } from '@ant-design/icons';
 import { useSyncStore } from '@/app/stores/syncStore';
 import { useUploadStore } from '@/app/stores/uploadStore';
 import { useDownloadStore } from '@/app/stores/downloadStore';
-import { useMoveStore } from '@/app/stores/moveStore';
+import { useMoveStore, selectAttentionCount } from '@/app/stores/moveStore';
 import SyncOverlay from '@/app/components/SyncOverlay';
 import UpdateChecker from '@/app/components/UpdateChecker';
 import ReportProblemButton from '@/app/components/report/ReportProblemButton';
@@ -54,9 +54,15 @@ export default function StatusBar({
 
   const lastSyncTime = useMemo(() => {
     if (!storageConfig?.accountId || !storageConfig?.bucket) return null;
-    const key = `${storageConfig.accountId}:${storageConfig.bucket}`;
+    const key = `${storageConfig.provider}:${storageConfig.accountId}:${storageConfig.bucket}`;
     return bucketSyncTimes[key] ?? null;
-  }, [storageConfig?.accountId, storageConfig?.bucket, bucketSyncTimes, currentBucketKey]);
+  }, [
+    storageConfig?.provider,
+    storageConfig?.accountId,
+    storageConfig?.bucket,
+    bucketSyncTimes,
+    currentBucketKey,
+  ]);
 
   const relativeTime = useRelativeTime(lastSyncTime);
 
@@ -64,6 +70,7 @@ export default function StatusBar({
   const uploadTasks = useUploadStore((s) => s.tasks);
   const downloadTasks = useDownloadStore((s) => s.tasks);
   const moveTasks = useMoveStore((s) => s.tasks);
+  const moveAttentionCount = useMoveStore(selectAttentionCount);
 
   const transferCount = useMemo(() => {
     const activeUploads = uploadTasks.filter(
@@ -147,6 +154,12 @@ export default function StatusBar({
         />
 
         <span className="spacer" />
+
+        {moveAttentionCount > 0 && (
+          <button className="sb-stat" onClick={() => useMoveStore.getState().setModalOpen(true)}>
+            {moveAttentionCount} move{moveAttentionCount > 1 ? 's' : ''} need attention
+          </button>
+        )}
 
         {/* Active transfers */}
         {transferCount > 0 && !isLoadingFiles && (

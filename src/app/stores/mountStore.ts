@@ -2,12 +2,14 @@ import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { useToastStore } from '@/app/stores/toastStore';
+import type { ProviderAccount } from '@/app/stores/accountStore';
 
 // Global listener state - persists across component unmounts
 let globalListenersSetup = false;
 let globalUnlisteners: UnlistenFn[] = [];
 
 export type MountProvider = 'r2' | 'aws' | 'minio' | 'rustfs';
+export type MountHealth = 'mounted' | 'degraded' | 'offline' | 'unmounting';
 
 /** A live mount, as reported by the backend (camelCase mirror of `MountInfoPayload`). */
 export interface MountInfo {
@@ -19,6 +21,9 @@ export interface MountInfo {
   port: number;
   readOnly: boolean;
   mountedAt: number;
+  health: MountHealth;
+  healthError: string | null;
+  pendingUploads: number;
 }
 
 /** Raw `MountInfo` shape on the wire — snake_case, as the Rust structs serialize. */
@@ -31,6 +36,56 @@ export interface MountInfoPayload {
   port: number;
   read_only: boolean;
   mounted_at: number;
+  health?: MountHealth;
+  health_error?: string | null;
+  pending_uploads?: number;
+}
+
+export interface MountRecoveryFile {
+  key: string;
+  size: number;
+  path: string;
+  generation: number;
+  state: string;
+  error?: string | null;
+}
+
+export function recoveryStateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    waiting: 'Waiting to upload',
+    uploading: 'Upload interrupted',
+    failed: 'Upload failed',
+    paused: 'Needs attention',
+    replay_pending: 'Restore interrupted write',
+    rename_recovery: 'Finish rename',
+    namespace_recovery: 'Finish saved change',
+    unreadable: 'Needs manual recovery',
+  };
+  return labels[state] ?? 'Needs attention';
+}
+
+export interface MountRecoveryPayload {
+  recovery_id: string;
+  provider?: MountProvider | null;
+  account_id?: string | null;
+  bucket?: string | null;
+  namespace_id?: string | null;
+  path: string;
+  files: MountRecoveryFile[];
+  error?: string | null;
+  active: boolean;
+}
+
+export interface MountRecovery {
+  recoveryId: string;
+  provider: MountProvider | null;
+  accountId: string | null;
+  bucket: string | null;
+  namespaceId: string | null;
+  path: string;
+  files: MountRecoveryFile[];
+  error: string | null;
+  active: boolean;
 }
 
 /** `mount-changed` payload: the backend always sends the full mount list. */
@@ -99,6 +154,7 @@ export interface MountBucketInput {
   force_path_style?: boolean | null;
   /** Absent or null mounts writable, which is the default. */
   read_only?: boolean | null;
+  recovery_id?: string | null;
 }
 
 /**
@@ -126,9 +182,17 @@ interface MountStore {
   isMounting: boolean;
   isUnmounting: boolean;
   error: string | null;
+  recoveries: MountRecovery[];
+  recoveryError: string | null;
+  isLoadingRecoveries: boolean;
+  selectedRecoveryId: string | null;
 
-  openMountModal: (target: MountTarget) => void;
+  openMountModal: (target: MountTarget, recoveryId?: string) => void;
   closeMountModal: () => void;
+  setRecoverySelection: (recoveryId: string | null) => void;
+  refreshRecoveries: () => Promise<void>;
+  exportRecovery: (recoveryId: string, destination: string) => Promise<string | null>;
+  discardRecovery: (recoveryId: string) => Promise<boolean>;
   clearError: () => void;
   setMounts: (mounts: MountInfo[]) => void;
   applyTransfer: (event: MountTransferEvent) => void;
@@ -148,6 +212,93 @@ export function toMountInfo(payload: MountInfoPayload): MountInfo {
     port: payload.port,
     readOnly: payload.read_only,
     mountedAt: payload.mounted_at,
+    health: payload.health ?? 'mounted',
+    healthError: payload.health_error ?? null,
+    pendingUploads: payload.pending_uploads ?? 0,
+  };
+}
+
+export function toMountRecovery(payload: MountRecoveryPayload): MountRecovery {
+  return {
+    recoveryId: payload.recovery_id,
+    provider: payload.provider ?? null,
+    accountId: payload.account_id ?? null,
+    bucket: payload.bucket ?? null,
+    namespaceId: payload.namespace_id ?? null,
+    path: payload.path,
+    files: payload.files,
+    error: payload.error ?? null,
+    active: payload.active,
+  };
+}
+
+export function canResumeRecovery(recovery: MountRecovery): boolean {
+  return (
+    !recovery.recoveryId.startsWith('legacy:') &&
+    !recovery.active &&
+    !recovery.error &&
+    !!recovery.provider &&
+    !!recovery.accountId &&
+    !!recovery.bucket &&
+    !!recovery.namespaceId &&
+    recovery.files.some((file) => file.state !== 'unreadable')
+  );
+}
+
+/** UI filtering only: the backend must also verify the exact storage namespace. */
+export function recoveryMatchesTarget(
+  recovery: MountRecovery,
+  target: Pick<MountTarget, 'provider' | 'accountId' | 'bucket'>
+): boolean {
+  return (
+    canResumeRecovery(recovery) &&
+    recovery.provider === target.provider &&
+    recovery.accountId === target.accountId &&
+    recovery.bucket === target.bucket
+  );
+}
+
+/** Reuse saved credentials without changing the selected browsing account. */
+export function resolveRecoveryTarget(
+  recovery: MountRecovery,
+  accounts: ProviderAccount[]
+): MountTarget | null {
+  if (!canResumeRecovery(recovery)) return null;
+  const accountData = accounts.find(
+    (a) => a.provider === recovery.provider && a.account.id === recovery.accountId
+  );
+  if (!accountData) return null;
+  const common = {
+    accountId: accountData.account.id,
+    accountLabel: accountData.account.name || accountData.account.id,
+    bucket: recovery.bucket!,
+  };
+  if (accountData.provider === 'r2') {
+    const tokens = accountData.tokens.filter((t) =>
+      t.buckets.some((b) => b.name === recovery.bucket)
+    );
+    if (tokens.length !== 1) return null;
+    const { token } = tokens[0];
+    if (!token.access_key_id || !token.secret_access_key) return null;
+    return {
+      ...common,
+      provider: 'r2',
+      accessKeyId: token.access_key_id,
+      secretAccessKey: token.secret_access_key,
+    };
+  }
+  const { account } = accountData;
+  if (!account.access_key_id || !account.secret_access_key) return null;
+  return {
+    ...common,
+    provider: accountData.provider,
+    accessKeyId: account.access_key_id,
+    secretAccessKey: account.secret_access_key,
+    endpointUrl: account.endpoint_host
+      ? `${account.endpoint_scheme || 'https'}://${account.endpoint_host}`
+      : null,
+    region: accountData.provider === 'aws' ? accountData.account.region : null,
+    forcePathStyle: accountData.provider === 'rustfs' ? true : account.force_path_style,
   };
 }
 
@@ -257,10 +408,98 @@ export const useMountStore = create<MountStore>((set, get) => ({
   isMounting: false,
   isUnmounting: false,
   error: null,
+  recoveries: [],
+  recoveryError: null,
+  isLoadingRecoveries: false,
+  selectedRecoveryId: null,
 
-  openMountModal: (target) => set({ modalOpen: true, target, error: null }),
+  openMountModal: (target, recoveryId) =>
+    set({
+      modalOpen: true,
+      target,
+      error: null,
+      selectedRecoveryId: get().recoveries.some(
+        (r) => r.recoveryId === recoveryId && recoveryMatchesTarget(r, target)
+      )
+        ? recoveryId!
+        : null,
+    }),
 
   closeMountModal: () => set({ modalOpen: false, error: null }),
+
+  setRecoverySelection: (recoveryId) => {
+    const { target, recoveries } = get();
+    set({
+      selectedRecoveryId:
+        target &&
+        recoveries.some((r) => r.recoveryId === recoveryId && recoveryMatchesTarget(r, target))
+          ? recoveryId
+          : null,
+    });
+  },
+
+  refreshRecoveries: async () => {
+    if (get().isLoadingRecoveries) return;
+    set({ isLoadingRecoveries: true, recoveryError: null });
+    try {
+      const payloads = await invoke<MountRecoveryPayload[]>('list_mount_recoveries');
+      const recoveries = payloads.map(toMountRecovery);
+      set((state) => ({
+        recoveries,
+        isLoadingRecoveries: false,
+        selectedRecoveryId:
+          state.target &&
+          recoveries.some(
+            (r) =>
+              r.recoveryId === state.selectedRecoveryId && recoveryMatchesTarget(r, state.target!)
+          )
+            ? state.selectedRecoveryId
+            : null,
+      }));
+    } catch (e) {
+      set({ isLoadingRecoveries: false, recoveryError: errorMessage(e) });
+    }
+  },
+
+  exportRecovery: async (recoveryId, destination) => {
+    const recovery = get().recoveries.find((r) => r.recoveryId === recoveryId);
+    if (!recovery || recovery.active) {
+      set({ recoveryError: 'Unmount this bucket before exporting its saved writes.' });
+      return null;
+    }
+    set({ recoveryError: null });
+    try {
+      return await invoke<string>('export_mount_recovery', { recoveryId, destination });
+    } catch (e) {
+      set({ recoveryError: errorMessage(e) });
+      return null;
+    }
+  },
+
+  discardRecovery: async (recoveryId) => {
+    const recovery = get().recoveries.find((r) => r.recoveryId === recoveryId);
+    if (!recovery || recovery.active) {
+      set({ recoveryError: 'Unmount this bucket before discarding its saved writes.' });
+      return false;
+    }
+    if (recovery.recoveryId.startsWith('legacy:') || recovery.error) {
+      set({ recoveryError: 'Export unrecognized saved writes to recover them manually.' });
+      return false;
+    }
+    set({ recoveryError: null });
+    try {
+      await invoke('discard_mount_recovery', { recoveryId });
+      set((state) => ({
+        recoveries: state.recoveries.filter((r) => r.recoveryId !== recoveryId),
+        selectedRecoveryId:
+          state.selectedRecoveryId === recoveryId ? null : state.selectedRecoveryId,
+      }));
+      return true;
+    } catch (e) {
+      set({ recoveryError: errorMessage(e) });
+      return false;
+    }
+  },
 
   clearError: () => set({ error: null }),
 
@@ -281,13 +520,31 @@ export const useMountStore = create<MountStore>((set, get) => ({
   refreshMounts: async () => {
     try {
       const mounts = await invoke<MountInfoPayload[]>('list_mounts');
-      set({ mounts: mounts.map(toMountInfo) });
+      get().setMounts(mounts.map(toMountInfo));
     } catch (e) {
       console.error('Failed to list mounts:', e);
     }
   },
 
   mount: async (input) => {
+    if (input.recovery_id) {
+      const recovery = get().recoveries.find((r) => r.recoveryId === input.recovery_id);
+      if (
+        !recovery ||
+        input.read_only ||
+        !recoveryMatchesTarget(recovery, {
+          provider: input.provider,
+          accountId: input.account_id,
+          bucket: input.bucket,
+        })
+      ) {
+        set({
+          error:
+            'Choose valid saved writes for this account and bucket, and allow changes to resume uploads.',
+        });
+        return null;
+      }
+    }
     set({ isMounting: true, error: null });
     try {
       const payload = await invoke<MountInfoPayload>('mount_bucket', { input });
@@ -297,6 +554,10 @@ export const useMountStore = create<MountStore>((set, get) => ({
       set((state) => ({
         mounts: [...state.mounts.filter((m) => m.mountId !== info.mountId), info],
         isMounting: false,
+        recoveries: state.recoveries.map((r) =>
+          r.recoveryId === input.recovery_id ? { ...r, active: true } : r
+        ),
+        selectedRecoveryId: null,
       }));
       return info;
     } catch (e) {

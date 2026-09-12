@@ -1,9 +1,11 @@
 //! Move transfer module with background worker and commands
 
 pub mod commands;
-mod config;
+pub(crate) mod config;
 mod finishing;
+pub(crate) mod planner;
+mod server_copy;
 mod state;
-mod stream;
+pub(crate) mod stream;
 mod types;
 mod worker;

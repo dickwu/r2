@@ -31,6 +31,8 @@ pub struct MoveConfigInput {
 pub struct MoveOperationInput {
     pub source_key: String,
     pub dest_key: String,
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -103,7 +105,13 @@ fn build_move_config(input: &MoveConfigInput) -> Result<MoveConfig, String> {
 }
 
 fn build_task_id(index: usize) -> String {
-    format!("move-{}-{}", Utc::now().timestamp_millis(), index)
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "move-{}-{}-{}",
+        Utc::now().timestamp_millis(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        index
+    )
 }
 
 /// Create move sessions and start processing queue
@@ -119,6 +127,21 @@ pub async fn start_batch_move(
         return Ok(StartMoveResult { created: 0 });
     }
 
+    let mut destinations = std::collections::HashSet::new();
+    for operation in &operations {
+        if operation.overwrite {
+            return Err(
+                "Replacing existing destinations requires a separate explicit operation".into(),
+            );
+        }
+        if operation.source_key.is_empty() || operation.dest_key.is_empty() {
+            return Err("Move source and destination keys must not be empty".into());
+        }
+        if !destinations.insert(&operation.dest_key) {
+            return Err("Multiple source objects map to the same destination key".into());
+        }
+    }
+
     let source_bucket = source_config.bucket.clone();
     let source_account_id = source_config.account_id.clone();
     let now = Utc::now().timestamp();
@@ -132,15 +155,26 @@ pub async fn start_batch_move(
         delete_original
     );
 
+    let source_cfg = build_move_config(&source_config)?;
+    let dest_cfg = build_move_config(&dest_config)?;
+    // Validate endpoints before writing tasks that could never run.
+    super::planner::scope(&source_cfg)?;
+    super::planner::scope(&dest_cfg)?;
+    let keys = operations
+        .iter()
+        .map(|op| op.source_key.clone())
+        .collect::<Vec<_>>();
+    let cached_sizes =
+        db::move_sessions::get_move_cached_sizes(&source_bucket, &source_account_id, &keys)
+            .await
+            .map_err(|e| format!("Failed to read cached sizes: {e}"))?;
+
     // Build all sessions first, then batch insert for speed
     let mut sessions_to_create: Vec<MoveSession> = Vec::with_capacity(operations.len());
 
     for (index, op) in operations.iter().enumerate() {
         let task_id = build_task_id(index);
-        let file_size =
-            db::get_cached_file_size(&source_bucket, &source_account_id, &op.source_key)
-                .await
-                .unwrap_or(0);
+        let file_size = cached_sizes.get(&op.source_key).copied().unwrap_or(0);
 
         sessions_to_create.push(MoveSession {
             id: task_id,
@@ -173,8 +207,6 @@ pub async fn start_batch_move(
         source_account_id
     );
 
-    let source_cfg = build_move_config(&source_config)?;
-    let dest_cfg = build_move_config(&dest_config)?;
     register_move_config(
         &source_config.provider,
         &source_config.account_id,
@@ -207,6 +239,7 @@ pub async fn start_move_queue(
     app: AppHandle,
     source_config: MoveConfigInput,
     dest_config: MoveConfigInput,
+    defer_start: Option<bool>,
 ) -> Result<i64, String> {
     let source_bucket = source_config.bucket.clone();
     let source_account_id = source_config.account_id.clone();
@@ -228,6 +261,9 @@ pub async fn start_move_queue(
         &dest_config.bucket,
         dest_cfg,
     );
+    if defer_start.unwrap_or(false) {
+        return Ok(0);
+    }
     let started_count = request_queue_run(&app, &source_bucket, &source_account_id).await;
     info!(
         "start_move_queue: starting {} sessions for {}/{}",
@@ -251,7 +287,12 @@ pub async fn pause_all_moves(
 
     let active_ids: Vec<String> = active_sessions
         .iter()
-        .filter(|s| s.status == "downloading" || s.status == "uploading" || s.status == "pending")
+        .filter(|s| {
+            matches!(
+                s.status.as_str(),
+                "downloading" | "uploading" | "finishing" | "deleting" | "pending"
+            )
+        })
         .map(|s| s.id.clone())
         .collect();
 
@@ -304,6 +345,15 @@ pub async fn resume_all_moves(
         .map(|s| s.id.clone())
         .collect();
 
+    {
+        let running = MOVE_CANCEL_REGISTRY.lock().unwrap();
+        if paused_ids.iter().any(|id| running.contains_key(id)) {
+            return Err(
+                "Some moves are still stopping; resume after their current requests settle".into(),
+            );
+        }
+    }
+
     // Clear pause flags for tasks that will be resumed
     {
         let registry = MOVE_PAUSE_REGISTRY.lock().unwrap();
@@ -355,6 +405,7 @@ pub async fn pause_move(app: AppHandle, task_id: String) -> Result<(), String> {
                 task_id: task_id.clone(),
                 status: "paused".to_string(),
                 error: None,
+                scope: None,
             },
         );
     } else {
@@ -365,7 +416,45 @@ pub async fn pause_move(app: AppHandle, task_id: String) -> Result<(), String> {
 
 /// Resume a paused move (set status to pending)
 #[tauri::command]
-pub async fn resume_move(app: AppHandle, task_id: String) -> Result<(), String> {
+pub async fn resume_move(
+    app: AppHandle,
+    task_id: String,
+    source_config: Option<MoveConfigInput>,
+    dest_config: Option<MoveConfigInput>,
+) -> Result<(), String> {
+    if MOVE_CANCEL_REGISTRY.lock().unwrap().contains_key(&task_id) {
+        return Err("Move is still stopping; resume after its current request settles".into());
+    }
+    let session = db::move_sessions::get_move_session(&task_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Move task does not exist")?;
+    match (source_config, dest_config) {
+        (Some(source), Some(dest)) => {
+            if source.provider != session.source_provider
+                || source.account_id != session.source_account_id
+                || source.bucket != session.source_bucket
+                || dest.provider != session.dest_provider
+                || dest.account_id != session.dest_account_id
+                || dest.bucket != session.dest_bucket
+            {
+                return Err("Resume configuration does not match the stored move scope".into());
+            }
+            let source_cfg = build_move_config(&source)?;
+            let dest_cfg = build_move_config(&dest)?;
+            register_move_config(
+                &source.provider,
+                &source.account_id,
+                &source.bucket,
+                source_cfg,
+            );
+            register_move_config(&dest.provider, &dest.account_id, &dest.bucket, dest_cfg);
+        }
+        (None, None) => {}
+        _ => return Err("Both source and destination credentials are required to resume".into()),
+    }
+    MOVE_PAUSE_REGISTRY.lock().unwrap().remove(&task_id);
+    MOVE_CANCEL_REGISTRY.lock().unwrap().remove(&task_id);
     db::update_move_status(&task_id, "pending", None)
         .await
         .map_err(|e| format!("Failed to resume move: {}", e))?;
@@ -377,9 +466,11 @@ pub async fn resume_move(app: AppHandle, task_id: String) -> Result<(), String> 
             task_id: task_id.clone(),
             status: "pending".to_string(),
             error: None,
+            scope: None,
         },
     );
 
+    request_queue_run(&app, &session.source_bucket, &session.source_account_id).await;
     Ok(())
 }
 
@@ -396,13 +487,27 @@ pub async fn cancel_move(app: AppHandle, task_id: String) -> Result<(), String> 
         }
     };
     if !found {
-        let _ = db::update_move_status(&task_id, "cancelled", None).await;
+        let journal = db::move_sessions::get_move_journal(&task_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = super::worker::recovery_failure_status(
+            "cancelled: Move cancelled",
+            journal.as_ref().map(|journal| journal.stage.as_str()),
+        );
+        let error = (status == "outcome_unknown").then(|| {
+            "Cancellation cannot undo a possible remote commit; resume to reconcile this task"
+                .to_string()
+        });
+        db::update_move_status(&task_id, status, error.as_deref())
+            .await
+            .map_err(|e| e.to_string())?;
         let _ = app.emit(
             "move-status-changed",
             MoveStatusChanged {
                 task_id: task_id.clone(),
-                status: "cancelled".to_string(),
-                error: None,
+                status: status.to_string(),
+                error,
+                scope: None,
             },
         );
     } else {
@@ -418,6 +523,9 @@ pub async fn delete_move_task(app: AppHandle, task_id: String) -> Result<(), Str
         let registry = MOVE_CANCEL_REGISTRY.lock().unwrap();
         if let Some(cancelled) = registry.get(&task_id) {
             cancelled.store(true, Ordering::SeqCst);
+            return Err(
+                "Move is stopping; remove its task after the current request settles".into(),
+            );
         }
     }
 

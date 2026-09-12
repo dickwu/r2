@@ -185,6 +185,7 @@ export default function FileListView({
       <Virtuoso
         style={{ flex: 1 }}
         data={items}
+        computeItemKey={(_index, item) => item.key}
         components={virtuosoComponents}
         itemContent={(_idx, item) => {
           const folderMeta = item.isFolder ? metadata[item.key] : undefined;

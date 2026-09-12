@@ -1,0 +1,32 @@
+{
+  "scope": "Real source-built MinIO servers on loopback, real Tauri IPC/SQLite, real macOS NFS client; disposable test data only",
+  "minio_commit": "7aac2a2c5b7c882e68c1ce017d8256be2feea27f",
+  "app_id": "com.lifefarmer.r2.audit-01a096c3-20260912",
+  "captured_at": "2026-09-12T22:29:29.722Z",
+  "moves": [
+    {
+      "bytes": 12,
+      "status": "needs_action",
+      "elapsed_ms": 268.211458,
+      "verified_sha256": "d4a80558db6a46ded5ee78fe63158026edbe571648b63bd4e9f192609c13b319",
+      "source_versioning": false,
+      "source_removed": false,
+      "destination_same_named_source_preserved": true
+    },
+    {
+      "bytes": 134217728,
+      "status": "success",
+      "elapsed_ms": 858.5331250000004,
+      "verified_sha256": "b26a669f61189a0637c36c5906e08b6f15feaa2dc2c17b9c38b6bff2f4161dc7",
+      "source_versioning": true,
+      "source_removed": true,
+      "destination_same_named_source_preserved": true
+    }
+  ],
+  "nfs": {
+    "os": "darwin",
+    "write_read_unmount": "passed",
+    "rename_delete": "safely rejected: conditional deletion unsupported by this MinIO revision",
+    "remote_content_verified": true
+  }
+}

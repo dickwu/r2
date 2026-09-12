@@ -24,9 +24,8 @@ impl MountPlatform {
     };
 }
 
-/// NFS client options for the unix mount commands. `actimeo` keeps attribute
-/// lookups off the network for two minutes, which matters a lot when every
-/// miss is an S3 round trip.
+/// NFS client options. Editing refreshes attributes every ten seconds;
+/// read-only browsing uses thirty seconds to bound external-change staleness.
 ///
 /// The transfer sizes are per-OS maxima: Linux negotiates up to the server's
 /// 1 MiB `rtmax`/`wtmax`, while the macOS client caps a transfer at 128 KiB.
@@ -39,12 +38,13 @@ impl MountPlatform {
 /// that would fail, instead of letting the user try and collect an I/O error.
 fn unix_options(platform: MountPlatform, port: u16, read_only: bool) -> String {
     let access = if read_only { "ro," } else { "" };
+    let attribute_ttl = if read_only { 30 } else { 10 };
     let sizes = match platform {
         MountPlatform::MacOs => "rsize=131072,wsize=131072,readahead=128",
         _ => "rsize=1048576,wsize=1048576",
     };
     format!(
-        "{access}vers=3,tcp,{sizes},actimeo=120,port={port},mountport={port}",
+        "{access}vers=3,tcp,{sizes},actimeo={attribute_ttl},port={port},mountport={port}",
         access = access,
         sizes = sizes,
         port = port
@@ -115,6 +115,16 @@ pub fn umount_argvs(platform: MountPlatform, target: &str) -> Vec<Vec<String>> {
     }
 }
 
+/// Interactive unmount must flush the OS client's dirty pages. Force/lazy
+/// detach are reserved for process-exit best effort, never reported as a safe
+/// completed upload by the interactive path.
+pub fn interactive_umount_argvs(platform: MountPlatform, target: &str) -> Vec<Vec<String>> {
+    umount_argvs(platform, target)
+        .into_iter()
+        .filter(|argv| !argv.iter().any(|arg| arg == "-f" || arg == "-l"))
+        .collect()
+}
+
 /// Copy-pasteable mount command shown to the user when the automatic mount
 /// fails. Linux distributions commonly require root for `mount.nfs`, so the
 /// suggestion is prefixed with `sudo` there.
@@ -172,6 +182,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn writable_mounts_refresh_metadata_more_often_than_browsing_mounts() {
+        for platform in [MountPlatform::MacOs, MountPlatform::Linux] {
+            assert!(unix_options(platform, 1, false).contains("actimeo=10,"));
+            assert!(unix_options(platform, 1, true).contains("actimeo=30,"));
+        }
+    }
+
+    #[test]
+    fn interactive_unmount_never_forces_or_lazily_detaches_dirty_clients() {
+        for platform in [
+            MountPlatform::MacOs,
+            MountPlatform::Linux,
+            MountPlatform::Windows,
+        ] {
+            for argv in interactive_umount_argvs(platform, "/mnt/photos") {
+                assert!(!argv.iter().any(|arg| arg == "-f" || arg == "-l"));
+            }
+        }
+    }
+
+    #[test]
     fn macos_mount_uses_nolocks_and_both_ports() {
         let argv = mount_argv(
             MountPlatform::MacOs,
@@ -185,7 +216,7 @@ mod tests {
             vec![
                 "/sbin/mount_nfs",
                 "-o",
-                "nolocks,vers=3,tcp,rsize=131072,wsize=131072,readahead=128,actimeo=120,port=51234,mountport=51234",
+                "nolocks,vers=3,tcp,rsize=131072,wsize=131072,readahead=128,actimeo=10,port=51234,mountport=51234",
                 "127.0.0.1:/",
                 "/Users/me/CloudMounts/photos",
             ]
@@ -209,13 +240,13 @@ mod tests {
         let macos = mount_argv(MountPlatform::MacOs, "127.0.0.1", 1, "/tmp/m", true);
         assert_eq!(
             macos[2],
-            "nolocks,ro,vers=3,tcp,rsize=131072,wsize=131072,readahead=128,actimeo=120,port=1,mountport=1"
+            "nolocks,ro,vers=3,tcp,rsize=131072,wsize=131072,readahead=128,actimeo=30,port=1,mountport=1"
         );
 
         let linux = mount_argv(MountPlatform::Linux, "127.0.0.1", 1, "/tmp/m", true);
         assert_eq!(
             linux[2],
-            "user,noacl,nolock,ro,vers=3,tcp,rsize=1048576,wsize=1048576,actimeo=120,port=1,mountport=1"
+            "user,noacl,nolock,ro,vers=3,tcp,rsize=1048576,wsize=1048576,actimeo=30,port=1,mountport=1"
         );
 
         // A writable mount says nothing about access at all.

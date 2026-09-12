@@ -78,6 +78,103 @@ pub struct MoveSession {
     pub updated_at: i64,
 }
 
+/// Identity observed before any destination mutation. A zero size is an actual
+/// HEAD result, never an unknown or cached size.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceIdentity {
+    pub size: u64,
+    pub etag: String,
+    pub version_id: Option<String>,
+}
+
+/// Recovery state is independent of UI pause/error status. In particular,
+/// retrying deletion must never re-run the destination transfer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveJournal {
+    pub task_id: String,
+    pub stage: String,
+    pub source: SourceIdentity,
+    pub source_scope: String,
+    pub dest_scope: String,
+    pub destination: Option<SourceIdentity>,
+}
+
+async fn save_journal_on(conn: &turso::Connection, journal: &MoveJournal) -> DbResult<()> {
+    // FULL applies to the critical decision record even though ordinary cache
+    // writes use NORMAL. Do not proceed to source deletion if this write fails.
+    conn.execute("PRAGMA synchronous = FULL", ()).await?;
+    let result = conn
+        .execute(
+            "INSERT INTO move_journal (task_id, data) VALUES (?1, ?2)
+         ON CONFLICT(task_id) DO UPDATE SET data = excluded.data",
+            turso::params![journal.task_id.as_str(), serde_json::to_string(journal)?],
+        )
+        .await;
+    let _ = conn.execute("PRAGMA synchronous = NORMAL", ()).await;
+    result?;
+    Ok(())
+}
+
+pub async fn save_move_journal(journal: &MoveJournal) -> DbResult<()> {
+    let conn = get_connection()?.lock().await;
+    // A task removed/cancelled by the user must not be resurrected by a late
+    // upload completion and then delete its source.
+    let mut rows = conn
+        .query(
+            "SELECT id FROM move_sessions WHERE id = ?1",
+            turso::params![journal.task_id.as_str()],
+        )
+        .await?;
+    if rows.next().await?.is_none() {
+        return Err("Move task was removed; source retained".into());
+    }
+    save_journal_on(&conn, journal).await
+}
+
+async fn get_journal_on(conn: &turso::Connection, task_id: &str) -> DbResult<Option<MoveJournal>> {
+    let mut rows = conn
+        .query(
+            "SELECT data FROM move_journal WHERE task_id = ?1",
+            turso::params![task_id],
+        )
+        .await?;
+    match rows.next().await? {
+        Some(row) => Ok(Some(serde_json::from_str(&row.get::<String>(0)?)?)),
+        None => Ok(None),
+    }
+}
+
+pub async fn get_move_journal(task_id: &str) -> DbResult<Option<MoveJournal>> {
+    let conn = get_connection()?.lock().await;
+    get_journal_on(&conn, task_id).await
+}
+
+/// Fetch all cached sizes with bounded IN queries instead of a query per move.
+/// These sizes are display hints; transfer identity always comes from HEAD.
+pub async fn get_move_cached_sizes(
+    bucket: &str,
+    account_id: &str,
+    keys: &[String],
+) -> DbResult<std::collections::HashMap<String, i64>> {
+    let conn = get_connection()?.lock().await;
+    let mut result = std::collections::HashMap::new();
+    for batch in keys.chunks(400) {
+        let placeholders = (3..batch.len() + 3)
+            .map(|n| format!("?{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT key, size FROM cached_files WHERE bucket = ?1 AND account_id = ?2 AND key IN ({placeholders})");
+        let mut params: Vec<turso::Value> =
+            vec![bucket.to_string().into(), account_id.to_string().into()];
+        params.extend(batch.iter().cloned().map(turso::Value::from));
+        let mut rows = conn.query(&sql, params).await?;
+        while let Some(row) = rows.next().await? {
+            result.insert(row.get(0)?, row.get(1)?);
+        }
+    }
+    Ok(result)
+}
+
 /// Get SQL for creating move session tables
 pub fn get_table_sql() -> &'static str {
     "
@@ -118,6 +215,11 @@ pub fn get_table_sql() -> &'static str {
     );
 
     CREATE INDEX IF NOT EXISTS idx_move_upload_parts_task ON move_upload_parts(task_id);
+
+    CREATE TABLE IF NOT EXISTS move_journal (
+        task_id TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+    );
     "
 }
 
@@ -288,17 +390,6 @@ pub async fn get_move_upload_session(task_id: &str) -> DbResult<Option<(String, 
     } else {
         Ok(None)
     }
-}
-
-/// Delete multipart upload session info for a move task
-pub async fn delete_move_upload_session(task_id: &str) -> DbResult<()> {
-    let conn = get_connection()?.lock().await;
-    conn.execute(
-        "DELETE FROM move_upload_sessions WHERE task_id = ?1",
-        turso::params![task_id],
-    )
-    .await?;
-    Ok(())
 }
 
 /// Save a completed multipart upload part
@@ -517,15 +608,14 @@ pub async fn get_pending_moves_for_source(
 }
 
 /// Count active move sessions for a source bucket (for queue slot calculation)
-/// Excludes tasks at 100% progress (deleting/finalizing) to allow new tasks to start immediately
+/// Finishing retains a worker slot, so slow deletion cannot create an unbounded queue.
 pub async fn count_active_moves(source_bucket: &str, source_account_id: &str) -> DbResult<i64> {
     let conn = get_connection()?.lock().await;
     let mut rows = conn
         .query(
             "SELECT COUNT(*) FROM move_sessions
          WHERE source_bucket = ?1 AND source_account_id = ?2
-         AND status IN ('downloading', 'uploading')
-         AND progress < 100",
+         AND status IN ('downloading', 'uploading', 'finishing', 'deleting')",
             turso::params![source_bucket, source_account_id],
         )
         .await?;
@@ -568,7 +658,7 @@ pub async fn get_all_active_move_sessions() -> DbResult<Vec<MoveSession>> {
             dest_bucket, dest_account_id, dest_provider, delete_original, file_size, progress,
             status, error, created_at, updated_at
          FROM move_sessions
-         WHERE status IN ('pending', 'downloading', 'uploading', 'finishing', 'deleting', 'paused')
+         WHERE status IN ('pending', 'downloading', 'uploading', 'finishing', 'deleting', 'paused', 'delete_pending', 'outcome_unknown', 'needs_auth', 'conflict', 'needs_action')
          ORDER BY updated_at DESC",
             turso::params![],
         )
@@ -624,7 +714,7 @@ pub async fn pause_stale_moves_on_startup() -> DbResult<i64> {
     let now = chrono::Utc::now().timestamp();
     conn.execute(
         "UPDATE move_sessions SET status = 'paused', updated_at = ?1
-         WHERE status IN ('pending', 'downloading', 'uploading', 'finishing', 'deleting')",
+         WHERE status IN ('pending', 'downloading', 'uploading', 'finishing', 'deleting', 'delete_pending', 'outcome_unknown')",
         turso::params![now],
     )
     .await?;
@@ -670,6 +760,11 @@ pub async fn delete_move_session(session_id: &str) -> DbResult<()> {
     )
     .await?;
     conn.execute(
+        "DELETE FROM move_journal WHERE task_id = ?1",
+        turso::params![session_id],
+    )
+    .await?;
+    conn.execute(
         "DELETE FROM move_sessions WHERE id = ?1",
         turso::params![session_id],
     )
@@ -686,7 +781,7 @@ pub async fn delete_finished_moves(source_bucket: &str, source_account_id: &str)
         .query(
             "SELECT id FROM move_sessions
              WHERE source_bucket = ?1 AND source_account_id = ?2
-             AND status IN ('success', 'error', 'cancelled')",
+             AND status IN ('success', 'cancelled')",
             turso::params![source_bucket, source_account_id],
         )
         .await?;
@@ -706,6 +801,11 @@ pub async fn delete_finished_moves(source_bucket: &str, source_account_id: &str)
         conn.execute(
             "DELETE FROM move_upload_sessions WHERE task_id = ?1",
             turso::params![session_id.clone()],
+        )
+        .await?;
+        conn.execute(
+            "DELETE FROM move_journal WHERE task_id = ?1",
+            turso::params![session_id.as_str()],
         )
         .await?;
         conn.execute(
@@ -721,18 +821,45 @@ pub async fn delete_finished_moves(source_bucket: &str, source_account_id: &str)
 /// Delete all move sessions for a source bucket (only when no active moves)
 pub async fn delete_all_moves(source_bucket: &str, source_account_id: &str) -> DbResult<i64> {
     let conn = get_connection()?.lock().await;
+    delete_all_moves_on(&conn, source_bucket, source_account_id).await
+}
 
+async fn delete_all_moves_on(
+    conn: &turso::Connection,
+    source_bucket: &str,
+    source_account_id: &str,
+) -> DbResult<i64> {
     // First, get the IDs of all sessions (libsql doesn't support subqueries in IN clauses)
     let mut rows = conn
         .query(
-            "SELECT id FROM move_sessions WHERE source_bucket = ?1 AND source_account_id = ?2",
+            "SELECT id, status FROM move_sessions WHERE source_bucket = ?1 AND source_account_id = ?2",
             turso::params![source_bucket, source_account_id],
         )
         .await?;
 
     let mut session_ids: Vec<String> = Vec::new();
     while let Some(row) = rows.next().await? {
+        let status: String = row.get(1)?;
+        if matches!(
+            status.as_str(),
+            "downloading" | "uploading" | "finishing" | "deleting"
+        ) {
+            return Err("Cannot clear all moves while moves are active".into());
+        }
         session_ids.push(row.get(0)?);
+    }
+
+    // Validate the entire set under the same database lock before deleting
+    // anything. A stale UI must not discard a just-published recovery receipt.
+    for id in &session_ids {
+        if get_journal_on(conn, id).await?.is_some_and(|journal| {
+            matches!(
+                journal.stage.as_str(),
+                "copied" | "delete_pending" | "delete_unknown" | "outcome_unknown"
+            )
+        }) {
+            return Err("Resolve moves that need attention before clearing all tasks; their recovery records were retained".into());
+        }
     }
 
     // Delete related records and sessions for each ID
@@ -745,6 +872,11 @@ pub async fn delete_all_moves(source_bucket: &str, source_account_id: &str) -> D
         conn.execute(
             "DELETE FROM move_upload_sessions WHERE task_id = ?1",
             turso::params![session_id.clone()],
+        )
+        .await?;
+        conn.execute(
+            "DELETE FROM move_journal WHERE task_id = ?1",
+            turso::params![session_id.as_str()],
         )
         .await?;
         conn.execute(
@@ -791,6 +923,11 @@ pub async fn cleanup_old_move_sessions() -> DbResult<usize> {
         )
         .await?;
         conn.execute(
+            "DELETE FROM move_journal WHERE task_id = ?1",
+            turso::params![session_id.as_str()],
+        )
+        .await?;
+        conn.execute(
             "DELETE FROM move_sessions WHERE id = ?1",
             turso::params![session_id.clone()],
         )
@@ -802,7 +939,66 @@ pub async fn cleanup_old_move_sessions() -> DbResult<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::get_table_sql;
+    use super::*;
+
+    #[tokio::test]
+    async fn bulk_clear_rejects_unresolved_receipts_before_deleting_any_task() {
+        let database = turso::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = database.connect().unwrap();
+        conn.execute_batch(get_table_sql()).await.unwrap();
+        for id in ["finished", "recover"] {
+            conn.execute("INSERT INTO move_sessions (id, source_key, dest_key, source_bucket, source_account_id, source_provider, dest_bucket, dest_account_id, dest_provider, created_at, updated_at, status) VALUES (?1, 'x', 'y', 'source', 'account', 'r2', 'target', 'account', 'r2', 0, 0, 'cancelled')",turso::params![id]).await.unwrap();
+        }
+        let mut journal = MoveJournal {
+            task_id: "recover".into(),
+            stage: "copied".into(),
+            source: SourceIdentity {
+                size: 4,
+                etag: "source".into(),
+                version_id: None,
+            },
+            source_scope: "source".into(),
+            dest_scope: "target".into(),
+            destination: None,
+        };
+        for phase in [
+            "copied",
+            "delete_pending",
+            "delete_unknown",
+            "outcome_unknown",
+        ] {
+            journal.stage = phase.into();
+            save_journal_on(&conn, &journal).await.unwrap();
+            assert!(delete_all_moves_on(&conn, "source", "account")
+                .await
+                .is_err());
+            let mut rows = conn
+                .query("SELECT count(*) FROM move_sessions", ())
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+                2
+            );
+            assert_eq!(
+                get_journal_on(&conn, "recover")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .stage,
+                phase
+            );
+        }
+        journal.stage = "complete".into();
+        save_journal_on(&conn, &journal).await.unwrap();
+        assert_eq!(
+            delete_all_moves_on(&conn, "source", "account")
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(get_journal_on(&conn, "recover").await.unwrap().is_none());
+    }
 
     #[test]
     fn move_sessions_sql_contains_table_and_indexes() {
@@ -813,5 +1009,70 @@ mod tests {
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS move_upload_sessions"));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS move_upload_parts"));
         assert!(sql.contains("idx_move_upload_parts_task"));
+    }
+    #[tokio::test]
+    async fn copied_receipt_survives_session_pause_and_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "r2-move-journal-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let database = turso::Builder::new_local(path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let conn = database.connect().unwrap();
+        conn.execute_batch(get_table_sql()).await.unwrap();
+        let identity = SourceIdentity {
+            size: 42,
+            etag: "frozen".into(),
+            version_id: Some("v1".into()),
+        };
+        let mut journal = MoveJournal {
+            task_id: "move".into(),
+            stage: "copied".into(),
+            source: identity.clone(),
+            source_scope: "source".into(),
+            dest_scope: "dest".into(),
+            destination: Some(identity),
+        };
+        save_journal_on(&conn, &journal).await.unwrap();
+        conn.execute("INSERT INTO move_sessions (id, source_key, dest_key, source_bucket, source_account_id, source_provider, dest_bucket, dest_account_id, dest_provider, created_at, updated_at, status) VALUES ('move', 'x', 'y', 'a', 'a', 'r2', 'b', 'b', 'r2', 0, 0, 'error')", ()).await.unwrap();
+        // UI retry is deliberately independent of the copy/delete receipt.
+        conn.execute(
+            "UPDATE move_sessions SET status = 'paused' WHERE id = 'move'",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "UPDATE move_sessions SET status = 'pending' WHERE id = 'move'",
+            (),
+        )
+        .await
+        .unwrap();
+        journal.stage = "delete_pending".into();
+        save_journal_on(&conn, &journal).await.unwrap();
+        drop(conn);
+        drop(database);
+        let database = turso::Builder::new_local(path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let conn = database.connect().unwrap();
+        let recovered = get_journal_on(&conn, "move").await.unwrap().unwrap();
+        assert_eq!(recovered.stage, "delete_pending");
+        assert_eq!(recovered.source, journal.source);
+        assert_eq!(recovered.destination, journal.destination);
+        conn.execute(
+            "UPDATE move_journal SET data = 'corrupt' WHERE task_id = 'move'",
+            (),
+        )
+        .await
+        .unwrap();
+        assert!(get_journal_on(&conn, "move").await.is_err());
+        drop(conn);
+        drop(database);
+        let _ = std::fs::remove_file(path);
     }
 }

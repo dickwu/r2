@@ -20,7 +20,9 @@ mod manager;
 mod nfs_fs;
 mod platform;
 mod progress;
+mod quota;
 mod read_cache;
+pub mod recovery;
 mod stage;
 
 pub use manager::{manager, MountInfo, MountProvider, MountRequest};

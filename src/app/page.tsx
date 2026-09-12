@@ -1,30 +1,22 @@
 'use client';
 
+import dynamic from 'next/dynamic';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { App, Spin, type InputRef } from 'antd';
+import { Alert, App, Button, Spin, type InputRef } from 'antd';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useThemeStore } from '@/app/stores/themeStore';
 import { usePreviewStore } from '@/app/stores/previewStore';
-import ConfigModal, { ModalMode } from '@/app/components/ConfigModal';
-import SettingsModal, { type SettingsTab } from '@/app/components/SettingsModal';
-import UploadModal from '@/app/components/UploadModal';
-import FilePreviewModal from '@/app/components/FilePreviewModal';
-import FileRenameModal from '@/app/components/FileRenameModal';
-import FolderRenameModal from '@/app/components/FolderRenameModal';
+import type { ModalMode } from '@/app/components/ConfigModal';
+import type { SettingsTab } from '@/app/components/SettingsModal';
 import FileGridView from '@/app/components/FileGridView';
 import FileListView from '@/app/components/FileListView';
 import AccountSidebar from '@/app/components/AccountSidebar';
 import Toolbar from '@/app/components/Toolbar';
 import StatusBar from '@/app/components/StatusBar';
 import Titlebar from '@/app/components/Titlebar';
-import BatchDeleteModal from '@/app/components/BatchDeleteModal';
-import BatchMoveModal from '@/app/components/BatchMoveModal';
-import SyncOverlay from '@/app/components/SyncOverlay';
 import SyncBanner from '@/app/components/SyncBanner';
-import DownloadTaskModal from '@/app/components/DownloadTaskModal';
-import MoveTaskModal from '@/app/components/MoveTaskModal';
 import SelectionActionBar from '@/app/components/SelectionActionBar';
 import Inspector from '@/app/components/Inspector';
 import EmptyState from '@/app/components/EmptyState';
@@ -48,15 +40,34 @@ import {
 } from '@/app/stores/downloadStore';
 import { setupGlobalRenameListeners, useRenameStore } from '@/app/stores/renameStore';
 import { setupGlobalMountListeners, useMountStore } from '@/app/stores/mountStore';
-import MountModal from '@/app/components/MountModal';
 import { useKeyboardShortcuts } from '@/app/hooks/useKeyboardShortcuts';
 import { useGlobalShortcuts } from '@/app/hooks/useGlobalShortcuts';
-import CommandPalette, { type CommandAction } from '@/app/components/CommandPalette';
-import ReportProblemModal from '@/app/components/report/ReportProblemModal';
+import type { CommandAction } from '@/app/components/CommandPalette';
+import { useMoveStore, setupGlobalMoveListeners, loadAllActiveMoves } from '@/app/stores/moveStore';
 import { useReportStore } from '@/app/stores/reportStore';
 import TransferDock from '@/app/components/TransferDock';
 import Toast from '@/app/components/Toast';
 import { useToastStore } from '@/app/stores/toastStore';
+
+const ConfigModal = dynamic(() => import('@/app/components/ConfigModal'), { ssr: false });
+const SettingsModal = dynamic(() => import('@/app/components/SettingsModal'), { ssr: false });
+const UploadModal = dynamic(() => import('@/app/components/UploadModal'), { ssr: false });
+const FilePreviewModal = dynamic(() => import('@/app/components/FilePreviewModal'), { ssr: false });
+const FileRenameModal = dynamic(() => import('@/app/components/FileRenameModal'), { ssr: false });
+const FolderRenameModal = dynamic(() => import('@/app/components/FolderRenameModal'), {
+  ssr: false,
+});
+const BatchDeleteModal = dynamic(() => import('@/app/components/BatchDeleteModal'), { ssr: false });
+const BatchMoveModal = dynamic(() => import('@/app/components/BatchMoveModal'), { ssr: false });
+const DownloadTaskModal = dynamic(() => import('@/app/components/DownloadTaskModal'), {
+  ssr: false,
+});
+const MoveTaskModal = dynamic(() => import('@/app/components/MoveTaskModal'), { ssr: false });
+const MountModal = dynamic(() => import('@/app/components/MountModal'), { ssr: false });
+const CommandPalette = dynamic(() => import('@/app/components/CommandPalette'), { ssr: false });
+const ReportProblemModal = dynamic(() => import('@/app/components/report/ReportProblemModal'), {
+  ssr: false,
+});
 
 type ViewMode = 'list' | 'grid';
 type SortOrder = 'asc' | 'desc' | null;
@@ -141,6 +152,9 @@ export default function Home() {
   const { message } = App.useApp();
   const sidebarStyle = useThemeStore((s) => s.sidebarStyle);
   const mountModalOpen = useMountStore((s) => s.modalOpen);
+  const moveTaskModalOpen = useMoveStore((s) => s.modalOpen);
+  const downloadTaskModalOpen = useDownloadStore((s) => s.modalOpen);
+  const reportOpen = useReportStore((s) => s.isOpen);
 
   const config = useMemo<StorageConfig | null>(
     () => toStorageConfig(),
@@ -209,11 +223,31 @@ export default function Home() {
     loadDownloads();
   }, [config?.bucket, config?.accountId, loadDownloadsFromDatabase]);
 
-  const { items, isLoading, isFetching, error, refresh } = useR2Files(config, currentPath);
+  const { items, hasData, isLoading, isFetching, isPartial, isCached, error, refresh } = useR2Files(
+    config,
+    currentPath
+  );
   const { isSyncing, isSynced, lastSyncTime, refresh: refreshSync } = useFilesSync(config);
 
-  // Get sync phase for first-load overlay
-  const syncPhase = useSyncStore((state) => state.phase);
+  useEffect(() => {
+    clearSelection();
+    setFocusedItem(null);
+    setRenameFile(null);
+    setRenameFolder(null);
+    closePreview();
+    closeDeleteModal();
+    closeMoveModal();
+  }, [
+    config?.provider,
+    config?.accountId,
+    config?.bucket,
+    currentPath,
+    clearSelection,
+    closePreview,
+    closeDeleteModal,
+    closeMoveModal,
+  ]);
+
   const backgroundSync = useSyncStore((state) => state.backgroundSync);
 
   // Zustand store for folder metadata
@@ -236,10 +270,13 @@ export default function Home() {
       return;
     }
 
+    let cancelled = false;
+    setSearchResults([]);
     setIsSearching(true);
     const timer = setTimeout(async () => {
       try {
         const result = await searchFiles(searchQuery);
+        if (cancelled) return;
         // Convert StoredFile to FileItem
         const fileItems: FileItem[] = result.files.map((file) => {
           const parts = file.key.split('/');
@@ -254,16 +291,20 @@ export default function Home() {
         setSearchResults(fileItems);
         setSearchTotalCount(result.totalCount);
       } catch (e) {
+        if (cancelled) return;
         console.error('Search error:', e);
         setSearchResults([]);
         setSearchTotalCount(0);
       } finally {
-        setIsSearching(false);
+        if (!cancelled) setIsSearching(false);
       }
     }, 300); // 300ms debounce
 
-    return () => clearTimeout(timer);
-  }, [searchQuery, isSynced, lastSyncTime]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchQuery, isSynced, lastSyncTime, config?.provider, config?.accountId, config?.bucket]);
 
   // Filter and sort items - use search results when searching
   const filteredItems = useMemo(() => {
@@ -441,6 +482,7 @@ export default function Home() {
   // Ensure the download store owns the real-time task state even before the modal opens.
   useEffect(() => {
     setupGlobalDownloadListeners();
+    void setupGlobalMoveListeners().then(() => loadAllActiveMoves());
     setupGlobalRenameListeners();
     setupGlobalMountListeners();
   }, []);
@@ -1123,13 +1165,34 @@ export default function Home() {
               </div>
             )}
 
+            {hasData && !searchQuery.trim() && (error || isPartial || (isCached && isFetching)) && (
+              <Alert
+                type={error ? 'warning' : 'info'}
+                showIcon
+                title={
+                  error
+                    ? `${isPartial ? 'Some files are loaded' : 'Showing cached folder contents'}; refresh failed`
+                    : isPartial
+                      ? 'Loading more files — sorting the files loaded so far'
+                      : 'Showing cached folder contents; checking for changes'
+                }
+                description={error?.message}
+                action={error ? <Button onClick={() => void refresh()}>Retry</Button> : undefined}
+              />
+            )}
+
             {/* File area */}
             <div className="file-area" style={{ flex: 1, minHeight: 0, position: 'relative' }}>
               {!config ? (
                 <EmptyState onUpload={() => setUploadModalOpen(true)} />
-              ) : lastSyncTime === null && (isSyncing || syncPhase !== 'idle') ? (
-                /* Show sync overlay during initial sync (before cache is ready) */
-                <SyncOverlay />
+              ) : error && !hasData ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  title="Could not load this folder"
+                  description={error.message}
+                  action={<Button onClick={() => void refresh()}>Retry</Button>}
+                />
               ) : isLoading || isSearching ? (
                 <div className="file-list-loading">
                   <Spin description={isSearching ? 'Searching bucket...' : undefined} fullscreen />
@@ -1221,11 +1284,13 @@ export default function Home() {
               />
             )}
 
-            <SettingsModal
-              open={settingsOpen}
-              onClose={() => setSettingsOpen(false)}
-              initialTab={settingsTab}
-            />
+            {settingsOpen && (
+              <SettingsModal
+                open={true}
+                onClose={() => setSettingsOpen(false)}
+                initialTab={settingsTab}
+              />
+            )}
 
             {mountModalOpen && <MountModal />}
 
@@ -1298,21 +1363,23 @@ export default function Home() {
               />
             )}
 
-            <MoveTaskModal storageConfig={config} />
-            <DownloadTaskModal storageConfig={config} />
+            {moveTaskModalOpen && <MoveTaskModal storageConfig={config} />}
+            {downloadTaskModalOpen && <DownloadTaskModal storageConfig={config} />}
           </div>
         </div>
       </div>
 
       {/* Report a problem — portal to body, opened from the status bar or the palette */}
-      <ReportProblemModal />
+      {reportOpen && <ReportProblemModal />}
 
       {/* Command palette — portal to body */}
-      <CommandPalette
-        open={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
-        onAction={handleCmdAction}
-      />
+      {paletteOpen && (
+        <CommandPalette
+          open={true}
+          onClose={() => setPaletteOpen(false)}
+          onAction={handleCmdAction}
+        />
+      )}
 
       {/* Transfer dock — auto-shows when tasks are running */}
       <TransferDock />

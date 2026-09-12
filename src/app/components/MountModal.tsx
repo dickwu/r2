@@ -16,9 +16,12 @@ import { ProviderIcon } from '@/app/components/AccountSidebarRows';
 import {
   defaultMountPath,
   findMount,
+  recoveryMatchesTarget,
   useMountStore,
   type MountBucketInput,
   type MountProvider,
+  type MountInfo,
+  type MountRecovery,
 } from '@/app/stores/mountStore';
 import {
   detectOs,
@@ -39,6 +42,105 @@ const PROVIDER_NAME: Record<MountProvider, string> = {
   rustfs: 'RustFS',
 };
 
+function MountedBucketDetails({ mount }: { mount: MountInfo }) {
+  return (
+    <>
+      <div className="field">
+        <div className="field-label">
+          {mount.health === 'mounted'
+            ? 'Mounted at'
+            : mount.health === 'degraded'
+              ? 'Degraded mount'
+              : mount.health === 'offline'
+                ? 'Mount offline'
+                : 'Unmounting…'}
+        </div>
+        <div className="mount-path-readout">
+          {mount.health === 'mounted' && <span className="mount-live-dot" aria-hidden="true" />}
+          <code>{mount.localPath}</code>
+        </div>
+        {mount.healthError && (
+          <div className="mount-error" role="status">
+            {mount.healthError}
+          </div>
+        )}
+        {mount.pendingUploads > 0 && (
+          <div className="field-hint">
+            {mount.pendingUploads} pending {mount.pendingUploads === 1 ? 'upload' : 'uploads'}.
+            Saved writes remain on this computer until uploaded.
+          </div>
+        )}
+        <div className="field-hint">
+          Open it like any folder. Unmount before deleting or moving it.
+        </div>
+      </div>
+
+      <div className="mount-notes">
+        <div className="mount-note">
+          <span
+            className={['mount-tag', mount.readOnly ? '' : 'mount-tag-live']
+              .filter(Boolean)
+              .join(' ')}
+          >
+            {mount.readOnly ? (
+              <LockOutlined style={{ fontSize: 10 }} />
+            ) : (
+              <CloudUploadOutlined style={{ fontSize: 10 }} />
+            )}{' '}
+            {mountModeLabel(mount.readOnly)}
+          </span>
+          <span>{mountModeHint(mount.readOnly)}</span>
+        </div>
+        {!mount.readOnly && (
+          <div className="mount-note mount-note-quiet">
+            Files you drop here upload in the background — keep the app running until they finish.
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function SavedWritesSelector({
+  recoveries,
+  selectedId,
+  busy,
+  onSelect,
+}: {
+  recoveries: MountRecovery[];
+  selectedId: string | null;
+  busy: boolean;
+  onSelect: (id: string | null) => void;
+}) {
+  if (recoveries.length === 0) return null;
+  return (
+    <div className="field">
+      <label className="field-label" htmlFor="mount-recovery">
+        Saved writes
+      </label>
+      <select
+        id="mount-recovery"
+        className="input"
+        value={selectedId ?? ''}
+        disabled={busy}
+        onChange={(event) => onSelect(event.target.value || null)}
+      >
+        <option value="">Start a new mount</option>
+        {recoveries.map((recovery) => (
+          <option key={recovery.recoveryId} value={recovery.recoveryId}>
+            {recovery.files.length} saved {recovery.files.length === 1 ? 'file' : 'files'} ·{' '}
+            {recovery.recoveryId}
+          </option>
+        ))}
+      </select>
+      <div className="field-hint">
+        Resume uploads using this account. The saved files remain available if you start a new
+        mount.
+      </div>
+    </div>
+  );
+}
+
 export default function MountModal() {
   const target = useMountStore((s) => s.target);
   const isMounting = useMountStore((s) => s.isMounting);
@@ -46,6 +148,11 @@ export default function MountModal() {
   const error = useMountStore((s) => s.error);
   const closeMountModal = useMountStore((s) => s.closeMountModal);
   const mountBucket = useMountStore((s) => s.mount);
+  const recoveries = useMountStore((s) => s.recoveries);
+  const recoveryError = useMountStore((s) => s.recoveryError);
+  const selectedRecoveryId = useMountStore((s) => s.selectedRecoveryId);
+  const setRecoverySelection = useMountStore((s) => s.setRecoverySelection);
+  const refreshRecoveries = useMountStore((s) => s.refreshRecoveries);
   const unmountBucket = useMountStore((s) => s.unmount);
   const mount = useMountStore((s) =>
     s.target
@@ -62,6 +169,14 @@ export default function MountModal() {
   const bucket = target?.bucket ?? '';
   const targetProvider = target?.provider;
   const targetAccountId = target?.accountId;
+  const matchingRecoveries = useMemo(
+    () => (target ? recoveries.filter((r) => recoveryMatchesTarget(r, target)) : []),
+    [recoveries, target]
+  );
+
+  useEffect(() => {
+    void refreshRecoveries();
+  }, [refreshRecoveries, bucket, targetProvider, targetAccountId]);
 
   // The mode belongs to the mount, not to the dialog: a different bucket starts
   // from the writable default rather than inheriting the last choice.
@@ -110,11 +225,17 @@ export default function MountModal() {
       region: target.region ?? null,
       endpoint_url: target.endpointUrl ?? null,
       force_path_style: target.forcePathStyle ?? null,
-      read_only: readOnly,
+      read_only: selectedRecoveryId ? false : readOnly,
+      recovery_id: selectedRecoveryId,
     };
     const info = await mountBucket(input);
-    if (info) message.success(`${target.bucket} mounted at ${info.localPath}`);
-  }, [target, localPath, readOnly, mountBucket, message]);
+    if (info)
+      message.success(
+        selectedRecoveryId
+          ? `Resumed saved writes for ${target.bucket} at ${info.localPath}`
+          : `${target.bucket} mounted at ${info.localPath}`
+      );
+  }, [target, localPath, readOnly, selectedRecoveryId, mountBucket, message]);
 
   const handleUnmount = useCallback(async () => {
     if (!mount) return;
@@ -155,14 +276,21 @@ export default function MountModal() {
 
   if (!target) return null;
 
-  const wireClass = ['mount-link-wire', mount ? 'mounted' : isMounting ? 'mounting' : '']
+  const wireClass = [
+    'mount-link-wire',
+    mount?.health === 'mounted' ? 'mounted' : isMounting ? 'mounting' : '',
+  ]
     .filter(Boolean)
     .join(' ');
 
   const footer = mount ? (
     <>
-      <button className="btn" onClick={handleUnmount} disabled={isUnmounting}>
-        {isUnmounting ? 'Unmounting…' : 'Unmount'}
+      <button
+        className="btn"
+        onClick={handleUnmount}
+        disabled={isUnmounting || mount.health === 'unmounting'}
+      >
+        {isUnmounting || mount.health === 'unmounting' ? 'Unmounting…' : 'Unmount'}
       </button>
       <button className="btn btn-primary" onClick={handleReveal}>
         <FolderOpenOutlined /> {revealActionLabel(os)}
@@ -178,7 +306,7 @@ export default function MountModal() {
         onClick={handleMount}
         disabled={isMounting || !localPath.trim()}
       >
-        {isMounting ? 'Mounting…' : 'Mount'}
+        {isMounting ? 'Mounting…' : selectedRecoveryId ? 'Resume uploads' : 'Mount'}
       </button>
     </>
   );
@@ -209,44 +337,23 @@ export default function MountModal() {
       </div>
 
       {mount ? (
-        <>
-          <div className="field">
-            <div className="field-label">Mounted at</div>
-            <div className="mount-path-readout">
-              <span className="mount-live-dot" aria-hidden="true" />
-              <code>{mount.localPath}</code>
-            </div>
-            <div className="field-hint">
-              Open it like any folder. Unmount before deleting or moving it.
-            </div>
-          </div>
-
-          <div className="mount-notes">
-            <div className="mount-note">
-              <span
-                className={['mount-tag', mount.readOnly ? '' : 'mount-tag-live']
-                  .filter(Boolean)
-                  .join(' ')}
-              >
-                {mount.readOnly ? (
-                  <LockOutlined style={{ fontSize: 10 }} />
-                ) : (
-                  <CloudUploadOutlined style={{ fontSize: 10 }} />
-                )}{' '}
-                {mountModeLabel(mount.readOnly)}
-              </span>
-              <span>{mountModeHint(mount.readOnly)}</span>
-            </div>
-            {!mount.readOnly && (
-              <div className="mount-note mount-note-quiet">
-                Files you drop here upload in the background — keep the app running until they
-                finish.
-              </div>
-            )}
-          </div>
-        </>
+        <MountedBucketDetails mount={mount} />
       ) : (
         <>
+          <SavedWritesSelector
+            recoveries={matchingRecoveries}
+            selectedId={selectedRecoveryId}
+            busy={isMounting}
+            onSelect={(id) => {
+              setRecoverySelection(id);
+              if (id) setReadOnly(false);
+            }}
+          />
+          {recoveryError && (
+            <div className="field-hint" role="status">
+              Could not check saved writes: {recoveryError}
+            </div>
+          )}
           <div className="field">
             <div className="field-label">Local path</div>
             <div className="mount-path-row">
@@ -268,7 +375,7 @@ export default function MountModal() {
             <button
               className={['toggle-row', !readOnly && 'on'].filter(Boolean).join(' ')}
               onClick={() => setReadOnly((v) => !v)}
-              disabled={isMounting}
+              disabled={isMounting || !!selectedRecoveryId}
               aria-pressed={!readOnly}
             >
               <span className="option-row-text">

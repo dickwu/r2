@@ -1,0 +1,40 @@
+{
+  "scope": "In-process production merge/cache helpers; excludes backend and rendering",
+  "captured_at": "2026-09-12T19:21:30.273Z",
+  "results": [
+    {
+      "total": 10000,
+      "page_size": 1000,
+      "runs": 10,
+      "first_page_ms": {
+        "p50": 0.16037500000000193,
+        "p95": 2.615000000000002
+      },
+      "all_pages_ms": {
+        "p50": 9.483666999999997,
+        "p95": 19.758875000000003
+      },
+      "cached_snapshot_handoff_ms": {
+        "p50": 0.0098339999999979,
+        "p95": 0.4997500000000059
+      }
+    },
+    {
+      "total": 100000,
+      "page_size": 1000,
+      "runs": 10,
+      "first_page_ms": {
+        "p50": 0.15558300000020608,
+        "p95": 0.20729199999999537
+      },
+      "all_pages_ms": {
+        "p50": 809.1900409999998,
+        "p95": 877.293666
+      },
+      "cached_snapshot_handoff_ms": {
+        "p50": 0.01749999999992724,
+        "p95": 0.0279579999996713
+      }
+    }
+  ]
+}

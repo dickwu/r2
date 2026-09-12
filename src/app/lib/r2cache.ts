@@ -1,4 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import {
+  buildFileItems,
+  type FolderFreshness,
+  type FolderPage,
+  type FolderSnapshot,
+} from '@/app/utils/folderItems';
+import { readFolderStream } from './folderStream';
 import { getProviderAdapter } from '@/app/providers/index';
 import type {
   BatchDeleteResult,
@@ -317,14 +325,88 @@ export async function listPrefix(
   });
 }
 
-export async function startBackgroundSync(config: StorageConfig): Promise<void> {
+export async function getPrefixCache(
+  config: StorageConfig,
+  prefix: string
+): Promise<FolderSnapshot | null> {
+  const cached = await invoke<
+    | (LazyListResult & {
+        provider: string;
+        account_id: string;
+        bucket: string;
+        complete: boolean;
+        freshness: FolderFreshness;
+      })
+    | null
+  >('get_prefix_cache', {
+    input: { ...getConnectionInput(config), prefix },
+  });
+  if (!cached) return null;
+  if (
+    cached.provider !== config.provider ||
+    cached.account_id !== config.accountId ||
+    cached.bucket !== config.bucket ||
+    cached.prefix !== prefix
+  ) {
+    throw new Error('Cached folder scope does not match the requested folder');
+  }
+  return {
+    items: buildFileItems(
+      cached.files.map((file) => ({
+        key: file.key,
+        size: file.size,
+        lastModified: file.last_modified,
+      })),
+      cached.folders,
+      prefix
+    ),
+    complete: cached.complete,
+    fromCache: true,
+    freshness: cached.freshness,
+  };
+}
+
+let folderGeneration = 0;
+
+export async function streamFolderPrefix(
+  config: StorageConfig,
+  prefix: string,
+  options: {
+    signal?: AbortSignal;
+    onUpdate: (snapshot: FolderSnapshot) => void;
+  }
+): Promise<FolderSnapshot> {
+  const scope = {
+    provider: config.provider,
+    account_id: config.accountId,
+    bucket: config.bucket,
+    prefix,
+    request_id: crypto.randomUUID(),
+    generation: ++folderGeneration,
+  };
+  return readFolderStream(
+    scope,
+    {
+      listen: (receive) => listen<FolderPage>('folder-page', (event) => receive(event.payload)),
+      start: () =>
+        invoke('list_prefix_stream', {
+          input: { ...getConnectionInput(config), ...scope, force_refresh: true },
+        }),
+      cancel: () => invoke('cancel_prefix_list', { requestId: scope.request_id }),
+    },
+    options.onUpdate,
+    options.signal
+  );
+}
+
+export async function startBackgroundSync(config: StorageConfig, runId: string): Promise<string> {
   return invoke('start_background_sync', {
-    input: { ...getConnectionInput(config), prefix: '' },
+    input: { ...getConnectionInput(config), prefix: '', run_id: runId },
   });
 }
 
-export async function cancelBackgroundSync(): Promise<void> {
-  return invoke('cancel_background_sync');
+export async function cancelBackgroundSync(runId?: string): Promise<void> {
+  return invoke('cancel_background_sync', { runId });
 }
 
 // Note: Upload state functions removed - now handled by backend upload_sessions table

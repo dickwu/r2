@@ -1,127 +1,183 @@
+import assert from 'node:assert/strict';
 import { describe, expect, test } from 'bun:test';
-import { loadFolderItems, type FolderContents, type LazyPrefixResult } from './folderItems';
+import {
+  createFolderPageAccumulator,
+  loadFolderItems,
+  type FolderSnapshot,
+  type FolderPage,
+  type FolderRequestScope,
+} from './folderItems';
 
-const staleCache: FolderContents = {
-  folders: ['appointments/', 'common_documents/', 'documents/'],
-  files: [{ key: '1.pdf', size: 1422625, lastModified: '2026-01-27T22:01:54.864Z' }],
-};
-
-const liveRoot: LazyPrefixResult = {
+const scope: FolderRequestScope = {
+  provider: 'r2',
+  account_id: 'acct',
+  bucket: 'b',
   prefix: '',
+  request_id: 'one',
+  generation: 1,
+};
+const page = (overrides: Partial<FolderPage> = {}): FolderPage => ({
+  ...scope,
+  files: [],
+  folders: [],
   from_cache: false,
-  folders: [
-    'appointments/',
-    'backup/',
-    'common_documents/',
-    'documents/',
-    'files/',
-    'google-review-screenshots/',
-    'insurance-cards/',
-    'verification/',
-  ],
-  files: [
-    { key: '1.pdf', name: '1.pdf', size: 1422625, last_modified: '2026-01-27T22:01:54.864Z' },
-    { key: 'test.txt', name: 'test.txt', size: 24, last_modified: '2026-02-19T16:30:23.760Z' },
-  ],
+  freshness: 'fresh',
+  complete: true,
+  page_index: 0,
+  next_cursor: null,
+  ...overrides,
+});
+const emptyCache: FolderSnapshot = {
+  items: [],
+  complete: true,
+  fromCache: true,
+  freshness: 'stale',
 };
 
-describe('loadFolderItems', () => {
-  test('uses prefix listing even when SQLite already has partial cached rows', async () => {
-    const calls: Array<{ prefix: string; forceRefresh?: boolean }> = [];
-
-    const result = await loadFolderItems({
-      config: { bucket: 'secret' },
+describe('folder stale while revalidate', () => {
+  test('publishes valid empty cache before the network resolves and propagates refresh errors', async () => {
+    const updates: FolderSnapshot[] = [];
+    let published!: () => void;
+    const cachePublished = new Promise<void>((resolve) => {
+      published = resolve;
+    });
+    let fail!: (error: Error) => void;
+    const network = new Promise<FolderSnapshot>((_resolve, reject) => {
+      fail = reject;
+    });
+    const pending = loadFolderItems({
+      config: {},
       prefix: '',
-      forceRefresh: true,
-      readCachedFolder: async () => staleCache,
-      readPrefixFolder: async (_config, prefix, options) => {
-        calls.push({ prefix, forceRefresh: options?.forceRefresh });
-        return liveRoot;
+      readCachedFolder: async () => emptyCache,
+      readPrefixFolder: async () => network,
+      onUpdate: (snapshot) => {
+        updates.push(snapshot);
+        published();
       },
     });
-
-    expect(calls).toEqual([{ prefix: '', forceRefresh: true }]);
-    expect(result.source).toBe('prefix');
-    expect(result.items.map((item) => item.key)).toEqual([
-      'appointments/',
-      'backup/',
-      'common_documents/',
-      'documents/',
-      'files/',
-      'google-review-screenshots/',
-      'insurance-cards/',
-      'verification/',
-      '1.pdf',
-      'test.txt',
-    ]);
+    await cachePublished;
+    expect(updates).toEqual([emptyCache]);
+    fail(new Error('offline'));
+    await assert.rejects(pending, /offline/);
+    expect(updates).toEqual([emptyCache]);
   });
 
-  test('passes force refresh to the prefix reader', async () => {
-    const calls: Array<{ forceRefresh?: boolean }> = [];
-
-    await loadFolderItems({
-      config: { bucket: 'secret' },
-      prefix: '',
-      forceRefresh: true,
-      readCachedFolder: async () => staleCache,
-      readPrefixFolder: async (_config, _prefix, options) => {
-        calls.push({ forceRefresh: options?.forceRefresh });
-        return liveRoot;
-      },
-    });
-
-    expect(calls).toEqual([{ forceRefresh: true }]);
-  });
-
-  test('falls back to SQLite cache when prefix listing fails', async () => {
-    const result = await loadFolderItems({
-      config: { bucket: 'secret' },
-      prefix: '',
-      readCachedFolder: async () => staleCache,
-      readPrefixFolder: async () => {
-        throw new Error('network unavailable');
-      },
-    });
-
-    expect(result.source).toBe('cache-fallback');
-    expect(result.items.map((item) => item.key)).toEqual([
-      'appointments/',
-      'common_documents/',
-      'documents/',
-      '1.pdf',
-    ]);
-  });
-
-  test('reconstructs a folder from full cached files when exact prefix cache is empty', async () => {
-    const result = await loadFolderItems({
-      config: { bucket: 'secret' },
-      prefix: '',
-      readCachedFolder: async () => ({ files: [], folders: [] }),
-      readAllCachedFiles: async () => [
-        { key: '1.pdf', size: 1422625, lastModified: '2026-01-27T22:01:54.864Z' },
-        { key: 'test.txt', size: 24, lastModified: '2026-02-19T16:30:23.760Z' },
-        {
-          key: 'appointments/1441909/istat/870095715388256257.png',
-          size: 8042,
-          lastModified: '2026-01-14T16:09:44.156Z',
+  test('missing cache and failed listing reject instead of becoming an empty directory', async () => {
+    await assert.rejects(
+      loadFolderItems({
+        config: {},
+        prefix: '',
+        readCachedFolder: async () => null,
+        readPrefixFolder: async () => {
+          throw new Error('denied');
         },
-        {
-          key: 'backup/export.zip',
-          size: 100,
-          lastModified: '2026-02-19T16:30:23.760Z',
+        onUpdate: () => {
+          throw new Error('must not publish missing cache');
         },
-      ],
+      }),
+      /denied/
+    );
+  });
+
+  test('cache database error does not prevent a successful live listing', async () => {
+    const live = { ...emptyCache, fromCache: false, freshness: 'fresh' as const };
+    const result = await loadFolderItems({
+      config: {},
+      prefix: '',
+      readCachedFolder: async () => {
+        throw new Error('cache unavailable');
+      },
+      readPrefixFolder: async () => live,
+      onUpdate: () => {},
+    });
+    expect(result).toEqual(live);
+  });
+
+  test('cancel during cache read never starts the stale navigation request', async () => {
+    const controller = new AbortController();
+    let started = false;
+    const pending = loadFolderItems({
+      config: {},
+      prefix: '',
+      signal: controller.signal,
+      readCachedFolder: async () => {
+        controller.abort();
+        return emptyCache;
+      },
       readPrefixFolder: async () => {
-        throw new Error('dispatch failure');
+        started = true;
+        return emptyCache;
+      },
+      onUpdate: () => {
+        throw new Error('must not publish after cancellation');
       },
     });
+    await assert.rejects(pending);
+    expect(started).toBe(false);
+  });
+});
 
-    expect(result.source).toBe('all-cache-fallback');
-    expect(result.items.map((item) => item.key)).toEqual([
-      'appointments/',
-      'backup/',
-      '1.pdf',
-      'test.txt',
-    ]);
+describe('scoped incremental folder pages', () => {
+  test('first page is usable before final page, merges by key with natural folder-first sorting', () => {
+    const accumulator = createFolderPageAccumulator(scope);
+    const first = accumulator.accept(
+      page({
+        files: [{ key: 'file10', name: 'file10', size: 1, last_modified: '' }],
+        complete: false,
+        next_cursor: 'next',
+      })
+    );
+    expect(first?.items.map((item) => item.key)).toEqual(['file10']);
+    expect(first?.complete).toBe(false);
+    const last = accumulator.accept(
+      page({
+        page_index: 1,
+        folders: ['z/'],
+        files: [
+          { key: 'file2', name: 'file2', size: 2, last_modified: '' },
+          { key: 'file10', name: 'file10', size: 3, last_modified: '' },
+        ],
+      })
+    );
+    expect(last?.items.map((item) => item.key)).toEqual(['z/', 'file2', 'file10']);
+    expect(last?.items[2].size).toBe(3);
+    expect(last?.complete).toBe(true);
+  });
+
+  test('ignores every mismatched scope field and obsolete request generation', () => {
+    for (const field of [
+      'provider',
+      'account_id',
+      'bucket',
+      'prefix',
+      'request_id',
+      'generation',
+    ] as const) {
+      const accumulator = createFolderPageAccumulator(scope);
+      expect(
+        accumulator.accept(page({ [field]: field === 'generation' ? 2 : 'other' }))
+      ).toBeNull();
+      expect(accumulator.accept(page())?.complete).toBe(true);
+    }
+  });
+
+  test('rejects missing or repeated cursors, skipped pages, and pages after completion', () => {
+    assert.throws(
+      () => createFolderPageAccumulator(scope).accept(page({ complete: false })),
+      /cursor/
+    );
+    assert.throws(
+      () => createFolderPageAccumulator(scope).accept(page({ page_index: 1 })),
+      /sequence/
+    );
+    const accumulator = createFolderPageAccumulator(scope);
+    accumulator.accept(page({ complete: false, next_cursor: 'same' }));
+    assert.throws(
+      () => accumulator.accept(page({ page_index: 1, complete: false, next_cursor: 'same' })),
+      /cursor/
+    );
+    const finished = createFolderPageAccumulator(scope);
+    finished.accept(page());
+    assert.throws(() => finished.accept(page({ page_index: 1 })), /complete/);
   });
 });

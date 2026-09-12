@@ -1,4 +1,5 @@
 'use client';
+import { resumeSavedMove } from '@/app/lib/moveRecovery';
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
@@ -17,7 +18,7 @@ import {
 } from '@ant-design/icons';
 import { useUploadStore } from '@/app/stores/uploadStore';
 import { useDownloadStore } from '@/app/stores/downloadStore';
-import { useMoveStore } from '@/app/stores/moveStore';
+import { useMoveStore, isMoveAwaitingAction } from '@/app/stores/moveStore';
 import { useRenameStore } from '@/app/stores/renameStore';
 import { useMountStore } from '@/app/stores/mountStore';
 import { formatBytes, formatSpeed, formatEta } from '@/app/utils/formatBytes';
@@ -51,6 +52,7 @@ interface DockTask {
   canPause: boolean;
   canResume: boolean;
   canCancel: boolean;
+  needsReview?: boolean;
 }
 
 function uploadState(status: string): TaskState {
@@ -67,6 +69,7 @@ function downloadState(status: string): TaskState {
 }
 
 function moveState(status: string): TaskState {
+  if (isMoveAwaitingAction(status)) return 'paused';
   if (status === 'success') return 'done';
   if (status === 'error' || status === 'cancelled') return 'error';
   if (status === 'paused') return 'paused';
@@ -146,7 +149,12 @@ export default function TransferDock() {
         id: t.id,
         kind: 'move',
         name,
-        phase: state === 'active' ? MOVE_PHASE_LABEL[t.phase] : undefined,
+        needsReview: isMoveAwaitingAction(t.status),
+        phase: isMoveAwaitingAction(t.status)
+          ? 'NEEDS ATTENTION'
+          : state === 'active'
+            ? MOVE_PHASE_LABEL[t.phase]
+            : undefined,
         progress: t.progress,
         state,
         speed: transferring ? t.speed : 0,
@@ -429,7 +437,10 @@ function DockTaskRow({ task }: { task: DockTask }) {
   async function handleResume() {
     try {
       if (task.kind === 'download') await invoke('resume_download', { taskId: task.id });
-      else if (task.kind === 'move') await invoke('resume_move', { taskId: task.id });
+      else if (task.kind === 'move') {
+        const saved = useMoveStore.getState().tasks.find((item) => item.id === task.id);
+        if (saved) await resumeSavedMove(saved);
+      }
     } catch (e) {
       console.error('Failed to resume task:', e);
     }
@@ -474,6 +485,15 @@ function DockTaskRow({ task }: { task: DockTask }) {
           {task.canPause && (
             <button className="dock-act" onClick={handlePause} title="Pause">
               <PauseOutlined style={{ fontSize: 10 }} />
+            </button>
+          )}
+          {task.needsReview && (
+            <button
+              className="dock-act"
+              onClick={() => useMoveStore.getState().setModalOpen(true)}
+              title="Review move recovery"
+            >
+              Review
             </button>
           )}
           {task.canResume && (

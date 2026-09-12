@@ -11,7 +11,7 @@ use tauri::Manager;
 #[cfg(not(windows))]
 const MOUNT_ROOT: &str = "CloudMounts";
 
-/// Folder under the app's cache directory holding one staging folder per mount.
+/// User data: pending writes must survive cache cleanup.
 const STAGING_ROOT: &str = "mount-stage";
 
 /// Everything needed to mount one bucket. Commands are stateless: the frontend
@@ -37,6 +37,10 @@ pub struct MountBucketInput {
     /// Absent means writable, which is the default a mount is offered as.
     #[serde(default)]
     pub read_only: Option<bool>,
+    #[serde(default)]
+    pub recovery_id: Option<String>,
+    #[serde(default)]
+    pub max_staging_bytes: Option<u64>,
 }
 
 /// Hand-written so credentials cannot reach a log line or a panic message.
@@ -82,6 +86,38 @@ fn non_empty(value: &str) -> Option<&str> {
 }
 
 impl MountBucketInput {
+    fn namespace_id(&self) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        let endpoint = self
+            .endpoint_parts()
+            .map(|(scheme, host)| {
+                reqwest::Url::parse(&format!("{scheme}://{host}"))
+                    .map(|url| url.to_string())
+                    .map_err(|_| "Invalid storage endpoint".to_string())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let principal = if matches!(self.provider, MountProvider::Minio | MountProvider::Rustfs)
+            || !endpoint.is_empty()
+        {
+            self.access_key_id.clone()
+        } else {
+            String::new()
+        };
+        for part in [
+            format!("{:?}", self.provider),
+            self.account_id.clone(),
+            endpoint,
+            self.region.clone().unwrap_or_default(),
+            principal,
+            format!("{:?}", self.force_path_style),
+        ] {
+            digest.update((part.len() as u64).to_le_bytes());
+            digest.update(part.as_bytes());
+        }
+        Ok(hex::encode(digest.finalize()))
+    }
     fn endpoint_parts(&self) -> Option<(String, String)> {
         self.endpoint_url
             .as_deref()
@@ -91,24 +127,21 @@ impl MountBucketInput {
 
     /// Builds the S3 client through the same per-provider factory the sync and
     /// listing commands use, so mounts cannot drift from the rest of the app.
-    async fn create_client(&self) -> Result<Client, String> {
-        match self.provider {
-            MountProvider::R2 => r2::create_r2_client(&r2::R2Config {
+    fn storage_config(&self) -> Result<crate::move_transfer::config::MoveConfig, String> {
+        use crate::move_transfer::config::MoveConfig;
+        Ok(match self.provider {
+            MountProvider::R2 => MoveConfig::R2(r2::R2Config {
                 account_id: self.account_id.clone(),
                 bucket: self.bucket.clone(),
                 access_key_id: self.access_key_id.clone(),
                 secret_access_key: self.secret_access_key.clone(),
-            })
-            .await
-            .map_err(|e| format!("Failed to create client: {}", e)),
-
+            }),
             MountProvider::Aws => {
-                let (endpoint_scheme, endpoint_host) = match self.endpoint_parts() {
-                    Some((scheme, host)) => (Some(scheme), Some(host)),
-                    None => (None, None),
-                };
-
-                aws::create_aws_client(&aws::AwsConfig {
+                let (endpoint_scheme, endpoint_host) = self
+                    .endpoint_parts()
+                    .map(|(scheme, host)| (Some(scheme), Some(host)))
+                    .unwrap_or_default();
+                MoveConfig::Aws(aws::AwsConfig {
                     bucket: self.bucket.clone(),
                     access_key_id: self.access_key_id.clone(),
                     secret_access_key: self.secret_access_key.clone(),
@@ -116,52 +149,48 @@ impl MountBucketInput {
                         .region
                         .as_deref()
                         .and_then(non_empty)
-                        .ok_or_else(|| "AWS mounts require a region".to_string())?
+                        .ok_or("AWS mounts require a region")?
                         .to_string(),
                     endpoint_scheme,
                     endpoint_host,
                     force_path_style: self.force_path_style.unwrap_or(false),
                 })
-                .await
-                .map_err(|e| format!("Failed to create client: {}", e))
             }
-
-            // RustFS speaks the MinIO dialect and always uses path-style URLs.
             MountProvider::Minio | MountProvider::Rustfs => {
                 let (endpoint_scheme, endpoint_host) = self
                     .endpoint_parts()
-                    .ok_or_else(|| "This provider requires an endpoint URL".to_string())?;
-                let force_path_style = match self.provider {
-                    MountProvider::Rustfs => true,
-                    _ => self.force_path_style.unwrap_or(true),
-                };
-
-                minio::create_minio_client(&minio::MinioConfig {
+                    .ok_or("This provider requires an endpoint URL")?;
+                let config = minio::MinioConfig {
                     bucket: self.bucket.clone(),
                     access_key_id: self.access_key_id.clone(),
                     secret_access_key: self.secret_access_key.clone(),
                     endpoint_scheme,
                     endpoint_host,
-                    force_path_style,
-                })
-                .await
-                .map_err(|e| format!("Failed to create client: {}", e))
+                    force_path_style: self.provider == MountProvider::Rustfs
+                        || self.force_path_style.unwrap_or(true),
+                };
+                if self.provider == MountProvider::Rustfs {
+                    MoveConfig::Rustfs(config)
+                } else {
+                    MoveConfig::Minio(config)
+                }
             }
-        }
+        })
+    }
+    async fn create_client(&self) -> Result<Client, String> {
+        self.storage_config()?.client().await
     }
 }
 
 /// Directory the per-mount staging folders live under.
 ///
-/// The app cache directory rather than the system temp directory on purpose:
-/// a file that was written into a mount but not uploaded before the app quit
-/// only exists here, and an OS temp sweep would take it.
+/// Pending writes are durable application data, separate from disposable caches.
 fn staging_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let cache = app
+    let data = app
         .path()
-        .app_cache_dir()
-        .map_err(|e| format!("Failed to resolve the cache directory: {}", e))?;
-    Ok(cache.join(STAGING_ROOT))
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve the data directory: {}", e))?;
+    Ok(data.join(STAGING_ROOT))
 }
 
 /// Expands a leading `~` against the user's home directory.
@@ -229,10 +258,14 @@ pub async fn mount_bucket(
     };
 
     let client = input.create_client().await?;
+    let transfer_config = input.storage_config()?;
     let staging_root = staging_root(&app)?;
+    let namespace_id = input.namespace_id()?;
 
     let info = mount::manager()
         .mount(MountRequest {
+            transfer_config,
+            max_staging_bytes: input.max_staging_bytes,
             provider: input.provider,
             account_id: input.account_id,
             bucket: input.bucket,
@@ -240,6 +273,8 @@ pub async fn mount_bucket(
             client,
             read_only: input.read_only.unwrap_or(false),
             staging_root,
+            namespace_id,
+            recovery_id: input.recovery_id,
             app: app.clone(),
         })
         .await?;
@@ -263,6 +298,75 @@ pub async fn unmount_bucket(mount_id: String, app: tauri::AppHandle) -> Result<(
 #[tauri::command]
 pub async fn list_mounts() -> Result<Vec<MountInfo>, String> {
     Ok(mount::manager().list())
+}
+
+#[tauri::command]
+pub async fn list_mount_recoveries(
+    app: tauri::AppHandle,
+) -> Result<Vec<mount::recovery::MountRecovery>, String> {
+    let root = staging_root(&app)?;
+    let legacy = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join(STAGING_ROOT);
+    let mut result = mount::recovery::list_recoveries(&root, "").await?;
+    if legacy != root {
+        result.extend(mount::recovery::list_recoveries(&legacy, "legacy:").await?);
+    }
+    Ok(result)
+}
+
+fn recovery_directory(
+    app: &tauri::AppHandle,
+    recovery_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    let (root, id) = if let Some(id) = recovery_id.strip_prefix("legacy:") {
+        (
+            app.path()
+                .app_cache_dir()
+                .map_err(|e| e.to_string())?
+                .join(STAGING_ROOT),
+            id,
+        )
+    } else {
+        (staging_root(app)?, recovery_id)
+    };
+    mount::recovery::resolve_recovery_dir(&root, id)
+}
+
+#[tauri::command]
+pub async fn export_mount_recovery(
+    recovery_id: String,
+    destination: String,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let _guard = mount::manager().recovery_guard().await;
+    let source = recovery_directory(&app, &recovery_id)?;
+    if mount::manager().staging_is_active(&source) {
+        return Err("Unmount and let active uploads settle before exporting".to_string());
+    }
+    tokio::task::spawn_blocking(move || {
+        mount::recovery::export_recovery(&source, std::path::Path::new(&destination))
+            .map(|path| path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn discard_mount_recovery(
+    recovery_id: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let _guard = mount::manager().recovery_guard().await;
+    let source = recovery_directory(&app, &recovery_id)?;
+    if mount::manager().staging_is_active(&source) {
+        return Err("Cannot discard uploads used by an active mount".to_string());
+    }
+    tokio::fs::remove_dir_all(source)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

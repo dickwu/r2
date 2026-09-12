@@ -14,7 +14,7 @@ import {
   SwapOutlined,
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
-import { type MoveTask } from '@/app/stores/moveStore';
+import { isMoveAwaitingAction, MOVE_RECOVERY_LABELS, type MoveTask } from '@/app/stores/moveStore';
 import { formatBytes } from '@/app/utils/formatBytes';
 
 const { Text } = Typography;
@@ -59,6 +59,13 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
     task.status === 'finishing' || task.status === 'deleting' || isUploadFinishing;
 
   const getActions = () => {
+    if (isMoveAwaitingAction(task.status)) {
+      return (
+        <Button size="small" icon={<PlayCircleOutlined />} onClick={handleResume}>
+          Review / resume
+        </Button>
+      );
+    }
     switch (task.status) {
       case 'pending':
         return (
@@ -248,6 +255,9 @@ function StatusIcon({ status, progress }: { status: MoveTask['status']; progress
   const isFinishing =
     status === 'finishing' || status === 'deleting' || (status === 'uploading' && progress >= 100);
 
+  if (isMoveAwaitingAction(status))
+    return <PauseCircleOutlined style={{ color: '#faad14', fontSize: 16 }} />;
+
   switch (status) {
     case 'success':
       return <CheckCircleOutlined style={{ color: '#52c41a', fontSize: 16 }} />;
@@ -279,6 +289,19 @@ function StatusIcon({ status, progress }: { status: MoveTask['status']; progress
 }
 
 function TaskDescription({ task }: { task: MoveTask }) {
+  if (isMoveAwaitingAction(task.status))
+    return (
+      <div>
+        <Text type="warning" style={{ fontSize: 12 }}>
+          {MOVE_RECOVERY_LABELS[task.status]}
+        </Text>
+        {task.error && (
+          <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+            {task.error}
+          </Text>
+        )}
+      </div>
+    );
   // Upload at 100% = finishing (post-sync), not actively uploading
   const isUploadFinishing = task.status === 'uploading' && task.progress >= 100;
 

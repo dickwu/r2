@@ -31,26 +31,45 @@ export interface LazyPrefixResult {
   from_cache: boolean;
 }
 
-export interface ListPrefixOptions {
-  forceRefresh?: boolean;
+export interface FolderRequestScope {
+  provider: string;
+  account_id: string;
+  bucket: string;
+  prefix: string;
+  request_id: string;
+  generation: number;
 }
 
-export interface LoadFolderItemsResult {
+export type FolderFreshness = 'fresh' | 'stale' | 'partial';
+
+export interface FolderPage extends LazyPrefixResult, FolderRequestScope {
+  page_index: number;
+  next_cursor: string | null;
+  complete: boolean;
+  freshness: FolderFreshness;
+}
+
+export interface FolderSnapshot {
   items: FileItem[];
-  source: 'prefix' | 'cache-fallback' | 'all-cache-fallback';
+  complete: boolean;
+  fromCache: boolean;
+  freshness: FolderFreshness;
 }
 
 interface LoadFolderItemsOptions<Config> {
   config: Config;
   prefix: string;
-  forceRefresh?: boolean;
-  readCachedFolder: (prefix: string) => Promise<FolderContents>;
-  readAllCachedFiles?: () => Promise<StoredFolderFile[]>;
+  signal?: AbortSignal;
+  readCachedFolder: (config: Config, prefix: string) => Promise<FolderSnapshot | null>;
   readPrefixFolder: (
     config: Config,
     prefix: string,
-    options?: ListPrefixOptions
-  ) => Promise<LazyPrefixResult>;
+    options: {
+      signal?: AbortSignal;
+      onUpdate: (snapshot: FolderSnapshot) => void;
+    }
+  ) => Promise<FolderSnapshot>;
+  onUpdate: (snapshot: FolderSnapshot) => void;
 }
 
 const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
@@ -58,47 +77,6 @@ const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 
 function extractName(key: string, prefix: string): string {
   const relativePath = prefix ? key.slice(prefix.length) : key;
   return relativePath.replace(/\/$/, '');
-}
-
-function hasFolderContents(contents: FolderContents): boolean {
-  return contents.files.length > 0 || contents.folders.length > 0;
-}
-
-function lazyFilesToStored(files: LazyPrefixFile[]): StoredFolderFile[] {
-  return files.map((file) => ({
-    key: file.key,
-    size: file.size,
-    lastModified: file.last_modified,
-  }));
-}
-
-function buildFolderContentsFromAllFiles(
-  files: StoredFolderFile[],
-  prefix: string
-): FolderContents {
-  const directFiles: StoredFolderFile[] = [];
-  const folders = new Set<string>();
-
-  for (const file of files) {
-    if (prefix && !file.key.startsWith(prefix)) continue;
-    if (file.key === prefix || file.key.endsWith('/')) continue;
-
-    const relativePath = prefix ? file.key.slice(prefix.length) : file.key;
-    if (!relativePath) continue;
-
-    const slashIndex = relativePath.indexOf('/');
-    if (slashIndex === -1) {
-      directFiles.push(file);
-      continue;
-    }
-
-    folders.add(`${prefix}${relativePath.slice(0, slashIndex + 1)}`);
-  }
-
-  return {
-    files: directFiles,
-    folders: Array.from(folders),
-  };
 }
 
 export function buildFileItems(
@@ -135,40 +113,67 @@ export function buildFileItems(
   });
 }
 
+/** Match the entire navigation identity before accepting any payload. */
+export function matchesFolderRequest(
+  expected: FolderRequestScope,
+  page: FolderRequestScope
+): boolean {
+  return (
+    expected.provider === page.provider &&
+    expected.account_id === page.account_id &&
+    expected.bucket === page.bucket &&
+    expected.prefix === page.prefix &&
+    expected.request_id === page.request_id &&
+    expected.generation === page.generation
+  );
+}
+
+export function createFolderPageAccumulator(scope: FolderRequestScope) {
+  const files = new Map<string, StoredFolderFile>();
+  const folders = new Set<string>();
+  const cursors = new Set<string>();
+  let nextIndex = 0;
+  let complete = false;
+
+  return {
+    accept(page: FolderPage): FolderSnapshot | null {
+      if (!matchesFolderRequest(scope, page)) return null;
+      if (complete) throw new Error('Folder page received after listing is complete');
+      if (page.page_index !== nextIndex) throw new Error('Folder page sequence is incomplete');
+      if (!page.complete && (!page.next_cursor || cursors.has(page.next_cursor))) {
+        throw new Error('Folder listing returned a missing or repeated cursor');
+      }
+      if (page.complete && page.next_cursor) throw new Error('Complete folder page has a cursor');
+      if (page.next_cursor) cursors.add(page.next_cursor);
+      nextIndex += 1;
+      complete = page.complete;
+      for (const file of page.files) {
+        files.set(file.key, { key: file.key, size: file.size, lastModified: file.last_modified });
+      }
+      for (const folder of page.folders) folders.add(folder);
+      return {
+        items: buildFileItems(Array.from(files.values()), Array.from(folders), scope.prefix),
+        complete,
+        fromCache: page.from_cache,
+        freshness: complete ? page.freshness : 'partial',
+      };
+    },
+  };
+}
+
+/** Publish known cache immediately. Failed refreshes remain errors, even with cached rows. */
 export async function loadFolderItems<Config>({
   config,
   prefix,
-  forceRefresh = false,
+  signal,
   readCachedFolder,
-  readAllCachedFiles,
   readPrefixFolder,
-}: LoadFolderItemsOptions<Config>): Promise<LoadFolderItemsResult> {
-  const cached = await readCachedFolder(prefix);
-
-  try {
-    const prefixResult = await readPrefixFolder(config, prefix, { forceRefresh });
-    return {
-      items: buildFileItems(lazyFilesToStored(prefixResult.files), prefixResult.folders, prefix),
-      source: 'prefix',
-    };
-  } catch (err) {
-    if (hasFolderContents(cached)) {
-      return {
-        items: buildFileItems(cached.files, cached.folders, prefix),
-        source: 'cache-fallback',
-      };
-    }
-
-    if (readAllCachedFiles) {
-      const allCachedContents = buildFolderContentsFromAllFiles(await readAllCachedFiles(), prefix);
-      if (hasFolderContents(allCachedContents)) {
-        return {
-          items: buildFileItems(allCachedContents.files, allCachedContents.folders, prefix),
-          source: 'all-cache-fallback',
-        };
-      }
-    }
-
-    throw err;
-  }
+  onUpdate,
+}: LoadFolderItemsOptions<Config>): Promise<FolderSnapshot> {
+  signal?.throwIfAborted();
+  // A cache read failure should not prevent the live provider request.
+  const cached = await readCachedFolder(config, prefix).catch(() => null);
+  signal?.throwIfAborted();
+  if (cached) onUpdate(cached);
+  return readPrefixFolder(config, prefix, { signal, onUpdate });
 }

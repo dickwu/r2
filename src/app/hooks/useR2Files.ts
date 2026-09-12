@@ -1,101 +1,49 @@
-import { useEffect, useMemo } from 'react';
-import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
-import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { getAllFiles, getFolderContents, listPrefix } from '@/app/lib/r2cache';
-import { StorageConfig } from '@/app/lib/r2cache';
+import { useCallback, useEffect, useMemo } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import {
+  getPrefixCache,
+  hasSigningCredentials,
+  streamFolderPrefix,
+  type StorageConfig,
+} from '@/app/lib/r2cache';
 import { useSyncStore } from '@/app/stores/syncStore';
 import { useCurrentPathStore } from '@/app/stores/currentPathStore';
-import { loadFolderItems } from '@/app/utils/folderItems';
-import type { FileItem } from '@/app/utils/folderItems';
+import { useMoveStore, type MoveStatusChangedEvent } from '@/app/stores/moveStore';
+import { loadFolderItems, type FolderSnapshot } from '@/app/utils/folderItems';
+import { affectedMoveFolders, createFolderInvalidator, parentPrefix } from '@/app/utils/syncScope';
 
 export type { FileItem } from '@/app/utils/folderItems';
 
-// Event emitted by backend when cache is updated
-interface MoveStatusChangedEvent {
-  task_id: string;
-  status: string;
-  error: string | null;
-}
-
-function getParentPath(path: string): string {
-  if (!path) return '';
-  const withoutTrailing = path.endsWith('/') ? path.slice(0, -1) : path;
-  const lastSlash = withoutTrailing.lastIndexOf('/');
-  if (lastSlash === -1) return '';
-  return `${withoutTrailing.slice(0, lastSlash + 1)}`;
-}
-
 export function useR2Files(config: StorageConfig | null, prefix: string = '') {
   const queryClient = useQueryClient();
-  const queryKey = ['folder-contents', config?.provider, config?.accountId, config?.bucket, prefix];
-
-  // Get per-bucket sync time - only load from cache after sync completes
-  const bucketSyncTimes = useSyncStore((state) => state.bucketSyncTimes);
-  const lastSyncTime = useMemo(() => {
-    if (!config?.accountId || !config?.bucket) return null;
-    return useSyncStore.getState().getLastSyncTime(config.accountId, config.bucket);
-  }, [config?.accountId, config?.bucket, bucketSyncTimes]);
-
-  const isConfigReady = useMemo(() => {
-    if (!config?.accountId || !config?.bucket) return false;
-    if (config.provider === 'r2') {
-      return !!config.accessKeyId && !!config.secretAccessKey;
-    }
-    if (config.provider === 'aws') {
-      return !!config.accessKeyId && !!config.secretAccessKey && !!config.region;
-    }
-    return (
-      !!config.accessKeyId &&
-      !!config.secretAccessKey &&
-      !!config.endpointHost &&
-      !!config.endpointScheme
-    );
-  }, [config]);
+  const queryKey = useMemo(
+    () => ['folder-contents', config?.provider, config?.accountId, config?.bucket, prefix],
+    [config?.provider, config?.accountId, config?.bucket, prefix]
+  );
 
   const query = useQuery({
     queryKey,
-    queryFn: async (): Promise<FileItem[]> => {
-      if (!config) return [];
-
-      try {
-        // Cache-first: the backend serves straight from SQLite when the bucket
-        // is fully synced or the prefix's lazy listing is fresh, and only then
-        // pays for a network LIST. Manual refresh goes through useFilesSync's
-        // refresh(), which restarts a real background sync.
-        const result = await loadFolderItems({
-          config,
-          prefix,
-          forceRefresh: false,
-          readCachedFolder: getFolderContents,
-          readAllCachedFiles: getAllFiles,
-          readPrefixFolder: listPrefix,
-        });
-
-        if (result.source === 'prefix') {
-          useSyncStore.getState().setLastSyncTime(config.accountId, config.bucket, Date.now());
-        }
-
-        return result.items;
-      } catch (err) {
-        console.warn('[useR2Files] failed to load prefix and no cache fallback was available:', {
-          prefix,
-          err,
-        });
-        return [];
-      }
+    queryFn: async ({ signal }): Promise<FolderSnapshot> => {
+      if (!config) throw new Error('Storage account is not configured');
+      return loadFolderItems({
+        config,
+        prefix,
+        signal,
+        readCachedFolder: getPrefixCache,
+        readPrefixFolder: streamFolderPrefix,
+        onUpdate: (snapshot) => {
+          if (!signal.aborted) queryClient.setQueryData(queryKey, snapshot);
+        },
+      });
     },
-    // Enable immediately when config is ready — lazy sync handles missing cache
-    enabled: isConfigReady,
-    retry: 1,
-    // Cache-updated events invalidate affected folders explicitly, so a
-    // short staleTime only suppresses redundant remount/refocus refetches.
+    enabled: hasSigningCredentials(config),
+    // The backend owns the bounded network retry budget. Do not multiply it here.
+    retry: false,
     staleTime: 30_000,
-    // Keep the previous folder on screen while the next one resolves —
-    // navigation swaps lists instead of blanking.
-    placeholderData: keepPreviousData,
+    // Previous-directory rows are never actionable placeholders for this scope.
   });
 
-  // Sync isFetching state to zustand store as isFolderLoading
   useEffect(() => {
     useSyncStore.getState().setIsFolderLoading(query.isFetching);
   }, [query.isFetching]);
@@ -103,73 +51,100 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
   const cacheUpdatedPaths = useCurrentPathStore((state) => state.cacheUpdatedPaths);
   const removedPaths = useCurrentPathStore((state) => state.removedPaths);
   const createdPaths = useCurrentPathStore((state) => state.createdPaths);
+  const invalidator = useMemo(
+    () =>
+      createFolderInvalidator((key) => {
+        void queryClient.invalidateQueries({ queryKey: key });
+      }),
+    [queryClient]
+  );
 
-  // Auto-refresh affected folders when cache changes
+  useEffect(() => () => invalidator.dispose(), [invalidator]);
+
   useEffect(() => {
-    if (!config?.bucket) return;
-
-    const invalidateFolderQueries = (paths: string[]) => {
-      for (const path of paths) {
-        queryClient.invalidateQueries({
-          queryKey: ['folder-contents', config.provider, config.accountId, config.bucket, path],
-        });
-      }
-    };
-
-    const invalidateParentQueries = (paths: string[]) => {
-      const parentPaths = new Set(paths.map(getParentPath));
-      invalidateFolderQueries(Array.from(parentPaths));
-    };
-    if (cacheUpdatedPaths.length > 0) {
-      invalidateFolderQueries(cacheUpdatedPaths);
-    }
-    if (removedPaths.length > 0) {
-      invalidateParentQueries(removedPaths);
-    }
-    if (createdPaths.length > 0) {
-      invalidateParentQueries(createdPaths);
-    }
+    if (!config) return;
+    const prefixes = new Set([
+      ...cacheUpdatedPaths,
+      ...removedPaths.map(parentPrefix),
+      ...createdPaths.map(parentPrefix),
+    ]);
+    invalidator.add(
+      Array.from(prefixes, (path) => [
+        'folder-contents',
+        config.provider,
+        config.accountId,
+        config.bucket,
+        path,
+      ])
+    );
   }, [
-    config?.bucket,
-    config?.accountId,
     config?.provider,
-    queryClient,
+    config?.accountId,
+    config?.bucket,
     cacheUpdatedPaths,
     removedPaths,
     createdPaths,
+    invalidator,
   ]);
 
-  // Refresh current folder list after move completes
   useEffect(() => {
-    if (!config?.bucket || !config?.accountId) return;
-
+    let disposed = false;
     let unlisten: UnlistenFn | undefined;
-
-    const setup = async () => {
-      unlisten = await listen<MoveStatusChangedEvent>('move-status-changed', (event) => {
-        if (event.payload.status === 'success') {
-          queryClient.invalidateQueries({
-            queryKey: ['folder-contents', config.provider, config.accountId, config.bucket, prefix],
-          });
-        }
-      });
-    };
-
-    setup();
-
+    void listen<MoveStatusChangedEvent>('move-status-changed', ({ payload }) => {
+      if (disposed || payload.status !== 'success') return;
+      if (
+        payload.source_provider &&
+        payload.source_account_id &&
+        payload.source_bucket &&
+        payload.source_key &&
+        payload.dest_provider &&
+        payload.dest_account_id &&
+        payload.dest_bucket &&
+        payload.dest_key
+      ) {
+        invalidator.add(
+          affectedMoveFolders({
+            sourceProvider: payload.source_provider,
+            sourceAccountId: payload.source_account_id,
+            sourceBucket: payload.source_bucket,
+            sourceKey: payload.source_key,
+            destProvider: payload.dest_provider,
+            destAccountId: payload.dest_account_id,
+            destBucket: payload.dest_bucket,
+            destKey: payload.dest_key,
+            deleteOriginal: payload.delete_original ?? true,
+          })
+        );
+      } else {
+        const task = useMoveStore
+          .getState()
+          .tasks.find((candidate) => candidate.id === payload.task_id);
+        if (task) invalidator.add(affectedMoveFolders(task));
+      }
+    })
+      .then((remove) => {
+        if (disposed) remove();
+        else unlisten = remove;
+      })
+      .catch((error) => console.warn('Unable to listen for moved files', error));
     return () => {
-      if (unlisten) unlisten();
+      disposed = true;
+      unlisten?.();
     };
-  }, [config?.bucket, config?.accountId, config?.provider, prefix, queryClient]);
+  }, [invalidator]);
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey });
-  }
+  }, [queryClient, queryKey]);
 
   return {
-    items: query.data ?? [],
+    items: query.data?.items ?? [],
+    hasData: query.data !== undefined,
     isLoading: query.isLoading,
     isFetching: query.isFetching,
+    isPartial: query.data?.complete === false,
+    isCached: query.data?.fromCache ?? false,
+    freshness: query.data?.freshness,
     error: query.error,
     refresh,
   };

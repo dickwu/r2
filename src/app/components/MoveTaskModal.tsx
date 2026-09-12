@@ -7,6 +7,7 @@ import { Virtuoso } from 'react-virtuoso';
 import {
   useMoveStore,
   selectPendingCount,
+  isMoveAwaitingAction,
   selectActiveCount,
   selectDownloadingCount,
   selectUploadingCount,
@@ -20,117 +21,15 @@ import {
 import { useAccountStore, type ProviderAccount } from '@/app/stores/accountStore';
 import MoveTaskItem from '@/app/components/MoveTaskItem';
 import type { StorageConfig } from '@/app/lib/r2cache';
+import {
+  buildSourceConfigFromAccounts,
+  buildDestinationConfigFromAccounts,
+  type MoveConfigInput,
+} from '@/app/utils/moveConfig';
+import { resumeSavedMove } from '@/app/lib/moveRecovery';
 
 interface MoveTaskModalProps {
   storageConfig?: StorageConfig | null;
-}
-
-interface MoveConfigInput {
-  provider: string;
-  account_id: string;
-  bucket: string;
-  access_key_id: string;
-  secret_access_key: string;
-  region?: string | null;
-  endpoint_scheme?: string | null;
-  endpoint_host?: string | null;
-  force_path_style?: boolean | null;
-}
-
-function buildMoveConfigFromAccounts(
-  provider: string,
-  accountId: string,
-  bucket: string,
-  accounts: ProviderAccount[]
-): MoveConfigInput | null {
-  const accountEntry = accounts.find(
-    (account) => account.provider === provider && account.account.id === accountId
-  );
-  if (!accountEntry) return null;
-
-  if (accountEntry.provider === 'r2') {
-    const tokenEntry = accountEntry.tokens.find((token) =>
-      token.buckets.some((item) => item.name === bucket)
-    );
-    if (!tokenEntry) return null;
-    return {
-      provider: 'r2',
-      account_id: accountEntry.account.id,
-      bucket,
-      access_key_id: tokenEntry.token.access_key_id,
-      secret_access_key: tokenEntry.token.secret_access_key,
-      region: null,
-      endpoint_scheme: null,
-      endpoint_host: null,
-      force_path_style: null,
-    };
-  }
-
-  if (accountEntry.provider === 'aws') {
-    return {
-      provider: 'aws',
-      account_id: accountEntry.account.id,
-      bucket,
-      access_key_id: accountEntry.account.access_key_id,
-      secret_access_key: accountEntry.account.secret_access_key,
-      region: accountEntry.account.region,
-      endpoint_scheme: accountEntry.account.endpoint_scheme,
-      endpoint_host: accountEntry.account.endpoint_host,
-      force_path_style: accountEntry.account.force_path_style,
-    };
-  }
-
-  if (accountEntry.provider === 'minio') {
-    return {
-      provider: 'minio',
-      account_id: accountEntry.account.id,
-      bucket,
-      access_key_id: accountEntry.account.access_key_id,
-      secret_access_key: accountEntry.account.secret_access_key,
-      endpoint_scheme: accountEntry.account.endpoint_scheme,
-      endpoint_host: accountEntry.account.endpoint_host,
-      force_path_style: accountEntry.account.force_path_style,
-    };
-  }
-
-  if (accountEntry.provider === 'rustfs') {
-    return {
-      provider: 'rustfs',
-      account_id: accountEntry.account.id,
-      bucket,
-      access_key_id: accountEntry.account.access_key_id,
-      secret_access_key: accountEntry.account.secret_access_key,
-      endpoint_scheme: accountEntry.account.endpoint_scheme,
-      endpoint_host: accountEntry.account.endpoint_host,
-      force_path_style: true,
-    };
-  }
-
-  return null;
-}
-
-function buildDestinationConfigFromAccounts(
-  task: MoveTask,
-  accounts: ProviderAccount[]
-): MoveConfigInput | null {
-  return buildMoveConfigFromAccounts(
-    task.destProvider,
-    task.destAccountId,
-    task.destBucket,
-    accounts
-  );
-}
-
-function buildSourceConfigFromAccounts(
-  task: MoveTask,
-  accounts: ProviderAccount[]
-): MoveConfigInput | null {
-  return buildMoveConfigFromAccounts(
-    task.sourceProvider,
-    task.sourceAccountId,
-    task.sourceBucket,
-    accounts
-  );
 }
 
 export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
@@ -151,7 +50,9 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
   const accounts = useAccountStore((state) => state.accounts);
   const loadAccounts = useAccountStore((state) => state.loadAccounts);
 
-  const [activeTab, setActiveTab] = useState<'pending' | 'finishing' | 'finished'>('pending');
+  const [activeTab, setActiveTab] = useState<'pending' | 'finishing' | 'attention' | 'finished'>(
+    'pending'
+  );
 
   const { message } = App.useApp();
 
@@ -190,6 +91,11 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       return 0;
     });
   }, [tasks]);
+
+  const attentionTasks = useMemo(
+    () => tasks.filter((task) => isMoveAwaitingAction(task.status)),
+    [tasks]
+  );
 
   const finishedTasks = useMemo(
     () =>
@@ -429,6 +335,15 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
         return;
       }
 
+      // Install all current credentials before any resumed group can run.
+      for (const group of groups.values()) {
+        await invoke('start_move_queue', {
+          sourceConfig: group.sourceConfig,
+          destConfig: group.destConfig,
+          deferStart: true,
+        });
+      }
+
       // Resume paused tasks for all source queues in view.
       const resumeTargets = new Map<string, { sourceBucket: string; sourceAccountId: string }>();
       for (const task of pendingTargets) {
@@ -488,43 +403,10 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
   const handleResume = async (taskId: string) => {
     const task = tasks.find((item) => item.id === taskId);
     if (!task) return;
-
-    const sourceConfig = buildSourceConfigFromAccounts(task, accounts);
-    const destConfig = buildDestinationConfigFromAccounts(task, accounts);
-    if (!sourceConfig || !destConfig) {
-      await loadAccounts();
-      const refreshedAccounts = useAccountStore.getState().accounts;
-      const refreshedSourceConfig = buildSourceConfigFromAccounts(task, refreshedAccounts);
-      const refreshedDestConfig = buildDestinationConfigFromAccounts(task, refreshedAccounts);
-
-      if (!refreshedSourceConfig || !refreshedDestConfig) {
-        message.error('Source/destination credentials are required to resume this move');
-        return;
-      }
-
-      try {
-        await invoke('resume_move', { taskId });
-        await invoke('start_move_queue', {
-          sourceConfig: refreshedSourceConfig,
-          destConfig: refreshedDestConfig,
-        });
-        return;
-      } catch (e) {
-        console.error('Failed to resume move:', e);
-        message.error('Failed to resume move');
-        return;
-      }
-    }
-
     try {
-      await invoke('resume_move', { taskId });
-      await invoke('start_move_queue', {
-        sourceConfig,
-        destConfig,
-      });
-    } catch (e) {
-      console.error('Failed to resume move:', e);
-      message.error('Failed to resume move');
+      await resumeSavedMove(task);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -591,6 +473,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
         className="move-task-list"
         style={{ height: 350 }}
         data={taskList}
+        computeItemKey={(_index, task) => task.id}
         itemContent={(index, task) => (
           <MoveTaskItem key={task.id} task={task} onResume={() => handleResume(task.id)} />
         )}
@@ -641,6 +524,15 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       children: renderTaskList(finishingTasks),
     },
     {
+      key: 'attention',
+      label: (
+        <span>
+          Needs attention <Badge count={attentionTasks.length} showZero size="small" />
+        </span>
+      ),
+      children: renderTaskList(attentionTasks),
+    },
+    {
       key: 'finished',
       label: (
         <span>
@@ -687,7 +579,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
               )}
             </div>
             <div>
-              {!hasInProgressMoves && tasks.length > 0 && (
+              {!hasInProgressMoves && attentionTasks.length === 0 && tasks.length > 0 && (
                 <Popconfirm
                   title="Clear all moves"
                   description="Are you sure you want to clear all move tasks?"
@@ -713,7 +605,9 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       <div className="cursor-default select-none">
         <Tabs
           activeKey={activeTab}
-          onChange={(key) => setActiveTab(key as 'pending' | 'finishing' | 'finished')}
+          onChange={(key) =>
+            setActiveTab(key as 'pending' | 'finishing' | 'attention' | 'finished')
+          }
           items={tabItems}
           size="small"
         />

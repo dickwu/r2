@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use aws_sdk_s3::Client;
@@ -41,6 +41,17 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Ceilings for the interactive (user-initiated) commands.
 const MOUNT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const UNMOUNT_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+const INTERACTIVE_UNMOUNT_BUDGET: Duration = Duration::from_secs(45);
+const PRE_DRAIN_BUDGET: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MountHealth {
+    Mounted,
+    Degraded,
+    Offline,
+    Unmounting,
+}
 
 /// Process-wide mount registry, following the `OnceLock` globals this crate
 /// uses for shared state (see `db::DB_CONNECTION`).
@@ -71,6 +82,12 @@ pub struct MountInfo {
     pub port: u16,
     pub read_only: bool,
     pub mounted_at: i64,
+    pub health: MountHealth,
+    pub health_error: Option<String>,
+    pub pending_uploads: usize,
+    pub dirty_bytes: u64,
+    pub oldest_dirty_ms: u64,
+    pub last_successful_io: Option<i64>,
 }
 
 /// Payload of the `mount-changed` event: always the complete mount list.
@@ -82,6 +99,8 @@ pub struct MountChangedPayload {
 /// Everything the manager needs to bring a mount up. The S3 client is built by
 /// the command layer so provider credential handling stays in one place.
 pub struct MountRequest {
+    pub transfer_config: crate::move_transfer::config::MoveConfig,
+    pub max_staging_bytes: Option<u64>,
     pub provider: MountProvider,
     pub account_id: String,
     pub bucket: String,
@@ -90,10 +109,11 @@ pub struct MountRequest {
     pub client: Client,
     pub read_only: bool,
     /// Directory the per-mount staging folder is created under. Deliberately
-    /// the app's cache directory rather than the system temp directory:
-    /// unflushed writes have to survive an OS temp sweep so they can still be
-    /// recovered by hand.
+    /// the app's persistent data directory: unflushed writes are user data.
     pub staging_root: PathBuf,
+    /// Explicit recovery selection, validated against its saved namespace.
+    pub recovery_id: Option<String>,
+    pub namespace_id: String,
     /// Used by the flusher to report an upload it could not complete.
     pub app: tauri::AppHandle,
 }
@@ -106,6 +126,9 @@ struct ActiveMount {
     /// Second handle to the filesystem, kept so staged writes can be drained
     /// once the client has been disconnected.
     fs: S3NfsFs,
+    supervisor: Option<JoinHandle<()>>,
+    app: tauri::AppHandle,
+    namespace_id: String,
 }
 
 /// Registry of active mounts.
@@ -114,7 +137,7 @@ struct ActiveMount {
 /// never across an await — so the app-exit hook can drain it synchronously
 /// without needing an async runtime.
 pub struct MountManager {
-    mounts: Mutex<HashMap<String, ActiveMount>>,
+    mounts: Arc<Mutex<HashMap<String, ActiveMount>>>,
     /// Serializes mount setup so two concurrent requests cannot claim the same
     /// path between validation and registration.
     setup: tokio::sync::Mutex<()>,
@@ -130,7 +153,7 @@ impl Default for MountManager {
 impl MountManager {
     pub fn new() -> Self {
         Self {
-            mounts: Mutex::new(HashMap::new()),
+            mounts: Arc::new(Mutex::new(HashMap::new())),
             setup: tokio::sync::Mutex::new(()),
             counter: AtomicU64::new(1),
         }
@@ -141,7 +164,7 @@ impl MountManager {
         let Ok(mounts) = self.mounts.lock() else {
             return Vec::new();
         };
-        let mut infos: Vec<MountInfo> = mounts.values().map(|m| m.info.clone()).collect();
+        let mut infos: Vec<MountInfo> = mounts.values().map(current_info).collect();
         infos.sort_by(|a, b| {
             a.mounted_at
                 .cmp(&b.mounted_at)
@@ -173,6 +196,20 @@ impl MountManager {
         let platform = MountPlatform::CURRENT;
         let _setup = self.setup.lock().await;
 
+        {
+            let mounts = self
+                .mounts
+                .lock()
+                .map_err(|_| "Mount registry is unavailable".to_string())?;
+            if mounts.values().any(|mount| {
+                mount.namespace_id == request.namespace_id
+                    && mount.info.bucket == request.bucket
+                    && (!mount.info.read_only || !request.read_only)
+            }) {
+                return Err("This bucket already has a mount. Unmount it before attaching a writable view so staged writes have one owner".to_string());
+            }
+        }
+
         let target = normalize_target(&request.local_path)?;
         self.ensure_path_available(&target)?;
         let created_dir = prepare_target(platform, &target)?;
@@ -197,7 +234,29 @@ impl MountManager {
         // The id is minted up front because the staging folder is named after
         // it and the filesystem needs it before the server can bind.
         let mount_id = self.next_mount_id();
-        let staging_dir = request.staging_root.join(&mount_id);
+        let staging_dir = if let Some(recovery_id) = &request.recovery_id {
+            if request.read_only {
+                return Err("Pending uploads require a writable recovery mount".to_string());
+            }
+            let dir = super::recovery::resolve_recovery_dir(&request.staging_root, recovery_id)?;
+            super::recovery::validate_identity(
+                &dir,
+                request.provider,
+                &request.account_id,
+                &request.bucket,
+                &request.namespace_id,
+            )?;
+            let mounts = self
+                .mounts
+                .lock()
+                .map_err(|_| "Mount registry is unavailable".to_string())?;
+            if mounts.values().any(|mount| mount.fs.staging_root() == dir) {
+                return Err("These uploads are already attached to an active mount".to_string());
+            }
+            dir
+        } else {
+            request.staging_root.join(&mount_id)
+        };
         if !request.read_only {
             // Surfaced now rather than at the first write, when the failure
             // would reach the user as an unexplained I/O error.
@@ -208,6 +267,13 @@ impl MountManager {
                     e
                 )
             })?;
+            super::recovery::save_mount_manifest(
+                &staging_dir,
+                request.provider,
+                &request.account_id,
+                &request.bucket,
+                &request.namespace_id,
+            )?;
         }
 
         let fs = S3NfsFs::new(
@@ -217,6 +283,21 @@ impl MountManager {
             staging_dir,
         );
         fs.set_progress(request.app.clone(), mount_id.clone());
+        fs.configure_transfer(request.transfer_config);
+        if !request.read_only {
+            let available = super::quota::available_space(fs.staging_root())
+                .map_err(|e| format!("Cannot determine staging disk capacity: {e}"))?;
+            let limit = request
+                .max_staging_bytes
+                .unwrap_or_else(|| available.saturating_mul(4) / 5);
+            if limit < 8 * 1024 * 1024 {
+                return Err("Insufficient staging disk capacity".to_string());
+            }
+            fs.configure_quota(limit).await;
+        }
+        if request.recovery_id.is_some() {
+            fs.restore_stages().await?;
+        }
 
         // The Windows NFS client cannot be pointed at a port: it asks the
         // portmapper on port 111 of the host it mounts. So on Windows the
@@ -257,6 +338,7 @@ impl MountManager {
             return Err(e);
         }
 
+        let health = fs.health_snapshot().await;
         let flusher = if request.read_only {
             None
         } else {
@@ -272,6 +354,16 @@ impl MountManager {
             port,
             read_only: request.read_only,
             mounted_at: chrono::Utc::now().timestamp(),
+            health: if health.last_error.is_some() {
+                MountHealth::Degraded
+            } else {
+                MountHealth::Mounted
+            },
+            health_error: health.last_error,
+            pending_uploads: health.pending_uploads,
+            dirty_bytes: health.dirty_bytes,
+            oldest_dirty_ms: health.oldest_dirty_ms,
+            last_successful_io: health.last_successful_io,
         };
 
         // The registry guard must not be held across the cleanup await below.
@@ -284,6 +376,9 @@ impl MountManager {
                         server,
                         flusher,
                         fs,
+                        supervisor: None,
+                        app: request.app.clone(),
+                        namespace_id: request.namespace_id,
                     },
                 );
                 None
@@ -302,6 +397,19 @@ impl MountManager {
             return Err("Mount registry is unavailable".to_string());
         }
 
+        let supervisor = spawn_supervisor(
+            Arc::downgrade(&self.mounts),
+            request.app,
+            info.mount_id.clone(),
+        );
+        if let Ok(mut mounts) = self.mounts.lock() {
+            if let Some(mount) = mounts.get_mut(&info.mount_id) {
+                mount.supervisor = Some(supervisor);
+            } else {
+                supervisor.abort();
+            }
+        }
+
         Ok(info)
     }
 
@@ -314,6 +422,10 @@ impl MountManager {
     /// (usually a file still open) the mount stays registered, with its flusher
     /// still running, so the user can retry.
     pub async fn unmount(&self, mount_id: &str) -> Result<(), String> {
+        // The same staging folder must never be recovered or unmounted twice
+        // while its current writer is still converging.
+        let deadline = tokio::time::Instant::now() + INTERACTIVE_UNMOUNT_BUDGET;
+        let _setup = tokio::time::timeout_at(deadline, self.setup.lock()).await.map_err(|_| "Another mount operation exceeded the unmount queue budget; staged uploads remain available".to_string())?;
         let (local_path, fs) = {
             let mounts = self
                 .mounts
@@ -325,15 +437,53 @@ impl MountManager {
                 .ok_or_else(|| format!("No active mount with id \"{}\"", mount_id))?
         };
 
-        fs.drain(DRAIN_ROUNDS, stage::UPLOAD_ATTEMPTS).await;
+        let _ = tokio::time::timeout(
+            PRE_DRAIN_BUDGET,
+            fs.drain(DRAIN_ROUNDS, stage::UPLOAD_ATTEMPTS),
+        )
+        .await;
+        {
+            let mut mounts = self
+                .mounts
+                .lock()
+                .map_err(|_| "Mount registry is unavailable".to_string())?;
+            if let Some(mount) = mounts.get_mut(mount_id) {
+                mount.info.health = MountHealth::Unmounting;
+            }
+        }
+        let unmount_result = tokio::time::timeout_at(
+            deadline,
+            run_umount_command(MountPlatform::CURRENT, &local_path),
+        )
+        .await;
+        if !matches!(unmount_result, Ok(Ok(()))) {
+            let error = match unmount_result {
+                Ok(Err(error)) => error,
+                _ => "Unmount budget expired; the mount and staged uploads remain available"
+                    .to_string(),
+            };
+            if let Ok(mut mounts) = self.mounts.lock() {
+                if let Some(mount) = mounts.get_mut(mount_id) {
+                    mount.info.health = MountHealth::Degraded;
+                    mount.info.health_error = Some(error.clone());
+                }
+            }
+            return Err(error);
+        }
 
-        run_umount_command(MountPlatform::CURRENT, &local_path).await?;
+        // nfsserve detaches accepted sockets. Stopping the listener alone
+        // does not fence an already accepted WRITE RPC.
+        fs.stop_accepting_writes();
 
         let removed = match self.mounts.lock() {
             Ok(mut mounts) => mounts.remove(mount_id),
             Err(_) => None,
         };
         if let Some(mount) = &removed {
+            if let Some(supervisor) = &mount.supervisor {
+                supervisor.abort();
+            }
+            mount.server.abort();
             // Stop the background flusher before the final drain so the two do
             // not upload the same file at once.
             if let Some(flusher) = &mount.flusher {
@@ -344,13 +494,47 @@ impl MountManager {
         // those are detached tasks. Waiting them out is what keeps the drain
         // below from racing one for the same key, and keeps the staging folder
         // from being deleted while a multipart upload is still reading it.
-        fs.wait_for_flushes().await;
-        fs.reset_flush_state().await;
-
-        let unflushed = fs.drain(DRAIN_ROUNDS, stage::UPLOAD_ATTEMPTS).await;
-
-        if let Some(mount) = removed {
-            mount.server.abort();
+        let settled = tokio::time::timeout_at(deadline, async {
+            fs.wait_for_mutations().await;
+            fs.wait_for_flushes().await;
+            fs.reset_flush_state().await;
+            fs.drain(DRAIN_ROUNDS, stage::UPLOAD_ATTEMPTS).await
+        })
+        .await;
+        let timed_out = settled.is_err();
+        let unflushed = settled.unwrap_or(1);
+        // Keep a timed-out mount's FS owned until detached publishers settle;
+        // recovery must not reuse its directory while any publisher is alive.
+        if timed_out {
+            if let Some(mut mount) = removed {
+                mount.info.health = MountHealth::Offline;
+                mount.info.health_error = Some(
+                    "Unmounted with pending uploads; waiting for in-flight requests to settle"
+                        .to_string(),
+                );
+                let app = mount.app.clone();
+                if let Ok(mut mounts) = self.mounts.lock() {
+                    mounts.insert(mount_id.to_string(), mount);
+                }
+                let mounts = Arc::downgrade(&self.mounts);
+                let id = mount_id.to_string();
+                let waiting_fs = fs.clone();
+                tokio::spawn(async move {
+                    waiting_fs.wait_for_mutations().await;
+                    waiting_fs.wait_for_flushes().await;
+                    if let Some(mounts) = mounts.upgrade() {
+                        if let Ok(mut mounts) = mounts.lock() {
+                            mounts.remove(&id);
+                            let _ = app.emit(
+                                "mount-changed",
+                                MountChangedPayload {
+                                    mounts: mounts.values().map(current_info).collect(),
+                                },
+                            );
+                        }
+                    }
+                });
+            }
         }
 
         if unflushed > 0 {
@@ -410,6 +594,10 @@ impl MountManager {
             }
             // The server task is aborted either way — the process is going away.
             mount.server.abort();
+            mount.fs.stop_accepting_writes();
+            if let Some(supervisor) = mount.supervisor {
+                supervisor.abort();
+            }
             if let Some(flusher) = mount.flusher {
                 flusher.abort();
                 writable.push(mount.fs);
@@ -439,6 +627,171 @@ impl MountManager {
 
         Ok(())
     }
+
+    pub fn staging_is_active(&self, directory: &Path) -> bool {
+        self.mounts
+            .lock()
+            .map(|mounts| {
+                mounts
+                    .values()
+                    .any(|mount| mount.fs.staging_root() == directory)
+            })
+            .unwrap_or(true)
+    }
+
+    pub async fn recovery_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.setup.lock().await
+    }
+}
+
+fn current_info(mount: &ActiveMount) -> MountInfo {
+    with_task_health(
+        mount.info.clone(),
+        mount.server.is_finished(),
+        mount.flusher.as_ref().is_some_and(JoinHandle::is_finished),
+    )
+}
+
+fn with_task_health(
+    mut info: MountInfo,
+    server_finished: bool,
+    flusher_finished: bool,
+) -> MountInfo {
+    if info.health == MountHealth::Offline || info.health == MountHealth::Unmounting {
+        return info;
+    }
+    if server_finished {
+        info.health = MountHealth::Offline;
+        info.health_error =
+            Some("The local NFS server stopped; staged uploads are retained".to_string());
+    } else if flusher_finished {
+        info.health = MountHealth::Degraded;
+        info.health_error =
+            Some("The upload worker stopped; staged uploads are retained".to_string());
+    }
+    info
+}
+
+fn spawn_supervisor(
+    mounts: std::sync::Weak<Mutex<HashMap<String, ActiveMount>>>,
+    app: tauri::AppHandle,
+    mount_id: String,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let Some(registry) = mounts.upgrade() else {
+                break;
+            };
+            let candidate = registry.lock().ok().and_then(|mounts| {
+                mounts.get(&mount_id).map(|mount| {
+                    let mut info = mount.info.clone();
+                    if info.health != MountHealth::Offline && info.health != MountHealth::Unmounting
+                    {
+                        info.health = MountHealth::Mounted;
+                        info.health_error = None;
+                    }
+                    (
+                        with_task_health(
+                            info,
+                            mount.server.is_finished(),
+                            mount.flusher.as_ref().is_some_and(JoinHandle::is_finished),
+                        ),
+                        mount.fs.clone(),
+                    )
+                })
+            });
+            let Some((mut info, fs)) = candidate else {
+                break;
+            };
+            if info.health == MountHealth::Unmounting {
+                continue;
+            }
+            if let Ok(health) =
+                tokio::time::timeout(Duration::from_secs(1), fs.health_snapshot()).await
+            {
+                info.pending_uploads = health.pending_uploads;
+                info.dirty_bytes = health.dirty_bytes;
+                info.oldest_dirty_ms = health.oldest_dirty_ms;
+                info.last_successful_io = health.last_successful_io;
+                if info.health != MountHealth::Offline {
+                    if let Some(error) = health.last_error {
+                        info.health = MountHealth::Degraded;
+                        info.health_error = Some(error);
+                    }
+                }
+            }
+            if info.health == MountHealth::Mounted {
+                if let Some(false) = probe_os_mount(&info.local_path).await {
+                    info.health = MountHealth::Degraded;
+                    info.health_error = Some("The operating system no longer reports this mount; staged uploads are retained".to_string());
+                }
+            }
+            if let Ok(mut mounts) = registry.lock() {
+                let Some(mount) = mounts.get_mut(&mount_id) else {
+                    break;
+                };
+                if mount.info.health == MountHealth::Unmounting {
+                    continue;
+                }
+                let changed = mount.info.health != info.health
+                    || mount.info.health_error != info.health_error
+                    || mount.info.pending_uploads != info.pending_uploads
+                    || mount.info.dirty_bytes != info.dirty_bytes;
+                mount.info = info;
+                if changed {
+                    let _ = app.emit(
+                        "mount-changed",
+                        MountChangedPayload {
+                            mounts: mounts.values().map(current_info).collect(),
+                        },
+                    );
+                }
+            };
+        }
+    })
+}
+
+async fn probe_os_mount(target: &str) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        let _ = target;
+        None
+    }
+    #[cfg(not(windows))]
+    {
+        let command = if cfg!(target_os = "macos") {
+            "/sbin/mount"
+        } else {
+            "mount"
+        };
+        let output = run_with_timeout(&[command.to_string()], Duration::from_secs(2))
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(mount_table_contains(
+            &String::from_utf8_lossy(&output.stdout),
+            target,
+        ))
+    }
+}
+
+#[cfg(any(not(windows), test))]
+fn mount_table_contains(table: &str, target: &str) -> bool {
+    let target = target.trim_end_matches('/');
+    table.lines().any(|line| {
+        let decoded = line
+            .replace("\\040", " ")
+            .replace("\\011", "\t")
+            .replace("\\134", "\\");
+        decoded.split_once(" on ").is_some_and(|(_, rest)| {
+            rest.strip_prefix(target)
+                .is_some_and(|rest| rest.starts_with(" (") || rest.starts_with(" type "))
+        })
+    })
 }
 
 /// Clears out staging folders left behind by an earlier session.
@@ -491,6 +844,13 @@ fn drain_on_exit(mounts: Vec<S3NfsFs>) {
             1
         } else {
             tauri::async_runtime::block_on(async {
+                if tokio::time::timeout(remaining, fs.wait_for_mutations())
+                    .await
+                    .is_err()
+                {
+                    return 1;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
                 // The uploads the flusher already started are detached tasks
                 // that the abort did not touch. They have to finish before the
                 // drain, or two PUTs race for one key and the older bytes can
@@ -846,9 +1206,13 @@ fn missing_client_message(platform: MountPlatform) -> String {
 
 async fn run_umount_command(platform: MountPlatform, target: &str) -> Result<(), String> {
     let mut last_error = format!("Failed to unmount \"{}\"", target);
-
-    for argv in platform::umount_argvs(platform, target) {
-        match run_with_timeout(&argv, UNMOUNT_COMMAND_TIMEOUT).await {
+    let deadline = tokio::time::Instant::now() + UNMOUNT_COMMAND_TIMEOUT;
+    for argv in platform::interactive_umount_argvs(platform, target) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match run_with_timeout(&argv, remaining).await {
             Ok(output) if output.status.success() => return Ok(()),
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -878,6 +1242,45 @@ async fn run_umount_command(platform: MountPlatform, target: &str) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn health_info() -> MountInfo {
+        MountInfo {
+            mount_id: "test".into(),
+            provider: MountProvider::R2,
+            account_id: "account".into(),
+            bucket: "bucket".into(),
+            local_path: "/tmp/test".into(),
+            port: 1,
+            read_only: true,
+            mounted_at: 0,
+            health: MountHealth::Degraded,
+            health_error: Some("Storage is unavailable".into()),
+            pending_uploads: 0,
+            dirty_bytes: 0,
+            oldest_dirty_ms: 0,
+            last_successful_io: None,
+        }
+    }
+
+    #[test]
+    fn reporting_does_not_erase_a_storage_health_failure() {
+        let info = with_task_health(health_info(), false, false);
+        assert_eq!(info.health, MountHealth::Degraded);
+        assert_eq!(info.health_error.as_deref(), Some("Storage is unavailable"));
+        assert_eq!(
+            with_task_health(info, true, false).health,
+            MountHealth::Offline
+        );
+    }
+
+    #[test]
+    fn os_mount_probe_matches_whole_paths_including_spaces() {
+        let table =
+            "127.0.0.1:/ on /tmp/my mount (nfs, local)\n127.0.0.1:/ on /tmp/other type nfs (rw)";
+        assert!(mount_table_contains(table, "/tmp/my mount"));
+        assert!(mount_table_contains(table, "/tmp/other"));
+        assert!(!mount_table_contains(table, "/tmp/my"));
+    }
 
     #[test]
     fn a_path_conflicts_with_itself() {

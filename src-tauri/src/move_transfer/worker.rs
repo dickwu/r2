@@ -1,8 +1,6 @@
 //! Move transfer worker - download to temp, upload to destination, optional delete
 
 use crate::db::{self, MoveSession};
-use crate::providers::{aws, minio};
-use crate::r2::{self};
 use log::{debug, error, info, warn};
 use reqwest::Client;
 use std::collections::HashMap;
@@ -13,9 +11,14 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::config::MoveConfig;
 use super::finishing::{run_cache_operations, run_delete_original};
+use super::planner::{
+    head_identity, plan_transfer, recovery_step, scope, verified_destination, RecoveryStep,
+    TransferPlan, TRANSFER_MARKER,
+};
 use super::state::{update_move_status, update_move_status_with_progress};
-use super::stream::stream_transfer_without_temp;
+use super::stream::{shared_http_client, stream_transfer_without_temp};
 use super::types::{MoveProgress, MoveStatusChanged, MAX_CONCURRENT_MOVES};
+use crate::db::move_sessions::{get_move_journal, save_move_journal, MoveJournal};
 
 // Global cancel/pause registry for move tasks (using std::sync::Mutex for Send compatibility)
 lazy_static::lazy_static! {
@@ -85,83 +88,17 @@ struct MoveUploadResult {
     delete_original: bool,
 }
 
-async fn try_server_side_copy(
-    session: &MoveSession,
-    source_config: &MoveConfig,
-    dest_config: &MoveConfig,
-) -> Option<MoveUploadResult> {
-    info!(
-        "move_copy_try: {} {}/{} -> {}/{}",
-        session.id,
-        session.source_account_id,
-        session.source_bucket,
-        session.dest_account_id,
-        session.dest_bucket
-    );
-    let copy_result = match (source_config, dest_config) {
-        (MoveConfig::R2(_), MoveConfig::R2(dest_cfg)) => r2::copy_object_between_buckets(
-            dest_cfg,
-            &session.source_bucket,
-            &session.source_key,
-            &session.dest_key,
-        )
-        .await
-        .map_err(|e| format!("R2 copy failed: {}", e)),
-        (MoveConfig::Aws(_), MoveConfig::Aws(dest_cfg)) => aws::copy_object_between_buckets(
-            dest_cfg,
-            &session.source_bucket,
-            &session.source_key,
-            &session.dest_key,
-        )
-        .await
-        .map_err(|e| format!("AWS copy failed: {}", e)),
-        (MoveConfig::Minio(_), MoveConfig::Minio(dest_cfg))
-        | (MoveConfig::Rustfs(_), MoveConfig::Rustfs(dest_cfg)) => {
-            minio::copy_object_between_buckets(
-                dest_cfg,
-                &session.source_bucket,
-                &session.source_key,
-                &session.dest_key,
-            )
-            .await
-            .map_err(|e| format!("MinIO copy failed: {}", e))
-        }
-        _ => return None,
-    };
-
-    let file_size = if session.file_size > 0 {
-        session.file_size as u64
-    } else {
-        db::get_cached_file_size(
-            &session.source_bucket,
-            &session.source_account_id,
-            &session.source_key,
-        )
-        .await
-        .unwrap_or(0) as u64
-    };
-
-    match copy_result {
-        Ok(()) => {
-            info!(
-                "move_copy_finish: {} size={} delete_original={}",
-                session.id, file_size, session.delete_original
-            );
-            Some(MoveUploadResult {
-                uploaded_size: file_size,
-                delete_original: session.delete_original,
-            })
-        }
-        Err(err) => {
-            warn!(
-                "move_copy_failed: {} error={}, fallback to stream",
-                session.id, err
-            );
-            None
-        }
+fn check_control(cancelled: &AtomicBool, paused: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::SeqCst) {
+        return Err("cancelled: Move cancelled; source retained".into());
     }
+    if paused.load(Ordering::SeqCst) {
+        return Err("paused: Move paused; source retained".into());
+    }
+    Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn move_file_internal(
     client: &Client,
     session: &MoveSession,
@@ -171,32 +108,279 @@ async fn move_file_internal(
     cancelled: &Arc<AtomicBool>,
     paused: &Arc<AtomicBool>,
 ) -> Result<Option<MoveUploadResult>, String> {
-    // Try server-side copy first (finishing handled in background)
-    if let Some(upload_result) = try_server_side_copy(session, source_config, dest_config).await {
-        return Ok(Some(upload_result));
+    check_control(cancelled, paused)?;
+    if source_config.bucket() != session.source_bucket
+        || dest_config.bucket() != session.dest_bucket
+    {
+        return Err("conflict: Move configuration no longer matches its stored bucket".into());
     }
-
-    let uploaded_size = stream_transfer_without_temp(
-        client,
-        session,
+    let initial_plan = plan_transfer(
         source_config,
         dest_config,
-        app,
+        &session.source_key,
+        &session.dest_key,
+        0,
+    )?;
+    if initial_plan == TransferPlan::NoOp {
+        return Ok(None);
+    }
+    if initial_plan == TransferPlan::RejectConflict {
+        return Err("conflict: Source and destination may identify the same object under different credentials".into());
+    }
+    let source_scope = scope(source_config)?;
+    let dest_scope = scope(dest_config)?;
+    let stored = get_move_journal(&session.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(journal) = &stored {
+        if journal.source_scope != source_scope || journal.dest_scope != dest_scope {
+            return Err(
+                "conflict: Storage endpoint or tenant changed since this move began".into(),
+            );
+        }
+        match recovery_step(&journal.stage) {
+            RecoveryStep::Complete => return Ok(None),
+            RecoveryStep::Transfer => {}
+            RecoveryStep::ReconcileDestination => {
+                let Some((identity, head)) = super::stream::protocol::interruptible(
+                    cancelled,
+                    paused,
+                    head_identity(dest_config, &session.dest_key),
+                )
+                .await??
+                else {
+                    return Err("outcome_unknown: Destination publication cannot yet be confirmed; source retained".into());
+                };
+                verified_destination(
+                    journal,
+                    &identity,
+                    head.metadata()
+                        .and_then(|m| m.get(TRANSFER_MARKER))
+                        .map(String::as_str),
+                )?;
+                if journal.destination.is_none() {
+                    super::planner::verify_unknown_content(
+                        source_config,
+                        dest_config,
+                        &session.source_key,
+                        &session.dest_key,
+                        &journal.source,
+                        &identity,
+                    )
+                    .await?;
+                }
+                let mut reconciled = journal.clone();
+                reconciled.destination = Some(identity);
+                if reconciled.stage == "outcome_unknown" {
+                    reconciled.stage = "copied".into();
+                }
+                save_move_journal(&reconciled)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Ok(Some(MoveUploadResult {
+                    uploaded_size: journal.source.size,
+                    delete_original: session.delete_original,
+                }));
+            }
+            _ => {
+                return Err(
+                    "needs_action: Unrecognized move recovery phase; source retained".into(),
+                )
+            }
+        }
+    }
+    if stored.is_none()
+        && (session.progress >= 100
+            || db::get_move_upload_session(&session.id)
+                .await
+                .map_err(|e| e.to_string())?
+                .is_some())
+    {
+        return Err("needs_action: This older move has no frozen source identity; inspect its destination before starting a new move".into());
+    }
+    let (source_identity, source_head) = super::stream::protocol::interruptible(
         cancelled,
         paused,
+        head_identity(source_config, &session.source_key),
     )
-    .await?;
-
-    if cancelled.load(Ordering::SeqCst) {
-        update_move_status(app, &session.id, "cancelled", None).await;
-        return Err("Move cancelled".to_string());
+    .await??
+    .ok_or_else(|| "not_found: Move source does not exist".to_string())?;
+    let mut journal = match stored {
+        Some(journal) => {
+            if journal.source != source_identity {
+                return Err(
+                    "conflict: Move source changed; existing uploaded parts cannot be reused"
+                        .into(),
+                );
+            }
+            journal
+        }
+        None => MoveJournal {
+            task_id: session.id.clone(),
+            stage: "transferring".into(),
+            source: source_identity,
+            source_scope,
+            dest_scope,
+            destination: None,
+        },
+    };
+    if super::stream::protocol::interruptible(
+        cancelled,
+        paused,
+        head_identity(dest_config, &session.dest_key),
+    )
+    .await??
+    .is_some()
+    {
+        return Err("conflict: Destination already exists; choose another name. Existing objects are never overwritten by a move.".into());
     }
-
-    // Upload complete - return result for background processing
+    save_move_journal(&journal)
+        .await
+        .map_err(|e| format!("Cannot persist source identity: {e}"))?;
+    let mut plan = plan_transfer(
+        source_config,
+        dest_config,
+        &session.source_key,
+        &session.dest_key,
+        journal.source.size,
+    )?;
+    if plan == TransferPlan::SingleCopy
+        && !super::planner::native_aws(dest_config)
+        && !matches!(dest_config, MoveConfig::R2(_))
+    {
+        use crate::providers::conditional::Condition;
+        if !dest_config
+            .supports_condition(Condition::CopyCreate)
+            .await?
+            || !dest_config
+                .supports_condition(Condition::CopySource)
+                .await?
+        {
+            plan = TransferPlan::Relay;
+        }
+    }
+    let uploaded_size = match plan {
+        TransferPlan::SingleCopy | TransferPlan::MultipartCopy => {
+            super::server_copy::copy(
+                plan,
+                session,
+                dest_config,
+                &source_head,
+                &mut journal,
+                cancelled,
+                paused,
+            )
+            .await?
+        }
+        TransferPlan::Relay => {
+            stream_transfer_without_temp(
+                client,
+                session,
+                source_config,
+                dest_config,
+                app,
+                cancelled,
+                paused,
+            )
+            .await?
+        }
+        _ => return Err("conflict: Invalid transfer plan".into()),
+    };
+    // The protocol engine may have persisted a response identity. Reload it
+    // before checking the currently visible destination.
+    let mut journal = get_move_journal(&session.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Missing move recovery journal")?;
+    let (destination, head) = super::stream::protocol::interruptible(
+        cancelled,
+        paused,
+        head_identity(dest_config, &session.dest_key),
+    )
+    .await??
+    .ok_or("outcome_unknown: Destination not visible after upload")?;
+    verified_destination(
+        &journal,
+        &destination,
+        head.metadata()
+            .and_then(|m| m.get(TRANSFER_MARKER))
+            .map(String::as_str),
+    )?;
+    if journal.destination.is_none() {
+        super::planner::verify_unknown_content(
+            source_config,
+            dest_config,
+            &session.source_key,
+            &session.dest_key,
+            &journal.source,
+            &destination,
+        )
+        .await?;
+    }
+    if uploaded_size != journal.source.size {
+        return Err("conflict: Uploaded length differs from the frozen source".into());
+    }
+    journal.destination = Some(destination);
+    journal.stage = "copied".into();
+    save_move_journal(&journal)
+        .await
+        .map_err(|e| format!("Cannot persist verified destination: {e}"))?;
+    check_control(cancelled, paused)?;
     Ok(Some(MoveUploadResult {
         uploaded_size,
         delete_original: session.delete_original,
     }))
+}
+
+fn failure_status(error: &str) -> &'static str {
+    for status in [
+        "paused",
+        "cancelled",
+        "needs_auth",
+        "conflict",
+        "outcome_unknown",
+        "needs_action",
+        "delete_pending",
+    ] {
+        if error.starts_with(&format!("{status}:")) {
+            return status;
+        }
+    }
+    "error"
+}
+
+pub(crate) fn recovery_failure_status(error: &str, phase: Option<&str>) -> &'static str {
+    let status = failure_status(error);
+    if matches!(phase, Some("outcome_unknown" | "delete_unknown"))
+        && matches!(status, "cancelled" | "paused" | "error")
+    {
+        "outcome_unknown"
+    } else if status == "cancelled" && phase == Some("delete_pending") {
+        "delete_pending"
+    } else if matches!(status, "error" | "cancelled")
+        && matches!(phase, Some("copied" | "delete_pending"))
+    {
+        "needs_action"
+    } else {
+        status
+    }
+}
+
+async fn report_failure(app: &AppHandle, task_id: &str, error: String) {
+    let phase = get_move_journal(task_id).await;
+    let status = match &phase {
+        Ok(journal) => recovery_failure_status(
+            &error,
+            journal.as_ref().map(|journal| journal.stage.as_str()),
+        ),
+        Err(_) => "needs_action",
+    };
+    let error = if status == "outcome_unknown" {
+        format!("outcome_unknown: {error}. A remote mutation may have committed; its recovery record was retained.")
+    } else {
+        error
+    };
+    update_move_status(app, task_id, status, Some(error)).await;
 }
 
 /// Spawn a move task
@@ -230,7 +414,7 @@ pub(crate) async fn spawn_move_task(
             .clone()
     };
 
-    let client = match Client::builder().build() {
+    let client = match shared_http_client() {
         Ok(c) => c,
         Err(e) => {
             update_move_status(&app, &task_id, "error", Some(e.to_string())).await;
@@ -251,126 +435,68 @@ pub(crate) async fn spawn_move_task(
     )
     .await;
 
-    let mut scheduled_continuation = false;
-
     match result {
         Ok(Some(upload_result)) => {
-            // Upload succeeded - mark finishing and emit 100% progress once
+            // Finishing shares the bounded worker lifetime. No unbounded detached
+            // delete/cache futures can accumulate behind a slow endpoint.
             update_move_status_with_progress(&app, &session.id, "finishing", 100, None).await;
             let _ = app.emit(
                 "move-progress",
                 MoveProgress {
                     task_id: session.id.clone(),
-                    phase: "uploading".to_string(),
+                    phase: "uploading".into(),
                     percent: 100,
                     transferred_bytes: upload_result.uploaded_size,
                     total_bytes: upload_result.uploaded_size,
                     speed: 0.0,
                 },
             );
-            info!(
-                "move_upload_complete: {} uploaded_size={} delete_original={}",
-                task_id, upload_result.uploaded_size, upload_result.delete_original
-            );
-
-            if upload_result.delete_original {
-                // Update status to "deleting" immediately, run delete in background
-                update_move_status_with_progress(&app, &session.id, "deleting", 100, None).await;
-                let app_for_cache = app.clone();
-                let app_for_delete = app.clone();
-                let task_id_cleanup = task_id.clone();
-                let dest_bucket_clone = session.dest_bucket.clone();
-                let dest_account_id_clone = session.dest_account_id.clone();
-                let dest_key_clone = session.dest_key.clone();
-                let uploaded_size = upload_result.uploaded_size;
-                let session_for_delete = session.clone();
-                let source_config_for_delete = source_config.clone();
-
-                schedule_queue_continuation(
-                    app.clone(),
-                    source_bucket.clone(),
-                    source_account_id.clone(),
-                );
-                scheduled_continuation = true;
-
-                // Spawn cache update + delete original in background, cleanup after both
-                tokio::spawn(async move {
-                    let cache_future = run_cache_operations(
-                        app_for_cache,
-                        task_id_cleanup.clone(),
-                        dest_bucket_clone,
-                        dest_account_id_clone,
-                        dest_key_clone,
-                        uploaded_size,
-                    );
-                    let delete_future = run_delete_original(
-                        app_for_delete,
-                        session_for_delete,
-                        source_config_for_delete,
-                    );
-                    let _ = tokio::join!(cache_future, delete_future);
-                    cleanup_registries(&task_id_cleanup);
-                });
+            run_cache_operations(
+                app.clone(),
+                session.id.clone(),
+                session.dest_bucket.clone(),
+                session.dest_account_id.clone(),
+                session.dest_key.clone(),
+                upload_result.uploaded_size,
+            )
+            .await;
+            let finished = if upload_result.delete_original {
+                run_delete_original(
+                    &app,
+                    &session,
+                    &source_config,
+                    &dest_config,
+                    &cancelled,
+                    &paused,
+                )
+                .await
             } else {
-                // No delete needed - stay in finishing until cache update completes
-                let app_for_cache = app.clone();
-                let app_for_status = app.clone();
-                let task_id_cleanup = session.id.clone();
-                let dest_bucket_clone = session.dest_bucket.clone();
-                let dest_account_id_clone = session.dest_account_id.clone();
-                let dest_key_clone = session.dest_key.clone();
-                let uploaded_size = upload_result.uploaded_size;
-
-                schedule_queue_continuation(
-                    app.clone(),
-                    source_bucket.clone(),
-                    source_account_id.clone(),
-                );
-                scheduled_continuation = true;
-
-                // Spawn cache update in background (non-blocking), cleanup after
-                tokio::spawn(async move {
-                    run_cache_operations(
-                        app_for_cache,
-                        task_id_cleanup.clone(),
-                        dest_bucket_clone,
-                        dest_account_id_clone,
-                        dest_key_clone,
-                        uploaded_size,
-                    )
-                    .await;
-                    update_move_status_with_progress(
-                        &app_for_status,
-                        &task_id_cleanup,
-                        "success",
-                        100,
-                        None,
-                    )
-                    .await;
-                    cleanup_registries(&task_id_cleanup);
-                });
+                async {
+                    check_control(&cancelled, &paused)?;
+                    let mut journal = get_move_journal(&session.id)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .ok_or("Missing move journal")?;
+                    journal.stage = "complete".into();
+                    save_move_journal(&journal).await.map_err(|e| e.to_string())
+                }
+                .await
+            };
+            match finished {
+                Ok(()) => {
+                    update_move_status_with_progress(&app, &session.id, "success", 100, None).await
+                }
+                Err(error) => report_failure(&app, &session.id, error).await,
             }
         }
-        Ok(None) => {
-            // Server-side copy completed everything, nothing more to do
-            info!("move_server_side_copy_done: {}", task_id);
-            cleanup_registries(&task_id);
-        }
-        Err(e) => {
-            if !e.contains("paused") && !e.contains("cancelled") {
-                let err = e.clone();
-                update_move_status(&app, &task_id, "error", Some(err)).await;
-                error!("move_failed: {} error={}", task_id, e);
-            }
-            cleanup_registries(&task_id);
+        Ok(None) => update_move_status_with_progress(&app, &session.id, "success", 100, None).await,
+        Err(error) => {
+            error!("move_failed: {} error={}", task_id, error);
+            report_failure(&app, &task_id, error).await;
         }
     }
-
-    // After upload completes, IMMEDIATELY schedule next pending tasks
-    // Post-upload operations (cache update, delete) run in parallel
-    if !scheduled_continuation {
-        schedule_queue_continuation(app, source_bucket, source_account_id);
-    }
+    cleanup_registries(&task_id);
+    schedule_queue_continuation(app, source_bucket, source_account_id);
 }
 
 /// Cleanup registries for a task
@@ -455,6 +581,13 @@ async fn continue_move_queue(app: &AppHandle, source_bucket: &str, source_accoun
                 if started >= slots_available {
                     break;
                 }
+                if MOVE_CANCEL_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .contains_key(&next_session.id)
+                {
+                    continue;
+                }
                 let source_config = match get_move_config(
                     &next_session.source_provider,
                     &next_session.source_account_id,
@@ -506,6 +639,7 @@ async fn continue_move_queue(app: &AppHandle, source_bucket: &str, source_accoun
                         task_id: next_session.id.clone(),
                         status: "downloading".to_string(),
                         error: None,
+                        scope: None,
                     },
                 );
 
@@ -580,4 +714,38 @@ pub(crate) async fn get_pending_sessions_to_start(
     }
 
     Ok((pending, slots_available))
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::recovery_failure_status;
+    #[test]
+    fn cancellation_does_not_turn_an_unknown_commit_into_a_finished_task() {
+        for phase in ["outcome_unknown", "delete_unknown"] {
+            assert_eq!(
+                recovery_failure_status("cancelled: Move cancelled", Some(phase)),
+                "outcome_unknown"
+            );
+            assert_eq!(
+                recovery_failure_status("paused: Move paused", Some(phase)),
+                "outcome_unknown"
+            );
+        }
+        assert_eq!(
+            recovery_failure_status("cancelled: Move cancelled", Some("transferring")),
+            "cancelled"
+        );
+        assert_eq!(
+            recovery_failure_status("Cannot persist deletion", Some("delete_pending")),
+            "needs_action"
+        );
+        assert_eq!(
+            recovery_failure_status("cancelled: Move cancelled", Some("copied")),
+            "needs_action"
+        );
+        assert_eq!(
+            recovery_failure_status("cancelled: Move cancelled", Some("delete_pending")),
+            "delete_pending"
+        );
+    }
 }

@@ -12,6 +12,7 @@ import { invoke } from '@tauri-apps/api/core';
 import {
   useMoveStore,
   selectActiveCount,
+  selectAttentionCount,
   selectDownloadingCount,
   selectUploadingCount,
   selectFinishingCount,
@@ -40,6 +41,7 @@ interface MoveProgressProps {
 export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProgressProps) {
   const tasks = useMoveStore((state) => state.tasks);
   const activeCount = useMoveStore(selectActiveCount);
+  const attentionCount = useMoveStore(selectAttentionCount);
   const downloadingCount = useMoveStore(selectDownloadingCount);
   const uploadingCount = useMoveStore(selectUploadingCount);
   const finishingCount = useMoveStore(selectFinishingCount);
@@ -199,6 +201,11 @@ export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProg
             {finishingCount} finishing
             {pendingCount > 0 && ` (${pendingCount} queued)`}
           </Text>
+        </>
+      ) : attentionCount > 0 ? (
+        <>
+          <PauseCircleOutlined style={{ color: '#faad14' }} />
+          <Text style={{ marginLeft: 4 }}>{attentionCount} need attention</Text>
         </>
       ) : pendingCount > 0 ? (
         <>

@@ -16,6 +16,8 @@ mod mount;
 mod move_transfer;
 mod providers;
 mod r2;
+#[cfg(test)]
+mod test_s3;
 mod transfer_progress;
 mod upload;
 
@@ -117,7 +119,11 @@ pub fn run() {
 
     #[cfg(all(debug_assertions, feature = "connector"))]
     {
-        builder = builder.plugin(tauri_plugin_connector::init());
+        builder = builder.plugin(
+            tauri_plugin_connector::ConnectorBuilder::new()
+                .bind_address("127.0.0.1")
+                .build(),
+        );
     }
 
     builder
@@ -389,6 +395,9 @@ pub fn run() {
             commands::sync_rustfs_bucket,
             // Lazy sync commands
             commands::lazy_sync::list_prefix,
+            commands::lazy_sync::get_prefix_cache,
+            commands::lazy_sync::list_prefix_stream,
+            commands::lazy_sync::cancel_prefix_list,
             commands::lazy_sync::start_background_sync,
             commands::lazy_sync::cancel_background_sync,
             // Cache commands
@@ -435,6 +444,9 @@ pub fn run() {
             commands::mount_bucket,
             commands::unmount_bucket,
             commands::list_mounts,
+            commands::list_mount_recoveries,
+            commands::export_mount_recovery,
+            commands::discard_mount_recovery,
             commands::default_mount_path,
         ])
         .build(tauri::generate_context!())

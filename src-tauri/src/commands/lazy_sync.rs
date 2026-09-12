@@ -8,16 +8,17 @@ use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::list_objects_v2::builders::ListObjectsV2FluentBuilder;
 use aws_sdk_s3::operation::list_objects_v2::{ListObjectsV2Error, ListObjectsV2Output};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
 use tauri::Emitter;
 
 // ============ Types ============
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct LazyListInput {
     pub account_id: String,
     pub bucket: String,
@@ -31,6 +32,9 @@ pub struct LazyListInput {
     pub force_path_style: Option<bool>,
     pub region: Option<String>,
     pub force_refresh: Option<bool>,
+    pub request_id: Option<String>,
+    pub generation: Option<u64>,
+    pub run_id: Option<String>,
 }
 
 // ============ Provider-Aware Client Factory ============
@@ -83,11 +87,42 @@ async fn create_client_for_input(input: &LazyListInput) -> Result<aws_sdk_s3::Cl
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ListScope {
+    pub provider: String,
+    pub account_id: String,
+    pub bucket: String,
+    pub prefix: String,
+    pub request_id: String,
+    pub generation: u64,
+}
+
+impl ListScope {
+    fn new(input: &LazyListInput) -> Self {
+        Self {
+            provider: input.provider.clone().unwrap_or_else(|| "r2".into()),
+            account_id: input.account_id.clone(),
+            bucket: input.bucket.clone(),
+            prefix: input.prefix.clone(),
+            request_id: input.request_id.clone().unwrap_or_else(|| {
+                format!(
+                    "list-{}",
+                    FOREGROUND_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+                )
+            }),
+            generation: input.generation.unwrap_or(0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct LazyListResult {
+    #[serde(flatten)]
+    pub scope: ListScope,
     pub files: Vec<LazyFileItem>,
     pub folders: Vec<String>,
-    pub prefix: String,
+    pub complete: bool,
     pub from_cache: bool,
+    pub freshness: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,206 +133,516 @@ pub struct LazyFileItem {
     pub last_modified: String,
 }
 
-// ============ list_prefix Command ============
+impl From<&CachedFile> for LazyFileItem {
+    fn from(file: &CachedFile) -> Self {
+        Self {
+            key: file.key.clone(),
+            name: file.name.clone(),
+            size: file.size,
+            last_modified: file.last_modified.clone(),
+        }
+    }
+}
 
-/// Lazy-list a single prefix using delimiter="/".
-/// If cache is fresh (< 60s), serves from SQLite. Otherwise hits S3.
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderPage {
+    #[serde(flatten)]
+    pub scope: ListScope,
+    #[serde(flatten)]
+    pub page: ListPage,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ListPage {
+    pub files: Vec<LazyFileItem>,
+    pub folders: Vec<String>,
+    pub page_index: usize,
+    pub next_cursor: Option<String>,
+    pub complete: bool,
+    pub from_cache: bool,
+    pub freshness: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderLoadSummary {
+    #[serde(flatten)]
+    pub scope: ListScope,
+    pub complete: bool,
+    pub from_cache: bool,
+    pub freshness: &'static str,
+    pub total_items: usize,
+}
+
+const DIRECTORY_TTL_SECS: i64 = 60;
+static FOREGROUND_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+static FOREGROUND_CANCEL: LazyLock<Mutex<HashMap<String, Weak<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A known complete index can be stale. Its timestamp never makes a directory
+/// freshly listed forever; prefix freshness and index completeness are distinct.
+#[tauri::command]
+pub async fn get_prefix_cache(input: LazyListInput) -> Result<Option<LazyListResult>, String> {
+    read_prefix_cache(&input, ListScope::new(&input)).await
+}
+
+async fn read_prefix_cache(
+    input: &LazyListInput,
+    scope: ListScope,
+) -> Result<Option<LazyListResult>, String> {
+    let prefix_time =
+        db::prefix_sync::get_prefix_sync_time(&input.bucket, &input.account_id, &input.prefix)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
+    let skipped = load_skipped_prefixes(&input.bucket, &input.account_id).await;
+    let complete_index = if skipped
+        .as_ref()
+        .is_some_and(|s| !is_under_skipped_prefix(&input.prefix, s))
+    {
+        db::has_full_sync(&input.bucket, &input.account_id)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?
+    } else {
+        false
+    };
+    let contents = db::get_folder_contents(&input.bucket, &input.account_id, &input.prefix)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+    let complete = prefix_time.is_some() || complete_index;
+    if !complete && contents.files.is_empty() && contents.folders.is_empty() {
+        return Ok(None);
+    }
+    let fresh = prefix_time.is_some_and(|time| {
+        let age = chrono::Utc::now().timestamp() - time;
+        (0..DIRECTORY_TTL_SECS).contains(&age)
+    });
+    Ok(Some(LazyListResult {
+        scope,
+        files: contents.files.iter().map(LazyFileItem::from).collect(),
+        folders: contents.folders,
+        complete,
+        from_cache: true,
+        freshness: if fresh {
+            "fresh"
+        } else if complete {
+            "stale"
+        } else {
+            "partial"
+        },
+    }))
+}
+
+struct RequestCancellation {
+    request_id: String,
+    cancelled: Arc<AtomicBool>,
+}
+impl RequestCancellation {
+    fn register(request_id: &str) -> Result<Self, String> {
+        let mut requests = FOREGROUND_CANCEL.lock().unwrap_or_else(|e| e.into_inner());
+        requests.retain(|_, value| value.strong_count() > 0);
+        if requests.get(request_id).and_then(Weak::upgrade).is_some() {
+            return Err("Folder request_id is already active".into());
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        requests.insert(request_id.into(), Arc::downgrade(&cancelled));
+        Ok(Self {
+            request_id: request_id.into(),
+            cancelled,
+        })
+    }
+    fn active(&self) -> bool {
+        !self.cancelled.load(Ordering::SeqCst)
+    }
+}
+impl Drop for RequestCancellation {
+    fn drop(&mut self) {
+        FOREGROUND_CANCEL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.request_id);
+    }
+}
+
+#[tauri::command]
+pub async fn cancel_prefix_list(request_id: String) -> Result<(), String> {
+    if let Some(cancelled) = FOREGROUND_CANCEL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&request_id)
+        .and_then(Weak::upgrade)
+    {
+        cancelled.store(true, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct FlightState {
+    pages: Vec<Arc<ListPage>>,
+    result: Option<Result<Arc<LazyListResult>, String>>,
+}
+struct PrefixFlight {
+    state: Mutex<FlightState>,
+    changed: tokio::sync::watch::Sender<u64>,
+    consumers: AtomicUsize,
+}
+impl PrefixFlight {
+    fn publish(&self, page: ListPage) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pages
+            .push(Arc::new(page));
+        self.changed.send_modify(|version| *version += 1);
+    }
+    fn active(&self) -> bool {
+        self.consumers.load(Ordering::SeqCst) > 0
+    }
+}
+struct FlightLease(Arc<PrefixFlight>);
+impl Drop for FlightLease {
+    fn drop(&mut self) {
+        self.0.consumers.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+static PREFIX_FLIGHTS: LazyLock<Mutex<HashMap<String, Weak<PrefixFlight>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn endpoint_scope(input: &LazyListInput) -> String {
+    let provider = input.provider.as_deref().unwrap_or("r2");
+    let host = match provider {
+        "minio" | "rustfs" => input.endpoint_host.clone().unwrap_or_default(),
+        "aws" => input.endpoint_host.clone().unwrap_or_else(|| {
+            format!(
+                "s3.{}.amazonaws.com",
+                input.region.as_deref().unwrap_or("us-east-1")
+            )
+        }),
+        _ => format!("{}.r2.cloudflarestorage.com", input.account_id),
+    };
+    let scheme =
+        input
+            .endpoint_scheme
+            .as_deref()
+            .unwrap_or(if matches!(provider, "minio" | "rustfs") {
+                "http"
+            } else {
+                "https"
+            });
+    format!(
+        "{}://{}",
+        scheme.to_ascii_lowercase(),
+        host.trim_end_matches('/').to_ascii_lowercase()
+    )
+}
+
+fn prefix_flight_key(input: &LazyListInput) -> String {
+    // Credentials participate in equality without becoming a plaintext map key.
+    let mut hash = Sha256::new();
+    for field in [
+        endpoint_scope(input),
+        input.provider.clone().unwrap_or_else(|| "r2".into()),
+        input.account_id.clone(),
+        input.bucket.clone(),
+        input.prefix.clone(),
+        input.region.clone().unwrap_or_default(),
+        input.access_key_id.clone(),
+        input.secret_access_key.clone(),
+        input.force_path_style.unwrap_or(false).to_string(),
+    ] {
+        hash.update((field.len() as u64).to_le_bytes());
+        hash.update(field.as_bytes());
+    }
+    hex::encode(hash.finalize())
+}
+
+fn join_prefix_flight(input: LazyListInput) -> FlightLease {
+    let key = prefix_flight_key(&input);
+    let mut flights = PREFIX_FLIGHTS.lock().unwrap_or_else(|e| e.into_inner());
+    flights.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(flight) = flights.get(&key).and_then(Weak::upgrade).filter(|flight| {
+        flight
+            .consumers
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                if count == 0 {
+                    None
+                } else {
+                    count.checked_add(1)
+                }
+            })
+            .is_ok()
+    }) {
+        return FlightLease(flight);
+    }
+    let (changed, _) = tokio::sync::watch::channel(0);
+    let flight = Arc::new(PrefixFlight {
+        state: Mutex::new(FlightState::default()),
+        changed,
+        consumers: AtomicUsize::new(1),
+    });
+    flights.insert(key, Arc::downgrade(&flight));
+    let owner = flight.clone();
+    tokio::spawn(async move {
+        let result = fetch_prefix(input, &owner).await.map(Arc::new);
+        owner.state.lock().unwrap_or_else(|e| e.into_inner()).result = Some(result);
+        owner.changed.send_modify(|version| *version += 1);
+    });
+    FlightLease(flight)
+}
+
+async fn list_prefix_internal(
+    input: LazyListInput,
+    app: tauri::AppHandle,
+    emit_pages: bool,
+) -> Result<Arc<LazyListResult>, String> {
+    let scope = ListScope::new(&input);
+    let cancellation = RequestCancellation::register(&scope.request_id)?;
+    if !input.force_refresh.unwrap_or(false) {
+        if let Some(cache) = read_prefix_cache(&input, scope.clone())
+            .await?
+            .filter(|cache| cache.freshness == "fresh")
+        {
+            if !cancellation.active() {
+                return Err("S3 list cancelled".into());
+            }
+            if emit_pages {
+                emit_cached_pages(&app, &cache)?;
+            }
+            return Ok(Arc::new(cache));
+        }
+    }
+    if !cancellation.active() {
+        return Err("S3 list cancelled".into());
+    }
+    let lease = join_prefix_flight(input);
+    let mut changed = lease.0.changed.subscribe();
+    let mut delivered = 0;
+    loop {
+        if !cancellation.active() {
+            return Err("S3 list cancelled".into());
+        }
+        let (pages, result) = {
+            let state = lease.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            (state.pages[delivered..].to_vec(), state.result.clone())
+        };
+        for page in pages {
+            if emit_pages {
+                app.emit(
+                    "folder-page",
+                    FolderPage {
+                        scope: scope.clone(),
+                        page: (*page).clone(),
+                    },
+                )
+                .map_err(|e| format!("Failed to deliver folder page: {e}"))?;
+            }
+            delivered += 1;
+        }
+        if let Some(result) = result {
+            // A shared flight's first consumer identity must not escape to another caller.
+            return result.map(|result| {
+                Arc::new(LazyListResult {
+                    scope,
+                    ..(*result).clone()
+                })
+            });
+        }
+        tokio::select! {
+            _ = changed.changed() => {},
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+        }
+    }
+}
+
+fn emit_cached_pages(app: &tauri::AppHandle, cache: &LazyListResult) -> Result<(), String> {
+    let total = cache.files.len() + cache.folders.len();
+    let page_count = total.max(1).div_ceil(1000);
+    for index in 0..page_count {
+        let start = index * 1000;
+        let end = ((index + 1) * 1000).min(total);
+        let folders_start = start.min(cache.folders.len());
+        let folders_end = end.min(cache.folders.len());
+        let files_start = start.saturating_sub(cache.folders.len());
+        let files_end = end.saturating_sub(cache.folders.len());
+        let complete = index + 1 == page_count;
+        app.emit(
+            "folder-page",
+            FolderPage {
+                scope: cache.scope.clone(),
+                page: ListPage {
+                    files: cache.files[files_start..files_end].to_vec(),
+                    folders: cache.folders[folders_start..folders_end].to_vec(),
+                    page_index: index,
+                    next_cursor: (!complete).then(|| format!("cache:{}", index + 1)),
+                    complete,
+                    from_cache: true,
+                    freshness: cache.freshness,
+                },
+            },
+        )
+        .map_err(|e| format!("Failed to deliver cached page: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Compatibility command for callers requiring a complete aggregate.
 #[tauri::command]
 pub async fn list_prefix(
     input: LazyListInput,
     app: tauri::AppHandle,
 ) -> Result<LazyListResult, String> {
-    let bucket = &input.bucket;
-    let account_id = &input.account_id;
-    let prefix = &input.prefix;
+    list_prefix_internal(input, app, false)
+        .await
+        .map(|result| (*result).clone())
+}
 
-    const STALE_THRESHOLD_SECS: i64 = 60;
+/// Pages arrive while S3 is still listing. The completion reply stays small.
+#[tauri::command]
+pub async fn list_prefix_stream(
+    input: LazyListInput,
+    app: tauri::AppHandle,
+) -> Result<FolderLoadSummary, String> {
+    let result = list_prefix_internal(input, app, true).await?;
+    Ok(FolderLoadSummary {
+        scope: result.scope.clone(),
+        complete: result.complete,
+        from_cache: result.from_cache,
+        freshness: result.freshness,
+        total_items: result.files.len() + result.folders.len(),
+    })
+}
 
-    if !input.force_refresh.unwrap_or(false) {
-        // A completed full sync makes the local cache authoritative for the
-        // whole bucket — background sync and incremental cache updates keep it
-        // fresh, so browsing never needs to wait on a network LIST. Without a
-        // full sync, fall back to the per-prefix lazy TTL.
-        let skipped = load_skipped_prefixes(bucket, account_id).await;
-        let cache_is_authoritative = match &skipped {
-            Some(skipped) if !is_under_skipped_prefix(prefix, skipped) => {
-                db::has_full_sync(bucket, account_id)
-                    .await
-                    .map_err(|e| format!("DB error: {}", e))?
-            }
-            // Either the last sync could not read this folder, so the cache
-            // holds nothing for it, or which folders those are is unknown.
-            // Neither may be answered from a cache claiming to be complete:
-            // that shows an empty folder and implies the data is gone.
-            _ => false,
-        };
-
-        let serve_cache = if cache_is_authoritative {
-            true
-        } else {
-            // The per-prefix TTL still applies, so a folder listed moments ago
-            // is not re-fetched; a folder the sync skipped has no such record
-            // and goes to the network.
-            let cached_time = db::prefix_sync::get_prefix_sync_time(bucket, account_id, prefix)
-                .await
-                .map_err(|e| format!("DB error: {}", e))?;
-            let now = chrono::Utc::now().timestamp();
-            matches!(cached_time, Some(synced_at) if now - synced_at < STALE_THRESHOLD_SECS)
-        };
-
-        if serve_cache {
-            let contents = db::get_folder_contents(bucket, account_id, prefix)
-                .await
-                .map_err(|e| format!("DB error: {}", e))?;
-
-            return Ok(LazyListResult {
-                files: contents
-                    .files
-                    .into_iter()
-                    .map(|f| LazyFileItem {
-                        name: f.name,
-                        key: f.key,
-                        size: f.size,
-                        last_modified: f.last_modified,
-                    })
-                    .collect(),
-                folders: contents.folders,
-                prefix: prefix.clone(),
-                from_cache: true,
-            });
-        }
+/// A truncated response must advance the cursor. Never loop back to page one,
+/// accept a repeated page as complete, or infer removals from a partial chain.
+fn next_page_cursor(
+    response: &ListObjectsV2Output,
+    seen: &mut HashSet<String>,
+) -> Result<Option<String>, String> {
+    if !response.is_truncated().unwrap_or(false) {
+        return Ok(None);
     }
+    let token = response
+        .next_continuation_token()
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            "S3 returned a truncated listing without a continuation token".to_string()
+        })?;
+    if !seen.insert(token.to_string()) {
+        return Err("S3 returned a repeated continuation token".into());
+    }
+    Ok(Some(token.to_string()))
+}
 
-    // Cache is stale or missing -- fetch from S3
-    let now = chrono::Utc::now().timestamp();
+async fn fetch_prefix(
+    input: LazyListInput,
+    flight: &PrefixFlight,
+) -> Result<LazyListResult, String> {
     let client = create_client_for_input(&input).await?;
-
-    // Paginate with delimiter to get immediate children only
-    let mut all_files: Vec<CachedFile> = Vec::new();
-    let mut all_folders: Vec<String> = Vec::new();
+    let scheduler = endpoint_scheduler(&endpoint_scope(&input));
+    let now = chrono::Utc::now().timestamp();
+    let mut files = Vec::new();
+    let mut folders = Vec::new();
     let mut continuation_token: Option<String> = None;
-    let mut page_count = 0;
-
+    let mut seen_tokens = HashSet::new();
+    let mut seen_files = HashSet::new();
+    let mut seen_folders = HashSet::new();
+    let mut page_index = 0;
     loop {
-        let create_request = || {
-            let mut request = client
-                .list_objects_v2()
-                .bucket(bucket)
-                .delimiter("/")
-                .max_keys(1000);
-
-            if !prefix.is_empty() {
-                request = request.prefix(prefix);
-            }
-
-            if let Some(token) = &continuation_token {
-                request = request.continuation_token(token);
-            }
-
-            request
-        };
-
         let response = list_with_retry(
             FOREGROUND_LIST_RETRY,
-            || true,
-            || send_locked(create_request()),
+            || flight.active(),
+            || {
+                let request = client
+                    .list_objects_v2()
+                    .bucket(&input.bucket)
+                    .delimiter("/")
+                    .max_keys(1000)
+                    .set_prefix((!input.prefix.is_empty()).then(|| input.prefix.clone()))
+                    .set_continuation_token(continuation_token.clone());
+                send_scheduled(request, &scheduler, false)
+            },
         )
         .await
-        .map_err(|failure| match failure {
-            ListFailure::Failed(message) => message,
-            ListFailure::Cancelled => "S3 list cancelled".to_string(),
-        })?;
-
-        page_count += 1;
-
-        // Collect files (objects at this level)
-        for obj in response.contents() {
-            if let Some(key) = obj.key() {
-                let key = key.to_string();
-                if key.ends_with('/') {
-                    continue; // Skip folder marker objects
+        .map_err(|error| error.to_string())?;
+        let next_cursor = next_page_cursor(&response, &mut seen_tokens)?;
+        let mut page = ListPage {
+            files: Vec::new(),
+            folders: Vec::new(),
+            page_index,
+            complete: next_cursor.is_none(),
+            next_cursor: next_cursor.clone(),
+            from_cache: false,
+            freshness: "fresh",
+        };
+        for object in response.contents() {
+            if let Some(key) = object.key().filter(|key| !key.ends_with('/')) {
+                let (parent_path, name) = db::parse_key(key);
+                if parent_path != input.prefix {
+                    return Err("S3 returned an object outside the requested directory".into());
                 }
-                let (parent_path, name) = db::parse_key(&key);
-                all_files.push(CachedFile {
-                    bucket: bucket.clone(),
-                    account_id: account_id.clone(),
-                    key,
+                if !seen_files.insert(key.to_string()) {
+                    continue;
+                }
+                let file = CachedFile {
+                    bucket: input.bucket.clone(),
+                    account_id: input.account_id.clone(),
+                    key: key.into(),
                     parent_path,
                     name,
-                    size: obj.size().unwrap_or(0),
-                    last_modified: obj
+                    size: object.size().unwrap_or(0),
+                    last_modified: object
                         .last_modified()
-                        .map(|dt| dt.to_string())
+                        .map(|date| date.to_string())
                         .unwrap_or_default(),
                     synced_at: now,
-                });
+                };
+                page.files.push(LazyFileItem::from(&file));
+                files.push(file);
             }
         }
-
-        // Collect folders (common prefixes)
-        for cp in response.common_prefixes() {
-            if let Some(p) = cp.prefix() {
-                all_folders.push(p.to_string());
+        for prefix in response.common_prefixes() {
+            if let Some(prefix) = prefix.prefix() {
+                let suffix = prefix.strip_prefix(&input.prefix).unwrap_or("");
+                if suffix.is_empty()
+                    || !suffix.ends_with('/')
+                    || suffix[..suffix.len() - 1].contains('/')
+                {
+                    return Err("S3 returned a prefix outside the requested directory".into());
+                }
+                if seen_folders.insert(prefix.to_string()) {
+                    page.folders.push(prefix.into());
+                    folders.push(prefix.into());
+                }
             }
         }
-
-        // Emit progress for multi-page prefixes
-        if page_count > 1 {
-            let _ = app.emit(
-                "folder-load-progress",
-                serde_json::json!({
-                    "pages": page_count,
-                    "items": all_files.len() + all_folders.len(),
-                }),
-            );
+        if !flight.active() {
+            return Err("S3 list cancelled".into());
         }
-
-        let is_truncated = response.is_truncated().unwrap_or(false);
-        if !is_truncated {
+        if page.complete {
+            db::prefix_sync::replace_complete_prefix(
+                &input.bucket,
+                &input.account_id,
+                &input.prefix,
+                &files,
+                &folders,
+            )
+            .await
+            .map_err(|e| format!("Failed to cache complete listing: {e}"))?;
+        }
+        flight.publish(page);
+        if next_cursor.is_none() {
             break;
         }
-        continuation_token = response.next_continuation_token().map(|s| s.to_string());
+        continuation_token = next_cursor;
+        page_index += 1;
     }
-
-    // Cache results in SQLite
-    db::upsert_prefix_files(bucket, account_id, prefix, &all_files)
-        .await
-        .map_err(|e| format!("Failed to cache files: {}", e))?;
-
-    // Upsert folder entries into directory_tree for this prefix
-    for folder in &all_folders {
-        db::ensure_directory_node(bucket, account_id, folder)
-            .await
-            .map_err(|e| format!("Failed to upsert directory node: {}", e))?;
-    }
-
-    // Record sync time
-    db::prefix_sync::set_prefix_sync_time(
-        bucket,
-        account_id,
-        prefix,
-        all_files.len() as i32,
-        all_folders.len() as i32,
-    )
-    .await
-    .map_err(|e| format!("Failed to record sync time: {}", e))?;
-
-    let result = LazyListResult {
-        files: all_files
-            .into_iter()
-            .map(|f| LazyFileItem {
-                name: f.name,
-                key: f.key,
-                size: f.size,
-                last_modified: f.last_modified,
-            })
-            .collect(),
-        folders: all_folders,
-        prefix: prefix.clone(),
+    Ok(LazyListResult {
+        scope: ListScope::new(&input),
+        files: files.iter().map(LazyFileItem::from).collect(),
+        folders,
+        complete: true,
         from_cache: false,
-    };
-
-    Ok(result)
+        freshness: "fresh",
+    })
 }
 
 // ============ Background Sync (Task 3) ============
@@ -305,9 +650,9 @@ pub async fn list_prefix(
 // Global cancellation token for background sync (one per app)
 static BACKGROUND_CANCEL: LazyLock<Arc<AtomicBool>> =
     LazyLock::new(|| Arc::new(AtomicBool::new(false)));
-static S3_LIST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 static BACKGROUND_RUN_ID: AtomicU64 = AtomicU64::new(0);
+static BACKGROUND_SCOPE: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
 static BACKGROUND_SYNC_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -390,9 +735,9 @@ fn is_under_skipped_prefix(prefix: &str, skipped: &[String]) -> bool {
 
 /// How long a listing keeps trying against a provider that is failing right now.
 ///
-/// The SDK already retries each call a few times within a couple of seconds;
-/// this layer is for the outage that outlasts that. Attempts are spread out
-/// exponentially, from `initial_backoff` up to `max_backoff`.
+/// Attempts use full jitter within an exponentially increasing cap. A shared
+/// 30-second deadline includes queueing, SDK attempts, and Retry-After waits;
+/// shared client configuration owns the SDK wire-attempt limit.
 #[derive(Debug, Clone, Copy)]
 struct ListRetryPolicy {
     /// Attempts in total, counting the first.
@@ -417,16 +762,14 @@ impl ListRetryPolicy {
 /// attempts reach four doublings — so this guards future ones, not these.
 const MAX_BACKOFF_DOUBLINGS: u32 = 16;
 
-/// Someone is looking at an empty folder while this runs: 0.5s, then 1s, then
-/// give up and let them see the error.
+/// Foreground requests use at most three attempts with 0.5s and 1s jitter caps.
 const FOREGROUND_LIST_RETRY: ListRetryPolicy = ListRetryPolicy {
     max_attempts: 3,
     initial_backoff: Duration::from_millis(500),
     max_backoff: Duration::from_secs(1),
 };
 
-/// A crawl takes minutes anyway; waiting out a half-minute outage (1+2+4+8+16s)
-/// beats starting it over.
+/// Background requests may retry six times within the same total deadline.
 const BACKGROUND_LIST_RETRY: ListRetryPolicy = ListRetryPolicy {
     max_attempts: 6,
     initial_backoff: Duration::from_secs(1),
@@ -436,10 +779,71 @@ const BACKGROUND_LIST_RETRY: ListRetryPolicy = ListRetryPolicy {
 /// Why a listing stopped without a page.
 #[derive(Debug, PartialEq)]
 enum ListFailure {
-    /// `is_active` turned false during a backoff.
+    /// The consumer cancelled during queueing, network I/O, or backoff.
     Cancelled,
     /// A message for the user.
     Failed(String),
+}
+
+impl std::fmt::Display for ListFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("S3 list cancelled"),
+            Self::Failed(message) => formatter.write_str(message),
+        }
+    }
+}
+
+/// LIST is read-only: dropping an in-flight attempt cannot commit a mutation.
+/// The deadline covers the queue and the SDK request, including SDK retries.
+async fn while_active<T>(
+    future: impl Future<Output = T>,
+    is_active: &impl Fn() -> bool,
+    deadline: tokio::time::Instant,
+) -> Result<T, ListFailure> {
+    tokio::pin!(future);
+    loop {
+        if !is_active() {
+            return Err(ListFailure::Cancelled);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ListFailure::Failed(
+                "S3 list exceeded its 30 second request budget".into(),
+            ));
+        }
+        tokio::select! {
+            biased;
+            result = &mut future => return Ok(result),
+            _ = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + Duration::from_millis(50))) => {},
+        }
+    }
+}
+
+fn jittered_backoff(cap: Duration) -> Duration {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0x9e3779b97f4a7c15);
+    let clock = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64;
+    let mut sample = SEQUENCE.fetch_add(0x9e3779b97f4a7c15, Ordering::Relaxed) ^ clock;
+    sample ^= sample >> 12;
+    sample ^= sample << 25;
+    sample ^= sample >> 27;
+    Duration::from_nanos(
+        sample.wrapping_mul(0x2545f4914f6cdd1d)
+            % (cap.as_nanos().min(u64::MAX as u128 - 1) as u64 + 1),
+    )
+}
+
+fn retry_after<E>(error: &SdkError<E, HttpResponse>) -> Option<Duration> {
+    let header = error.raw_response()?.headers().get("retry-after")?;
+    if let Ok(seconds) = header.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let date = chrono::DateTime::parse_from_rfc2822(header).ok()?;
+    (date.with_timezone(&chrono::Utc) - chrono::Utc::now())
+        .to_std()
+        .ok()
 }
 
 /// Sends the page request until it succeeds, the error is one that will not
@@ -456,10 +860,14 @@ where
     let max_attempts = policy.max_attempts.max(1);
     let mut first_failure: Option<String> = None;
     let mut attempt = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
 
     loop {
+        if !is_active() {
+            return Err(ListFailure::Cancelled);
+        }
         attempt += 1;
-        let error = match send_page().await {
+        let error = match while_active(send_page(), &is_active, deadline).await? {
             Ok(page) => return Ok(page),
             Err(error) => error,
         };
@@ -486,7 +894,8 @@ where
             return Err(ListFailure::Failed(message));
         }
 
-        let backoff = policy.backoff(attempt);
+        let backoff =
+            jittered_backoff(policy.backoff(attempt)).max(retry_after(&error).unwrap_or_default());
         // eprintln, not log::warn — the app registers no `log` backend, so the
         // macro would discard the one line that explains a slow or failed sync.
         eprintln!(
@@ -494,46 +903,93 @@ where
         );
         first_failure.get_or_insert(description);
 
-        if !sleep_while_active(backoff, &is_active).await {
-            return Err(ListFailure::Cancelled);
-        }
+        while_active(tokio::time::sleep(backoff), &is_active, deadline).await?;
     }
 }
 
-/// Waits out `duration`, unless `is_active` turns false first; says which.
-async fn sleep_while_active(duration: Duration, is_active: &impl Fn() -> bool) -> bool {
-    /// The longest a cancelled run keeps sleeping.
-    const CHECK_INTERVAL: Duration = Duration::from_millis(250);
+const ENDPOINT_LIST_CAPACITY: usize = 4;
+const BACKGROUND_LIST_CAPACITY: usize = ENDPOINT_LIST_CAPACITY - 1;
+struct EndpointScheduler {
+    total: tokio::sync::Semaphore,
+    background: tokio::sync::Semaphore,
+}
+static ENDPOINT_SCHEDULERS: LazyLock<Mutex<HashMap<String, Weak<EndpointScheduler>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-    let deadline = tokio::time::Instant::now() + duration;
-    loop {
-        if !is_active() {
-            return false;
-        }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return true;
-        }
-        tokio::time::sleep(remaining.min(CHECK_INTERVAL)).await;
+fn endpoint_scheduler(scope: &str) -> Arc<EndpointScheduler> {
+    let mut schedulers = ENDPOINT_SCHEDULERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    schedulers.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(scheduler) = schedulers.get(scope).and_then(Weak::upgrade) {
+        return scheduler;
     }
+    let scheduler = Arc::new(EndpointScheduler {
+        total: tokio::sync::Semaphore::new(ENDPOINT_LIST_CAPACITY),
+        background: tokio::sync::Semaphore::new(BACKGROUND_LIST_CAPACITY),
+    });
+    schedulers.insert(scope.into(), Arc::downgrade(&scheduler));
+    scheduler
 }
 
-/// Sends one page request while holding the list lock, so listings do not
-/// compete with each other at the provider. The backoff between attempts
-/// happens outside it, where another listing can get through.
-///
-/// The error is the SDK's own, handed straight to the retry loop; boxing it
-/// here would only move the cost, so the large-error lint is set aside.
+/// Background work first takes its own quota, leaving one total permit for
+/// foreground consumers. The enclosing retry future cancels both permit waits
+/// and the network request; permits are always released before retry backoff.
 #[allow(clippy::result_large_err)]
-async fn send_locked(
+async fn send_scheduled(
     request: ListObjectsV2FluentBuilder,
+    scheduler: &EndpointScheduler,
+    background: bool,
 ) -> Result<ListObjectsV2Output, SdkError<ListObjectsV2Error, HttpResponse>> {
-    let _list_guard = S3_LIST_LOCK.lock().await;
+    let _background = if background {
+        Some(
+            scheduler
+                .background
+                .acquire()
+                .await
+                .expect("private semaphore is never closed"),
+        )
+    } else {
+        None
+    };
+    let _total = scheduler
+        .total
+        .acquire()
+        .await
+        .expect("private semaphore is never closed");
     request.send().await
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct BackgroundScope {
+    pub provider: String,
+    pub account_id: String,
+    pub bucket: String,
+    pub prefix: String,
+    pub run_id: String,
+}
+impl BackgroundScope {
+    fn new(input: &LazyListInput) -> Self {
+        Self {
+            provider: input.provider.clone().unwrap_or_else(|| "r2".into()),
+            account_id: input.account_id.clone(),
+            bucket: input.bucket.clone(),
+            prefix: input.prefix.clone(),
+            run_id: input.run_id.clone().unwrap_or_default(),
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct BackgroundSyncError {
+    #[serde(flatten)]
+    pub scope: BackgroundScope,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct BackgroundSyncProgress {
+    #[serde(flatten)]
+    pub scope: BackgroundScope,
     pub objects_fetched: usize,
     pub bytes_fetched: i64,
     pub estimated_total: Option<usize>,
@@ -543,6 +999,8 @@ pub struct BackgroundSyncProgress {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BackgroundSyncResult {
+    #[serde(flatten)]
+    pub scope: BackgroundScope,
     pub total_objects: usize,
     pub total_bytes: i64,
     pub cancelled: bool,
@@ -553,31 +1011,41 @@ pub struct BackgroundSyncResult {
 
 #[tauri::command]
 pub async fn start_background_sync(
-    input: LazyListInput,
+    mut input: LazyListInput,
     app: tauri::AppHandle,
-) -> Result<(), String> {
-    let run_id = BACKGROUND_RUN_ID.fetch_add(1, Ordering::SeqCst) + 1;
-
-    // Reset cancellation flag
-    BACKGROUND_CANCEL.store(false, Ordering::SeqCst);
-
-    // Spawn background task -- returns immediately
+) -> Result<String, String> {
+    let (run_id, public_run_id) = {
+        let mut current = BACKGROUND_SCOPE.lock().unwrap_or_else(|e| e.into_inner());
+        let run_id = BACKGROUND_RUN_ID.fetch_add(1, Ordering::SeqCst) + 1;
+        let public_run_id = input
+            .run_id
+            .clone()
+            .unwrap_or_else(|| format!("sync-{run_id}"));
+        input.run_id = Some(public_run_id.clone());
+        *current = Some(public_run_id.clone());
+        BACKGROUND_CANCEL.store(false, Ordering::SeqCst);
+        (run_id, public_run_id)
+    };
     tokio::spawn(async move {
+        let scope = BackgroundScope::new(&input);
         let result = run_background_sync(input, app.clone(), run_id).await;
-        let is_active = is_background_run_active(run_id);
-
+        let active = is_background_run_active(run_id);
         match result {
-            Ok(sync_result) if is_active && !sync_result.cancelled => {
+            Ok(sync_result) if active && !sync_result.cancelled => {
                 let _ = app.emit("background-sync-complete", sync_result);
             }
-            Err(e) if is_active => {
-                let _ = app.emit("background-sync-error", e);
+            Err(error) if active => {
+                let _ = app.emit(
+                    "background-sync-error",
+                    BackgroundSyncError { scope, error },
+                );
             }
-            _ => {}
+            _ => {
+                let _ = app.emit("background-sync-cancelled", scope);
+            }
         }
     });
-
-    Ok(())
+    Ok(public_run_id)
 }
 
 async fn run_background_sync(
@@ -585,13 +1053,21 @@ async fn run_background_sync(
     app: tauri::AppHandle,
     run_id: u64,
 ) -> Result<BackgroundSyncResult, String> {
-    let _sync_guard = BACKGROUND_SYNC_LOCK.lock().await;
+    let scope = BackgroundScope::new(&input);
+    let _sync_guard = while_active(
+        BACKGROUND_SYNC_LOCK.lock(),
+        &|| is_background_run_active(run_id),
+        tokio::time::Instant::now() + Duration::from_secs(30),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let bucket = input.bucket.clone();
     let account_id = input.account_id.clone();
 
     if !is_background_run_active(run_id) {
         return Ok(BackgroundSyncResult {
+            scope: scope.clone(),
             total_objects: 0,
             total_bytes: 0,
             cancelled: true,
@@ -606,6 +1082,7 @@ async fn run_background_sync(
 
     if !is_background_run_active(run_id) {
         return Ok(BackgroundSyncResult {
+            scope: scope.clone(),
             total_objects: 0,
             total_bytes: 0,
             cancelled: true,
@@ -615,26 +1092,7 @@ async fn run_background_sync(
 
     // Create S3 client (provider-aware)
     let client = create_client_for_input(&input).await?;
-
-    // Spawn store task
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<CachedFile>>(8);
-    let store_bucket = bucket.clone();
-    let store_account_id = account_id.clone();
-    let store_handle = tokio::spawn(async move {
-        let mut stored_count: usize = 0;
-        while let Some(batch) = rx.recv().await {
-            if !is_background_run_active(run_id) {
-                break;
-            }
-
-            let batch_len = batch.len();
-            db::store_file_batch(&store_bucket, &store_account_id, &batch)
-                .await
-                .map_err(|e| format!("Failed to store files: {}", e))?;
-            stored_count += batch_len;
-        }
-        Ok::<usize, String>(stored_count)
-    });
+    let scheduler = endpoint_scheduler(&endpoint_scope(&input));
 
     // Fetch loop with progress emission
     let mut fetched_count: usize = 0;
@@ -655,11 +1113,12 @@ async fn run_background_sync(
 
     while let Some(current_prefix) = pending_prefixes.pop_front() {
         let mut continuation_token: Option<String> = None;
+        let mut seen_tokens = HashSet::new();
 
         loop {
             if !is_background_run_active(run_id) {
-                drop(tx);
                 return Ok(BackgroundSyncResult {
+                    scope: scope.clone(),
                     total_objects: fetched_count,
                     total_bytes: fetched_bytes,
                     cancelled: true,
@@ -687,7 +1146,7 @@ async fn run_background_sync(
             let response = match list_with_retry(
                 BACKGROUND_LIST_RETRY,
                 || is_background_run_active(run_id),
-                || send_locked(create_request()),
+                || send_scheduled(create_request(), &scheduler, true),
             )
             .await
             {
@@ -708,8 +1167,8 @@ async fn run_background_sync(
                     return Err(message);
                 }
                 Err(ListFailure::Cancelled) => {
-                    drop(tx);
                     return Ok(BackgroundSyncResult {
+                        scope: scope.clone(),
                         total_objects: fetched_count,
                         total_bytes: fetched_bytes,
                         cancelled: true,
@@ -719,8 +1178,8 @@ async fn run_background_sync(
             };
 
             if !is_background_run_active(run_id) {
-                drop(tx);
                 return Ok(BackgroundSyncResult {
+                    scope: scope.clone(),
                     total_objects: fetched_count,
                     total_bytes: fetched_bytes,
                     cancelled: true,
@@ -729,7 +1188,7 @@ async fn run_background_sync(
             }
 
             let is_truncated = response.is_truncated().unwrap_or(false);
-            let next_token = response.next_continuation_token().map(|s| s.to_string());
+            let next_token = next_page_cursor(&response, &mut seen_tokens)?;
             let now = chrono::Utc::now().timestamp();
 
             let mut batch: Vec<CachedFile> = Vec::new();
@@ -785,6 +1244,7 @@ async fn run_background_sync(
                 let _ = app.emit(
                     "background-sync-progress",
                     BackgroundSyncProgress {
+                        scope: scope.clone(),
                         objects_fetched: fetched_count,
                         bytes_fetched: fetched_bytes,
                         estimated_total: {
@@ -803,9 +1263,9 @@ async fn run_background_sync(
             }
 
             if !batch.is_empty() {
-                tx.send(batch)
+                db::store_file_batch(&bucket, &account_id, &batch)
                     .await
-                    .map_err(|_| "Store task crashed".to_string())?;
+                    .map_err(|e| format!("Failed to store files: {e}"))?;
             }
 
             if !is_truncated {
@@ -819,15 +1279,9 @@ async fn run_background_sync(
         }
     }
 
-    // Wait for store task
-    drop(tx);
-    let stored_count = store_handle
-        .await
-        .map_err(|e| format!("Store task panicked: {}", e))?
-        .map_err(|e| format!("Store failed: {}", e))?;
-
     if !is_background_run_active(run_id) {
         return Ok(BackgroundSyncResult {
+            scope: scope.clone(),
             total_objects: fetched_count,
             total_bytes: fetched_bytes,
             cancelled: true,
@@ -836,17 +1290,22 @@ async fn run_background_sync(
     }
 
     // Finish sync (swap staging -> live)
-    db::finish_sync(&bucket, &account_id, stored_count)
+    db::finish_sync(&bucket, &account_id, fetched_count)
         .await
         .map_err(|e| format!("Failed to finish sync: {}", e))?;
 
     // Written with the swap, not after it: `finish_sync` is what makes the
     // cache authoritative, and any folder missing from it must be known before
     // browsing can trust it.
+    // The swapped index must not inherit freshness from an older delimiter listing.
+    db::prefix_sync::clear_prefix_sync_times(&bucket, &account_id)
+        .await
+        .map_err(|e| format!("Failed to invalidate directory freshness: {e}"))?;
     store_skipped_prefixes(&bucket, &account_id, &skipped_prefixes).await;
 
     if !is_background_run_active(run_id) {
         return Ok(BackgroundSyncResult {
+            scope: scope.clone(),
             total_objects: fetched_count,
             total_bytes: fetched_bytes,
             cancelled: true,
@@ -868,6 +1327,7 @@ async fn run_background_sync(
     }
 
     Ok(BackgroundSyncResult {
+        scope,
         total_objects: fetched_count,
         total_bytes: fetched_bytes,
         cancelled: false,
@@ -876,7 +1336,14 @@ async fn run_background_sync(
 }
 
 #[tauri::command]
-pub async fn cancel_background_sync() -> Result<(), String> {
+pub async fn cancel_background_sync(run_id: Option<String>) -> Result<(), String> {
+    let current = BACKGROUND_SCOPE.lock().unwrap_or_else(|e| e.into_inner());
+    if run_id
+        .as_ref()
+        .is_some_and(|run_id| current.as_ref() != Some(run_id))
+    {
+        return Ok(());
+    }
     BACKGROUND_RUN_ID.fetch_add(1, Ordering::SeqCst);
     BACKGROUND_CANCEL.store(true, Ordering::SeqCst);
     Ok(())
@@ -943,7 +1410,7 @@ mod tests {
 
         assert_eq!(result, Ok("page"));
         assert_eq!(calls.get(), 3);
-        assert_eq!(started.elapsed(), Duration::from_secs(1 + 2));
+        assert!(started.elapsed() <= Duration::from_secs(1 + 2));
     }
 
     #[tokio::test(start_paused = true)]
@@ -994,11 +1461,11 @@ mod tests {
             ))
         );
         assert_eq!(calls.get(), 6);
-        assert_eq!(started.elapsed(), Duration::from_secs(1 + 2 + 4 + 8 + 16));
+        assert!(started.elapsed() <= Duration::from_secs(30));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_folder_listing_gives_up_after_a_second_and_a_half() {
+    async fn a_folder_listing_caps_its_jittered_backoff_at_a_second_and_a_half() {
         let calls = Cell::new(0);
         let started = Instant::now();
 
@@ -1025,7 +1492,7 @@ mod tests {
             ))
         );
         assert_eq!(calls.get(), 3);
-        assert_eq!(started.elapsed(), Duration::from_millis(500 + 1000));
+        assert!(started.elapsed() <= Duration::from_millis(500 + 1000));
     }
 
     #[test]
@@ -1107,26 +1574,321 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_cancelled_run_stops_partway_through_a_backoff() {
         let calls = Cell::new(0);
-        let checks = Cell::new(0);
+        let active = Arc::new(AtomicBool::new(true));
+        let cancel = active.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel.store(false, Ordering::SeqCst);
+        });
         let started = Instant::now();
-
         let result: Result<(), _> = list_with_retry(
             BACKGROUND_LIST_RETRY,
-            || {
-                checks.set(checks.get() + 1);
-                checks.get() <= 2
-            },
+            || active.load(Ordering::SeqCst),
             || {
                 calls.set(calls.get() + 1);
-                async { Err(unavailable()) }
+                let inner =
+                    ListObjectsV2Error::generic(ErrorMetadata::builder().code("SlowDown").build());
+                let mut raw = HttpResponse::new(503.try_into().unwrap(), SdkBody::empty());
+                raw.headers_mut().insert("retry-after", "10");
+                async move { Err(SdkError::service_error(inner, raw)) }
             },
         )
         .await;
-
         assert_eq!(result, Err(ListFailure::Cancelled));
         assert_eq!(calls.get(), 1);
-        // Two checks passed, so two slices of the one-second backoff went by
-        // before the third check saw the cancellation.
-        assert_eq!(started.elapsed(), Duration::from_millis(500));
+        assert!(started.elapsed() <= Duration::from_millis(150));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_drops_a_pending_network_future() {
+        let active = Arc::new(AtomicBool::new(true));
+        let cancel = active.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel.store(false, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let result = list_with_retry(
+            FOREGROUND_LIST_RETRY,
+            || active.load(Ordering::SeqCst),
+            std::future::pending::<Result<(), ListError>>,
+        )
+        .await;
+        assert_eq!(result, Err(ListFailure::Cancelled));
+        assert!(started.elapsed() <= Duration::from_millis(150));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queue_and_network_share_the_total_budget() {
+        let started = Instant::now();
+        let result = list_with_retry(
+            FOREGROUND_LIST_RETRY,
+            || true,
+            std::future::pending::<Result<(), ListError>>,
+        )
+        .await;
+        assert!(matches!(result, Err(ListFailure::Failed(message)) if message.contains("budget")));
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_after_is_honoured_without_exceeding_total_budget() {
+        let calls = Cell::new(0);
+        let started = Instant::now();
+        let result: Result<(), _> = list_with_retry(
+            FOREGROUND_LIST_RETRY,
+            || true,
+            || {
+                calls.set(calls.get() + 1);
+                let inner =
+                    ListObjectsV2Error::generic(ErrorMetadata::builder().code("SlowDown").build());
+                let mut raw = HttpResponse::new(503.try_into().unwrap(), SdkBody::empty());
+                raw.headers_mut().insert("retry-after", "120");
+                async move { Err(SdkError::service_error(inner, raw)) }
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(ListFailure::Failed(message)) if message.contains("budget")));
+        assert_eq!(calls.get(), 1);
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn invalid_pagination_never_restarts_or_claims_completeness() {
+        let mut seen = HashSet::new();
+        let missing = ListObjectsV2Output::builder().is_truncated(true).build();
+        assert!(next_page_cursor(&missing, &mut seen)
+            .unwrap_err()
+            .contains("without"));
+        let blank = ListObjectsV2Output::builder()
+            .is_truncated(true)
+            .next_continuation_token("")
+            .build();
+        assert!(next_page_cursor(&blank, &mut seen).is_err());
+        let page = ListObjectsV2Output::builder()
+            .is_truncated(true)
+            .next_continuation_token("cursor")
+            .build();
+        assert_eq!(
+            next_page_cursor(&page, &mut seen).unwrap(),
+            Some("cursor".into())
+        );
+        assert!(next_page_cursor(&page, &mut seen)
+            .unwrap_err()
+            .contains("repeated"));
+        let complete = ListObjectsV2Output::builder().is_truncated(false).build();
+        assert_eq!(next_page_cursor(&complete, &mut seen).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn background_quota_preserves_foreground_capacity_and_isolates_endpoints() {
+        let scheduler = endpoint_scheduler("test-background-reserve");
+        let same = endpoint_scheduler("test-background-reserve");
+        let other = endpoint_scheduler("test-independent-endpoint");
+        assert!(Arc::ptr_eq(&scheduler, &same));
+        let mut permits = Vec::new();
+        for _ in 0..BACKGROUND_LIST_CAPACITY {
+            permits.push((
+                scheduler.background.acquire().await.unwrap(),
+                scheduler.total.acquire().await.unwrap(),
+            ));
+        }
+        assert!(scheduler.background.try_acquire().is_err());
+        assert!(scheduler.total.try_acquire().is_ok());
+        assert_eq!(other.total.available_permits(), ENDPOINT_LIST_CAPACITY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_queued_consumer_leaves_no_permit_or_request() {
+        let scheduler = endpoint_scheduler("test-cancel-queue");
+        let _occupied = scheduler
+            .total
+            .acquire_many(ENDPOINT_LIST_CAPACITY as u32)
+            .await
+            .unwrap();
+        let active = Arc::new(AtomicBool::new(true));
+        let cancel = active.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel.store(false, Ordering::SeqCst);
+        });
+        let sent = Cell::new(false);
+        let result: Result<(), ListFailure> = while_active(
+            async {
+                let _permit = scheduler.total.acquire().await.unwrap();
+                sent.set(true);
+            },
+            &|| active.load(Ordering::SeqCst),
+            Instant::now() + Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(result, Err(ListFailure::Cancelled));
+        assert!(!sent.get());
+    }
+
+    #[test]
+    fn singleflight_consumers_cancel_independently() {
+        let (changed, _) = tokio::sync::watch::channel(0);
+        let flight = Arc::new(PrefixFlight {
+            state: Mutex::new(FlightState::default()),
+            changed,
+            consumers: AtomicUsize::new(2),
+        });
+        let first = FlightLease(flight.clone());
+        let second = FlightLease(flight.clone());
+        drop(first);
+        assert!(flight.active());
+        drop(second);
+        assert!(!flight.active());
+    }
+    #[tokio::test]
+    async fn first_http_page_is_shared_before_slow_second_page_and_cancel_stops_io() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (second_tx, second_rx) = tokio::sync::oneshot::channel();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0; 2048];
+                let count = first.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buffer[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            server_requests.fetch_add(1, Ordering::SeqCst);
+            let body = r#"<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>test</Name><IsTruncated>true</IsTruncated><NextContinuationToken>second</NextContinuationToken><Contents><Key>first.txt</Key><Size>7</Size></Contents></ListBucketResult>"#;
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/xml\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            first.write_all(response.as_bytes()).await.unwrap();
+            drop(first);
+            let (mut second, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 2048];
+            assert!(second.read(&mut buffer).await.unwrap() > 0);
+            server_requests.fetch_add(1, Ordering::SeqCst);
+            second_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let input = LazyListInput {
+            account_id: "local-fixture".into(),
+            bucket: "test".into(),
+            access_key_id: "fixture".into(),
+            secret_access_key: "fixture-secret".into(),
+            prefix: String::new(),
+            provider: Some("minio".into()),
+            endpoint_scheme: Some("http".into()),
+            endpoint_host: Some(address.to_string()),
+            force_path_style: Some(true),
+            region: None,
+            force_refresh: Some(true),
+            request_id: None,
+            generation: None,
+            run_id: None,
+        };
+        let first = join_prefix_flight(input.clone());
+        let second = join_prefix_flight(input);
+        assert!(Arc::ptr_eq(&first.0, &second.0));
+        tokio::time::timeout(Duration::from_secs(10), second_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let shared = first.0.clone();
+        {
+            let state = shared.state.lock().unwrap();
+            assert_eq!(state.pages.len(), 1);
+            assert_eq!(state.pages[0].files[0].key, "first.txt");
+            assert!(!state.pages[0].complete);
+            assert!(state.result.is_none());
+        }
+        drop(first);
+        assert!(shared.active());
+        drop(second);
+        let started = Instant::now();
+        loop {
+            let result = shared.state.lock().unwrap().result.clone();
+            if let Some(result) = result {
+                assert!(matches!(result, Err(message) if message.contains("cancelled")));
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(1));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+    #[tokio::test]
+    async fn stale_background_cleanup_cannot_cancel_a_newer_run() {
+        let old_id = BACKGROUND_RUN_ID.load(Ordering::SeqCst);
+        let old_cancel = BACKGROUND_CANCEL.load(Ordering::SeqCst);
+        let old_scope = BACKGROUND_SCOPE
+            .lock()
+            .unwrap()
+            .replace("current-test-run".into());
+        BACKGROUND_CANCEL.store(false, Ordering::SeqCst);
+        cancel_background_sync(Some("older-test-run".into()))
+            .await
+            .unwrap();
+        let unchanged = BACKGROUND_RUN_ID.load(Ordering::SeqCst) == old_id
+            && !BACKGROUND_CANCEL.load(Ordering::SeqCst);
+        cancel_background_sync(Some("current-test-run".into()))
+            .await
+            .unwrap();
+        let cancelled = BACKGROUND_RUN_ID.load(Ordering::SeqCst) == old_id + 1
+            && BACKGROUND_CANCEL.load(Ordering::SeqCst);
+        BACKGROUND_RUN_ID.store(old_id, Ordering::SeqCst);
+        BACKGROUND_CANCEL.store(old_cancel, Ordering::SeqCst);
+        *BACKGROUND_SCOPE.lock().unwrap() = old_scope;
+        assert!(unchanged);
+        assert!(cancelled);
+    }
+
+    #[test]
+    fn foreground_and_background_events_carry_their_origin_scope() {
+        let scope = BackgroundScope {
+            provider: "aws".into(),
+            account_id: "account-A".into(),
+            bucket: "bucket-A".into(),
+            prefix: String::new(),
+            run_id: "run-A".into(),
+        };
+        let event = serde_json::to_value(BackgroundSyncError {
+            scope,
+            error: "offline".into(),
+        })
+        .unwrap();
+        assert_eq!(event["provider"], "aws");
+        assert_eq!(event["account_id"], "account-A");
+        assert_eq!(event["bucket"], "bucket-A");
+        assert_eq!(event["run_id"], "run-A");
+        assert_eq!(event["error"], "offline");
+        let event = serde_json::to_value(FolderPage {
+            scope: ListScope {
+                provider: "r2".into(),
+                account_id: "account-B".into(),
+                bucket: "bucket-B".into(),
+                prefix: "folder/".into(),
+                request_id: "request-B".into(),
+                generation: 42,
+            },
+            page: ListPage {
+                files: Vec::new(),
+                folders: Vec::new(),
+                page_index: 0,
+                next_cursor: None,
+                complete: true,
+                from_cache: true,
+                freshness: "stale",
+            },
+        })
+        .unwrap();
+        assert_eq!(event["request_id"], "request-B");
+        assert_eq!(event["generation"], 42);
+        assert_eq!(event["prefix"], "folder/");
+        assert_eq!(event["complete"], true);
+        assert_eq!(event["from_cache"], true);
     }
 }
