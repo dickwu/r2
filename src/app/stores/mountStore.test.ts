@@ -15,13 +15,13 @@ type EventHandler = (event: { payload: unknown }) => void;
 // reference, so each test installs its own fake backend.
 let handleInvoke: InvokeFn = async () => undefined;
 
-// Subscriptions outlive individual tests: setupGlobalMountListeners() guards
-// against re-subscribing, so the handler registered by the first call is the
-// one every later test drives.
+// Each test gets a fresh store module and its own recorded subscriptions.
 const eventHandlers: Record<string, EventHandler> = {};
 let listenCalls = 0;
 
+const tauriCore = await import('@tauri-apps/api/core');
 mock.module('@tauri-apps/api/core', () => ({
+  ...tauriCore,
   invoke: (cmd: string, args?: InvokeArgs) => handleInvoke(cmd, args),
 }));
 
@@ -38,14 +38,16 @@ const recordingListen: ListenFn = async (event, handler) => {
 // Swappable so one test can fail a single registration mid-setup.
 let listenImpl: ListenFn = recordingListen;
 
+const tauriEvent = await import('@tauri-apps/api/event');
 mock.module('@tauri-apps/api/event', () => ({
+  ...tauriEvent,
   listen: (event: string, handler: EventHandler) => listenImpl(event, handler),
 }));
 
 // Import after the mocks are registered so the store binds to the fakes.
+const mountModule = await import('./mountStore');
+let { useMountStore, setupGlobalMountListeners } = mountModule;
 const {
-  useMountStore,
-  setupGlobalMountListeners,
   findMount,
   isBucketMounted,
   toMountInfo,
@@ -63,7 +65,7 @@ const {
   pruneDeadMountTransfers,
   TRANSFER_RETAIN_MS,
   MAX_TRANSFER_ROWS,
-} = await import('./mountStore');
+} = mountModule;
 type MountTransferEvent = import('./mountStore').MountTransferEvent;
 type MountTransfer = import('./mountStore').MountTransfer;
 const { useToastStore } = await import('./toastStore');
@@ -91,7 +93,16 @@ const MOUNT_INPUT = {
   secret_access_key: 'sk',
 };
 
-beforeEach(() => {
+let storeInstance = 0;
+beforeEach(async () => {
+  // The module intentionally keeps listeners for the app's whole lifetime.
+  // A distinct module URL gives each test a fresh app lifetime without a
+  // production-only reset API or a dependency on filesystem/test ordering.
+  const modulePath = `./mountStore.ts?test-instance=${++storeInstance}`;
+  ({ useMountStore, setupGlobalMountListeners } = (await import(modulePath)) as typeof mountModule);
+  for (const event of Object.keys(eventHandlers)) delete eventHandlers[event];
+  listenImpl = recordingListen;
+  listenCalls = 0;
   handleInvoke = async () => undefined;
   useMountStore.setState({
     mounts: [],
@@ -495,10 +506,6 @@ describe('unmount', () => {
 });
 
 describe('listener registration failure', () => {
-  /**
-   * Must be the first test that calls setup: the module refuses to subscribe
-   * twice, so only the first call reaches the registration path at all.
-   */
   test('rolls back a partial registration so a retry starts from zero', async () => {
     listenImpl = async (event, handler) => {
       if (event === 'mount-flush-error') {
@@ -515,10 +522,12 @@ describe('listener registration failure', () => {
     }
 
     // `mount-changed` registered before the failure — it must not survive, or a
-    // retry would leave two subscriptions delivering every event twice. The
-    // next describe is that retry: it subscribes and loads from scratch.
+    // retry would leave two subscriptions delivering every event twice.
     expect(eventHandlers['mount-changed']).toBeUndefined();
     expect(eventHandlers['mount-flush-error']).toBeUndefined();
+    await setupGlobalMountListeners();
+    expect(typeof eventHandlers['mount-changed']).toBe('function');
+    expect(typeof eventHandlers['mount-flush-error']).toBe('function');
   });
 });
 

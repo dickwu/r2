@@ -19,7 +19,9 @@ type InvokeFn = (cmd: string, args?: InvokeArgs) => Promise<unknown>;
 // reference, so each test can install its own fake backend.
 let handleInvoke: InvokeFn = async () => undefined;
 
+const tauriCore = await import('@tauri-apps/api/core');
 mock.module('@tauri-apps/api/core', () => ({
+  ...tauriCore,
   invoke: (cmd: string, args?: InvokeArgs) => handleInvoke(cmd, args),
 }));
 

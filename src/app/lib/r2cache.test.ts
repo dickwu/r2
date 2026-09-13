@@ -6,10 +6,11 @@ import type {
   StorageConfig,
 } from '@/app/providers/types';
 
-// Provider adapters import the Tauri core at module load; stub it so importing
-// r2cache works in a plain test environment. None of the functions under test
-// actually invoke the backend.
+// Preserve exports used by Tauri's event module regardless of test order.
+// None of the functions under test actually invoke the backend.
+const tauriCore = await import('@tauri-apps/api/core');
 mock.module('@tauri-apps/api/core', () => ({
+  ...tauriCore,
   invoke: async () => undefined,
 }));
 
