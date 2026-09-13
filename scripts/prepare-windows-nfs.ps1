@@ -28,10 +28,17 @@ foreach ($tool in 'mount.exe', 'umount.exe', 'nfsadmin.exe') {
         throw "Required Windows NFS tool is missing: $tool"
     }
 }
+# nfsadmin exits non-zero when the client is already running ("The service is
+# already started."), which is a success here. The service state, not the exit
+# code, decides. Clear the tolerated code afterwards: the step's shell is
+# `pwsh -command`, which returns $LASTEXITCODE, so leaving it set fails the step
+# after the script has done its job. Real failures still throw under
+# $ErrorActionPreference = 'Stop' and exit non-zero regardless.
 & (Join-Path $system32 'nfsadmin.exe') client start
 if ($LASTEXITCODE -ne 0 -and (Get-Service NfsClnt).Status -ne 'Running') {
     throw 'The NFS client could not start.'
 }
+$global:LASTEXITCODE = 0
 
 $occupied = [System.Environment]::GetLogicalDrives()
 $drive = $null
@@ -47,3 +54,4 @@ if ($null -eq $drive) {
 }
 "R2_NFS_TEST_DRIVE=$drive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 Write-Host "Reserved unused test drive $drive for the isolated native NFS test."
+exit 0
