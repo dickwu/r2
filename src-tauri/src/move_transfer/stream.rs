@@ -1,6 +1,8 @@
 //! Replayable, identity-bound relay transfers and multipart recovery.
 use super::config::MoveConfig;
-use super::planner::{head_identity, storage_error, TRANSFER_MARKER};
+use super::planner::{
+    head_identity, storage_error, verified_destination, verify_unknown_content, TRANSFER_MARKER,
+};
 use super::state::update_move_status;
 use super::types::{MoveProgress, MAX_CONCURRENT_PARTS};
 use crate::db;
@@ -107,7 +109,9 @@ pub(crate) fn data_timeouts(bytes: u64) -> aws_sdk_s3::config::Builder {
             .operation_timeout(attempt_timeout(bytes))
             .operation_attempt_timeout(attempt_timeout(bytes))
             .connect_timeout(Duration::from_secs(10))
-            .read_timeout(Duration::from_secs(30))
+            // Upload response headers normally arrive only after the request body.
+            // This first-byte timeout must allow the same size budget as the upload.
+            .read_timeout(attempt_timeout(bytes))
             .build(),
     )
 }
@@ -216,7 +220,7 @@ async fn reconcile_parts(
     total: u64,
     cancelled: &AtomicBool,
     paused: &AtomicBool,
-) -> Result<BTreeMap<i32, (String, u64)>, String> {
+) -> Result<Option<BTreeMap<i32, (String, u64)>>, String> {
     let mut result = BTreeMap::new();
     let mut marker = None;
     let mut seen_markers = HashSet::new();
@@ -244,6 +248,7 @@ async fn reconcile_parts(
                 Err(error) if is_transient_s3_error(&error) && attempt + 1 < MAX_ATTEMPTS => {
                     retry_delay(attempt, None, cancelled, paused).await?
                 }
+                Err(error) if error.code() == Some("NoSuchUpload") => return Ok(None),
                 Err(error) => {
                     return Err(storage_error(
                         "ListParts",
@@ -305,7 +310,7 @@ async fn reconcile_parts(
         }
         marker = Some(next);
     }
-    Ok(result)
+    Ok(Some(result))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -386,21 +391,154 @@ async fn transfer_part(
     unreachable!("bounded part attempts return a result")
 }
 
+/// Validate an already-published object before changing recovery phase. With
+/// no response receipt, metadata alone cannot establish that its bytes are ours.
 #[allow(clippy::too_many_arguments)]
-async fn stream_multipart(
-    http: &Client,
-    source_client: &aws_sdk_s3::Client,
-    dest_client: &aws_sdk_s3::Client,
+pub(crate) async fn reconcile_uploaded_destination(
     source_config: &MoveConfig,
+    dest_config: &MoveConfig,
+    session: &MoveSession,
+    journal: &mut MoveJournal,
+    identity: SourceIdentity,
+    head: &HeadObjectOutput,
+    cancelled: &AtomicBool,
+    paused: &AtomicBool,
+) -> Result<(), String> {
+    verified_destination(
+        journal,
+        &identity,
+        head.metadata()
+            .and_then(|metadata| metadata.get(TRANSFER_MARKER))
+            .map(String::as_str),
+    )?;
+    if journal.destination.is_none() {
+        interruptible(
+            cancelled,
+            paused,
+            verify_unknown_content(
+                source_config,
+                dest_config,
+                &session.source_key,
+                &session.dest_key,
+                &journal.source,
+                &identity,
+            ),
+        )
+        .await??;
+    }
+    journal.destination = Some(identity);
+    save_phase(journal, "copied").await
+}
+
+/// An absent destination after an unknown completion is not proof of failure.
+/// Only an explicit missing upload ID permits the atomic conditional restart.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn recover_absent_multipart(
+    source_config: &MoveConfig,
+    dest_config: &MoveConfig,
+    session: &MoveSession,
+    journal: &mut MoveJournal,
+    cancelled: &AtomicBool,
+    paused: &AtomicBool,
+) -> Result<bool, String> {
+    if journal.destination.is_some() {
+        return Err("conflict: An acknowledged destination is now absent; do not recreate an object another client may have deleted. Source retained.".into());
+    }
+    let (upload_id, part_size) = db::get_move_upload_session(&session.id)
+        .await
+        .map_err(|error| format!("Cannot inspect unknown multipart upload: {error}"))?
+        .ok_or(
+            "outcome_unknown: Destination publication cannot yet be confirmed; source retained",
+        )?;
+    let plan = MultipartPlan::new(dest_config, journal.source.size, Some(part_size as u64))?;
+    let client = dest_config.client().await?;
+    if reconcile_parts(
+        &client,
+        dest_config,
+        &session.dest_key,
+        &upload_id,
+        plan,
+        journal.source.size,
+        cancelled,
+        paused,
+    )
+    .await?
+    .is_some()
+    {
+        return Err("outcome_unknown: Multipart upload still exists; completion may still be in flight, source retained".into());
+    }
+    recover_missing_upload(
+        source_config,
+        dest_config,
+        session,
+        journal,
+        &upload_id,
+        cancelled,
+        paused,
+    )
+    .await
+}
+
+/// Called only after S3 explicitly returns NoSuchUpload. Unknown HEAD results
+/// and foreign destinations keep the recovery record; confirmed absence clears
+/// obsolete geometry before a future conditional upload can begin.
+#[allow(clippy::too_many_arguments)]
+async fn recover_missing_upload(
+    source_config: &MoveConfig,
+    dest_config: &MoveConfig,
+    session: &MoveSession,
+    journal: &mut MoveJournal,
+    upload_id: &str,
+    cancelled: &AtomicBool,
+    paused: &AtomicBool,
+) -> Result<bool, String> {
+    match interruptible(
+        cancelled,
+        paused,
+        head_identity(dest_config, &session.dest_key),
+    )
+    .await??
+    {
+        Some((identity, head)) => {
+            reconcile_uploaded_destination(
+                source_config,
+                dest_config,
+                session,
+                journal,
+                identity,
+                &head,
+                cancelled,
+                paused,
+            )
+            .await?;
+            Ok(true)
+        }
+        None => {
+            if journal.destination.is_some() {
+                return Err("conflict: An acknowledged destination is now absent; its receipt and source were retained".into());
+            }
+            let mut reset = journal.clone();
+            reset.stage = "transferring".into();
+            reset.destination = None;
+            db::move_sessions::reset_missing_move_upload(upload_id, &reset)
+                .await
+                .map_err(|error| format!("Cannot reset expired multipart upload: {error}"))?;
+            *journal = reset;
+            Ok(false)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_multipart_upload(
+    dest_client: &aws_sdk_s3::Client,
     dest_config: &MoveConfig,
     source_head: &HeadObjectOutput,
     session: &MoveSession,
-    journal: &mut MoveJournal,
-    app: &AppHandle,
+    total: u64,
     cancelled: &AtomicBool,
     paused: &AtomicBool,
-) -> Result<u64, String> {
-    let total = journal.source.size;
+) -> Result<(MultipartPlan, String), String> {
     let saved = db::get_move_upload_session(&session.id)
         .await
         .map_err(|e| format!("Cannot read multipart recovery record: {e}"))?;
@@ -455,7 +593,35 @@ async fn stream_multipart(
             upload_id
         }
     };
-    let mut completed = reconcile_parts(
+    Ok((plan, upload_id))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_multipart(
+    http: &Client,
+    source_client: &aws_sdk_s3::Client,
+    dest_client: &aws_sdk_s3::Client,
+    source_config: &MoveConfig,
+    dest_config: &MoveConfig,
+    source_head: &HeadObjectOutput,
+    session: &MoveSession,
+    journal: &mut MoveJournal,
+    app: &AppHandle,
+    cancelled: &AtomicBool,
+    paused: &AtomicBool,
+) -> Result<u64, String> {
+    let total = journal.source.size;
+    let (plan, upload_id) = prepare_multipart_upload(
+        dest_client,
+        dest_config,
+        source_head,
+        session,
+        total,
+        cancelled,
+        paused,
+    )
+    .await?;
+    let completed = reconcile_parts(
         dest_client,
         dest_config,
         &session.dest_key,
@@ -466,6 +632,22 @@ async fn stream_multipart(
         paused,
     )
     .await?;
+    let Some(mut completed) = completed else {
+        if recover_missing_upload(
+            source_config,
+            dest_config,
+            session,
+            journal,
+            &upload_id,
+            cancelled,
+            paused,
+        )
+        .await?
+        {
+            return Ok(total);
+        }
+        return Err("transient: Multipart upload expired; its obsolete parts were cleared. Resume to start a new upload.".into());
+    };
     // Replace stale local inventory after the complete remote pagination succeeds.
     db::delete_move_upload_parts(&session.id)
         .await
@@ -554,6 +736,32 @@ async fn stream_multipart(
                 .build()
         })
         .collect();
+    finish_multipart_upload(
+        dest_client,
+        source_config,
+        dest_config,
+        session,
+        journal,
+        &upload_id,
+        parts,
+        cancelled,
+        paused,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_multipart_upload(
+    dest_client: &aws_sdk_s3::Client,
+    source_config: &MoveConfig,
+    dest_config: &MoveConfig,
+    session: &MoveSession,
+    journal: &mut MoveJournal,
+    upload_id: &str,
+    parts: Vec<CompletedPart>,
+    cancelled: &AtomicBool,
+    paused: &AtomicBool,
+) -> Result<u64, String> {
     // Persist before dispatch: cancellation, network loss, or a crash can leave
     // Complete committed. The worker reconciles the marker before any replay.
     save_phase(journal, "outcome_unknown").await?;
@@ -565,7 +773,7 @@ async fn stream_multipart(
             .if_none_match("*")
             .bucket(dest_config.bucket())
             .key(&session.dest_key)
-            .upload_id(&upload_id)
+            .upload_id(upload_id)
             .multipart_upload(
                 CompletedMultipartUpload::builder()
                     .set_parts(Some(parts))
@@ -585,14 +793,32 @@ async fn stream_multipart(
                 describe_s3_error(&error),
                 true,
             );
-            if matches!(status, Some(400..=499)) && status != Some(408) {
+            if error.code() == Some("NoSuchUpload") {
+                if recover_missing_upload(
+                    source_config,
+                    dest_config,
+                    session,
+                    journal,
+                    upload_id,
+                    cancelled,
+                    paused,
+                )
+                .await?
+                {
+                    return Ok(journal.source.size);
+                }
+                return Err("transient: Multipart upload expired before publication; resume to start a new upload.".into());
+            }
+            // A generic 404 does not prove expiration. Keep the uncertain
+            // phase so the worker verifies the destination before any replay.
+            if matches!(status, Some(400..=499)) && !matches!(status, Some(404 | 408)) {
                 save_phase(journal, "transferring").await?;
             }
             return Err(message);
         }
     };
     record_destination(journal, output.e_tag(), output.version_id()).await?;
-    Ok(total)
+    Ok(journal.source.size)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -744,7 +970,7 @@ pub(crate) async fn stream_transfer_without_temp(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     fn aws() -> MoveConfig {
         MoveConfig::Aws(crate::providers::aws::AwsConfig {
@@ -854,6 +1080,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let parts = parts.expect("multipart upload still exists");
         assert_eq!(parts.len(), 1001);
         assert_eq!(parts[&1001], ("\"part-1001\"".into(), 20 * MIB));
         let requests = server.await.unwrap();
@@ -921,5 +1148,490 @@ mod tests {
             assert!(request.to_ascii_lowercase().contains("if-match: \"v1\""));
             assert!(request.to_ascii_lowercase().contains("range: bytes=2-3"));
         }
+    }
+    pub(crate) fn fixture_config(endpoint: &str) -> MoveConfig {
+        MoveConfig::Minio(crate::providers::minio::MinioConfig {
+            bucket: "bucket".into(),
+            access_key_id: "fixture".into(),
+            secret_access_key: "fixture-secret".into(),
+            endpoint_scheme: "http".into(),
+            endpoint_host: endpoint.strip_prefix("http://").unwrap().into(),
+            force_path_style: true,
+        })
+    }
+
+    pub(crate) async fn journal_fixture(name: &str, size: u64) -> (MoveSession, MoveJournal) {
+        static DATABASE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        DATABASE
+            .get_or_init(|| async {
+                db::init_db(std::path::Path::new(":memory:")).await.unwrap();
+            })
+            .await;
+        let id = format!("{name}-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+        let session = MoveSession {
+            id: id.clone(),
+            source_key: "source".into(),
+            dest_key: "destination".into(),
+            source_bucket: "bucket".into(),
+            source_account_id: "account".into(),
+            source_provider: "minio".into(),
+            dest_bucket: "bucket".into(),
+            dest_account_id: "account".into(),
+            dest_provider: "minio".into(),
+            delete_original: true,
+            file_size: size as i64,
+            progress: 99,
+            status: "error".into(),
+            error: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        db::move_sessions::create_move_session(&session)
+            .await
+            .unwrap();
+        let journal = MoveJournal {
+            task_id: id,
+            stage: "outcome_unknown".into(),
+            source: SourceIdentity {
+                size,
+                etag: "\"source\"".into(),
+                version_id: None,
+            },
+            source_scope: "fixture".into(),
+            dest_scope: "fixture".into(),
+            destination: None,
+        };
+        save_move_journal(&journal).await.unwrap();
+        db::save_move_upload_session(&session.id, "expired-upload", (5 * MIB) as i64)
+            .await
+            .unwrap();
+        db::save_move_upload_part(&session.id, 1, "old-part", size as i64)
+            .await
+            .unwrap();
+        (session, journal)
+    }
+
+    fn completed_part(etag: &str) -> Vec<CompletedPart> {
+        vec![CompletedPart::builder().part_number(1).e_tag(etag).build()]
+    }
+
+    fn missing_upload() -> crate::test_s3::Response {
+        crate::test_s3::Response::xml(
+            404,
+            "<Error><Code>NoSuchUpload</Code><Message>The upload does not exist</Message></Error>",
+        )
+    }
+
+    #[tokio::test]
+    async fn consumed_completion_verifies_content_and_records_copied_without_reupload() {
+        use crate::test_s3::{serve, Response};
+        for changed in [false, true] {
+            let (session, mut journal) = journal_fixture("consumed", 8).await;
+            let marker = session.id.clone();
+            let fixture = serve(move |request| {
+                let marker = marker.clone();
+                async move {
+                    if request.method == "POST" {
+                        return missing_upload();
+                    }
+                    if request.method == "HEAD" {
+                        return Response::empty(200)
+                            .header("etag", "\"destination\"")
+                            .header("content-length", 8)
+                            .header("x-amz-meta-r2-move-task", marker);
+                    }
+                    let source = request.path.split('?').next().unwrap().ends_with("/source");
+                    Response::xml(
+                        200,
+                        if changed && !source {
+                            "modified"
+                        } else {
+                            "original"
+                        },
+                    )
+                    .header(
+                        "etag",
+                        if source {
+                            "\"source\""
+                        } else {
+                            "\"destination\""
+                        },
+                    )
+                }
+            })
+            .await;
+            let config = fixture_config(&fixture.endpoint);
+            let result = finish_multipart_upload(
+                &fixture.client,
+                &config,
+                &config,
+                &session,
+                &mut journal,
+                "expired-upload",
+                completed_part("old-part"),
+                &AtomicBool::new(false),
+                &AtomicBool::new(false),
+            )
+            .await;
+            let saved = get_move_journal(&session.id).await.unwrap().unwrap();
+            if changed {
+                assert!(result.unwrap_err().starts_with("conflict:"));
+                assert_eq!(saved.stage, "outcome_unknown");
+                assert!(saved.destination.is_none());
+            } else {
+                assert_eq!(result.unwrap(), 8);
+                assert_eq!(saved.stage, "copied");
+                assert_eq!(saved.destination.unwrap().etag, "\"destination\"");
+            }
+            let requests = fixture.requests.lock().unwrap();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.method == "POST")
+                    .count(),
+                1
+            );
+            assert!(!requests
+                .iter()
+                .any(|request| request.method == "PUT" || request.method == "DELETE"));
+            let reads: Vec<_> = requests
+                .iter()
+                .filter(|request| request.method == "GET")
+                .collect();
+            assert_eq!(reads.len(), 2);
+            assert!(reads
+                .iter()
+                .all(|request| request.headers.contains_key("if-match")));
+            assert_eq!(
+                requests[0].headers.get("if-none-match").map(String::as_str),
+                Some("*")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_completion_clears_obsolete_parts_then_uploads_new_conditional_session() {
+        use crate::test_s3::{serve, Response};
+        let (session, mut journal) = journal_fixture("expired", 8).await;
+        let fixture = serve(|request| async move {
+            if request.path.contains("uploadId=expired-upload") { return missing_upload(); }
+            if request.method == "HEAD" { return Response::empty(404); }
+            if request.method == "POST" && request.path.contains("uploads") {
+                return Response::xml(200, "<InitiateMultipartUploadResult><UploadId>replacement-upload</UploadId></InitiateMultipartUploadResult>");
+            }
+            if request.method == "GET" {
+                return Response::xml(206, "original").header("etag", "\"source\"").header("content-range", "bytes 0-7/8");
+            }
+            if request.method == "PUT" {
+                assert_eq!(request.body, b"original");
+                return Response::empty(200).header("etag", "\"new-part\"");
+            }
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.headers.get("if-none-match").map(String::as_str), Some("*"));
+            Response::xml(200, "<CompleteMultipartUploadResult><ETag>\"destination\"</ETag></CompleteMultipartUploadResult>")
+        }).await;
+        let config = fixture_config(&fixture.endpoint);
+        let error = finish_multipart_upload(
+            &fixture.client,
+            &config,
+            &config,
+            &session,
+            &mut journal,
+            "expired-upload",
+            completed_part("old-part"),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.starts_with("transient:"));
+        assert_eq!(
+            get_move_journal(&session.id).await.unwrap().unwrap().stage,
+            "transferring"
+        );
+        assert!(db::get_move_upload_session(&session.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(db::get_move_upload_parts(&session.id)
+            .await
+            .unwrap()
+            .is_empty());
+        let (plan, upload_id) = prepare_multipart_upload(
+            &fixture.client,
+            &config,
+            &HeadObjectOutput::builder().build(),
+            &session,
+            8,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(upload_id, "replacement-upload");
+        let (number, etag, size) = transfer_part(
+            &shared_http_client().unwrap(),
+            &fixture.client,
+            &fixture.client,
+            &config,
+            &config,
+            &session,
+            &journal.source,
+            &upload_id,
+            1,
+            plan,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!((number, size), (1, 8));
+        assert_eq!(
+            finish_multipart_upload(
+                &fixture.client,
+                &config,
+                &config,
+                &session,
+                &mut journal,
+                &upload_id,
+                completed_part(&etag),
+                &AtomicBool::new(false),
+                &AtomicBool::new(false)
+            )
+            .await
+            .unwrap(),
+            8
+        );
+        assert_eq!(
+            get_move_journal(&session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .destination
+                .unwrap()
+                .etag,
+            "\"destination\""
+        );
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.path.contains("uploadId=expired-upload"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.method == "PUT")
+                .count(),
+            1
+        );
+        assert!(!requests.iter().any(|request| request.method == "DELETE"));
+    }
+
+    #[tokio::test]
+    async fn unknown_completion_requires_missing_mpu_and_fresh_absence_before_reset() {
+        use crate::test_s3::{serve, Response};
+        for missing in [false, true] {
+            let (session, mut journal) = journal_fixture("unknown-resume", 8).await;
+            let fixture = serve(move |request| async move {
+                if request.method == "HEAD" {
+                    return Response::empty(404);
+                }
+                if missing {
+                    missing_upload()
+                } else {
+                    Response::xml(
+                        200,
+                        "<ListPartsResult><IsTruncated>false</IsTruncated></ListPartsResult>",
+                    )
+                }
+            })
+            .await;
+            let config = fixture_config(&fixture.endpoint);
+            let result = recover_absent_multipart(
+                &config,
+                &config,
+                &session,
+                &mut journal,
+                &AtomicBool::new(false),
+                &AtomicBool::new(false),
+            )
+            .await;
+            if missing {
+                assert!(!result.unwrap());
+                assert!(db::get_move_upload_session(&session.id)
+                    .await
+                    .unwrap()
+                    .is_none());
+                assert_eq!(journal.stage, "transferring");
+            } else {
+                assert!(result.unwrap_err().starts_with("outcome_unknown:"));
+                assert!(db::get_move_upload_session(&session.id)
+                    .await
+                    .unwrap()
+                    .is_some());
+                assert_eq!(journal.stage, "outcome_unknown");
+            }
+            let requests = fixture.requests.lock().unwrap();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.method == "HEAD")
+                    .count(),
+                usize::from(missing)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_upload_does_not_clear_foreign_destination_or_failed_head() {
+        use crate::test_s3::{serve, Response};
+        for head_status in [200, 403] {
+            let (session, mut journal) = journal_fixture("foreign-or-denied", 8).await;
+            let fixture = serve(move |request| async move {
+                if request.method == "POST" {
+                    missing_upload()
+                } else {
+                    Response::empty(head_status)
+                        .header("etag", "\"foreign\"")
+                        .header("content-length", 8)
+                        .header("x-amz-meta-r2-move-task", "another-task")
+                }
+            })
+            .await;
+            let config = fixture_config(&fixture.endpoint);
+            assert!(finish_multipart_upload(
+                &fixture.client,
+                &config,
+                &config,
+                &session,
+                &mut journal,
+                "expired-upload",
+                completed_part("old-part"),
+                &AtomicBool::new(false),
+                &AtomicBool::new(false)
+            )
+            .await
+            .is_err());
+            assert!(db::get_move_upload_session(&session.id)
+                .await
+                .unwrap()
+                .is_some());
+            assert_eq!(
+                db::get_move_upload_parts(&session.id).await.unwrap().len(),
+                1
+            );
+            assert_eq!(
+                get_move_journal(&session.id).await.unwrap().unwrap().stage,
+                "outcome_unknown"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_part_allows_a_response_after_thirty_seconds_without_replay() {
+        use crate::test_s3::{serve, Response};
+        let (session, journal) = journal_fixture("slow-upload", 5 * MIB).await;
+        let fixture = serve(|request| async move {
+            if request.method == "GET" {
+                return Response {
+                    status: 206,
+                    headers: vec![
+                        ("etag".into(), "\"source\"".into()),
+                        (
+                            "content-range".into(),
+                            format!("bytes 0-{}/{}", 5 * MIB - 1, 5 * MIB),
+                        ),
+                    ],
+                    body: vec![b'x'; (5 * MIB) as usize],
+                };
+            }
+            assert_eq!(request.method, "PUT");
+            assert_eq!(request.body.len(), (5 * MIB) as usize);
+            // The real S3 first-response-byte timer includes sending the body.
+            // The old 30s setting retried here even though its 70s operation
+            // budget had ample time remaining. Keep this as an actual wire test.
+            tokio::time::sleep(Duration::from_secs(31)).await;
+            Response::empty(200).header("etag", "\"slow-part\"")
+        })
+        .await;
+        let config = fixture_config(&fixture.endpoint);
+        let plan = MultipartPlan::new(&config, 5 * MIB, Some(5 * MIB)).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(36),
+            transfer_part(
+                &shared_http_client().unwrap(),
+                &fixture.client,
+                &fixture.client,
+                &config,
+                &config,
+                &session,
+                &journal.source,
+                "expired-upload",
+                1,
+                plan,
+                &AtomicBool::new(false),
+                &AtomicBool::new(false),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.1, "\"slow-part\"");
+        assert_eq!(
+            fixture
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.method == "PUT")
+                .count(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn unknown_upload_with_a_destination_receipt_never_restarts_after_disappearance() {
+        use crate::test_s3::{serve, Response};
+        let (session, mut journal) = journal_fixture("acknowledged-destination-missing", 8).await;
+        let receipt = SourceIdentity {
+            size: 8,
+            etag: "\"acknowledged\"".into(),
+            version_id: None,
+        };
+        journal.destination = Some(receipt.clone());
+        save_move_journal(&journal).await.unwrap();
+        let fixture = serve(|_| async { Response::empty(404) }).await;
+        let config = fixture_config(&fixture.endpoint);
+        let error = recover_absent_multipart(
+            &config,
+            &config,
+            &session,
+            &mut journal,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.starts_with("conflict:"));
+        assert!(fixture.requests.lock().unwrap().is_empty());
+        assert!(db::get_move_upload_session(&session.id)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            get_move_journal(&session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .destination,
+            Some(receipt)
+        );
+        assert_eq!(
+            db::get_move_upload_parts(&session.id).await.unwrap().len(),
+            1
+        );
     }
 }

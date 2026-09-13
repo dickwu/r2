@@ -392,6 +392,67 @@ pub async fn get_move_upload_session(task_id: &str) -> DbResult<Option<(String, 
     }
 }
 
+/// Reset only the MPU proven missing by the caller, in the same durable
+/// transaction as its parts and recovery phase. A concurrent replacement or
+/// task removal must not erase a newer upload or resurrect a removed task.
+pub async fn reset_missing_move_upload(
+    expected_upload_id: &str,
+    journal: &MoveJournal,
+) -> DbResult<()> {
+    let conn = get_connection()?.lock().await;
+    reset_missing_upload_on(&conn, expected_upload_id, journal).await
+}
+
+async fn reset_missing_upload_on(
+    conn: &turso::Connection,
+    expected_upload_id: &str,
+    journal: &MoveJournal,
+) -> DbResult<()> {
+    if journal.stage != "transferring" || journal.destination.is_some() {
+        return Err("Missing upload reset requires an uncommitted transfer".into());
+    }
+    conn.execute("PRAGMA synchronous = FULL", ()).await?;
+    let result: DbResult<()> = async {
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
+        let mut rows = conn.query(
+            "SELECT u.upload_id FROM move_upload_sessions u INNER JOIN move_sessions m ON m.id = u.task_id WHERE u.task_id = ?1",
+            turso::params![journal.task_id.as_str()],
+        ).await?;
+        let upload_id = match rows.next().await? {
+            Some(row) => row.get::<String>(0)?,
+            None => return Err("Move task or multipart upload was removed; recovery record retained".into()),
+        };
+        drop(rows);
+        if upload_id != expected_upload_id {
+            return Err("Multipart upload changed during reconciliation; newer upload retained".into());
+        }
+        let current = get_journal_on(conn, &journal.task_id).await?
+            .ok_or("Move recovery journal was removed; multipart upload retained")?;
+        if !matches!(current.stage.as_str(), "transferring" | "outcome_unknown")
+            || current.destination.is_some()
+            || current.task_id != journal.task_id
+            || current.source != journal.source
+            || current.source_scope != journal.source_scope
+            || current.dest_scope != journal.dest_scope
+        {
+            return Err("Move recovery journal advanced during reconciliation; current receipt retained".into());
+        }
+        conn.execute("DELETE FROM move_upload_parts WHERE task_id = ?1", turso::params![journal.task_id.as_str()]).await?;
+        conn.execute("DELETE FROM move_upload_sessions WHERE task_id = ?1", turso::params![journal.task_id.as_str()]).await?;
+        conn.execute(
+            "INSERT INTO move_journal (task_id, data) VALUES (?1, ?2) ON CONFLICT(task_id) DO UPDATE SET data = excluded.data",
+            turso::params![journal.task_id.as_str(), serde_json::to_string(journal)?],
+        ).await?;
+        conn.execute("COMMIT", ()).await?;
+        Ok(())
+    }.await;
+    if result.is_err() {
+        let _ = conn.execute("ROLLBACK", ()).await;
+    }
+    let _ = conn.execute("PRAGMA synchronous = NORMAL", ()).await;
+    result
+}
+
 /// Save a completed multipart upload part
 pub async fn save_move_upload_part(
     task_id: &str,
@@ -1074,5 +1135,129 @@ mod tests {
         drop(conn);
         drop(database);
         let _ = std::fs::remove_file(path);
+    }
+    #[tokio::test]
+    async fn expired_upload_reset_retains_newer_upload_and_removed_task_receipts() {
+        let database = turso::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = database.connect().unwrap();
+        conn.execute_batch(get_table_sql()).await.unwrap();
+        conn.execute("INSERT INTO move_sessions (id, source_key, dest_key, source_bucket, source_account_id, source_provider, dest_bucket, dest_account_id, dest_provider, created_at, updated_at, status) VALUES ('move', 'source', 'dest', 'bucket', 'account', 'minio', 'bucket', 'account', 'minio', 0, 0, 'error')", ()).await.unwrap();
+        let mut journal = MoveJournal {
+            task_id: "move".into(),
+            stage: "outcome_unknown".into(),
+            source: SourceIdentity {
+                size: 8,
+                etag: "source".into(),
+                version_id: None,
+            },
+            source_scope: "source".into(),
+            dest_scope: "dest".into(),
+            destination: None,
+        };
+        save_journal_on(&conn, &journal).await.unwrap();
+        conn.execute(
+            "INSERT INTO move_upload_sessions VALUES ('move', 'new-upload', 5242880)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO move_upload_parts VALUES ('move', 1, 'part', 8)",
+            (),
+        )
+        .await
+        .unwrap();
+        journal.stage = "transferring".into();
+        assert!(reset_missing_upload_on(&conn, "old-upload", &journal)
+            .await
+            .is_err());
+        assert_eq!(
+            get_journal_on(&conn, "move").await.unwrap().unwrap().stage,
+            "outcome_unknown"
+        );
+        let mut parts = conn
+            .query("SELECT count(*) FROM move_upload_parts", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            parts.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1
+        );
+        drop(parts);
+        conn.execute("DELETE FROM move_sessions WHERE id = 'move'", ())
+            .await
+            .unwrap();
+        assert!(reset_missing_upload_on(&conn, "new-upload", &journal)
+            .await
+            .is_err());
+        assert_eq!(
+            get_journal_on(&conn, "move").await.unwrap().unwrap().stage,
+            "outcome_unknown"
+        );
+    }
+    #[tokio::test]
+    async fn expired_upload_reset_rejects_an_advanced_journal_even_when_upload_id_matches() {
+        let database = turso::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = database.connect().unwrap();
+        conn.execute_batch(get_table_sql()).await.unwrap();
+        conn.execute("INSERT INTO move_sessions (id, source_key, dest_key, source_bucket, source_account_id, source_provider, dest_bucket, dest_account_id, dest_provider, created_at, updated_at, status) VALUES ('move', 'source', 'dest', 'bucket', 'account', 'minio', 'bucket', 'account', 'minio', 0, 0, 'error')", ()).await.unwrap();
+        conn.execute(
+            "INSERT INTO move_upload_sessions VALUES ('move', 'same-upload', 5242880)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO move_upload_parts VALUES ('move', 1, 'part', 8)",
+            (),
+        )
+        .await
+        .unwrap();
+        let requested = MoveJournal {
+            task_id: "move".into(),
+            stage: "transferring".into(),
+            source: SourceIdentity {
+                size: 8,
+                etag: "source".into(),
+                version_id: None,
+            },
+            source_scope: "source".into(),
+            dest_scope: "dest".into(),
+            destination: None,
+        };
+        for scenario in ["copied", "receipt", "source-change"] {
+            let mut current = requested.clone();
+            match scenario {
+                "copied" => current.stage = "copied".into(),
+                "receipt" => {
+                    current.stage = "outcome_unknown".into();
+                    current.destination = Some(SourceIdentity {
+                        size: 8,
+                        etag: "published".into(),
+                        version_id: None,
+                    });
+                }
+                _ => current.source.etag = "new-source".into(),
+            }
+            save_journal_on(&conn, &current).await.unwrap();
+            assert!(
+                reset_missing_upload_on(&conn, "same-upload", &requested)
+                    .await
+                    .is_err(),
+                "{scenario}"
+            );
+            let stored = get_journal_on(&conn, "move").await.unwrap().unwrap();
+            assert_eq!(stored.stage, current.stage);
+            assert_eq!(stored.destination, current.destination);
+            assert_eq!(stored.source, current.source);
+            let mut parts = conn
+                .query("SELECT count(*) FROM move_upload_parts", ())
+                .await
+                .unwrap();
+            assert_eq!(
+                parts.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+                1
+            );
+        }
     }
 }

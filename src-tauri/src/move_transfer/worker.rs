@@ -98,6 +98,46 @@ fn check_control(cancelled: &AtomicBool, paused: &AtomicBool) -> Result<(), Stri
     Ok(())
 }
 
+/// Older builds downgraded a missing completion to transferring. A saved
+/// MPU and our marker identify a candidate only; bytes still must be verified.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_legacy_multipart(
+    source_config: &MoveConfig,
+    dest_config: &MoveConfig,
+    session: &MoveSession,
+    journal: &mut MoveJournal,
+    identity: crate::db::move_sessions::SourceIdentity,
+    head: &aws_sdk_s3::operation::head_object::HeadObjectOutput,
+    cancelled: &AtomicBool,
+    paused: &AtomicBool,
+) -> Result<bool, String> {
+    if journal.stage != "transferring"
+        || head
+            .metadata()
+            .and_then(|metadata| metadata.get(TRANSFER_MARKER))
+            .map(String::as_str)
+            != Some(session.id.as_str())
+        || db::get_move_upload_session(&session.id)
+            .await
+            .map_err(|e| e.to_string())?
+            .is_none()
+    {
+        return Ok(false);
+    }
+    super::stream::reconcile_uploaded_destination(
+        source_config,
+        dest_config,
+        session,
+        journal,
+        identity,
+        head,
+        cancelled,
+        paused,
+    )
+    .await?;
+    Ok(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn move_file_internal(
     client: &Client,
@@ -129,10 +169,10 @@ async fn move_file_internal(
     }
     let source_scope = scope(source_config)?;
     let dest_scope = scope(dest_config)?;
-    let stored = get_move_journal(&session.id)
+    let mut stored = get_move_journal(&session.id)
         .await
         .map_err(|e| e.to_string())?;
-    if let Some(journal) = &stored {
+    if let Some(journal) = stored.clone() {
         if journal.source_scope != source_scope || journal.dest_scope != dest_scope {
             return Err(
                 "conflict: Storage endpoint or tenant changed since this move began".into(),
@@ -142,45 +182,69 @@ async fn move_file_internal(
             RecoveryStep::Complete => return Ok(None),
             RecoveryStep::Transfer => {}
             RecoveryStep::ReconcileDestination => {
-                let Some((identity, head)) = super::stream::protocol::interruptible(
+                let observed = super::stream::protocol::interruptible(
                     cancelled,
                     paused,
                     head_identity(dest_config, &session.dest_key),
                 )
-                .await??
-                else {
-                    return Err("outcome_unknown: Destination publication cannot yet be confirmed; source retained".into());
-                };
-                verified_destination(
-                    journal,
-                    &identity,
-                    head.metadata()
-                        .and_then(|m| m.get(TRANSFER_MARKER))
-                        .map(String::as_str),
-                )?;
-                if journal.destination.is_none() {
-                    super::planner::verify_unknown_content(
-                        source_config,
-                        dest_config,
-                        &session.source_key,
-                        &session.dest_key,
-                        &journal.source,
+                .await??;
+                if let Some((identity, head)) = observed {
+                    verified_destination(
+                        &journal,
                         &identity,
-                    )
-                    .await?;
+                        head.metadata()
+                            .and_then(|m| m.get(TRANSFER_MARKER))
+                            .map(String::as_str),
+                    )?;
+                    if journal.destination.is_none() {
+                        super::planner::verify_unknown_content(
+                            source_config,
+                            dest_config,
+                            &session.source_key,
+                            &session.dest_key,
+                            &journal.source,
+                            &identity,
+                        )
+                        .await?;
+                    }
+                    let mut reconciled = journal.clone();
+                    reconciled.destination = Some(identity);
+                    if reconciled.stage == "outcome_unknown" {
+                        reconciled.stage = "copied".into();
+                    }
+                    save_move_journal(&reconciled)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    return Ok(Some(MoveUploadResult {
+                        uploaded_size: journal.source.size,
+                        delete_original: session.delete_original,
+                    }));
                 }
-                let mut reconciled = journal.clone();
-                reconciled.destination = Some(identity);
-                if reconciled.stage == "outcome_unknown" {
-                    reconciled.stage = "copied".into();
+                if journal.stage != "outcome_unknown" {
+                    return Err(
+                        "outcome_unknown: Verified destination no longer exists; source retained"
+                            .into(),
+                    );
                 }
-                save_move_journal(&reconciled)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                return Ok(Some(MoveUploadResult {
-                    uploaded_size: journal.source.size,
-                    delete_original: session.delete_original,
-                }));
+                let mut recovered = journal.clone();
+                if super::stream::recover_absent_multipart(
+                    source_config,
+                    dest_config,
+                    session,
+                    &mut recovered,
+                    cancelled,
+                    paused,
+                )
+                .await?
+                {
+                    return Ok(Some(MoveUploadResult {
+                        uploaded_size: recovered.source.size,
+                        delete_original: session.delete_original,
+                    }));
+                }
+                // The upload ID is proven missing, and a fresh HEAD confirmed
+                // absence. Its atomic reset permits only a new conditional upload.
+                stored = Some(recovered);
             }
             _ => {
                 return Err(
@@ -224,14 +288,30 @@ async fn move_file_internal(
             destination: None,
         },
     };
-    if super::stream::protocol::interruptible(
+    if let Some((identity, head)) = super::stream::protocol::interruptible(
         cancelled,
         paused,
         head_identity(dest_config, &session.dest_key),
     )
     .await??
-    .is_some()
     {
+        if reconcile_legacy_multipart(
+            source_config,
+            dest_config,
+            session,
+            &mut journal,
+            identity,
+            &head,
+            cancelled,
+            paused,
+        )
+        .await?
+        {
+            return Ok(Some(MoveUploadResult {
+                uploaded_size: journal.source.size,
+                delete_original: session.delete_original,
+            }));
+        }
         return Err("conflict: Destination already exists; choose another name. Existing objects are never overwritten by a move.".into());
     }
     save_move_journal(&journal)
@@ -747,5 +827,89 @@ mod recovery_tests {
             recovery_failure_status("cancelled: Move cancelled", Some("delete_pending")),
             "delete_pending"
         );
+    }
+    #[tokio::test]
+    async fn legacy_transferring_multipart_verifies_bytes_before_adopting_destination() {
+        use super::*;
+        use crate::move_transfer::stream::tests::{fixture_config, journal_fixture};
+        use crate::test_s3::{serve, Response};
+        for (our_marker, changed) in [(true, false), (true, true), (false, false)] {
+            let (session, mut journal) = journal_fixture("legacy-multipart", 8).await;
+            journal.stage = "transferring".into();
+            save_move_journal(&journal).await.unwrap();
+            let marker = if our_marker {
+                session.id.clone()
+            } else {
+                "foreign-task".into()
+            };
+            let fixture = serve(move |request| {
+                let marker = marker.clone();
+                async move {
+                    if request.method == "HEAD" {
+                        return Response::empty(200)
+                            .header("etag", "\"destination\"")
+                            .header("content-length", 8)
+                            .header("x-amz-meta-r2-move-task", marker);
+                    }
+                    let source = request.path.split('?').next().unwrap().ends_with("/source");
+                    Response::xml(
+                        200,
+                        if changed && !source {
+                            "modified"
+                        } else {
+                            "original"
+                        },
+                    )
+                    .header(
+                        "etag",
+                        if source {
+                            "\"source\""
+                        } else {
+                            "\"destination\""
+                        },
+                    )
+                }
+            })
+            .await;
+            let config = fixture_config(&fixture.endpoint);
+            let (identity, head) = head_identity(&config, &session.dest_key)
+                .await
+                .unwrap()
+                .unwrap();
+            let result = reconcile_legacy_multipart(
+                &config,
+                &config,
+                &session,
+                &mut journal,
+                identity,
+                &head,
+                &AtomicBool::new(false),
+                &AtomicBool::new(false),
+            )
+            .await;
+            if !our_marker {
+                assert!(!result.unwrap());
+                assert_eq!(journal.stage, "transferring");
+                assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+            } else if changed {
+                assert!(result.unwrap_err().starts_with("conflict:"));
+                assert_eq!(
+                    get_move_journal(&session.id).await.unwrap().unwrap().stage,
+                    "transferring"
+                );
+            } else {
+                assert!(result.unwrap());
+                assert_eq!(
+                    get_move_journal(&session.id).await.unwrap().unwrap().stage,
+                    "copied"
+                );
+            }
+            assert!(fixture
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| matches!(request.method.as_str(), "GET" | "HEAD")));
+        }
     }
 }
