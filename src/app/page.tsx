@@ -1065,6 +1065,14 @@ export default function Home() {
     setModifiedSort(null);
   }
 
+  useEffect(() => {
+    if (initialized && !loading && performance.getEntriesByName('r2:shell-ready').length === 0) {
+      // After the initialized shell commits and its React handlers are bound.
+      // This local timing mark contains no account or storage data.
+      performance.mark('r2:shell-ready');
+    }
+  }, [initialized, loading]);
+
   if (loading) {
     return (
       <div className="center-container">

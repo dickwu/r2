@@ -1,3 +1,5 @@
+import { observeFolderAccumulation } from '@/app/lib/folderTiming';
+
 export interface FileItem {
   name: string;
   key: string;
@@ -106,11 +108,13 @@ export function buildFileItems(
     });
   }
 
-  return items.sort((a, b) => {
-    if (a.isFolder && !b.isFolder) return -1;
-    if (!a.isFolder && b.isFolder) return 1;
-    return nameCollator.compare(a.name, b.name);
-  });
+  return items.sort(compareFileItems);
+}
+
+function compareFileItems(a: FileItem, b: FileItem): number {
+  if (a.isFolder && !b.isFolder) return -1;
+  if (!a.isFolder && b.isFolder) return 1;
+  return nameCollator.compare(a.name, b.name);
 }
 
 /** Match the entire navigation identity before accepting any payload. */
@@ -129,8 +133,9 @@ export function matchesFolderRequest(
 }
 
 export function createFolderPageAccumulator(scope: FolderRequestScope) {
-  const files = new Map<string, StoredFolderFile>();
+  const files = new Map<string, FileItem>();
   const folders = new Set<string>();
+  let sorted: FileItem[] = [];
   const cursors = new Set<string>();
   let nextIndex = 0;
   let complete = false;
@@ -147,16 +152,81 @@ export function createFolderPageAccumulator(scope: FolderRequestScope) {
       if (page.next_cursor) cursors.add(page.next_cursor);
       nextIndex += 1;
       complete = page.complete;
-      for (const file of page.files) {
-        files.set(file.key, { key: file.key, size: file.size, lastModified: file.last_modified });
-      }
-      for (const folder of page.folders) folders.add(folder);
-      return {
-        items: buildFileItems(Array.from(files.values()), Array.from(folders), scope.prefix),
-        complete,
-        fromCache: page.from_cache,
-        freshness: complete ? page.freshness : 'partial',
-      };
+      return observeFolderAccumulation(scope, page.page_index, () => {
+        const newKeys = new Set<string>();
+        const replacements = new Map<string, FileItem>();
+        const additions: FileItem[] = [];
+        for (const file of page.files) {
+          if (file.key === scope.prefix || file.key.endsWith('/')) continue;
+          const previous = files.get(file.key);
+          if (
+            previous &&
+            previous.size === file.size &&
+            previous.lastModified === file.last_modified
+          )
+            continue;
+          const item: FileItem = {
+            name: extractName(file.key, scope.prefix),
+            key: file.key,
+            isFolder: false,
+            size: file.size,
+            lastModified: file.last_modified,
+          };
+          files.set(file.key, item);
+          if (!previous) newKeys.add(file.key);
+          else replacements.set(file.key, item);
+        }
+        for (const folder of page.folders) {
+          if (!folder || folder === '/' || folders.has(folder)) continue;
+          folders.add(folder);
+          additions.push({ name: extractName(folder, scope.prefix), key: folder, isFolder: true });
+        }
+        // Read the final value after duplicate keys within this page were replaced.
+        for (const key of newKeys) additions.push(files.get(key)!);
+        additions.sort(compareFileItems);
+        if (additions.length > 0 || replacements.size > 0) {
+          const merged = new Array<FileItem>(sorted.length + additions.length);
+          let oldIndex = 0;
+          let writeIndex = 0;
+          const copyExisting = (end: number) => {
+            while (oldIndex < end) {
+              const previous = sorted[oldIndex++];
+              merged[writeIndex++] = previous.isFolder
+                ? previous
+                : (replacements.get(previous.key) ?? previous);
+            }
+          };
+          for (const addition of additions) {
+            // Find a whole existing run to copy. Binary upper bounds avoid an
+            // expensive Intl comparison for every old row on every new page.
+            let low = oldIndex;
+            let high = sorted.length;
+            if (low < high && compareFileItems(sorted[low], addition) <= 0) {
+              if (compareFileItems(sorted[high - 1], addition) <= 0) low = high;
+              else {
+                while (low < high) {
+                  const middle = low + Math.floor((high - low) / 2);
+                  if (compareFileItems(sorted[middle], addition) <= 0) low = middle + 1;
+                  else high = middle;
+                }
+              }
+            }
+            // Existing equal names precede newly observed equal names, exactly
+            // matching the previous stable sort over Map/Set insertion order.
+            copyExisting(low);
+            merged[writeIndex++] = addition;
+          }
+          copyExisting(sorted.length);
+          sorted = merged;
+        }
+        // Never mutate older arrays or their item objects after publishing.
+        return {
+          items: sorted,
+          complete,
+          fromCache: page.from_cache,
+          freshness: complete ? page.freshness : 'partial',
+        };
+      });
     },
   };
 }

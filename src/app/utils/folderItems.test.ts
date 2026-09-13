@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, expect, test } from 'bun:test';
 import {
   createFolderPageAccumulator,
+  buildFileItems,
   loadFolderItems,
   type FolderSnapshot,
   type FolderPage,
@@ -118,6 +119,84 @@ describe('folder stale while revalidate', () => {
 });
 
 describe('scoped incremental folder pages', () => {
+  test('lexical pages match the full natural stable sort with duplicate metadata and late folders', () => {
+    const request = { ...scope, prefix: 'nested/' };
+    const accumulator = createFolderPageAccumulator(request);
+    const keys = Array.from({ length: 10_000 }, (_, index) => `nested/file-${index}.txt`).sort();
+    const known = new Map<string, { key: string; size: number; lastModified: string }>();
+    const knownFolders = new Set<string>();
+    const retained: Array<{ snapshot: FolderSnapshot; json: string }> = [];
+    for (let index = 0; index < 10; index++) {
+      const entries = keys
+        .slice(index * 1000, (index + 1) * 1000)
+        .map((key) => ({ key, name: key, size: index, last_modified: `day-${index}` }));
+      // Equal collator values retain first insertion order across pages.
+      entries.push({
+        key: `nested/tie-${index % 2 ? '01' : '1'}.txt`,
+        name: 'ignored',
+        size: index,
+        last_modified: `day-${index}`,
+      });
+      if (index > 0)
+        entries.push({
+          key: keys[0],
+          name: 'ignored',
+          size: 9999 + index,
+          last_modified: 'replaced',
+        });
+      const folders =
+        index === 3
+          ? ['nested/z/', 'nested/a01/', 'nested/a1/']
+          : index === 8
+            ? ['nested/a1/', 'nested/b/']
+            : [];
+      entries.forEach((file) =>
+        known.set(file.key, { key: file.key, size: file.size, lastModified: file.last_modified })
+      );
+      folders.forEach((folder) => knownFolders.add(folder));
+      const snapshot = accumulator.accept({
+        ...page(),
+        ...request,
+        files: entries,
+        folders,
+        page_index: index,
+        complete: index === 9,
+        next_cursor: index === 9 ? null : String(index + 1),
+      })!;
+      expect(snapshot.items).toEqual(
+        buildFileItems([...known.values()], [...knownFolders], request.prefix)
+      );
+      retained.forEach((older) => expect(JSON.stringify(older.snapshot)).toBe(older.json));
+      retained.push({ snapshot, json: JSON.stringify(snapshot) });
+    }
+  });
+
+  test('metadata replacements leave earlier snapshots and untouched item references intact', () => {
+    const accumulator = createFolderPageAccumulator(scope);
+    const first = accumulator.accept(
+      page({
+        files: [
+          { key: 'a', name: 'ignored', size: 1, last_modified: 'old' },
+          { key: 'b', name: 'ignored', size: 2, last_modified: 'unchanged' },
+        ],
+        complete: false,
+        next_cursor: 'next',
+      })
+    )!;
+    const second = accumulator.accept(
+      page({
+        page_index: 1,
+        files: [
+          { key: 'a', name: 'ignored', size: 10, last_modified: 'intermediate' },
+          { key: 'a', name: 'ignored', size: 20, last_modified: 'new' },
+        ],
+      })
+    )!;
+    expect(first.items[0].size).toBe(1);
+    expect(second.items[0].size).toBe(20);
+    expect(second.items[1]).toBe(first.items[1]);
+  });
+
   test('first page is usable before final page, merges by key with natural folder-first sorting', () => {
     const accumulator = createFolderPageAccumulator(scope);
     const first = accumulator.accept(
