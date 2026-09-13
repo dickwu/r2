@@ -32,13 +32,10 @@ async fn intern(fs: &S3NfsFs, key: &str) -> fileid3 {
         .unwrap();
     fs.inner.dirs.write().unwrap().insert(
         ROOT_ID,
-        DirListing {
-            children: Arc::new(vec![DirChild {
-                fileid: id,
-                name: key.into(),
-            }]),
-            fetched_at: Instant::now(),
-        },
+        DirListing::complete(Arc::new(vec![DirChild {
+            fileid: id,
+            name: key.into(),
+        }])),
     );
     // This fixture begins with a newly created, empty local stage.
     let mut stage = fs.reset_stage(id, &fs.inode(id).unwrap()).await.unwrap();
@@ -263,8 +260,8 @@ async fn namespace_recovery_reconciles_a_committed_put_after_a_lost_response() {
 async fn nfs_directory_listing_rejects_nonadjacent_cursor_cycles() {
     let pages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let fixture=serve({let pages=pages.clone();move |_|{let pages=pages.clone();async move {
-        let token=if pages.fetch_add(1,Ordering::SeqCst).is_multiple_of(2) {"a"} else {"b"};
-        Response::xml(200,&format!("<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>{token}</NextContinuationToken><Contents><Key>file</Key><Size>1</Size></Contents></ListBucketResult>"))
+        let index=pages.fetch_add(1,Ordering::SeqCst); let token=if index.is_multiple_of(2) {"a"} else {"b"};
+        Response::xml(200,&format!("<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>{token}</NextContinuationToken><Contents><Key>file{index}</Key><Size>1</Size></Contents></ListBucketResult>"))
     }}}).await;
     let fs = filesystem(fixture.client.clone(), "cursor-cycle");
     assert!(
@@ -621,19 +618,16 @@ async fn rename_failure_before_copy_does_not_freeze_the_destination_stage() {
     let b = intern(&fs, "b").await;
     fs.inner.dirs.write().unwrap().insert(
         ROOT_ID,
-        DirListing {
-            children: Arc::new(vec![
-                DirChild {
-                    fileid: a,
-                    name: "a".into(),
-                },
-                DirChild {
-                    fileid: b,
-                    name: "b".into(),
-                },
-            ]),
-            fetched_at: Instant::now(),
-        },
+        DirListing::complete(Arc::new(vec![
+            DirChild {
+                fileid: a,
+                name: "a".into(),
+            },
+            DirChild {
+                fileid: b,
+                name: "b".into(),
+            },
+        ])),
     );
     fs.write(a, 0, b"AAAA").await.unwrap();
     fs.write(b, 0, b"BBBB").await.unwrap();
@@ -826,19 +820,16 @@ async fn unsupported_rename_is_rejected_before_it_can_freeze_staged_files() {
     let b = intern(&fs, "b").await;
     fs.inner.dirs.write().unwrap().insert(
         ROOT_ID,
-        DirListing {
-            children: Arc::new(vec![
-                DirChild {
-                    fileid: a,
-                    name: "a".into(),
-                },
-                DirChild {
-                    fileid: b,
-                    name: "b".into(),
-                },
-            ]),
-            fetched_at: Instant::now(),
-        },
+        DirListing::complete(Arc::new(vec![
+            DirChild {
+                fileid: a,
+                name: "a".into(),
+            },
+            DirChild {
+                fileid: b,
+                name: "b".into(),
+            },
+        ])),
     );
     fs.write(a, 0, b"A").await.unwrap();
     fs.write(b, 0, b"B").await.unwrap();
@@ -1253,5 +1244,643 @@ async fn unordered_copy_failure_keeps_the_successful_key_in_its_journal() {
         .unwrap()
         .iter()
         .any(|r| r.method == "DELETE"));
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+fn directory_response(keys: &[&str], prefixes: &[&str], next: Option<&str>) -> Response {
+    let mut body = format!(
+        "<ListBucketResult><IsTruncated>{}</IsTruncated>",
+        next.is_some()
+    );
+    for key in keys {
+        body.push_str(&format!(
+            "<Contents><Key>{key}</Key><Size>1</Size></Contents>"
+        ));
+    }
+    for prefix in prefixes {
+        body.push_str(&format!(
+            "<CommonPrefixes><Prefix>{prefix}</Prefix></CommonPrefixes>"
+        ));
+    }
+    if let Some(token) = next {
+        body.push_str(&format!(
+            "<NextContinuationToken>{token}</NextContinuationToken>"
+        ));
+    }
+    body.push_str("</ListBucketResult>");
+    Response::xml(200, &body)
+}
+
+fn directory_names(page: &ReadDirResult) -> Vec<String> {
+    page.entries
+        .iter()
+        .map(|entry| String::from_utf8(entry.name.as_ref().to_vec()).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn first_readdir_returns_before_the_next_provider_page_is_requested() {
+    let second_entered = Arc::new(tokio::sync::Notify::new());
+    let release_second = Arc::new(tokio::sync::Notify::new());
+    let fixture = serve({
+        let second_entered = second_entered.clone();
+        let release_second = release_second.clone();
+        move |request| {
+            let second_entered = second_entered.clone();
+            let release_second = release_second.clone();
+            async move {
+                if request.path.contains("continuation-token=next") {
+                    second_entered.notify_one();
+                    release_second.notified().await;
+                    directory_response(&["gamma"], &[], None)
+                } else {
+                    directory_response(&["alpha", "beta"], &[], Some("next"))
+                }
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "incremental-first-page");
+    let first = tokio::time::timeout(Duration::from_secs(2), fs.readdir(ROOT_ID, 0, 100))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(directory_names(&first), ["alpha"]);
+    assert!(!first.end);
+    assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+    let second = tokio::spawn({
+        let fs = fs.clone();
+        let cookie = first.entries[0].fileid;
+        async move { fs.readdir(ROOT_ID, cookie, 100).await }
+    });
+    second_entered.notified().await;
+    assert!(!second.is_finished());
+    release_second.notify_one();
+    let last = second.await.unwrap().unwrap();
+    assert_eq!(directory_names(&last), ["beta", "gamma"]);
+    assert!(last.end);
+}
+
+#[tokio::test]
+async fn incremental_readdir_cookies_cover_a_stable_directory_exactly_once() {
+    let fixture = serve(|request| async move {
+        if request.path.contains("continuation-token=p2") {
+            directory_response(&["e", "f"], &[], None)
+        } else if request.path.contains("continuation-token=p1") {
+            directory_response(&["c", "d"], &[], Some("p2"))
+        } else {
+            directory_response(&["a", "b"], &[], Some("p1"))
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "incremental-cookies");
+    let mut cookie = 0;
+    let mut names = Vec::new();
+    let mut ids = std::collections::HashSet::new();
+    loop {
+        // A zero entry limit still has to make progress.
+        let page = fs.readdir(ROOT_ID, cookie, 0).await.unwrap();
+        assert_eq!(page.entries.len(), 1);
+        cookie = page.entries[0].fileid;
+        assert!(ids.insert(cookie));
+        names.extend(directory_names(&page));
+        if page.end {
+            break;
+        }
+    }
+    assert_eq!(names, ["a", "b", "c", "d", "e", "f"]);
+    assert_eq!(fixture.requests.lock().unwrap().len(), 3);
+    let eof = fs.readdir(ROOT_ID, cookie, 1).await.unwrap();
+    assert!(eof.end && eof.entries.is_empty());
+    let warm = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+    assert_eq!(directory_names(&warm), names);
+    assert!(warm.end);
+    assert_eq!(fixture.requests.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn a_later_directory_prefix_wins_before_any_colliding_name_is_emitted() {
+    let fixture = serve(|request| async move {
+        if request.path.contains("continuation-token=p2") {
+            directory_response(&["b"], &["a/"], None)
+        } else if request.path.contains("continuation-token=p1") {
+            directory_response(&["a#", "a."], &[], Some("p2"))
+        } else {
+            directory_response(&["0", "a", "a!"], &[], Some("p1"))
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "delimiter-collision");
+    let first = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+    assert_eq!(directory_names(&first), ["0"]);
+    assert!(!first.end);
+    assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+    let rest = fs
+        .readdir(ROOT_ID, first.entries[0].fileid, 100)
+        .await
+        .unwrap();
+    assert_eq!(directory_names(&rest), ["a", "a!", "a#", "a.", "b"]);
+    assert!(matches!(rest.entries[0].attr.ftype, ftype3::NF3DIR));
+    assert!(rest.end);
+    assert_eq!(fixture.requests.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn a_directory_without_a_same_named_file_can_sort_before_prior_page_files() {
+    let fixture = serve(|request| async move {
+        if request.path.contains("continuation-token=next") {
+            directory_response(&["b"], &["a/"], None)
+        } else {
+            directory_response(&["a!", "a#"], &[], Some("next"))
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "implicit-delimiter-collision");
+    let page = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+    assert_eq!(directory_names(&page), ["a", "a!", "a#", "b"]);
+    assert!(page.end);
+    assert_eq!(
+        fixture.requests.lock().unwrap().len(),
+        2,
+        "the ambiguous first provider page needs lookahead"
+    );
+}
+
+#[tokio::test]
+async fn partial_directory_cache_does_not_establish_lookup_absence() {
+    let fixture = serve(|request| async move {
+        if request.path.contains("continuation-token=next") {
+            directory_response(&["later"], &[], None)
+        } else {
+            directory_response(&["a", "b"], &[], Some("next"))
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "partial-lookup");
+    let first = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+    assert!(!first.end);
+    let later = fs.lookup_child(ROOT_ID, "", "later").await.unwrap();
+    assert!(later.is_some());
+    assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+    assert!(fs.readdir(ROOT_ID, 0, 100).await.unwrap().end);
+}
+
+#[tokio::test]
+async fn concurrent_first_readdir_requests_share_one_provider_page() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let fixture = serve({
+        let entered = entered.clone();
+        let release = release.clone();
+        move |_| {
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                entered.notify_one();
+                release.notified().await;
+                directory_response(&["a", "b"], &[], Some("next"))
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "readdir-singleflight");
+    let a = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.readdir(ROOT_ID, 0, 100).await }
+    });
+    entered.notified().await;
+    let b = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.readdir(ROOT_ID, 0, 100).await }
+    });
+    release.notify_one();
+    let a = a.await.unwrap().unwrap();
+    let b = b.await.unwrap().unwrap();
+    assert_eq!(directory_names(&a), ["a"]);
+    assert_eq!(directory_names(&b), ["a"]);
+    assert_eq!(a.entries[0].fileid, b.entries[0].fileid);
+    assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn canceling_a_page_fetch_keeps_the_previous_cursor_for_retry() {
+    let second_entered = Arc::new(tokio::sync::Notify::new());
+    let release_second = Arc::new(tokio::sync::Notify::new());
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fixture = serve({
+        let entered = second_entered.clone();
+        let release = release_second.clone();
+        let attempts = attempts.clone();
+        move |request| {
+            let entered = entered.clone();
+            let release = release.clone();
+            let attempts = attempts.clone();
+            async move {
+                if request.path.contains("continuation-token=next") {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    directory_response(&["c"], &[], None)
+                } else {
+                    directory_response(&["a", "b"], &[], Some("next"))
+                }
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "cancel-directory-fetch");
+    let first = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+    let cookie = first.entries[0].fileid;
+    let pending = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.readdir(ROOT_ID, cookie, 100).await }
+    });
+    second_entered.notified().await;
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    release_second.notify_one();
+    let resumed = fs.readdir(ROOT_ID, cookie, 100).await.unwrap();
+    assert_eq!(directory_names(&resumed), ["b", "c"]);
+    assert!(resumed.end);
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| r.path.contains("continuation-token=next"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn invalidation_rejects_the_inflight_generation_without_restarting_other_directories() {
+    for invalidate_same in [true, false] {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let fixture = serve({
+            let entered = entered.clone();
+            let release = release.clone();
+            move |_| {
+                let entered = entered.clone();
+                let release = release.clone();
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    directory_response(&["a", "b"], &[], Some("next"))
+                }
+            }
+        })
+        .await;
+        let fs = filesystem(fixture.client.clone(), "directory-epoch");
+        let other = fs
+            .intern_child("other/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+            .unwrap();
+        let pending = tokio::spawn({
+            let fs = fs.clone();
+            async move { fs.readdir(ROOT_ID, 0, 100).await }
+        });
+        entered.notified().await;
+        fs.invalidate_dir(if invalidate_same { ROOT_ID } else { other });
+        release.notify_one();
+        let result = pending.await.unwrap();
+        if invalidate_same {
+            assert!(matches!(result, Err(nfsstat3::NFS3ERR_BAD_COOKIE)));
+            assert!(!fs.inner.dirs.read().unwrap().contains_key(&ROOT_ID));
+        } else {
+            assert_eq!(directory_names(&result.unwrap()), ["a"]);
+        }
+        assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn stale_and_foreign_directory_cookies_are_rejected_explicitly() {
+    let fixture = serve(|_| async { directory_response(&["a", "b"], &[], None) }).await;
+    let fs = filesystem(fixture.client.clone(), "stale-directory-cookie");
+    let first = fs.readdir(ROOT_ID, 0, 1).await.unwrap();
+    let cookie = first.entries[0].fileid;
+    let other = fs
+        .intern_child("other/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    assert!(matches!(
+        fs.readdir(other, cookie, 100).await,
+        Err(nfsstat3::NFS3ERR_BAD_COOKIE)
+    ));
+    fs.invalidate_dir(ROOT_ID);
+    assert!(matches!(
+        fs.readdir(ROOT_ID, cookie, 100).await,
+        Err(nfsstat3::NFS3ERR_BAD_COOKIE)
+    ));
+    assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        directory_names(&fs.readdir(ROOT_ID, 0, 100).await.unwrap()),
+        ["a", "b"]
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_later_page_preserves_partial_rows_and_reports_an_error() {
+    for malformed in ["missing", "repeated", "regressed"] {
+        let fixture = serve(move |request| async move {
+            if !request.path.contains("continuation-token=next") {
+                return directory_response(&["a", "b"], &[], Some("next"));
+            }
+            match malformed {
+                "missing" => Response::xml(200, "<ListBucketResult><IsTruncated>true</IsTruncated><Contents><Key>c</Key><Size>1</Size></Contents></ListBucketResult>"),
+                "repeated" => directory_response(&["c"], &[], Some("next")),
+                _ => directory_response(&["a"], &[], None),
+            }
+        }).await;
+        let fs = filesystem(fixture.client.clone(), "malformed-directory-page");
+        let first = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+        assert_eq!(directory_names(&first), ["a"]);
+        assert!(matches!(
+            fs.readdir(ROOT_ID, first.entries[0].fileid, 100).await,
+            Err(nfsstat3::NFS3ERR_IO)
+        ));
+        let retained = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+        assert_eq!(directory_names(&retained), ["a"]);
+        assert!(!retained.end);
+        assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn complete_directory_lookup_yields_between_pages_to_a_waiting_readdir() {
+    let first_entered = Arc::new(tokio::sync::Notify::new());
+    let release_first = Arc::new(tokio::sync::Notify::new());
+    let release_last = Arc::new(tokio::sync::Notify::new());
+    let fixture = serve({
+        let entered = first_entered.clone();
+        let first = release_first.clone();
+        let last = release_last.clone();
+        move |request| {
+            let entered = entered.clone();
+            let first = first.clone();
+            let last = last.clone();
+            async move {
+                if request.path.contains("continuation-token=next") {
+                    last.notified().await;
+                    directory_response(&["c"], &[], None)
+                } else {
+                    entered.notify_one();
+                    first.notified().await;
+                    directory_response(&["a", "b"], &[], Some("next"))
+                }
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "directory-page-fairness");
+    let complete = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.children_of(ROOT_ID, "").await }
+    });
+    first_entered.notified().await;
+    let readdir = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.readdir(ROOT_ID, 0, 100).await }
+    });
+    tokio::task::yield_now().await;
+    release_first.notify_one();
+    let page = tokio::time::timeout(Duration::from_secs(2), readdir)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(directory_names(&page), ["a"]);
+    assert!(!page.end);
+    assert!(!complete.is_finished());
+    release_last.notify_one();
+    assert_eq!(complete.await.unwrap().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn empty_s3_path_components_are_skipped_without_losing_the_provider_cursor() {
+    for dir_key in ["", "a/"] {
+        let fixture = serve(move |request| async move {
+            if request.path.contains("continuation-token=next") {
+                directory_response(&[&format!("{dir_key}b"), &format!("{dir_key}c")], &[], None)
+            } else {
+                directory_response(
+                    &[&format!("{dir_key}!")],
+                    &[&format!("{dir_key}/")],
+                    Some("next"),
+                )
+            }
+        })
+        .await;
+        let fs = filesystem(fixture.client.clone(), "empty-directory-component");
+        let dirid = if dir_key.is_empty() {
+            ROOT_ID
+        } else {
+            fs.intern_child(dir_key, ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+                .unwrap()
+        };
+        let first = fs.readdir(dirid, 0, 100).await.unwrap();
+        assert_eq!(directory_names(&first), ["!"]);
+        assert!(!first.end);
+        assert_eq!(fixture.requests.lock().unwrap().len(), 1);
+        let last = fs
+            .readdir(dirid, first.entries[0].fileid, 100)
+            .await
+            .unwrap();
+        assert_eq!(directory_names(&last), ["b", "c"]);
+        assert!(last.end);
+        assert!(fixture
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .path
+            .contains("continuation-token=next"));
+        assert_eq!(fs.children_of(dirid, dir_key).await.unwrap().len(), 3);
+    }
+}
+
+#[tokio::test]
+async fn a_skipped_empty_prefix_still_sets_the_raw_pagination_watermark() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fixture = serve({
+        let calls = calls.clone();
+        move |_| {
+            let calls = calls.clone();
+            async move {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    directory_response(&[], &["/"], Some("next"))
+                } else {
+                    // This is not an empty directory: the provider has regressed
+                    // behind the continuation despite returning no visible names.
+                    directory_response(&[], &["/"], None)
+                }
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "empty-prefix-watermark");
+    assert!(matches!(
+        fs.readdir(ROOT_ID, 0, 100).await,
+        Err(nfsstat3::NFS3ERR_IO)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn renaming_a_directory_preserves_an_unrelated_directorys_active_cookies() {
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let copy_permits = Arc::new(Semaphore::new(0));
+    let copied = Arc::new(std::sync::Mutex::new(HashMap::<String, String>::new()));
+    let removed = Arc::new(std::sync::Mutex::new(
+        std::collections::HashSet::<String>::new(),
+    ));
+    let fixture = serve({
+        let copy_entered = copy_entered.clone();
+        let copy_permits = copy_permits.clone();
+        let copied = copied.clone();
+        let removed = removed.clone();
+        move |request| {
+            let copy_entered = copy_entered.clone();
+            let copy_permits = copy_permits.clone();
+            let copied = copied.clone();
+            let removed = removed.clone();
+            async move {
+                let url = reqwest::Url::parse(&format!("http://fixture{}", request.path)).unwrap();
+                let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                let key = url
+                    .path()
+                    .strip_prefix("/photos/")
+                    .unwrap_or_default()
+                    .to_string();
+                if request.method == "GET" && query.contains_key("list-type") {
+                    return match query.get("prefix").map(String::as_str).unwrap_or_default() {
+                        "" => directory_response(&[], &["A/", "B/"], None),
+                        "A/" if query.contains_key("delimiter") => {
+                            directory_response(&["A/x"], &["A/sub/"], None)
+                        }
+                        "A/" => directory_response(&["A/sub/y", "A/x"], &[], None),
+                        "A/sub/" => directory_response(&["A/sub/y"], &[], None),
+                        "B/" if query.contains_key("continuation-token") => {
+                            directory_response(&["B/c"], &[], None)
+                        }
+                        "B/" => directory_response(&["B/a", "B/b"], &[], Some("b-next")),
+                        _ => Response::empty(400),
+                    };
+                }
+                match request.method.as_str() {
+                    "HEAD" => {
+                        if matches!(key.as_str(), "A/x" | "A/sub/y")
+                            && !removed.lock().unwrap().contains(&key)
+                        {
+                            Response::empty(200)
+                                .header("content-length", 1)
+                                .header("etag", "\"source\"")
+                        } else if let Some(token) = copied.lock().unwrap().get(&key) {
+                            Response::empty(200)
+                                .header("content-length", 1)
+                                .header("etag", "\"copied\"")
+                                .header("x-amz-meta-r2-rename-operation", token)
+                        } else {
+                            Response::empty(404)
+                        }
+                    }
+                    "PUT" => {
+                        assert!(request.headers.contains_key("x-amz-copy-source"));
+                        copy_entered.notify_one();
+                        copy_permits.acquire().await.unwrap().forget();
+                        copied.lock().unwrap().insert(
+                            key,
+                            request
+                                .headers
+                                .get("x-amz-meta-r2-rename-operation")
+                                .unwrap()
+                                .clone(),
+                        );
+                        Response::xml(
+                            200,
+                            "<CopyObjectResult><ETag>&quot;copied&quot;</ETag></CopyObjectResult>",
+                        )
+                    }
+                    "DELETE" => {
+                        assert_eq!(
+                            request.headers.get("if-match").map(String::as_str),
+                            Some("\"source\"")
+                        );
+                        removed.lock().unwrap().insert(key);
+                        Response::empty(204)
+                    }
+                    _ => Response::empty(400),
+                }
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "rename-directory-cookie-scope");
+    let root = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+    let a = root.entries[0].fileid;
+    let b = root.entries[1].fileid;
+    let a_page = fs.readdir(a, 0, 1).await.unwrap();
+    let sub = a_page.entries[0].fileid;
+    let sub_page = fs.readdir(sub, 0, 1).await.unwrap();
+    let first_b = fs.readdir(b, 0, 100).await.unwrap();
+    assert_eq!(directory_names(&first_b), ["a"]);
+    let rename = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"A".as_slice().into(),
+                ROOT_ID,
+                &b"C".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let middle_b = fs.readdir(b, first_b.entries[0].fileid, 1).await.unwrap();
+    assert_eq!(directory_names(&middle_b), ["b"]);
+    assert!(!middle_b.end);
+    copy_permits.add_permits(2);
+    tokio::time::timeout(Duration::from_secs(3), rename)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let last_b = fs
+        .readdir(b, middle_b.entries[0].fileid, 100)
+        .await
+        .unwrap();
+    assert_eq!(directory_names(&last_b), ["c"]);
+    assert!(last_b.end);
+    assert_eq!(fs.inode(a).unwrap().key, "C/");
+    assert_eq!(fs.inode(sub).unwrap().key, "C/sub/");
+    assert!(matches!(
+        fs.readdir(a, sub, 100).await,
+        Err(nfsstat3::NFS3ERR_BAD_COOKIE)
+    ));
+    assert!(matches!(
+        fs.readdir(sub, sub_page.entries[0].fileid, 100).await,
+        Err(nfsstat3::NFS3ERR_BAD_COOKIE)
+    ));
+    assert!(matches!(
+        fs.readdir(ROOT_ID, a, 100).await,
+        Err(nfsstat3::NFS3ERR_BAD_COOKIE)
+    ));
+    assert_eq!(removed.lock().unwrap().len(), 2);
+    assert_eq!(copied.lock().unwrap().len(), 2);
+    let b_requests = fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.path.contains("prefix=B%2F"))
+        .count();
+    assert_eq!(
+        b_requests, 2,
+        "unrelated listing must not restart after rename"
+    );
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
 }

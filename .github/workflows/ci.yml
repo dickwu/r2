@@ -91,22 +91,25 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets -- -D warnings
 
-      # On the windows-2025-vs2026 preview image every freshly linked test
-      # binary dies at load with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139).
-      # dumpbin shows the exe imports only core system DLLs, and neither the
-      # toolchain's own CRT redist staged beside the exe nor a fully static
-      # CRT (which changes nothing else about the import list) makes it
-      # loadable — the new SDK's import libraries reference system-DLL exports
-      # the image's own OS does not carry yet. That is not fixable from a
-      # workflow, so Windows compiles the tests but does not execute them
-      # until the image's toolchain and OS converge; test *behaviour* is still
-      # covered by the macOS and Linux jobs, and Windows linkage by the build.
+      # Execute on every host. A Windows loader failure is a runtime gate;
+      # compilation alone cannot establish Windows behavior. The diagnostic
+      # step below preserves the DLL evidence if an image regresses again.
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --workspace ${{ contains(matrix.platform, 'windows') && '--no-run' || '' }}
+        run: cargo test --manifest-path src-tauri/Cargo.toml --workspace
 
       - name: Native Linux NFS integration
         if: matrix.platform == 'ubuntu-22.04'
         run: python3 scripts/run-native-nfs-test.py --sudo
+
+      - name: Prepare Windows NFS client
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/prepare-windows-nfs.ps1
+
+      - name: Native Windows NFS integration
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: python scripts/run-native-nfs-test.py
 
       # STATUS_ENTRYPOINT_NOT_FOUND carries no DLL name; when the Windows test
       # binary dies at load time this shows, in PATH order, every copy of each

@@ -223,10 +223,94 @@ fn ipc_storage_fixture_daemon() {
     });
 }
 
-#[cfg(unix)]
+/// Drive selection is explicit and checks assigned letters, rather than
+/// opening a potentially disconnected/user-owned drive to test its existence.
+fn explicit_test_drive(value: Option<&str>, assigned_drives: u32) -> Result<String, String> {
+    let value =
+        value.ok_or("Set R2_NFS_TEST_DRIVE to an explicitly reserved, unused drive letter")?;
+    let drive = super::super::platform::normalize_drive_spec(value)
+        .ok_or("R2_NFS_TEST_DRIVE must be a drive letter such as Z:, not a folder or share")?;
+    let bit = u32::from(drive.as_bytes()[0] - b'A');
+    if assigned_drives & (1 << bit) != 0 {
+        return Err(format!(
+            "Refusing native NFS smoke: drive {drive} is already assigned"
+        ));
+    }
+    Ok(drive)
+}
+
+#[cfg(windows)]
+fn assigned_windows_drives() -> Result<u32, String> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLogicalDrives() -> u32;
+    }
+    // SAFETY: GetLogicalDrives has no parameters or pointer requirements and
+    // returns an owned bitmask. A zero result is failure, never proof of no drives.
+    let drives = unsafe { GetLogicalDrives() };
+    if drives == 0 {
+        return Err(format!(
+            "Unable to inventory Windows drive letters: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(drives)
+}
+
+#[cfg(windows)]
+fn windows_nfs_tool(name: &str) -> Result<String, String> {
+    let root = std::env::var_os("SystemRoot").ok_or("SystemRoot is missing")?;
+    let root = PathBuf::from(root);
+    if !root.is_absolute() {
+        return Err("SystemRoot is not an absolute Windows directory".into());
+    }
+    let path = root.join("System32").join(name);
+    if !path.is_file() {
+        return Err(format!(
+            "Windows Client for NFS is unavailable: {} is missing",
+            path.display()
+        ));
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[test]
+fn native_windows_smoke_requires_an_explicit_unused_drive() {
+    let assigned = (1 << 2) | (1 << 25); // C: and Z: are in use.
+    assert!(explicit_test_drive(None, assigned).is_err());
+    for invalid in [
+        "",
+        "*",
+        "C:\\Users\\user",
+        "\\\\server\\share",
+        "E:folder",
+        "1:",
+    ] {
+        assert!(
+            explicit_test_drive(Some(invalid), assigned).is_err(),
+            "{invalid}"
+        );
+    }
+    assert!(explicit_test_drive(Some("C:"), assigned).is_err());
+    assert!(explicit_test_drive(Some("z:"), assigned).is_err());
+    assert_eq!(explicit_test_drive(Some(" y:\\ "), assigned).unwrap(), "Y:");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires the host NFS client and permission to create a temporary loopback mount"]
 async fn native_nfs_write_read_rename_unmount() {
+    #[cfg(windows)]
+    let (drive, mount_tool, unmount_tool) = {
+        let value = std::env::var("R2_NFS_TEST_DRIVE").ok();
+        let drive = explicit_test_drive(
+            value.as_deref(),
+            assigned_windows_drives().expect("read drive inventory"),
+        )
+        .expect("validate explicitly reserved test drive");
+        let mount = windows_nfs_tool("mount.exe").expect("Windows Client for NFS mount tool");
+        let unmount = windows_nfs_tool("umount.exe").expect("Windows Client for NFS unmount tool");
+        (drive, mount, unmount)
+    };
     let objects = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let fixture = serve({
         let objects = objects.clone();
@@ -241,8 +325,12 @@ async fn native_nfs_write_read_rename_unmount() {
         std::process::id(),
         chrono::Utc::now().timestamp_nanos_opt().unwrap()
     ));
+    #[cfg(not(windows))]
     let target = root.join("mount");
+    #[cfg(windows)]
+    let target = PathBuf::from(format!("{drive}\\"));
     let staging = root.join("staging");
+    #[cfg(not(windows))]
     tokio::fs::create_dir_all(&target).await.unwrap();
     tokio::fs::create_dir_all(&staging).await.unwrap();
     let fs = S3NfsFs::new(fixture.client.clone(), "photos".into(), false, staging);
@@ -257,21 +345,44 @@ async fn native_nfs_write_read_rename_unmount() {
             force_path_style: true,
         },
     ));
-    let listener = NFSTcpListener::bind("127.0.0.1:0", fs.clone())
+    let bind_address = if cfg!(windows) {
+        "auto:111"
+    } else {
+        "127.0.0.1:0"
+    };
+    let listener = NFSTcpListener::bind(bind_address, fs.clone())
         .await
         .unwrap();
     let port = listener.get_listen_port();
+    let server_ip = listener.get_listen_ip().to_string();
     let server = tokio::spawn(async move { listener.handle_forever().await });
+    #[cfg(not(windows))]
     let target_text = target.to_string_lossy().to_string();
+    #[cfg(windows)]
+    let target_text = drive.clone();
     let argv = super::super::platform::mount_argv(
         super::super::platform::MountPlatform::CURRENT,
-        "127.0.0.1",
+        &server_ip,
         port,
         &target_text,
         false,
     );
+    #[cfg(windows)]
+    let argv = {
+        let mut argv = argv;
+        // Resolve only the executable; retain every production mount option.
+        argv[0] = mount_tool;
+        // Recheck just before mounting. mount.exe is not given any force or
+        // replacement option if another process claims the letter meanwhile.
+        explicit_test_drive(Some(&drive), assigned_windows_drives().unwrap()).unwrap();
+        argv
+    };
+    eprintln!(
+        "Native NFS fixture mount: {argv:?}; disposable data: {}",
+        root.display()
+    );
     let mount = tokio::time::timeout(
-        Duration::from_secs(15),
+        Duration::from_secs(if cfg!(windows) { 30 } else { 15 }),
         tokio::process::Command::new(&argv[0])
             .args(&argv[1..])
             .kill_on_drop(true)
@@ -291,6 +402,11 @@ async fn native_nfs_write_read_rename_unmount() {
             tokio::fs::write(&file, b"native NFS bytes").await?;
             if tokio::fs::read(&file).await? != b"native NFS bytes" {
                 return Err(std::io::Error::other("Native write/read content mismatch"));
+            }
+            if !objects.lock().unwrap().contains_key("file + 中文.txt") {
+                return Err(std::io::Error::other(
+                    "The native client did not preserve the exact Unicode object key",
+                ));
             }
             tokio::fs::rename(&file, &renamed).await?;
             let cloud = objects
@@ -324,24 +440,77 @@ async fn native_nfs_write_read_rename_unmount() {
             failure = Some(format!("Native NFS operations failed: {result:?}"));
         }
     }
-    // This path was created solely by this test. Forced cleanup may discard
-    // only fixture data, and prevents leaving a dead loopback mount on failure.
-    let unmount = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::process::Command::new("umount")
-            .args(["-f", &target_text])
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
+    // Only a successful mount command establishes ownership. A failed or
+    // timed-out mount can have an uncertain result: do not unmount a drive
+    // merely because it matches the requested letter, and retain diagnostics.
+    let mut unmounted = false;
+    if mounted {
+        #[cfg(not(windows))]
+        let unmount_argv = ["umount".to_string(), "-f".to_string(), target_text.clone()];
+        #[cfg(windows)]
+        let unmount_argv = [unmount_tool.clone(), target_text.clone()];
+        let unmount = tokio::time::timeout(
+            Duration::from_secs(if cfg!(windows) { 15 } else { 10 }),
+            tokio::process::Command::new(&unmount_argv[0])
+                .args(&unmount_argv[1..])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        unmounted = matches!(&unmount, Ok(Ok(output)) if output.status.success());
+        if !unmounted {
+            failure = Some(format!(
+                "Fixture mount cleanup failed at {target_text}: {unmount:?}. Disposable data: {}",
+                root.display()
+            ));
+            #[cfg(windows)]
+            {
+                // This drive was unused before our successful mount. Forced
+                // cleanup may discard fixture bytes only, and cannot turn a
+                // failed normal-unmount acceptance test into a passing one.
+                let cleanup = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    tokio::process::Command::new(&unmount_tool)
+                        .args(["-f", &target_text])
+                        .kill_on_drop(true)
+                        .output(),
+                )
+                .await;
+                unmounted = matches!(&cleanup, Ok(Ok(output)) if output.status.success());
+                eprintln!("Owned Windows fixture forced cleanup: {cleanup:?}");
+            }
+        }
+        #[cfg(windows)]
+        if unmounted {
+            match assigned_windows_drives() {
+                Ok(drives) if explicit_test_drive(Some(&drive), drives).is_ok() => {}
+                result => {
+                    unmounted = false;
+                    failure = Some(format!("Fixture drive {drive} remains assigned or cannot be verified after unmount: {result:?}"));
+                }
+            }
+        }
+    }
     fs.stop_accepting_writes();
+    let settled = tokio::time::timeout(Duration::from_secs(10), async {
+        fs.wait_for_mutations().await;
+        fs.wait_for_flushes().await;
+    })
+    .await
+    .is_ok();
     server.abort();
-    if !mounted || matches!(&unmount,Ok(Ok(output)) if output.status.success()) {
+    let _ = server.await;
+    if unmounted && settled {
         let _ = tokio::fs::remove_dir_all(&root).await;
     } else {
-        failure = Some(format!(
-            "Fixture mount cleanup failed at {target_text}: {unmount:?}"
-        ));
+        eprintln!("Native fixture retained at {}; mount_confirmed={mounted}, unmount_confirmed={unmounted}, VFS_settled={settled}", root.display());
+        if !settled {
+            failure = Some(format!(
+                "Native fixture operations did not settle; data retained at {}",
+                root.display()
+            ));
+        }
     }
+
     assert!(failure.is_none(), "{}", failure.unwrap_or_default());
 }

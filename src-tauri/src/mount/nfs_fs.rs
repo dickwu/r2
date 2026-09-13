@@ -395,10 +395,7 @@ struct DirChild {
     name: String,
 }
 
-struct DirListing {
-    children: Arc<Vec<DirChild>>,
-    fetched_at: Instant,
-}
+use directory_listing::{DirListing, DirectoryCookie};
 
 // ============ Flush events ============
 
@@ -506,9 +503,11 @@ struct IoHealth {
 }
 
 // ============ Filesystem ============
+#[path = "directory_listing.rs"]
+mod directory_listing;
 #[path = "namespace_recovery.rs"]
 mod namespace_recovery;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "native_smoke_tests.rs"]
 mod native_smoke_tests;
 #[cfg(test)]
@@ -547,7 +546,8 @@ pub struct FsInner {
     key_lifecycles: std::sync::Mutex<HashMap<String, Weak<KeyLifecycle>>>,
     accepting_writes: AtomicBool,
     shutdown: AtomicBool,
-    directory_epoch: AtomicU64,
+    directory_generation: AtomicU64,
+    directory_cookies: RwLock<HashMap<(fileid3, fileid3), DirectoryCookie>>,
     directory_flights: AsyncMutex<HashMap<fileid3, Weak<AsyncMutex<()>>>>,
     read_identities: AsyncMutex<HashMap<fileid3, ReadIdentity>>,
     /// Chunked cache behind the read path; see [`super::read_cache`].
@@ -588,7 +588,8 @@ impl S3NfsFs {
                 key_lifecycles: std::sync::Mutex::new(HashMap::new()),
                 accepting_writes: AtomicBool::new(true),
                 shutdown: AtomicBool::new(false),
-                directory_epoch: AtomicU64::new(0),
+                directory_generation: AtomicU64::new(1),
+                directory_cookies: RwLock::new(HashMap::new()),
                 directory_flights: AsyncMutex::new(HashMap::new()),
                 read_identities: AsyncMutex::new(HashMap::new()),
                 read_cache: ReadCache::new(),
@@ -980,19 +981,57 @@ impl S3NfsFs {
     }
 
     fn invalidate_dir(&self, dirid: fileid3) {
-        self.inner.directory_epoch.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut dirs) = self.inner.dirs.write() {
             dirs.remove(&dirid);
+            if let Ok(mut cookies) = self.inner.directory_cookies.write() {
+                cookies.retain(|(directory, _), _| *directory != dirid);
+            }
         }
     }
 
-    /// Drops every cached listing. A directory rename moves an unbounded set of
-    /// paths, and re-listing costs one request per directory the user actually
-    /// looks at.
+    /// Invalidate names changed by a rename without expiring independent
+    /// directory scans. Called both after remote copies (including failure)
+    /// and after rekeying, to catch descendant listings opened during deletes.
+    fn invalidate_rename_dirs(&self, from: &str, to: &str) -> Result<(), nfsstat3> {
+        fn parent_key(key: &str) -> &str {
+            let key = key.strip_suffix('/').unwrap_or(key);
+            key.rfind('/').map(|index| &key[..=index]).unwrap_or("")
+        }
+        let from_parent = parent_key(from);
+        let to_parent = parent_key(to);
+        let is_directory = from.ends_with('/');
+        let affected: Vec<_> = {
+            let inodes = self
+                .inner
+                .inodes
+                .read()
+                .map_err(|_| nfsstat3::NFS3ERR_SERVERFAULT)?;
+            inodes
+                .by_id
+                .iter()
+                .filter_map(|(&id, inode)| {
+                    (inode.kind == EntryKind::Dir
+                        && (inode.key == from_parent
+                            || inode.key == to_parent
+                            || (is_directory
+                                && (inode.key.starts_with(from) || inode.key.starts_with(to)))))
+                    .then_some(id)
+                })
+                .collect()
+        };
+        for id in affected {
+            self.invalidate_dir(id);
+        }
+        Ok(())
+    }
+
+    /// Drop all directory generations when recovery affects arbitrary keys.
     fn invalidate_all_dirs(&self) {
-        self.inner.directory_epoch.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut dirs) = self.inner.dirs.write() {
             dirs.clear();
+            if let Ok(mut cookies) = self.inner.directory_cookies.write() {
+                cookies.clear();
+            }
         }
     }
 
@@ -1056,162 +1095,6 @@ impl S3NfsFs {
             ctime: time,
             ..self.attr_of(id, inode)
         }
-    }
-
-    /// Cached children of `dirid`, re-listing from S3 once the entry is older
-    /// than [`DIR_CACHE_TTL`].
-    async fn children_of(
-        &self,
-        dirid: fileid3,
-        dir_key: &str,
-    ) -> Result<Arc<Vec<DirChild>>, nfsstat3> {
-        if let Ok(dirs) = self.inner.dirs.read() {
-            if let Some(listing) = dirs.get(&dirid) {
-                if listing.fetched_at.elapsed() < DIR_CACHE_TTL {
-                    return Ok(listing.children.clone());
-                }
-            }
-        }
-
-        let flight = {
-            let mut flights = self.inner.directory_flights.lock().await;
-            flights.retain(|_, value| value.strong_count() != 0);
-            let flight = flights
-                .get(&dirid)
-                .and_then(Weak::upgrade)
-                .unwrap_or_else(|| Arc::new(AsyncMutex::new(())));
-            flights.insert(dirid, Arc::downgrade(&flight));
-            flight
-        };
-        let _flight = flight.lock().await;
-        if let Ok(dirs) = self.inner.dirs.read() {
-            if let Some(listing) = dirs.get(&dirid) {
-                if listing.fetched_at.elapsed() < DIR_CACHE_TTL {
-                    return Ok(listing.children.clone());
-                }
-            }
-        }
-        self.list_dir(dirid, dir_key).await
-    }
-
-    /// Lists one directory level and registers an inode for every child.
-    async fn list_dir(
-        &self,
-        dirid: fileid3,
-        dir_key: &str,
-    ) -> Result<Arc<Vec<DirChild>>, nfsstat3> {
-        let epoch = self.inner.directory_epoch.load(Ordering::SeqCst);
-        // BTreeMap gives the deterministic, name-sorted ordering readdir needs.
-        let mut entries: BTreeMap<String, (EntryKind, u64, u32)> = BTreeMap::new();
-        let mut continuation_token: Option<String> = None;
-        let mut seen_tokens = std::collections::HashSet::new();
-
-        loop {
-            let mut request = self
-                .inner
-                .client
-                .list_objects_v2()
-                .bucket(&self.inner.bucket)
-                .delimiter("/")
-                .max_keys(LIST_PAGE_SIZE);
-
-            if !dir_key.is_empty() {
-                request = request.prefix(dir_key);
-            }
-            if let Some(token) = &continuation_token {
-                request = request.continuation_token(token);
-            }
-
-            let response = request.send().await.map_err(|e| {
-                log::error!("mount: failed to list \"{}\": {}", dir_key, e);
-                self.io_failed(format!("List: {}", describe_s3_error(&e)));
-                map_s3_error(&e)
-            })?;
-            self.io_succeeded();
-
-            for prefix in response.common_prefixes() {
-                let Some(prefix) = prefix.prefix() else {
-                    continue;
-                };
-                let name = entry_name(prefix);
-                if name.is_empty() {
-                    continue;
-                }
-                // A directory always wins over an object with the same name so
-                // the subtree underneath it stays reachable.
-                entries.insert(name.to_string(), (EntryKind::Dir, DIR_SIZE, 0));
-            }
-
-            for object in response.contents() {
-                let Some(key) = object.key() else {
-                    continue;
-                };
-                // The prefix itself and any other explicit folder marker are
-                // already represented as directories.
-                if key == dir_key || key.ends_with('/') {
-                    continue;
-                }
-                let name = entry_name(key);
-                if name.is_empty() {
-                    continue;
-                }
-                let size = object.size().unwrap_or(0).max(0) as u64;
-                let mtime = object
-                    .last_modified()
-                    .map(|time| time.secs())
-                    .unwrap_or_default();
-                let mtime = u32::try_from(mtime.max(0)).unwrap_or(u32::MAX);
-                entries
-                    .entry(name.to_string())
-                    .or_insert((EntryKind::File, size, mtime));
-            }
-
-            if !response.is_truncated().unwrap_or(false) {
-                break;
-            }
-            let next = response
-                .next_continuation_token()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-            if next
-                .as_ref()
-                .is_none_or(|token| token.is_empty() || !seen_tokens.insert(token.clone()))
-            {
-                return Err(nfsstat3::NFS3ERR_IO);
-            }
-            continuation_token = next;
-        }
-
-        let children = {
-            let mut inodes = self
-                .inner
-                .inodes
-                .write()
-                .map_err(|_| nfsstat3::NFS3ERR_SERVERFAULT)?;
-            entries
-                .into_iter()
-                .map(|(name, (kind, size, mtime))| {
-                    let key = child_key(dir_key, &name, kind == EntryKind::Dir);
-                    let fileid = inodes.intern(&key, dirid, kind, size, mtime);
-                    DirChild { fileid, name }
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let children = Arc::new(children);
-        if let Ok(mut dirs) = self.inner.dirs.write() {
-            if self.inner.directory_epoch.load(Ordering::SeqCst) == epoch {
-                dirs.insert(
-                    dirid,
-                    DirListing {
-                        children: children.clone(),
-                        fetched_at: Instant::now(),
-                    },
-                );
-            }
-        }
-
-        Ok(children)
     }
 
     /// Resolves a name the cached listing does not contain by asking S3
@@ -1877,7 +1760,7 @@ impl S3NfsFs {
         .buffer_unordered(RENAME_COPY_CONCURRENCY)
         .collect::<Vec<_>>()
         .await;
-        self.invalidate_all_dirs();
+        self.invalidate_rename_dirs(from, to)?;
         for result in results {
             let (_, _, copy) = result?;
             copy?;
@@ -3816,41 +3699,7 @@ impl NFSFileSystem for S3NfsFs {
         start_after: fileid3,
         max_entries: usize,
     ) -> Result<ReadDirResult, nfsstat3> {
-        let dir = self.dir_inode(dirid)?;
-        let dir_key = normalize_dir_key(&dir.key);
-        let children = self.children_of(dirid, &dir_key).await?;
-
-        let after_name = if start_after == 0 {
-            None
-        } else {
-            // An unknown cookie is the one case we cannot interpret at all.
-            let inode = self
-                .inode(start_after)
-                .map_err(|_| nfsstat3::NFS3ERR_BAD_COOKIE)?;
-            Some(entry_name(&inode.key).to_string())
-        };
-
-        let start = resume_index(&children, after_name.as_deref());
-        let (end, is_last_page) = page_end(children.len(), start, max_entries);
-
-        let mut entries = Vec::with_capacity(end.saturating_sub(start));
-        for child in &children[start..end] {
-            let inode = self.inode(child.fileid)?;
-            let attr = match self.try_staged_attr(child.fileid, &inode).await {
-                Some(staged) => staged,
-                None => self.attr_of(child.fileid, &inode),
-            };
-            entries.push(DirEntry {
-                fileid: child.fileid,
-                name: child.name.as_bytes().into(),
-                attr,
-            });
-        }
-
-        Ok(ReadDirResult {
-            entries,
-            end: is_last_page,
-        })
+        self.readdir_page(dirid, start_after, max_entries).await
     }
 
     async fn symlink(
@@ -3933,6 +3782,7 @@ impl S3NfsFs {
             inodes.rekey_prefix(&from_prefix, &to_prefix);
             inodes.rekey(id, &to_prefix, to_dirid);
         }
+        self.invalidate_rename_dirs(&from_prefix, &to_prefix)?;
         let moved: Vec<_> = self
             .inner
             .inodes
