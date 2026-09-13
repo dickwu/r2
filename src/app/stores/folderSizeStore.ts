@@ -20,6 +20,7 @@ interface FolderSizeStore {
   sizes: Record<string, FolderSizeState>;
   // New metadata map with size and counts
   metadata: Record<string, FolderMetadata>;
+  generation: number;
 
   setSize: (key: string, size: FolderSizeState) => void;
   setMetadata: (key: string, data: FolderMetadata) => void;
@@ -30,7 +31,7 @@ interface FolderSizeStore {
 
   // New: Load metadata from directory tree
   loadMetadata: (folderKey: string) => Promise<void>;
-  loadMetadataList: (folderKeys: string[]) => void;
+  loadMetadataList: (folderKeys: string[]) => Promise<void>;
 
   clearSizes: () => void;
 }
@@ -56,6 +57,7 @@ export function shouldReuseFolderMetadata(path: string, metadata: FolderMetadata
 export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
   sizes: {},
   metadata: {},
+  generation: 0,
 
   setSize: (key, size) => {
     set((state) => ({
@@ -85,6 +87,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
   },
 
   calculateSize: async (folderKey) => {
+    const generation = get().generation;
     const { sizes, setSize } = get();
 
     // Skip if already calculated
@@ -94,8 +97,10 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
 
     try {
       const size = await calculateFolderSize(folderKey);
+      if (get().generation !== generation) return;
       setSize(folderKey, size);
     } catch (err) {
+      if (get().generation !== generation) return;
       console.error(`Failed to calculate size for ${folderKey}:`, err);
       setSize(folderKey, 'error');
     }
@@ -110,6 +115,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
 
   // Load metadata from pre-built directory tree
   loadMetadata: async (folderKey) => {
+    const generation = get().generation;
     const { metadata, setMetadata } = get();
     const existing = metadata[folderKey];
 
@@ -127,6 +133,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
 
     try {
       const node = await getDirectoryNode(folderKey);
+      if (get().generation !== generation) return;
       if (node && !isProvisionalZeroNode(folderKey, node)) {
         setMetadata(folderKey, {
           size: node.totalSize,
@@ -138,6 +145,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
         // Fallback when the node is missing, or when lazy sync only created a
         // zero-valued placeholder before background indexing computed aggregates.
         const size = await calculateFolderSize(folderKey);
+        if (get().generation !== generation) return;
         setMetadata(folderKey, {
           size,
           fileCount: null,
@@ -146,6 +154,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
         });
       }
     } catch (err) {
+      if (get().generation !== generation) return;
       console.error(`Failed to load metadata for ${folderKey}:`, err);
       setMetadata(folderKey, {
         size: 'error',
@@ -157,6 +166,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
   },
 
   loadMetadataList: async (folderKeys) => {
+    const generation = get().generation;
     const { metadata, setMetadataBatch, loadMetadata } = get();
 
     // One IPC for the whole folder view instead of one per subfolder; a
@@ -177,6 +187,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
 
     try {
       const nodes = await getDirectoryNodes(toLoad);
+      if (get().generation !== generation) return;
       const resolved: [string, FolderMetadata][] = [];
       const missing: string[] = [];
 
@@ -205,6 +216,7 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
         loadMetadata(key);
       }
     } catch (err) {
+      if (get().generation !== generation) return;
       console.error('Failed to batch-load folder metadata:', err);
       setMetadataBatch(
         toLoad.map((key) => [
@@ -216,6 +228,6 @@ export const useFolderSizeStore = create<FolderSizeStore>((set, get) => ({
   },
 
   clearSizes: () => {
-    set({ sizes: {}, metadata: {} });
+    set((state) => ({ sizes: {}, metadata: {}, generation: state.generation + 1 }));
   },
 }));

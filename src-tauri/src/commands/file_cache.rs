@@ -94,6 +94,23 @@ async fn get_current_bucket_info() -> Result<(String, String), String> {
     Ok((config.bucket, config.account_id))
 }
 
+async fn with_current_cache_scope<T, F>(
+    operation: impl FnOnce(String, String) -> F,
+) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    let config = db::get_current_config()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("No active configuration")?;
+    let scope =
+        db::cache_scope::CacheScope::capture(&db::cache_scope::CacheConfig::from_current(&config))
+            .await
+            .map_err(|e| e.to_string())?;
+    db::cache_scope::in_scope(scope, operation(config.bucket, config.account_id)).await
+}
+
 // ============ Commands ============
 
 #[tauri::command]
@@ -101,53 +118,35 @@ pub async fn store_all_files(
     files: Vec<r2::R2Object>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let (bucket, account_id) = get_current_bucket_info().await?;
-    let now = chrono::Utc::now().timestamp();
-
-    let _ = app.emit("sync-phase", "storing");
-
-    let cached_files: Vec<CachedFile> = files
-        .into_iter()
-        .map(|f| CachedFile {
-            bucket: bucket.clone(),
-            account_id: account_id.clone(),
-            key: f.key,
-            parent_path: String::new(), // Computed in store_all_files from key
-            name: String::new(),        // Computed in store_all_files from key
-            size: f.size,
-            last_modified: f.last_modified,
-            synced_at: now,
-        })
-        .collect();
-
-    db::store_all_files(&bucket, &account_id, &cached_files)
-        .await
-        .map_err(|e| format!("Failed to store files: {}", e))
+    let _ = (files, app);
+    Err("Unscoped cache imports are no longer accepted; run a scoped bucket sync".into())
 }
 
 #[tauri::command]
 pub async fn get_all_cached_files() -> Result<Vec<CachedFileResponse>, String> {
-    let (bucket, account_id) = get_current_bucket_info().await?;
+    with_current_cache_scope(|bucket, account_id| async move {
+        let files = db::get_all_cached_files(&bucket, &account_id)
+            .await
+            .map_err(|e| format!("Failed to get cached files: {}", e))?;
 
-    let files = db::get_all_cached_files(&bucket, &account_id)
-        .await
-        .map_err(|e| format!("Failed to get cached files: {}", e))?;
-
-    Ok(files.into_iter().map(|f| f.into()).collect())
+        Ok(files.into_iter().map(|f| f.into()).collect())
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn search_cached_files(query: String) -> Result<SearchResultResponse, String> {
-    let (bucket, account_id) = get_current_bucket_info().await?;
+    with_current_cache_scope(|bucket, account_id| async move {
+        let result = db::search_cached_files(&bucket, &account_id, &query)
+            .await
+            .map_err(|e| format!("Failed to search files: {}", e))?;
 
-    let result = db::search_cached_files(&bucket, &account_id, &query)
-        .await
-        .map_err(|e| format!("Failed to search files: {}", e))?;
-
-    Ok(SearchResultResponse {
-        files: result.files.into_iter().map(|f| f.into()).collect(),
-        total_count: result.total_count,
+        Ok(SearchResultResponse {
+            files: result.files.into_iter().map(|f| f.into()).collect(),
+            total_count: result.total_count,
+        })
     })
+    .await
 }
 
 /// Bucket-wide summary (total files + size) for the status bar.
@@ -155,32 +154,43 @@ pub async fn search_cached_files(query: String) -> Result<SearchResultResponse, 
 /// one SQL aggregate over the partial lazy cache — never a LIKE scan.
 #[tauri::command]
 pub async fn get_bucket_summary() -> Result<BucketSummaryResponse, String> {
-    let (bucket, account_id) = get_current_bucket_info().await?;
+    with_current_cache_scope(|bucket, account_id| async move {
+        let summary = db::get_bucket_summary(&bucket, &account_id)
+            .await
+            .map_err(|e| format!("Failed to get bucket summary: {}", e))?;
 
-    let summary = db::get_bucket_summary(&bucket, &account_id)
-        .await
-        .map_err(|e| format!("Failed to get bucket summary: {}", e))?;
-
-    Ok(BucketSummaryResponse {
-        total_files: summary.total_files,
-        total_size: summary.total_size,
-        last_modified: summary.last_modified,
-        is_complete: summary.is_complete,
+        Ok(BucketSummaryResponse {
+            total_files: summary.total_files,
+            total_size: summary.total_size,
+            last_modified: summary.last_modified,
+            is_complete: summary.is_complete,
+        })
     })
+    .await
 }
 
 #[tauri::command]
 pub async fn calculate_folder_size(prefix: String) -> Result<i64, String> {
-    let (bucket, account_id) = get_current_bucket_info().await?;
-
-    db::calculate_folder_size(&bucket, &account_id, &prefix)
-        .await
-        .map_err(|e| format!("Failed to calculate folder size: {}", e))
+    with_current_cache_scope(|bucket, account_id| async move {
+        db::calculate_folder_size(&bucket, &account_id, &prefix)
+            .await
+            .map_err(|e| format!("Failed to calculate folder size: {}", e))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn build_directory_tree(app: tauri::AppHandle) -> Result<(), String> {
-    let (bucket, account_id) = get_current_bucket_info().await?;
+    let config = db::get_current_config()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("No active configuration")?;
+    let scope =
+        db::cache_scope::CacheScope::capture(&db::cache_scope::CacheConfig::from_current(&config))
+            .await
+            .map_err(|e| e.to_string())?;
+    let bucket = config.bucket;
+    let account_id = config.account_id;
 
     let _ = app.emit("sync-phase", "indexing");
 
@@ -190,9 +200,12 @@ pub async fn build_directory_tree(app: tauri::AppHandle) -> Result<(), String> {
     };
 
     // Build from DB instead of loading all files into memory
-    db::build_directory_tree_from_db(&bucket, &account_id, &[], Some(progress_callback))
-        .await
-        .map_err(|e| format!("Failed to build directory tree: {}", e))?;
+    db::cache_scope::in_scope(
+        scope,
+        db::build_directory_tree_from_db(&bucket, &account_id, &[], Some(progress_callback)),
+    )
+    .await
+    .map_err(|e| format!("Failed to build directory tree: {}", e))?;
 
     let _ = app.emit("sync-phase", "complete");
 
@@ -201,13 +214,14 @@ pub async fn build_directory_tree(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn get_directory_node(path: String) -> Result<Option<DirectoryNodeResponse>, String> {
-    let (bucket, account_id) = get_current_bucket_info().await?;
+    with_current_cache_scope(|bucket, account_id| async move {
+        let node = db::get_directory_node(&bucket, &account_id, &path)
+            .await
+            .map_err(|e| format!("Failed to get directory node: {}", e))?;
 
-    let node = db::get_directory_node(&bucket, &account_id, &path)
-        .await
-        .map_err(|e| format!("Failed to get directory node: {}", e))?;
-
-    Ok(node.map(|n| n.into()))
+        Ok(node.map(|n| n.into()))
+    })
+    .await
 }
 
 /// Batch lookup: one IPC + one config resolve for a whole folder view's
@@ -217,27 +231,29 @@ pub async fn get_directory_node(path: String) -> Result<Option<DirectoryNodeResp
 pub async fn get_directory_nodes(
     paths: Vec<String>,
 ) -> Result<Vec<Option<DirectoryNodeResponse>>, String> {
-    let (bucket, account_id) = get_current_bucket_info().await?;
+    with_current_cache_scope(|bucket, account_id| async move {
+        let nodes = db::get_directory_nodes(&bucket, &account_id, &paths)
+            .await
+            .map_err(|e| format!("Failed to get directory nodes: {}", e))?;
 
-    let nodes = db::get_directory_nodes(&bucket, &account_id, &paths)
-        .await
-        .map_err(|e| format!("Failed to get directory nodes: {}", e))?;
-
-    Ok(nodes
-        .into_iter()
-        .map(|node| node.map(|n| n.into()))
-        .collect())
+        Ok(nodes
+            .into_iter()
+            .map(|node| node.map(|n| n.into()))
+            .collect())
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn get_all_directory_nodes() -> Result<Vec<DirectoryNodeResponse>, String> {
-    let (bucket, account_id) = get_current_bucket_info().await?;
+    with_current_cache_scope(|bucket, account_id| async move {
+        let nodes = db::get_all_directory_nodes(&bucket, &account_id)
+            .await
+            .map_err(|e| format!("Failed to get directory nodes: {}", e))?;
 
-    let nodes = db::get_all_directory_nodes(&bucket, &account_id)
-        .await
-        .map_err(|e| format!("Failed to get directory nodes: {}", e))?;
-
-    Ok(nodes.into_iter().map(|n| n.into()).collect())
+        Ok(nodes.into_iter().map(|n| n.into()).collect())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -261,17 +277,19 @@ pub struct FolderContentsResponse {
 /// This is the cache equivalent of S3 ListObjectsV2 with delimiter="/"
 #[tauri::command]
 pub async fn get_folder_contents(prefix: Option<String>) -> Result<FolderContentsResponse, String> {
-    let (bucket, account_id) = get_current_bucket_info().await?;
-    let prefix_str = prefix.unwrap_or_default();
+    with_current_cache_scope(|bucket, account_id| async move {
+        let prefix_str = prefix.unwrap_or_default();
 
-    let result = db::get_folder_contents(&bucket, &account_id, &prefix_str)
-        .await
-        .map_err(|e| format!("Failed to get folder contents: {}", e))?;
+        let result = db::get_folder_contents(&bucket, &account_id, &prefix_str)
+            .await
+            .map_err(|e| format!("Failed to get folder contents: {}", e))?;
 
-    Ok(FolderContentsResponse {
-        files: result.files.into_iter().map(|f| f.into()).collect(),
-        folders: result.folders,
+        Ok(FolderContentsResponse {
+            files: result.files.into_iter().map(|f| f.into()).collect(),
+            folders: result.folders,
+        })
     })
+    .await
 }
 
 // ============ URL Fetch Command ============

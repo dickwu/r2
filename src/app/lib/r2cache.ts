@@ -7,6 +7,7 @@ import {
   type FolderSnapshot,
 } from '@/app/utils/folderItems';
 import { readFolderStream } from './folderStream';
+import { observeFolderRequest } from './folderTiming';
 import { getProviderAdapter } from '@/app/providers/index';
 import type {
   BatchDeleteResult,
@@ -329,18 +330,23 @@ export async function getPrefixCache(
   config: StorageConfig,
   prefix: string
 ): Promise<FolderSnapshot | null> {
-  const cached = await invoke<
-    | (LazyListResult & {
-        provider: string;
-        account_id: string;
-        bucket: string;
-        complete: boolean;
-        freshness: FolderFreshness;
+  const cached = await observeFolderRequest(
+    'get_prefix_cache',
+    { provider: config.provider, account_id: config.accountId, bucket: config.bucket, prefix },
+    () =>
+      invoke<
+        | (LazyListResult & {
+            provider: string;
+            account_id: string;
+            bucket: string;
+            complete: boolean;
+            freshness: FolderFreshness;
+          })
+        | null
+      >('get_prefix_cache', {
+        input: { ...getConnectionInput(config), prefix },
       })
-    | null
-  >('get_prefix_cache', {
-    input: { ...getConnectionInput(config), prefix },
-  });
+  );
   if (!cached) return null;
   if (
     cached.provider !== config.provider ||
@@ -389,10 +395,15 @@ export async function streamFolderPrefix(
     {
       listen: (receive) => listen<FolderPage>('folder-page', (event) => receive(event.payload)),
       start: () =>
-        invoke('list_prefix_stream', {
-          input: { ...getConnectionInput(config), ...scope, force_refresh: true },
-        }),
-      cancel: () => invoke('cancel_prefix_list', { requestId: scope.request_id }),
+        observeFolderRequest('list_prefix_stream', scope, () =>
+          invoke('list_prefix_stream', {
+            input: { ...getConnectionInput(config), ...scope, force_refresh: true },
+          })
+        ),
+      cancel: () =>
+        observeFolderRequest('cancel_prefix_list', scope, () =>
+          invoke('cancel_prefix_list', { requestId: scope.request_id })
+        ),
     },
     options.onUpdate,
     options.signal

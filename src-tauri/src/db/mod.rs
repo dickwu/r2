@@ -16,6 +16,7 @@ pub mod app_state;
 pub mod aws_accounts;
 pub mod aws_buckets;
 pub mod buckets;
+pub mod cache_scope;
 pub mod dir_tree;
 pub mod downloads;
 pub mod file_cache;
@@ -194,6 +195,7 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
     conn.execute_batch(app_state::get_table_sql()).await?;
 
     // Create file cache tables
+    cache_scope::prepare_cache_schema_on(&conn).await?;
     conn.execute_batch(file_cache::get_table_sql()).await?;
 
     // Create download sessions table
@@ -204,6 +206,7 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
 
     // Create prefix sync times table (for lazy sync)
     conn.execute_batch(prefix_sync::get_table_sql()).await?;
+    cache_scope::initialize_on(&conn).await?;
 
     DB_CONNECTION
         .set(Mutex::new(conn))
@@ -253,8 +256,8 @@ pub use file_cache::{
     begin_sync, calculate_folder_size, clear_file_cache, clear_full_sync_marker,
     delete_cached_file, delete_cached_files_batch, finish_sync, get_all_cached_files,
     get_all_directory_nodes, get_bucket_summary, get_cached_file_size, get_directory_node,
-    get_directory_nodes, get_folder_contents, has_full_sync, move_cached_file, parse_key,
-    search_cached_files, store_all_files, store_file_batch, update_cached_file,
+    get_directory_nodes, get_folder_contents, move_cached_file, parse_key, search_cached_files,
+    store_file_batch, update_cached_file,
 };
 // Re-export directory tree builder
 pub use dir_tree::{

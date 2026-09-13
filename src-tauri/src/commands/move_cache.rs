@@ -14,6 +14,23 @@ pub(crate) async fn update_cache_after_move(
     old_key: &str,
     new_key: &str,
 ) -> Result<(), String> {
+    if db::cache_scope::current_scope().is_none() {
+        db::cache_scope::invalidate_unscoped(account_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = app.emit(
+            "cache-updated",
+            CacheUpdatedEvent {
+                action: "move".into(),
+                affected_paths: get_unique_parent_paths(&[
+                    old_key.to_string(),
+                    new_key.to_string(),
+                ]),
+            },
+        );
+        return Ok(());
+    }
+
     if old_key == new_key {
         return Ok(());
     }
@@ -72,6 +89,25 @@ pub(crate) async fn update_cache_after_batch_move(
     account_id: &str,
     operations: &[(String, String)],
 ) -> Result<(), String> {
+    if db::cache_scope::current_scope().is_none() {
+        db::cache_scope::invalidate_unscoped(account_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = app.emit(
+            "cache-updated",
+            CacheUpdatedEvent {
+                action: "move".into(),
+                affected_paths: get_unique_parent_paths(
+                    &operations
+                        .iter()
+                        .flat_map(|(a, b)| [a.clone(), b.clone()])
+                        .collect::<Vec<_>>(),
+                ),
+            },
+        );
+        return Ok(());
+    }
+
     if operations.is_empty() {
         return Ok(());
     }

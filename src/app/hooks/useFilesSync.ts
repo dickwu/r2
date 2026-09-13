@@ -7,6 +7,7 @@ import {
   hasSigningCredentials,
   type StorageConfig,
 } from '@/app/lib/r2cache';
+import { useStorageNamespace } from '@/app/hooks/useStorageNamespace';
 import { useFolderSizeStore } from '@/app/stores/folderSizeStore';
 import { useSyncStore } from '@/app/stores/syncStore';
 import { logSession } from '@/app/lib/diagnostics/sessionLog';
@@ -29,6 +30,7 @@ interface BackgroundSyncCompleteEvent extends SyncScope {
 
 interface SyncSession {
   config: StorageConfig;
+  namespace: string;
   disposed: boolean;
   ready: Promise<void>;
   run: SyncScope | null;
@@ -38,10 +40,12 @@ const describeError = (error: unknown) => (error instanceof Error ? error.messag
 
 export function useFilesSync(config: StorageConfig | null) {
   const queryClient = useQueryClient();
+  const namespace = useStorageNamespace(config);
   const sessionRef = useRef<SyncSession | null>(null);
   const bucketSyncTimes = useSyncStore((state) => state.bucketSyncTimes);
   // Providers may use the same account label; keep their sync histories separate.
-  const storeAccountId = config ? `${config.provider}:${config.accountId}` : null;
+  const storeAccountId =
+    config && namespace ? `${config.provider}:${config.accountId}:${namespace}` : null;
   const lastSyncTime = useMemo(
     () =>
       storeAccountId && config?.bucket
@@ -79,8 +83,14 @@ export function useFilesSync(config: StorageConfig | null) {
   useEffect(() => {
     useSyncStore.getState().setCurrentBucket(storeAccountId, config?.bucket ?? null);
     useSyncStore.getState().resetBackgroundSync();
-    if (!config || !hasSigningCredentials(config)) return;
-    const session: SyncSession = { config, disposed: false, ready: Promise.resolve(), run: null };
+    if (!config || !namespace || !hasSigningCredentials(config)) return;
+    const session: SyncSession = {
+      config,
+      namespace,
+      disposed: false,
+      ready: Promise.resolve(),
+      run: null,
+    };
     sessionRef.current = session;
     const unlisteners: UnlistenFn[] = [];
     const accepts = (payload: SyncScope) =>
@@ -121,7 +131,11 @@ export function useFilesSync(config: StorageConfig | null) {
         if (skipped.length === 0) {
           useSyncStore
             .getState()
-            .setLastSyncTime(`${event.provider}:${event.account_id}`, event.bucket, Date.now());
+            .setLastSyncTime(
+              `${event.provider}:${event.account_id}:${session.namespace}`,
+              event.bucket,
+              Date.now()
+            );
         }
         useFolderSizeStore.getState().clearSizes();
         // The foreground query already revalidates independently. Keep it fresh
@@ -151,7 +165,7 @@ export function useFilesSync(config: StorageConfig | null) {
       unlisteners.forEach((unlisten) => unlisten());
       if (session.run) void cancelBackgroundSync(session.run.run_id).catch(() => {});
     };
-  }, [config, queryClient, startRun, storeAccountId]);
+  }, [config, namespace, queryClient, startRun, storeAccountId]);
 
   const refresh = useCallback(async () => {
     const session = sessionRef.current;
@@ -171,8 +185,12 @@ export function useFilesSync(config: StorageConfig | null) {
 
   const backgroundSync = useSyncStore((state) => state.backgroundSync);
   return {
-    isSyncing: backgroundSync.isRunning,
-    isSynced: lastSyncTime !== null || backgroundSync.objectsFetched > 0,
+    isSyncing:
+      namespace !== null && sessionRef.current?.namespace === namespace && backgroundSync.isRunning,
+    isSynced:
+      namespace !== null &&
+      (lastSyncTime !== null ||
+        (sessionRef.current?.namespace === namespace && backgroundSync.objectsFetched > 0)),
     syncError: backgroundSync.error ? new Error(backgroundSync.error) : null,
     lastSyncTime,
     refresh,

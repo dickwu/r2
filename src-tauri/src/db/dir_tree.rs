@@ -5,7 +5,7 @@
 //! - Batch database inserts for performance
 //! - Progress reporting during build
 
-use super::{get_connection, CachedFile, DbResult};
+use super::{CachedFile, DbResult};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Batch size for database inserts
@@ -319,7 +319,7 @@ impl DirectoryTreeBuilder {
     /// Clears existing tree first.
     pub async fn store(bucket: &str, account_id: &str, nodes: &[ComputedNode]) -> DbResult<()> {
         let now = chrono::Utc::now().timestamp();
-        let conn = get_connection()?.lock().await;
+        let conn = super::cache_scope::write_connection(account_id).await?;
         conn.execute("BEGIN TRANSACTION", ()).await?;
 
         let tx_result = async {
@@ -428,7 +428,7 @@ where
 
     // Step 1: Query direct file stats per directory from DB
     let direct_stats = {
-        let conn = get_connection()?.lock().await;
+        let conn = super::cache_scope::read_connection(account_id).await?;
         let mut rows = conn
             .query(
                 "SELECT parent_path, COUNT(*), SUM(size), MAX(last_modified)
@@ -631,7 +631,7 @@ async fn apply_directory_delta(
     size_delta: i64,
     last_modified: Option<&str>,
 ) -> DbResult<()> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
     let now = chrono::Utc::now().timestamp();
 
     let (parent_path, paths_to_update) = get_ancestor_paths(key);
@@ -755,7 +755,7 @@ pub async fn update_directory_tree_for_delete_batch(
     let mut paths: Vec<String> = affected_paths.into_iter().collect();
     paths.sort_by_key(|path| std::cmp::Reverse(path.len()));
 
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
 
     let placeholders: Vec<String> = (0..paths.len()).map(|i| format!("?{}", i + 3)).collect();
     let select_sql = format!(
@@ -810,7 +810,7 @@ pub async fn update_directory_tree_for_delete_batch(
 /// Detect which ancestor paths for a key do not yet exist in directory_tree.
 /// Returns the list of paths that would be newly created.
 async fn detect_new_paths(bucket: &str, account_id: &str, key: &str) -> DbResult<Vec<String>> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
     let (_, paths_to_check) = get_ancestor_paths(key);
 
     let mut created_paths: Vec<String> = Vec::new();
@@ -835,7 +835,7 @@ async fn detect_new_paths(bucket: &str, account_id: &str, key: &str) -> DbResult
 /// Check all ancestor paths and remove any that have become empty (total_file_count == 0).
 /// Returns the list of removed paths.
 async fn remove_empty_paths(bucket: &str, account_id: &str, key: &str) -> DbResult<Vec<String>> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
     let (_, paths_to_check) = get_ancestor_paths(key);
 
     let mut removed_paths: Vec<String> = Vec::new();

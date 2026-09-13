@@ -34,6 +34,20 @@ pub(crate) async fn update_cache_after_delete(
     account_id: &str,
     key: &str,
 ) -> Result<(), String> {
+    if db::cache_scope::current_scope().is_none() {
+        db::cache_scope::invalidate_unscoped(account_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = app.emit(
+            "cache-updated",
+            CacheUpdatedEvent {
+                action: "delete".into(),
+                affected_paths: get_unique_parent_paths(&[key.to_string()]),
+            },
+        );
+        return Ok(());
+    }
+
     // Delete the file from cache and get its size
     let file_size = db::delete_cached_file(bucket, account_id, key)
         .await
@@ -79,6 +93,20 @@ pub(crate) async fn update_cache_after_batch_delete(
     account_id: &str,
     deleted_keys: &[String],
 ) -> Result<(), String> {
+    if db::cache_scope::current_scope().is_none() {
+        db::cache_scope::invalidate_unscoped(account_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = app.emit(
+            "cache-updated",
+            CacheUpdatedEvent {
+                action: "delete".into(),
+                affected_paths: get_unique_parent_paths(deleted_keys),
+            },
+        );
+        return Ok(());
+    }
+
     if deleted_keys.is_empty() {
         return Ok(());
     }

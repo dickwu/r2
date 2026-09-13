@@ -1,4 +1,4 @@
-use super::{get_connection, DbResult};
+use super::DbResult;
 use serde::{Deserialize, Serialize};
 
 // ============ File Cache Structs ============
@@ -45,8 +45,6 @@ pub struct CachedDirectoryNode {
 pub fn get_table_sql() -> &'static str {
     "
     -- File cache tables (replaces IndexedDB)
-    -- Drop old table to recreate with new schema
-    DROP TABLE IF EXISTS cached_files;
     
     CREATE TABLE IF NOT EXISTS cached_files (
         bucket TEXT NOT NULL,
@@ -60,8 +58,6 @@ pub fn get_table_sql() -> &'static str {
         PRIMARY KEY (bucket, account_id, key)
     );
 
-    -- Drop old directory_tree to recreate with new schema
-    DROP TABLE IF EXISTS directory_tree;
     
     CREATE TABLE IF NOT EXISTS directory_tree (
         bucket TEXT NOT NULL,
@@ -75,6 +71,13 @@ pub fn get_table_sql() -> &'static str {
         last_modified TEXT,
         last_updated INTEGER NOT NULL,
         PRIMARY KEY (bucket, account_id, path)
+    );
+
+    CREATE TABLE IF NOT EXISTS cached_files_staging (
+        bucket TEXT NOT NULL, account_id TEXT NOT NULL, key TEXT NOT NULL,
+        parent_path TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL,
+        last_modified TEXT NOT NULL, synced_at INTEGER NOT NULL,
+        PRIMARY KEY(bucket, account_id, key)
     );
 
     CREATE TABLE IF NOT EXISTS sync_meta (
@@ -93,104 +96,9 @@ pub fn get_table_sql() -> &'static str {
 
 // ============ File Cache Functions ============
 
-/// Store all files for a bucket (clears existing) - optimized with batch inserts
-pub async fn store_all_files(bucket: &str, account_id: &str, files: &[CachedFile]) -> DbResult<()> {
-    // Batch insert files - SQLite supports multi-row INSERT.
-    // Keep well below SQLite parameter limits: 1000 * 8 = 8000 params.
-    const BATCH_SIZE: usize = 1000;
-    const YIELD_EVERY_BATCHES: usize = 8;
-
-    let now = chrono::Utc::now().timestamp();
-    let conn = get_connection()?.lock().await;
-    conn.execute("BEGIN TRANSACTION", ()).await?;
-
-    let tx_result = async {
-        conn.execute(
-            "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2",
-            turso::params![bucket, account_id],
-        )
-        .await?;
-
-        for (batch_idx, chunk) in files.chunks(BATCH_SIZE).enumerate() {
-            if chunk.is_empty() {
-                continue;
-            }
-
-            // Build multi-value INSERT statement (8 columns)
-            let placeholders: Vec<String> = chunk
-                .iter()
-                .enumerate()
-                .map(|(i, _)| {
-                    let base = i * 8;
-                    format!(
-                        "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
-                        base + 1,
-                        base + 2,
-                        base + 3,
-                        base + 4,
-                        base + 5,
-                        base + 6,
-                        base + 7,
-                        base + 8
-                    )
-                })
-                .collect();
-
-            let sql = format!(
-                "INSERT INTO cached_files (bucket, account_id, key, parent_path, name, size, last_modified, synced_at) VALUES {}",
-                placeholders.join(", ")
-            );
-
-            let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 8);
-            for file in chunk {
-                // Reuse precomputed parent_path/name when provided.
-                let (parent_path, name) = if file.name.is_empty() {
-                    parse_key(&file.key)
-                } else {
-                    (file.parent_path.clone(), file.name.clone())
-                };
-
-                params.push(bucket.to_string().into());
-                params.push(account_id.to_string().into());
-                params.push(file.key.clone().into());
-                params.push(parent_path.into());
-                params.push(name.into());
-                params.push(file.size.into());
-                params.push(file.last_modified.clone().into());
-                params.push(file.synced_at.into());
-            }
-
-            conn.execute(&sql, params).await?;
-
-            if (batch_idx + 1) % YIELD_EVERY_BATCHES == 0 {
-                tokio::task::yield_now().await;
-            }
-        }
-
-        conn.execute(
-            "INSERT INTO sync_meta (bucket, account_id, last_sync, file_count)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (bucket, account_id) DO UPDATE SET last_sync = ?3, file_count = ?4",
-            turso::params![bucket, account_id, now, files.len() as i32],
-        )
-        .await?;
-
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-    }
-    .await;
-
-    if let Err(err) = tx_result {
-        let _ = conn.execute("ROLLBACK", ()).await;
-        return Err(err);
-    }
-
-    conn.execute("COMMIT", ()).await?;
-    Ok(())
-}
-
 /// Get all cached files for a bucket
 pub async fn get_all_cached_files(bucket: &str, account_id: &str) -> DbResult<Vec<CachedFile>> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::read_connection(account_id).await?;
     let mut rows = conn
         .query(
             "SELECT bucket, account_id, key, parent_path, name, size, last_modified, synced_at
@@ -219,7 +127,7 @@ pub async fn get_all_cached_files(bucket: &str, account_id: &str) -> DbResult<Ve
 
 /// Get a single file's size from cache (returns 0 if not found)
 pub async fn get_cached_file_size(bucket: &str, account_id: &str, key: &str) -> DbResult<i64> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::read_connection(account_id).await?;
     let mut rows = conn
         .query(
             "SELECT size FROM cached_files WHERE bucket = ?1 AND account_id = ?2 AND key = ?3",
@@ -242,7 +150,7 @@ pub async fn delete_cached_file(
     account_id: &str,
     key: &str,
 ) -> DbResult<Option<i64>> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
 
     // Get file size before deleting
     let mut rows = conn
@@ -280,7 +188,7 @@ pub async fn delete_cached_files_batch(
         return Ok(std::collections::HashMap::new());
     }
 
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
     let mut file_sizes: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
     // Get sizes for all files
@@ -345,7 +253,7 @@ pub async fn move_cached_file(
     old_key: &str,
     new_key: &str,
 ) -> DbResult<Option<(i64, String)>> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
 
     // Get file info
     let mut rows = conn.query(
@@ -396,7 +304,7 @@ pub async fn update_cached_file(
     new_size: i64,
     last_modified: &str,
 ) -> DbResult<(i64, bool)> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
 
     // Get old size for delta calculation (if file exists)
     let mut rows = conn
@@ -443,7 +351,7 @@ pub async fn search_cached_files(
     account_id: &str,
     query: &str,
 ) -> DbResult<SearchResult> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::read_connection(account_id).await?;
 
     // Split query into terms and create LIKE conditions for each
     let terms: Vec<&str> = query.split_whitespace().filter(|t| !t.is_empty()).collect();
@@ -501,7 +409,7 @@ pub async fn search_cached_files(
 
 /// Calculate folder size by prefix
 pub async fn calculate_folder_size(bucket: &str, account_id: &str, prefix: &str) -> DbResult<i64> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::read_connection(account_id).await?;
     let pattern = format!("{}%", prefix);
 
     let mut rows = conn
@@ -536,7 +444,7 @@ pub struct BucketSummary {
 /// full sync + incremental cache updates hold, the local cache is
 /// authoritative for browsing this bucket.
 pub async fn has_full_sync(bucket: &str, account_id: &str) -> DbResult<bool> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::read_connection(account_id).await?;
     let mut meta_rows = conn
         .query(
             "SELECT 1 FROM sync_meta WHERE bucket = ?1 AND account_id = ?2",
@@ -571,7 +479,7 @@ pub async fn get_bucket_summary(bucket: &str, account_id: &str) -> DbResult<Buck
         }
     }
 
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::read_connection(account_id).await?;
 
     let mut rows = conn
         .query(
@@ -620,7 +528,7 @@ pub async fn get_directory_node(
     account_id: &str,
     path: &str,
 ) -> DbResult<Option<CachedDirectoryNode>> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::read_connection(account_id).await?;
     let mut rows = conn.query(
         "SELECT bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated
          FROM directory_tree
@@ -643,7 +551,7 @@ pub async fn get_directory_nodes(
     account_id: &str,
     paths: &[String],
 ) -> DbResult<Vec<Option<CachedDirectoryNode>>> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::read_connection(account_id).await?;
     let mut nodes = Vec::with_capacity(paths.len());
     for path in paths {
         let mut rows = conn.query(
@@ -666,7 +574,7 @@ pub async fn get_all_directory_nodes(
     bucket: &str,
     account_id: &str,
 ) -> DbResult<Vec<CachedDirectoryNode>> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::read_connection(account_id).await?;
     let mut rows = conn.query(
         "SELECT bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated
          FROM directory_tree
@@ -689,7 +597,7 @@ pub async fn get_all_directory_nodes(
 /// can no longer back up. The rows themselves are kept: they are still the
 /// best answer available until the next sync.
 pub async fn clear_full_sync_marker(bucket: &str, account_id: &str) -> DbResult<()> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::clear_connection(account_id).await?;
     conn.execute(
         "DELETE FROM sync_meta WHERE bucket = ?1 AND account_id = ?2",
         turso::params![bucket, account_id],
@@ -700,7 +608,7 @@ pub async fn clear_full_sync_marker(bucket: &str, account_id: &str) -> DbResult<
 
 /// Clear all cached data for a bucket
 pub async fn clear_file_cache(bucket: &str, account_id: &str) -> DbResult<()> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::clear_connection(account_id).await?;
 
     conn.execute(
         "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2",
@@ -739,8 +647,17 @@ pub async fn get_folder_contents(
     account_id: &str,
     prefix: &str,
 ) -> DbResult<FolderContents> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::read_connection(account_id).await?;
 
+    folder_contents_on(&conn, bucket, account_id, prefix).await
+}
+
+pub(crate) async fn folder_contents_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    prefix: &str,
+) -> DbResult<FolderContents> {
     // Query 1: Get files directly in this folder using EXACT MATCH on parent_path
     // This is O(1) index lookup instead of O(n) LIKE scan
     let mut rows = conn
@@ -797,7 +714,7 @@ pub async fn get_folder_contents(
 /// Step 1: prepare staging table for new sync data.
 /// Old data in cached_files stays intact and queryable during the entire sync.
 pub async fn begin_sync(bucket: &str, account_id: &str) -> DbResult<()> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
 
     // Create staging table if it doesn't exist (same schema, no indexes needed)
     conn.execute(
@@ -838,7 +755,7 @@ pub async fn store_file_batch(
     }
 
     const BATCH_SIZE: usize = 1000;
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
     conn.execute("BEGIN TRANSACTION", ()).await?;
 
     let tx_result = async {
@@ -904,7 +821,7 @@ pub async fn store_file_batch(
 /// If this fails, old data is still intact in cached_files.
 pub async fn finish_sync(bucket: &str, account_id: &str, file_count: usize) -> DbResult<()> {
     let now = chrono::Utc::now().timestamp();
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
     conn.execute("BEGIN TRANSACTION", ()).await?;
 
     let tx_result = async {

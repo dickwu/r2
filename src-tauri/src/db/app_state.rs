@@ -16,6 +16,7 @@ pub fn get_table_sql() -> &'static str {
 #[allow(dead_code)]
 pub async fn get_app_state(key: &str) -> DbResult<Option<String>> {
     let conn = get_connection()?.lock().await;
+    super::cache_scope::validate_app_state_on(&conn, key, false).await?;
     let mut rows = conn
         .query(
             "SELECT value FROM app_state WHERE key = ?1",
@@ -33,6 +34,7 @@ pub async fn get_app_state(key: &str) -> DbResult<Option<String>> {
 /// Set app state value
 pub async fn set_app_state(key: &str, value: &str) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
+    super::cache_scope::validate_app_state_on(&conn, key, true).await?;
     conn.execute(
         "INSERT INTO app_state (key, value) VALUES (?1, ?2)
          ON CONFLICT (key) DO UPDATE SET value = ?2",
@@ -46,6 +48,7 @@ pub async fn set_app_state(key: &str, value: &str) -> DbResult<()> {
 #[allow(dead_code)]
 pub async fn delete_app_state(key: &str) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
+    super::cache_scope::validate_app_state_on(&conn, key, true).await?;
     conn.execute("DELETE FROM app_state WHERE key = ?1", turso::params![key])
         .await?;
     Ok(())

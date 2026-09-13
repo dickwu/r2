@@ -6,6 +6,14 @@ declare module 'bun:test' {
   export function beforeAll(fn: () => void | Promise<void>): void;
   export function afterAll(fn: () => void | Promise<void>): void;
 
+  export function spyOn<T, K extends keyof T>(
+    object: T,
+    method: K
+  ): {
+    mockImplementation(implementation: T[K]): { mockRestore(): void };
+    mockRestore(): void;
+  };
+
   interface Matchers<T> {
     toBe(expected: T): void;
     toEqual(expected: unknown): void;

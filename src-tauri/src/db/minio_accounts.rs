@@ -121,44 +121,77 @@ pub async fn update_minio_account(
     force_path_style: bool,
 ) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
-    let now = chrono::Utc::now().timestamp();
-    let force_value = if force_path_style { 1 } else { 0 };
+    update_minio_account_on(
+        &conn,
+        id,
+        name,
+        access_key_id,
+        secret_access_key,
+        endpoint_scheme,
+        endpoint_host,
+        force_path_style,
+    )
+    .await
+}
 
-    conn.execute(
-        "UPDATE minio_accounts
+#[allow(clippy::too_many_arguments)] // Mirrors the existing account fields plus the transaction connection.
+pub(crate) async fn update_minio_account_on(
+    conn: &turso::Connection,
+    id: &str,
+    name: Option<&str>,
+    access_key_id: &str,
+    secret_access_key: &str,
+    endpoint_scheme: &str,
+    endpoint_host: &str,
+    force_path_style: bool,
+) -> DbResult<()> {
+    conn.execute("BEGIN TRANSACTION", ()).await?;
+    let result = async {
+        let now = chrono::Utc::now().timestamp();
+        let force_value = if force_path_style { 1 } else { 0 };
+
+        conn.execute(
+            "UPDATE minio_accounts
          SET name = ?1, access_key_id = ?2, secret_access_key = ?3,
              endpoint_scheme = ?4, endpoint_host = ?5, force_path_style = ?6, updated_at = ?7
          WHERE id = ?8",
-        turso::params![
-            name,
-            access_key_id,
-            secret_access_key,
-            endpoint_scheme,
-            endpoint_host,
-            force_value,
-            now,
-            id
-        ],
-    )
-    .await?;
+            turso::params![
+                name,
+                access_key_id,
+                secret_access_key,
+                endpoint_scheme,
+                endpoint_host,
+                force_value,
+                now,
+                id
+            ],
+        )
+        .await?;
 
-    Ok(())
+        super::cache_scope::account_updated_on(conn, "minio", id).await
+    }
+    .await;
+    super::cache_scope::finish_transaction(conn, result).await
 }
 
 pub async fn delete_minio_account(id: &str) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
+    conn.execute("BEGIN TRANSACTION", ()).await?;
+    let result = async {
+        conn.execute(
+            "DELETE FROM minio_buckets WHERE account_id = ?1",
+            turso::params![id],
+        )
+        .await?;
 
-    conn.execute(
-        "DELETE FROM minio_buckets WHERE account_id = ?1",
-        turso::params![id],
-    )
-    .await?;
+        conn.execute(
+            "DELETE FROM minio_accounts WHERE id = ?1",
+            turso::params![id],
+        )
+        .await?;
 
-    conn.execute(
-        "DELETE FROM minio_accounts WHERE id = ?1",
-        turso::params![id],
-    )
-    .await?;
-
-    Ok(())
+        super::cache_scope::account_updated_on(&conn, "minio", id).await
+    }
+    .await;
+    super::cache_scope::finish_transaction(&conn, result).await
 }

@@ -153,28 +153,53 @@ pub async fn update_token(
     secret_access_key: &str,
 ) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
+    let mut rows = conn
+        .query(
+            "SELECT account_id FROM tokens WHERE id=?1",
+            turso::params![id],
+        )
+        .await?;
+    let account_id: String = rows.next().await?.ok_or("Token does not exist")?.get(0)?;
+    drop(rows);
+    conn.execute("BEGIN TRANSACTION", ()).await?;
+    let result = async {
     let now = chrono::Utc::now().timestamp();
     conn.execute(
         "UPDATE tokens SET name = ?1, api_token = ?2, access_key_id = ?3, secret_access_key = ?4, updated_at = ?5
          WHERE id = ?6",
         turso::params![name, api_token, access_key_id, secret_access_key, now, id],
     ).await?;
-    Ok(())
+    super::cache_scope::account_updated_on(&conn, "r2", &account_id).await
+    }.await;
+    super::cache_scope::finish_transaction(&conn, result).await
 }
 
 /// Delete token (manually cascades to buckets)
 pub async fn delete_token(id: i64) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
-    // Delete buckets first
-    conn.execute(
-        "DELETE FROM buckets WHERE token_id = ?1",
-        turso::params![id],
-    )
-    .await?;
-    // Then delete token
-    conn.execute("DELETE FROM tokens WHERE id = ?1", turso::params![id])
+    let mut rows = conn
+        .query(
+            "SELECT account_id FROM tokens WHERE id=?1",
+            turso::params![id],
+        )
         .await?;
-    Ok(())
+    let account_id: String = rows.next().await?.ok_or("Token does not exist")?.get(0)?;
+    drop(rows);
+    conn.execute("BEGIN TRANSACTION", ()).await?;
+    let result = async {
+        // Delete buckets first
+        conn.execute(
+            "DELETE FROM buckets WHERE token_id = ?1",
+            turso::params![id],
+        )
+        .await?;
+        // Then delete token
+        conn.execute("DELETE FROM tokens WHERE id = ?1", turso::params![id])
+            .await?;
+        super::cache_scope::account_updated_on(&conn, "r2", &account_id).await
+    }
+    .await;
+    super::cache_scope::finish_transaction(&conn, result).await
 }
 
 // ============ Combined Config Functions ============

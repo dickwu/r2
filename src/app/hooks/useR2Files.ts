@@ -7,6 +7,7 @@ import {
   streamFolderPrefix,
   type StorageConfig,
 } from '@/app/lib/r2cache';
+import { useStorageNamespace } from '@/app/hooks/useStorageNamespace';
 import { useSyncStore } from '@/app/stores/syncStore';
 import { useCurrentPathStore } from '@/app/stores/currentPathStore';
 import { useMoveStore, type MoveStatusChangedEvent } from '@/app/stores/moveStore';
@@ -17,10 +18,33 @@ export type { FileItem } from '@/app/utils/folderItems';
 
 export function useR2Files(config: StorageConfig | null, prefix: string = '') {
   const queryClient = useQueryClient();
+  const namespace = useStorageNamespace(config);
   const queryKey = useMemo(
-    () => ['folder-contents', config?.provider, config?.accountId, config?.bucket, prefix],
-    [config?.provider, config?.accountId, config?.bucket, prefix]
+    () => [
+      'folder-contents',
+      config?.provider,
+      config?.accountId,
+      config?.bucket,
+      prefix,
+      namespace,
+    ],
+    [config?.provider, config?.accountId, config?.bucket, prefix, namespace]
   );
+
+  useEffect(() => {
+    if (!namespace || !config) return;
+    const provider = config.provider;
+    const account = config.accountId;
+    return () => {
+      const predicate = (query: { queryKey: readonly unknown[] }) =>
+        query.queryKey[0] === 'folder-contents' &&
+        query.queryKey[1] === provider &&
+        query.queryKey[2] === account &&
+        query.queryKey[5] === namespace;
+      void queryClient.cancelQueries({ predicate });
+      queryClient.removeQueries({ predicate });
+    };
+  }, [namespace, config?.provider, config?.accountId, queryClient]);
 
   const query = useQuery({
     queryKey,
@@ -37,10 +61,14 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
         },
       });
     },
-    enabled: hasSigningCredentials(config),
+    enabled: hasSigningCredentials(config) && namespace !== null,
     // The backend owns the bounded network retry budget. Do not multiply it here.
     retry: false,
     staleTime: 30_000,
+    // The page accumulator already preserves immutable snapshots and reuses
+    // unchanged items. Deep reconciliation of each growing/reordered page
+    // otherwise copies the same directory repeatedly and blocks first paint.
+    structuralSharing: false,
     // Previous-directory rows are never actionable placeholders for this scope.
   });
 
@@ -138,8 +166,8 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
   }, [queryClient, queryKey]);
 
   return {
-    items: query.data?.items ?? [],
-    hasData: query.data !== undefined,
+    items: namespace ? (query.data?.items ?? []) : [],
+    hasData: namespace !== null && query.data !== undefined,
     isLoading: query.isLoading,
     isFetching: query.isFetching,
     isPartial: query.data?.complete === false,

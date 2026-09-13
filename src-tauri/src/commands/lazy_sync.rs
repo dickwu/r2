@@ -1,3 +1,4 @@
+use crate::db::cache_scope::{self, CacheConfig, CacheScope};
 use crate::db::{self, CachedFile};
 use crate::providers::aws;
 use crate::providers::minio;
@@ -35,6 +36,24 @@ pub struct LazyListInput {
     pub request_id: Option<String>,
     pub generation: Option<u64>,
     pub run_id: Option<String>,
+}
+
+fn cache_config(input: &LazyListInput) -> CacheConfig {
+    let provider = input.provider.clone().unwrap_or_else(|| "r2".into());
+    CacheConfig {
+        force_path_style: if provider == "r2" {
+            true
+        } else {
+            input.force_path_style.unwrap_or(provider != "aws")
+        },
+        provider,
+        account_id: input.account_id.clone(),
+        access_key_id: input.access_key_id.clone(),
+        secret_access_key: input.secret_access_key.clone(),
+        region: input.region.clone(),
+        endpoint_scheme: input.endpoint_scheme.clone(),
+        endpoint_host: input.endpoint_host.clone(),
+    }
 }
 
 // ============ Provider-Aware Client Factory ============
@@ -114,8 +133,79 @@ impl ListScope {
     }
 }
 
+/// Native timing snapshots are cumulative, not per-page deltas. Queue,
+/// network, backoff and DB intervals belong to the shared prefix flight;
+/// cache and native elapsed intervals belong to the invoking consumer. A
+/// joining consumer can therefore observe shared work predating its request.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct ListTiming {
+    pub queue_ms: f64,
+    pub network_ms: f64,
+    pub backoff_ms: f64,
+    pub db_ms: f64,
+    pub cache_ms: f64,
+    pub native_elapsed_ms: f64,
+    pub shared_flight: bool,
+    /// Monotonic flight-start-to-publication time; absent for cache pages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_ready_ms: Option<f64>,
+    /// Wall clock immediately before native emission, not a transport duration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emit_started_unix_ms: Option<f64>,
+    /// Reply only: synchronous native serialization/enqueue time. This excludes
+    /// IPC transport, webview event handling, sorting, React and rendering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emit_ms: Option<f64>,
+}
+
+#[derive(Default)]
+struct ListMeasurements {
+    queue_ns: AtomicU64,
+    network_ns: AtomicU64,
+    backoff_ns: AtomicU64,
+    db_ns: AtomicU64,
+}
+impl ListMeasurements {
+    fn snapshot(&self) -> ListTiming {
+        let ms = |value: &AtomicU64| value.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        ListTiming {
+            queue_ms: ms(&self.queue_ns),
+            network_ms: ms(&self.network_ns),
+            backoff_ms: ms(&self.backoff_ns),
+            db_ms: ms(&self.db_ns),
+            ..ListTiming::default()
+        }
+    }
+}
+
+/// Records elapsed work even when cancellation drops a permit wait, request,
+/// backoff or DB future. It neither polls nor changes that future's lifetime.
+struct MeasureInterval<'a> {
+    counter: &'a AtomicU64,
+    started: tokio::time::Instant,
+}
+impl<'a> MeasureInterval<'a> {
+    fn new(counter: &'a AtomicU64) -> Self {
+        Self {
+            counter,
+            started: tokio::time::Instant::now(),
+        }
+    }
+}
+impl Drop for MeasureInterval<'_> {
+    fn drop(&mut self) {
+        let nanos = self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.counter.fetch_add(nanos, Ordering::Relaxed);
+    }
+}
+
+fn elapsed_ms(started: tokio::time::Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1000.0
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LazyListResult {
+    pub timing: ListTiming,
     #[serde(flatten)]
     pub scope: ListScope,
     pub files: Vec<LazyFileItem>,
@@ -154,6 +244,7 @@ pub struct FolderPage {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ListPage {
+    pub timing: ListTiming,
     pub files: Vec<LazyFileItem>,
     pub folders: Vec<String>,
     pub page_index: usize,
@@ -165,6 +256,7 @@ pub struct ListPage {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FolderLoadSummary {
+    pub timing: ListTiming,
     #[serde(flatten)]
     pub scope: ListScope,
     pub complete: bool,
@@ -189,24 +281,34 @@ async fn read_prefix_cache(
     input: &LazyListInput,
     scope: ListScope,
 ) -> Result<Option<LazyListResult>, String> {
-    let prefix_time =
-        db::prefix_sync::get_prefix_sync_time(&input.bucket, &input.account_id, &input.prefix)
-            .await
-            .map_err(|e| format!("DB error: {e}"))?;
-    let skipped = load_skipped_prefixes(&input.bucket, &input.account_id).await;
-    let complete_index = if skipped
-        .as_ref()
-        .is_some_and(|s| !is_under_skipped_prefix(&input.prefix, s))
-    {
-        db::has_full_sync(&input.bucket, &input.account_id)
-            .await
-            .map_err(|e| format!("DB error: {e}"))?
-    } else {
-        false
-    };
-    let contents = db::get_folder_contents(&input.bucket, &input.account_id, &input.prefix)
+    let started = tokio::time::Instant::now();
+    let cache_scope = CacheScope::capture(&cache_config(input))
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut result = read_prefix_cache_scoped(input, scope, &cache_scope).await?;
+    if let Some(result) = &mut result {
+        result.timing.cache_ms = elapsed_ms(started);
+        result.timing.native_elapsed_ms = result.timing.cache_ms;
+    }
+    Ok(result)
+}
+
+async fn read_prefix_cache_scoped(
+    input: &LazyListInput,
+    scope: ListScope,
+    cache_scope: &CacheScope,
+) -> Result<Option<LazyListResult>, String> {
+    let started = tokio::time::Instant::now();
+    let snapshot = cache_scope::read_prefix_snapshot(cache_scope, &input.bucket, &input.prefix)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
+    let prefix_time = snapshot.prefix_time;
+    let complete_index = snapshot.full_sync
+        && snapshot
+            .skipped_prefixes
+            .as_ref()
+            .is_some_and(|skipped| !is_under_skipped_prefix(&input.prefix, skipped));
+    let contents = snapshot.contents;
     let complete = prefix_time.is_some() || complete_index;
     if !complete && contents.files.is_empty() && contents.folders.is_empty() {
         return Ok(None);
@@ -215,7 +317,8 @@ async fn read_prefix_cache(
         let age = chrono::Utc::now().timestamp() - time;
         (0..DIRECTORY_TTL_SECS).contains(&age)
     });
-    Ok(Some(LazyListResult {
+    let mut result = LazyListResult {
+        timing: ListTiming::default(),
         scope,
         files: contents.files.iter().map(LazyFileItem::from).collect(),
         folders: contents.folders,
@@ -228,7 +331,11 @@ async fn read_prefix_cache(
         } else {
             "partial"
         },
-    }))
+    };
+    result.timing.cache_ms = elapsed_ms(started);
+    result.timing.native_elapsed_ms = result.timing.cache_ms;
+    result.timing.emit_ms = Some(0.0);
+    Ok(Some(result))
 }
 
 struct RequestCancellation {
@@ -281,12 +388,16 @@ struct FlightState {
     result: Option<Result<Arc<LazyListResult>, String>>,
 }
 struct PrefixFlight {
+    started: tokio::time::Instant,
+    measurements: ListMeasurements,
     state: Mutex<FlightState>,
     changed: tokio::sync::watch::Sender<u64>,
     consumers: AtomicUsize,
 }
 impl PrefixFlight {
-    fn publish(&self, page: ListPage) {
+    fn publish(&self, mut page: ListPage) {
+        page.timing = self.measurements.snapshot();
+        page.timing.page_ready_ms = Some(elapsed_ms(self.started));
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -298,7 +409,7 @@ impl PrefixFlight {
         self.consumers.load(Ordering::SeqCst) > 0
     }
 }
-struct FlightLease(Arc<PrefixFlight>);
+struct FlightLease(Arc<PrefixFlight>, bool);
 impl Drop for FlightLease {
     fn drop(&mut self) {
         self.0.consumers.fetch_sub(1, Ordering::SeqCst);
@@ -355,8 +466,20 @@ fn prefix_flight_key(input: &LazyListInput) -> String {
     hex::encode(hash.finalize())
 }
 
-fn join_prefix_flight(input: LazyListInput) -> FlightLease {
-    let key = prefix_flight_key(&input);
+fn join_prefix_flight(input: LazyListInput, cache_scope: CacheScope) -> FlightLease {
+    // An account edited away and back must not join the obsolete revision's
+    // in-flight result even when its credentials happen to match again.
+    let key = format!("{}:{}", prefix_flight_key(&input), cache_scope.revision);
+    join_prefix_flight_with(input, key, move |input, owner| async move {
+        cache_scope::in_scope(cache_scope, fetch_prefix(input, &owner)).await
+    })
+}
+
+fn join_prefix_flight_with<F, Fut>(input: LazyListInput, key: String, fetch: F) -> FlightLease
+where
+    F: FnOnce(LazyListInput, Arc<PrefixFlight>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<LazyListResult, String>> + Send + 'static,
+{
     let mut flights = PREFIX_FLIGHTS.lock().unwrap_or_else(|e| e.into_inner());
     flights.retain(|_, weak| weak.strong_count() > 0);
     if let Some(flight) = flights.get(&key).and_then(Weak::upgrade).filter(|flight| {
@@ -371,10 +494,12 @@ fn join_prefix_flight(input: LazyListInput) -> FlightLease {
             })
             .is_ok()
     }) {
-        return FlightLease(flight);
+        return FlightLease(flight, true);
     }
     let (changed, _) = tokio::sync::watch::channel(0);
     let flight = Arc::new(PrefixFlight {
+        started: tokio::time::Instant::now(),
+        measurements: ListMeasurements::default(),
         state: Mutex::new(FlightState::default()),
         changed,
         consumers: AtomicUsize::new(1),
@@ -382,11 +507,11 @@ fn join_prefix_flight(input: LazyListInput) -> FlightLease {
     flights.insert(key, Arc::downgrade(&flight));
     let owner = flight.clone();
     tokio::spawn(async move {
-        let result = fetch_prefix(input, &owner).await.map(Arc::new);
+        let result = fetch(input, owner.clone()).await.map(Arc::new);
         owner.state.lock().unwrap_or_else(|e| e.into_inner()).result = Some(result);
         owner.changed.send_modify(|version| *version += 1);
     });
-    FlightLease(flight)
+    FlightLease(flight, false)
 }
 
 async fn list_prefix_internal(
@@ -394,28 +519,38 @@ async fn list_prefix_internal(
     app: tauri::AppHandle,
     emit_pages: bool,
 ) -> Result<Arc<LazyListResult>, String> {
+    let started = tokio::time::Instant::now();
     let scope = ListScope::new(&input);
     let cancellation = RequestCancellation::register(&scope.request_id)?;
+    let cache_started = tokio::time::Instant::now();
+    let cache_scope = CacheScope::capture(&cache_config(&input))
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut cache_ms = elapsed_ms(cache_started);
     if !input.force_refresh.unwrap_or(false) {
-        if let Some(cache) = read_prefix_cache(&input, scope.clone())
-            .await?
-            .filter(|cache| cache.freshness == "fresh")
-        {
+        let cache = read_prefix_cache_scoped(&input, scope.clone(), &cache_scope).await?;
+        cache_ms = elapsed_ms(cache_started);
+        if let Some(mut cache) = cache.filter(|cache| cache.freshness == "fresh") {
             if !cancellation.active() {
                 return Err("S3 list cancelled".into());
             }
-            if emit_pages {
-                emit_cached_pages(&app, &cache)?;
-            }
+            cache.timing.cache_ms = cache_ms;
+            cache.timing.emit_ms = Some(if emit_pages {
+                emit_cached_pages(&app, &cache, started)?
+            } else {
+                0.0
+            });
+            cache.timing.native_elapsed_ms = elapsed_ms(started);
             return Ok(Arc::new(cache));
         }
     }
     if !cancellation.active() {
         return Err("S3 list cancelled".into());
     }
-    let lease = join_prefix_flight(input);
+    let lease = join_prefix_flight(input, cache_scope);
     let mut changed = lease.0.changed.subscribe();
     let mut delivered = 0;
+    let mut emit_ms = 0.0;
     loop {
         if !cancellation.active() {
             return Err("S3 list cancelled".into());
@@ -426,24 +561,33 @@ async fn list_prefix_internal(
         };
         for page in pages {
             if emit_pages {
-                app.emit(
-                    "folder-page",
+                let mut page = (*page).clone();
+                page.timing.cache_ms = cache_ms;
+                page.timing.shared_flight = lease.1;
+                emit_ms += emit_folder_page(
+                    &app,
                     FolderPage {
                         scope: scope.clone(),
-                        page: (*page).clone(),
+                        page,
                     },
-                )
-                .map_err(|e| format!("Failed to deliver folder page: {e}"))?;
+                    started,
+                )?;
             }
             delivered += 1;
         }
         if let Some(result) = result {
-            // A shared flight's first consumer identity must not escape to another caller.
+            // Shared work retains its measurements; each consumer gets its own
+            // scope, cache interval and native delivery elapsed time.
             return result.map(|result| {
-                Arc::new(LazyListResult {
+                let mut result = LazyListResult {
                     scope,
                     ..(*result).clone()
-                })
+                };
+                result.timing.cache_ms = cache_ms;
+                result.timing.native_elapsed_ms = elapsed_ms(started);
+                result.timing.shared_flight = lease.1;
+                result.timing.emit_ms = Some(emit_ms);
+                Arc::new(result)
             });
         }
         tokio::select! {
@@ -453,9 +597,31 @@ async fn list_prefix_internal(
     }
 }
 
-fn emit_cached_pages(app: &tauri::AppHandle, cache: &LazyListResult) -> Result<(), String> {
+fn emit_folder_page(
+    app: &tauri::AppHandle,
+    mut event: FolderPage,
+    consumer_started: tokio::time::Instant,
+) -> Result<f64, String> {
+    event.page.timing.native_elapsed_ms = elapsed_ms(consumer_started);
+    event.page.timing.emit_started_unix_ms =
+        Some(chrono::Utc::now().timestamp_micros() as f64 / 1000.0);
+    // A page cannot include the cost of its own emission. Only the completed
+    // calls are accumulated in the final reply's emit_ms field.
+    event.page.timing.emit_ms = None;
+    let started = tokio::time::Instant::now();
+    app.emit("folder-page", event)
+        .map_err(|e| format!("Failed to deliver folder page: {e}"))?;
+    Ok(elapsed_ms(started))
+}
+
+fn emit_cached_pages(
+    app: &tauri::AppHandle,
+    cache: &LazyListResult,
+    consumer_started: tokio::time::Instant,
+) -> Result<f64, String> {
     let total = cache.files.len() + cache.folders.len();
     let page_count = total.max(1).div_ceil(1000);
+    let mut emit_ms = 0.0;
     for index in 0..page_count {
         let start = index * 1000;
         let end = ((index + 1) * 1000).min(total);
@@ -464,11 +630,12 @@ fn emit_cached_pages(app: &tauri::AppHandle, cache: &LazyListResult) -> Result<(
         let files_start = start.saturating_sub(cache.folders.len());
         let files_end = end.saturating_sub(cache.folders.len());
         let complete = index + 1 == page_count;
-        app.emit(
-            "folder-page",
+        emit_ms += emit_folder_page(
+            app,
             FolderPage {
                 scope: cache.scope.clone(),
                 page: ListPage {
+                    timing: cache.timing.clone(),
                     files: cache.files[files_start..files_end].to_vec(),
                     folders: cache.folders[folders_start..folders_end].to_vec(),
                     page_index: index,
@@ -478,10 +645,10 @@ fn emit_cached_pages(app: &tauri::AppHandle, cache: &LazyListResult) -> Result<(
                     freshness: cache.freshness,
                 },
             },
-        )
-        .map_err(|e| format!("Failed to deliver cached page: {e}"))?;
+            consumer_started,
+        )?;
     }
-    Ok(())
+    Ok(emit_ms)
 }
 
 /// Compatibility command for callers requiring a complete aggregate.
@@ -503,6 +670,7 @@ pub async fn list_prefix_stream(
 ) -> Result<FolderLoadSummary, String> {
     let result = list_prefix_internal(input, app, true).await?;
     Ok(FolderLoadSummary {
+        timing: result.timing.clone(),
         scope: result.scope.clone(),
         complete: result.complete,
         from_cache: result.from_cache,
@@ -547,8 +715,9 @@ async fn fetch_prefix(
     let mut seen_folders = HashSet::new();
     let mut page_index = 0;
     loop {
-        let response = list_with_retry(
+        let response = list_with_retry_measured(
             FOREGROUND_LIST_RETRY,
+            Some(&flight.measurements),
             || flight.active(),
             || {
                 let request = client
@@ -558,13 +727,14 @@ async fn fetch_prefix(
                     .max_keys(1000)
                     .set_prefix((!input.prefix.is_empty()).then(|| input.prefix.clone()))
                     .set_continuation_token(continuation_token.clone());
-                send_scheduled(request, &scheduler, false)
+                send_scheduled_measured(request, &scheduler, false, Some(&flight.measurements))
             },
         )
         .await
         .map_err(|error| error.to_string())?;
         let next_cursor = next_page_cursor(&response, &mut seen_tokens)?;
         let mut page = ListPage {
+            timing: ListTiming::default(),
             files: Vec::new(),
             folders: Vec::new(),
             page_index,
@@ -618,6 +788,7 @@ async fn fetch_prefix(
             return Err("S3 list cancelled".into());
         }
         if page.complete {
+            let _measure = MeasureInterval::new(&flight.measurements.db_ns);
             db::prefix_sync::replace_complete_prefix(
                 &input.bucket,
                 &input.account_id,
@@ -636,6 +807,7 @@ async fn fetch_prefix(
         page_index += 1;
     }
     Ok(LazyListResult {
+        timing: flight.measurements.snapshot(),
         scope: ListScope::new(&input),
         files: files.iter().map(LazyFileItem::from).collect(),
         folders,
@@ -665,23 +837,6 @@ fn is_background_run_active(run_id: u64) -> bool {
 /// Where a completed sync records the prefixes it could not read.
 fn skipped_prefixes_key(bucket: &str, account_id: &str) -> String {
     format!("skipped_prefixes:{account_id}:{bucket}")
-}
-
-/// The prefixes the last completed sync could not read.
-///
-/// `None` means the answer is unknown — the read failed, or the stored value is
-/// not one this build understands. That is deliberately not the same as "the
-/// sync skipped nothing". A skipped folder is cached as empty, so treating an
-/// unknown as an empty list would serve that folder from cache and show it as
-/// empty, which is the failure this whole mechanism exists to prevent. The
-/// caller fails closed on `None`.
-async fn load_skipped_prefixes(bucket: &str, account_id: &str) -> Option<Vec<String>> {
-    match db::app_state::get_app_state(&skipped_prefixes_key(bucket, account_id)).await {
-        // No row at all is a real answer: the last sync read every prefix.
-        Ok(None) => Some(Vec::new()),
-        Ok(Some(value)) => serde_json::from_str::<Vec<String>>(&value).ok(),
-        Err(_) => None,
-    }
 }
 
 /// Records what a completed sync skipped, clearing the note when it skipped
@@ -851,6 +1006,19 @@ fn retry_after<E>(error: &SdkError<E, HttpResponse>) -> Option<Duration> {
 async fn list_with_retry<T, E, Fut>(
     policy: ListRetryPolicy,
     is_active: impl Fn() -> bool,
+    send_page: impl FnMut() -> Fut,
+) -> Result<T, ListFailure>
+where
+    E: std::error::Error + ProvideErrorMetadata + 'static,
+    Fut: Future<Output = Result<T, SdkError<E, HttpResponse>>>,
+{
+    list_with_retry_measured(policy, None, is_active, send_page).await
+}
+
+async fn list_with_retry_measured<T, E, Fut>(
+    policy: ListRetryPolicy,
+    measurements: Option<&ListMeasurements>,
+    is_active: impl Fn() -> bool,
     mut send_page: impl FnMut() -> Fut,
 ) -> Result<T, ListFailure>
 where
@@ -903,6 +1071,8 @@ where
         );
         first_failure.get_or_insert(description);
 
+        let _measure =
+            measurements.map(|measurements| MeasureInterval::new(&measurements.backoff_ns));
         while_active(tokio::time::sleep(backoff), &is_active, deadline).await?;
     }
 }
@@ -941,6 +1111,18 @@ async fn send_scheduled(
     scheduler: &EndpointScheduler,
     background: bool,
 ) -> Result<ListObjectsV2Output, SdkError<ListObjectsV2Error, HttpResponse>> {
+    send_scheduled_measured(request, scheduler, background, None).await
+}
+
+#[allow(clippy::result_large_err)]
+async fn send_scheduled_measured(
+    request: ListObjectsV2FluentBuilder,
+    scheduler: &EndpointScheduler,
+    background: bool,
+    measurements: Option<&ListMeasurements>,
+) -> Result<ListObjectsV2Output, SdkError<ListObjectsV2Error, HttpResponse>> {
+    let queue_measure =
+        measurements.map(|measurements| MeasureInterval::new(&measurements.queue_ns));
     let _background = if background {
         Some(
             scheduler
@@ -957,6 +1139,9 @@ async fn send_scheduled(
         .acquire()
         .await
         .expect("private semaphore is never closed");
+    drop(queue_measure);
+    let _network_measure =
+        measurements.map(|measurements| MeasureInterval::new(&measurements.network_ns));
     request.send().await
 }
 
@@ -1014,6 +1199,9 @@ pub async fn start_background_sync(
     mut input: LazyListInput,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
+    let cache_scope = CacheScope::capture(&cache_config(&input))
+        .await
+        .map_err(|e| e.to_string())?;
     let (run_id, public_run_id) = {
         let mut current = BACKGROUND_SCOPE.lock().unwrap_or_else(|e| e.into_inner());
         let run_id = BACKGROUND_RUN_ID.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1028,7 +1216,9 @@ pub async fn start_background_sync(
     };
     tokio::spawn(async move {
         let scope = BackgroundScope::new(&input);
-        let result = run_background_sync(input, app.clone(), run_id).await;
+        let result =
+            cache_scope::in_scope(cache_scope, run_background_sync(input, app.clone(), run_id))
+                .await;
         let active = is_background_run_active(run_id);
         match result {
             Ok(sync_result) if active && !sync_result.cancelled => {
@@ -1730,12 +1920,14 @@ mod tests {
     fn singleflight_consumers_cancel_independently() {
         let (changed, _) = tokio::sync::watch::channel(0);
         let flight = Arc::new(PrefixFlight {
+            started: tokio::time::Instant::now(),
+            measurements: ListMeasurements::default(),
             state: Mutex::new(FlightState::default()),
             changed,
             consumers: AtomicUsize::new(2),
         });
-        let first = FlightLease(flight.clone());
-        let second = FlightLease(flight.clone());
+        let first = FlightLease(flight.clone(), false);
+        let second = FlightLease(flight.clone(), false);
         drop(first);
         assert!(flight.active());
         drop(second);
@@ -1789,9 +1981,17 @@ mod tests {
             generation: None,
             run_id: None,
         };
-        let first = join_prefix_flight(input.clone());
-        let second = join_prefix_flight(input);
+        let fixture_flight = |input: LazyListInput| {
+            let key = prefix_flight_key(&input);
+            join_prefix_flight_with(input, key, |input, owner| async move {
+                fetch_prefix(input, &owner).await
+            })
+        };
+        let first = fixture_flight(input.clone());
+        let second = fixture_flight(input);
         assert!(Arc::ptr_eq(&first.0, &second.0));
+        assert!(!first.1);
+        assert!(second.1);
         tokio::time::timeout(Duration::from_secs(10), second_rx)
             .await
             .unwrap()
@@ -1802,6 +2002,11 @@ mod tests {
             assert_eq!(state.pages.len(), 1);
             assert_eq!(state.pages[0].files[0].key, "first.txt");
             assert!(!state.pages[0].complete);
+            assert!(state.pages[0].timing.network_ms > 0.0);
+            assert!(
+                state.pages[0].timing.page_ready_ms.unwrap() >= state.pages[0].timing.network_ms
+            );
+            assert_eq!(state.pages[0].timing.db_ms, 0.0);
             assert!(state.result.is_none());
         }
         drop(first);
@@ -1875,6 +2080,7 @@ mod tests {
                 generation: 42,
             },
             page: ListPage {
+                timing: ListTiming::default(),
                 files: Vec::new(),
                 folders: Vec::new(),
                 page_index: 0,
@@ -1890,5 +2096,137 @@ mod tests {
         assert_eq!(event["prefix"], "folder/");
         assert_eq!(event["complete"], true);
         assert_eq!(event["from_cache"], true);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn timing_records_partial_wait_when_cancellation_drops_the_future() {
+        let measurements = ListMeasurements::default();
+        let result = tokio::time::timeout(Duration::from_millis(125), async {
+            let _measure = MeasureInterval::new(&measurements.queue_ns);
+            std::future::pending::<()>().await;
+        })
+        .await;
+        assert!(result.is_err());
+        let timing = measurements.snapshot();
+        assert_eq!(timing.queue_ms, 125.0);
+        assert_eq!(timing.network_ms, 0.0);
+        assert_eq!(timing.backoff_ms, 0.0);
+        assert_eq!(timing.db_ms, 0.0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_timing_counts_actual_sleep_without_changing_the_attempt_budget() {
+        let measurements = ListMeasurements::default();
+        let started = Instant::now();
+        let calls = Cell::new(0);
+        let result = list_with_retry_measured(
+            FOREGROUND_LIST_RETRY,
+            Some(&measurements),
+            || true,
+            || {
+                calls.set(calls.get() + 1);
+                let outcome = if calls.get() < 3 {
+                    Err(unavailable())
+                } else {
+                    Ok("page")
+                };
+                async move { outcome }
+            },
+        )
+        .await;
+        assert_eq!(result, Ok("page"));
+        assert_eq!(calls.get(), 3);
+        assert!((measurements.snapshot().backoff_ms - elapsed_ms(started)).abs() < 0.001);
+        assert!(measurements.snapshot().backoff_ms <= 1500.0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn page_timing_snapshots_are_cumulative_and_do_not_change_on_later_work() {
+        let (changed, _) = tokio::sync::watch::channel(0);
+        let flight = PrefixFlight {
+            started: Instant::now(),
+            measurements: ListMeasurements::default(),
+            state: Mutex::new(FlightState::default()),
+            changed,
+            consumers: AtomicUsize::new(2),
+        };
+        {
+            let _measure = MeasureInterval::new(&flight.measurements.queue_ns);
+            tokio::time::advance(Duration::from_millis(4)).await;
+        }
+        {
+            let _measure = MeasureInterval::new(&flight.measurements.network_ns);
+            tokio::time::advance(Duration::from_millis(8)).await;
+        }
+        let page = ListPage {
+            timing: ListTiming::default(),
+            files: Vec::new(),
+            folders: Vec::new(),
+            page_index: 0,
+            next_cursor: Some("next".into()),
+            complete: false,
+            from_cache: false,
+            freshness: "fresh",
+        };
+        flight.publish(page.clone());
+        {
+            let _measure = MeasureInterval::new(&flight.measurements.db_ns);
+            tokio::time::advance(Duration::from_millis(3)).await;
+        }
+        flight.publish(ListPage {
+            page_index: 1,
+            next_cursor: None,
+            complete: true,
+            ..page
+        });
+        let state = flight.state.lock().unwrap();
+        assert_eq!(state.pages[0].timing.queue_ms, 4.0);
+        assert_eq!(state.pages[0].timing.network_ms, 8.0);
+        assert_eq!(state.pages[0].timing.db_ms, 0.0);
+        assert_eq!(state.pages[0].timing.page_ready_ms, Some(12.0));
+        assert_eq!(state.pages[1].timing.queue_ms, 4.0);
+        assert_eq!(state.pages[1].timing.network_ms, 8.0);
+        assert_eq!(state.pages[1].timing.db_ms, 3.0);
+        assert_eq!(state.pages[1].timing.page_ready_ms, Some(15.0));
+        // Publication metrics have no consumer-local or emission measurements.
+        assert_eq!(state.pages[1].timing.native_elapsed_ms, 0.0);
+        assert_eq!(state.pages[1].timing.emit_ms, None);
+        assert_eq!(state.pages[1].timing.emit_started_unix_ms, None);
+    }
+
+    #[test]
+    fn timing_serialization_keeps_reply_emission_cost_separate_from_page_timestamp() {
+        let reply = serde_json::to_value(ListTiming {
+            emit_ms: Some(2.5),
+            cache_ms: 3.25,
+            ..ListTiming::default()
+        })
+        .unwrap();
+        assert_eq!(reply["emit_ms"], 2.5);
+        assert_eq!(reply["cache_ms"], 3.25);
+        assert!(reply.get("page_ready_ms").is_none());
+        assert!(reply.get("emit_started_unix_ms").is_none());
+        let page = serde_json::to_value(ListTiming {
+            page_ready_ms: Some(15.0),
+            emit_started_unix_ms: Some(1_700_000_000_000.0),
+            ..ListTiming::default()
+        })
+        .unwrap();
+        assert_eq!(page["page_ready_ms"], 15.0);
+        assert!(page.get("emit_ms").is_none());
+    }
+    #[test]
+    fn cache_scope_uses_the_same_path_style_defaults_as_listing_clients() {
+        let input = |provider: &str, path_style: Option<bool>| {
+            serde_json::from_value::<LazyListInput>(serde_json::json!({
+            "provider": provider, "account_id": "account", "bucket": "bucket", "prefix": "",
+            "access_key_id": "key", "secret_access_key": "secret", "force_path_style": path_style,
+        })).unwrap()
+        };
+        assert!(cache_config(&input("r2", None)).force_path_style);
+        assert!(cache_config(&input("r2", Some(false))).force_path_style);
+        assert!(!cache_config(&input("aws", None)).force_path_style);
+        assert!(cache_config(&input("minio", None)).force_path_style);
+        assert!(cache_config(&input("rustfs", None)).force_path_style);
+        assert!(!cache_config(&input("minio", Some(false))).force_path_style);
     }
 }

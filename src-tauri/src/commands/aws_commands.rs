@@ -2,7 +2,6 @@ use crate::commands::batch_delete::run_batch_delete;
 use crate::commands::batch_move::{
     fallback_batch_id, run_batch_move, BatchMoveResult, MoveOperation,
 };
-use crate::commands::cache_events::{get_unique_parent_paths, CacheUpdatedEvent};
 use crate::commands::delete_cache::{update_cache_after_batch_delete, update_cache_after_delete};
 use crate::commands::move_cache::{update_cache_after_batch_move, update_cache_after_move};
 use crate::commands::upload_cache::update_cache_after_upload;
@@ -131,6 +130,26 @@ pub async fn sync_aws_bucket(
     config: AwsConfigInput,
     app: tauri::AppHandle,
 ) -> Result<SyncResult, String> {
+    let cache_config = db::cache_scope::CacheConfig {
+        provider: "aws".into(),
+        account_id: config.account_id.clone(),
+        access_key_id: config.access_key_id.clone(),
+        secret_access_key: config.secret_access_key.clone(),
+        region: Some(config.region.clone()),
+        endpoint_scheme: config.endpoint_scheme.clone(),
+        endpoint_host: config.endpoint_host.clone(),
+        force_path_style: config.force_path_style,
+    };
+    let scope = db::cache_scope::CacheScope::capture(&cache_config)
+        .await
+        .map_err(|e| e.to_string())?;
+    db::cache_scope::in_scope(scope, sync_aws_bucket_scoped(config, app)).await
+}
+
+async fn sync_aws_bucket_scoped(
+    config: AwsConfigInput,
+    app: tauri::AppHandle,
+) -> Result<SyncResult, String> {
     let account_id = config.account_id.clone();
     let aws_config: aws::AwsConfig = config.into();
     let bucket = aws_config.bucket.clone();
@@ -147,7 +166,8 @@ pub async fn sync_aws_bucket(
     let store_bucket = bucket.clone();
     let store_account_id = account_id.clone();
     let store_app = app.clone();
-    let store_handle = tokio::spawn(async move {
+    let store_scope = db::cache_scope::current_scope().ok_or("Missing sync cache scope")?;
+    let store_handle = tokio::spawn(db::cache_scope::in_scope(store_scope, async move {
         let mut stored_count: usize = 0;
         while let Some(batch) = rx.recv().await {
             let batch_len = batch.len();
@@ -158,7 +178,7 @@ pub async fn sync_aws_bucket(
             let _ = store_app.emit("store-progress", stored_count);
         }
         Ok::<usize, String>(stored_count)
-    });
+    }));
 
     let client = aws::create_aws_client(&aws_config)
         .await
@@ -449,29 +469,15 @@ pub async fn upload_aws_content(
 
     let last_modified = chrono::Utc::now().to_rfc3339();
 
-    let (size_delta, is_new_file) =
-        db::update_cached_file(&bucket, &account_id, &key, new_size, &last_modified)
-            .await
-            .map_err(|e| format!("Failed to update file cache: {}", e))?;
-
-    db::update_directory_tree_for_file(
+    crate::commands::upload_cache::update_cache_after_upload(
+        &app,
         &bucket,
         &account_id,
         &key,
-        size_delta,
+        new_size,
         &last_modified,
-        is_new_file,
     )
-    .await
-    .map_err(|e| format!("Failed to update directory tree: {}", e))?;
-
-    let _ = app.emit(
-        "cache-updated",
-        CacheUpdatedEvent {
-            action: "update".to_string(),
-            affected_paths: get_unique_parent_paths(&[key]),
-        },
-    );
+    .await?;
 
     Ok(etag)
 }

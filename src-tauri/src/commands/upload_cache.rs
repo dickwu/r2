@@ -10,6 +10,20 @@ pub(crate) async fn update_cache_after_upload(
     new_size: i64,
     last_modified: &str,
 ) -> Result<(), String> {
+    if db::cache_scope::current_scope().is_none() {
+        db::cache_scope::invalidate_unscoped(account_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = app.emit(
+            "cache-updated",
+            CacheUpdatedEvent {
+                action: "update".into(),
+                affected_paths: get_unique_parent_paths(&[key.to_string()]),
+            },
+        );
+        return Ok(());
+    }
+
     // Insert or update the file in cache, returns (size_delta, is_new_file)
     let (size_delta, is_new_file) =
         db::update_cached_file(bucket, account_id, key, new_size, last_modified)

@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import { useFolderSizeStore } from '@/app/stores/folderSizeStore';
+import { useBatchOperationStore } from '@/app/stores/batchOperationStore';
 import type { StorageConfig, StorageProvider } from '@/app/lib/r2cache';
 
 // Types matching Rust structs
@@ -460,6 +462,17 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
   },
 
   updateToken: async (input) => {
+    const current = get().currentConfig;
+    const changingCurrent =
+      current?.provider === 'r2' &&
+      current.token_id === input.id &&
+      (current.access_key_id !== input.access_key_id ||
+        current.secret_access_key !== input.secret_access_key);
+    if (changingCurrent) {
+      set({ currentConfig: null, loading: true });
+      useFolderSizeStore.getState().clearSizes();
+      useBatchOperationStore.getState().reset();
+    }
     try {
       await invoke('update_token', {
         input: {
@@ -475,6 +488,11 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
     } catch (e) {
       console.error('Failed to update token:', e);
       throw e;
+    } finally {
+      if (changingCurrent) {
+        if (!get().currentConfig) await get().loadCurrentConfig();
+        set({ loading: false });
+      }
     }
   },
 
@@ -540,6 +558,21 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
   },
 
   updateAwsAccount: async (input) => {
+    const current = get().currentConfig;
+    const changingCurrent =
+      current?.provider === 'aws' &&
+      current.account_id === input.id &&
+      (current.access_key_id !== input.access_key_id ||
+        current.secret_access_key !== input.secret_access_key ||
+        current.endpoint_scheme !== (input.endpoint_scheme ?? null) ||
+        current.endpoint_host !== (input.endpoint_host ?? null) ||
+        current.force_path_style !== input.force_path_style ||
+        current.region !== input.region);
+    if (changingCurrent) {
+      set({ currentConfig: null, loading: true });
+      useFolderSizeStore.getState().clearSizes();
+      useBatchOperationStore.getState().reset();
+    }
     try {
       await invoke('update_aws_account', {
         input: {
@@ -558,6 +591,11 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
     } catch (e) {
       console.error('Failed to update AWS account:', e);
       throw e;
+    } finally {
+      if (changingCurrent) {
+        if (!get().currentConfig) await get().loadCurrentConfig();
+        set({ loading: false });
+      }
     }
   },
 
@@ -622,6 +660,20 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
   },
 
   updateMinioAccount: async (input) => {
+    const current = get().currentConfig;
+    const changingCurrent =
+      current?.provider === 'minio' &&
+      current.account_id === input.id &&
+      (current.access_key_id !== input.access_key_id ||
+        current.secret_access_key !== input.secret_access_key ||
+        current.endpoint_scheme !== (input.endpoint_scheme ?? null) ||
+        current.endpoint_host !== (input.endpoint_host ?? null) ||
+        current.force_path_style !== input.force_path_style);
+    if (changingCurrent) {
+      set({ currentConfig: null, loading: true });
+      useFolderSizeStore.getState().clearSizes();
+      useBatchOperationStore.getState().reset();
+    }
     try {
       await invoke('update_minio_account', {
         input: {
@@ -639,6 +691,11 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
     } catch (e) {
       console.error('Failed to update MinIO account:', e);
       throw e;
+    } finally {
+      if (changingCurrent) {
+        if (!get().currentConfig) await get().loadCurrentConfig();
+        set({ loading: false });
+      }
     }
   },
 
@@ -702,6 +759,20 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
   },
 
   updateRustfsAccount: async (input) => {
+    const current = get().currentConfig;
+    const changingCurrent =
+      current?.provider === 'rustfs' &&
+      current.account_id === input.id &&
+      (current.access_key_id !== input.access_key_id ||
+        current.secret_access_key !== input.secret_access_key ||
+        current.endpoint_scheme !== (input.endpoint_scheme ?? null) ||
+        current.endpoint_host !== (input.endpoint_host ?? null) ||
+        current.force_path_style !== true);
+    if (changingCurrent) {
+      set({ currentConfig: null, loading: true });
+      useFolderSizeStore.getState().clearSizes();
+      useBatchOperationStore.getState().reset();
+    }
     try {
       await invoke('update_rustfs_account', {
         input: {
@@ -718,6 +789,11 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
     } catch (e) {
       console.error('Failed to update RustFS account:', e);
       throw e;
+    } finally {
+      if (changingCurrent) {
+        if (!get().currentConfig) await get().loadCurrentConfig();
+        set({ loading: false });
+      }
     }
   },
 

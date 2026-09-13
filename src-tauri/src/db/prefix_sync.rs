@@ -1,4 +1,4 @@
-use super::{get_connection, DbResult};
+use super::DbResult;
 
 pub fn get_table_sql() -> &'static str {
     "
@@ -15,28 +15,6 @@ pub fn get_table_sql() -> &'static str {
     "
 }
 
-/// Get the last sync time for a prefix. Returns None if never synced.
-pub async fn get_prefix_sync_time(
-    bucket: &str,
-    account_id: &str,
-    prefix: &str,
-) -> DbResult<Option<i64>> {
-    let conn = get_connection()?.lock().await;
-    let mut rows = conn
-        .query(
-            "SELECT last_synced_at FROM prefix_sync_times
-             WHERE bucket = ?1 AND account_id = ?2 AND prefix = ?3",
-            turso::params![bucket, account_id, prefix],
-        )
-        .await?;
-
-    if let Some(row) = rows.next().await? {
-        Ok(Some(row.get(0)?))
-    } else {
-        Ok(None)
-    }
-}
-
 /// Publish a complete delimiter listing and its freshness record together.
 /// Partial pages never call this function: a failure leaves the old snapshot
 /// and marker unchanged, including a previously valid empty directory.
@@ -47,11 +25,11 @@ pub async fn replace_complete_prefix(
     files: &[super::CachedFile],
     folders: &[String],
 ) -> DbResult<()> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
     replace_complete_prefix_on(&conn, bucket, account_id, prefix, files, folders).await
 }
 
-async fn replace_complete_prefix_on(
+pub(crate) async fn replace_complete_prefix_on(
     conn: &turso::Connection,
     bucket: &str,
     account_id: &str,
@@ -102,7 +80,7 @@ pub async fn touch_prefix_sync_times_if_exists(
     account_id: &str,
     prefixes: &[String],
 ) -> DbResult<()> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::write_connection(account_id).await?;
     invalidate_prefixes_on(&conn, bucket, account_id, prefixes).await
 }
 
@@ -126,7 +104,7 @@ async fn invalidate_prefixes_on(
 /// Clear all prefix sync times for a bucket (used when switching accounts or full re-sync).
 #[allow(dead_code)]
 pub async fn clear_prefix_sync_times(bucket: &str, account_id: &str) -> DbResult<()> {
-    let conn = get_connection()?.lock().await;
+    let conn = super::cache_scope::clear_connection(account_id).await?;
     conn.execute(
         "DELETE FROM prefix_sync_times WHERE bucket = ?1 AND account_id = ?2",
         turso::params![bucket, account_id],

@@ -129,42 +129,77 @@ pub async fn update_aws_account(
     force_path_style: bool,
 ) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
-    let now = chrono::Utc::now().timestamp();
-    let force_value = if force_path_style { 1 } else { 0 };
+    update_aws_account_on(
+        &conn,
+        id,
+        name,
+        access_key_id,
+        secret_access_key,
+        region,
+        endpoint_scheme,
+        endpoint_host,
+        force_path_style,
+    )
+    .await
+}
 
-    conn.execute(
-        "UPDATE aws_accounts
+#[allow(clippy::too_many_arguments)] // Mirrors the existing account fields plus the transaction connection.
+pub(crate) async fn update_aws_account_on(
+    conn: &turso::Connection,
+    id: &str,
+    name: Option<&str>,
+    access_key_id: &str,
+    secret_access_key: &str,
+    region: &str,
+    endpoint_scheme: &str,
+    endpoint_host: Option<&str>,
+    force_path_style: bool,
+) -> DbResult<()> {
+    conn.execute("BEGIN TRANSACTION", ()).await?;
+    let result = async {
+        let now = chrono::Utc::now().timestamp();
+        let force_value = if force_path_style { 1 } else { 0 };
+
+        conn.execute(
+            "UPDATE aws_accounts
          SET name = ?1, access_key_id = ?2, secret_access_key = ?3, region = ?4,
              endpoint_scheme = ?5, endpoint_host = ?6, force_path_style = ?7, updated_at = ?8
          WHERE id = ?9",
-        turso::params![
-            name,
-            access_key_id,
-            secret_access_key,
-            region,
-            endpoint_scheme,
-            endpoint_host,
-            force_value,
-            now,
-            id
-        ],
-    )
-    .await?;
+            turso::params![
+                name,
+                access_key_id,
+                secret_access_key,
+                region,
+                endpoint_scheme,
+                endpoint_host,
+                force_value,
+                now,
+                id
+            ],
+        )
+        .await?;
 
-    Ok(())
+        super::cache_scope::account_updated_on(conn, "aws", id).await
+    }
+    .await;
+    super::cache_scope::finish_transaction(conn, result).await
 }
 
 pub async fn delete_aws_account(id: &str) -> DbResult<()> {
     let conn = get_connection()?.lock().await;
-
-    conn.execute(
-        "DELETE FROM aws_buckets WHERE account_id = ?1",
-        turso::params![id],
-    )
-    .await?;
-
-    conn.execute("DELETE FROM aws_accounts WHERE id = ?1", turso::params![id])
+    conn.execute("BEGIN TRANSACTION", ()).await?;
+    let result = async {
+        conn.execute(
+            "DELETE FROM aws_buckets WHERE account_id = ?1",
+            turso::params![id],
+        )
         .await?;
 
-    Ok(())
+        conn.execute("DELETE FROM aws_accounts WHERE id = ?1", turso::params![id])
+            .await?;
+
+        super::cache_scope::account_updated_on(&conn, "aws", id).await
+    }
+    .await;
+    super::cache_scope::finish_transaction(&conn, result).await
 }
