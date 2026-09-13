@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "archived_at": "2026-09-13T15:07:35Z",
+  "policy": "Raw files were copied without parsing/reformatting. Gzip decompression was SHA256-verified. Only verified untracked source JSONs may be removed.",
+  "canonical": "native-listing.json",
+  "baseline_binary_sha256": "71c876f9bbf4b7bd1dc84e7ccb2cee5c0d9822508144c86c01a3416c67ae5590",
+  "files": [
+    {
+      "original_path": "docs/engineering/r2-audit/native-listing-focused-smoke.json",
+      "raw_bytes": 424217,
+      "raw_sha256": "8c1b46e2ffa91d6dbbd80200b7027d6b262e4900adaa231d8f80897635d9b051",
+      "ignored_copy": ".omx/artifacts/native-listing-baseline-20260913/native-listing-focused-smoke.json",
+      "untracked_at_archive": true
+    },
+    {
+      "original_path": "docs/engineering/r2-audit/native-listing-instrumentation-restart.json",
+      "raw_bytes": 124092,
+      "raw_sha256": "bae8240b5731b171d957c7bb41f9f3d410a2b8a71b124b3930f11d28376c5f98",
+      "ignored_copy": ".omx/artifacts/native-listing-baseline-20260913/native-listing-instrumentation-restart.json",
+      "untracked_at_archive": true
+    },
+    {
+      "original_path": "docs/engineering/r2-audit/native-listing-occluded.json",
+      "raw_bytes": 4278218,
+      "raw_sha256": "da36f7833edfab60c93f3cd59a2f446f6422dfbc74f239d231e19a9a8661bbb3",
+      "ignored_copy": ".omx/artifacts/native-listing-baseline-20260913/native-listing-occluded.json",
+      "untracked_at_archive": true
+    },
+    {
+      "original_path": "docs/engineering/r2-audit/native-listing-optimized-smoke-failed.json",
+      "raw_bytes": 71126,
+      "raw_sha256": "ac49fac4f251ae67d78ee8b24e57529a722df37664b014e96ca4327e72c08998",
+      "ignored_copy": ".omx/artifacts/native-listing-baseline-20260913/native-listing-optimized-smoke-failed.json",
+      "untracked_at_archive": true
+    },
+    {
+      "original_path": "docs/engineering/r2-audit/native-listing-optimized-smoke.json",
+      "raw_bytes": 426277,
+      "raw_sha256": "645dc733b962b44efa1d0bea8bfa02a196527ff51011f3d1a378ce74694ffc4a",
+      "ignored_copy": ".omx/artifacts/native-listing-baseline-20260913/native-listing-optimized-smoke.json",
+      "untracked_at_archive": true
+    },
+    {
+      "original_path": "docs/engineering/r2-audit/native-listing-scroll-probe.json",
+      "raw_bytes": 9597,
+      "raw_sha256": "36786f90536e0f3e1e3558b4423c26542ef0864c92ddcca35751002bfc526af9",
+      "ignored_copy": ".omx/artifacts/native-listing-baseline-20260913/native-listing-scroll-probe.json",
+      "untracked_at_archive": true
+    },
+    {
+      "original_path": "docs/engineering/r2-audit/native-listing-segment-1.json",
+      "raw_bytes": 6735991,
+      "raw_sha256": "72c20973b9c908fdfac7a8cd0d4f7f1b672ea1c4cb5d63f67e406346a311307f",
+      "ignored_copy": ".omx/artifacts/native-listing-baseline-20260913/native-listing-segment-1.json",
+      "untracked_at_archive": true,
+      "gzip_file": "native-listing-segment-1.json.gz",
+      "gzip_bytes": 437384,
+      "gzip_sha256": "8f53c7f9b228923708d94dcb7e884ed9401440fb7b0cd3dd20a352a2907d9be5",
+      "decompressed_sha256": "72c20973b9c908fdfac7a8cd0d4f7f1b672ea1c4cb5d63f67e406346a311307f"
+    },
+    {
+      "original_path": "docs/engineering/r2-audit/native-listing-segment-2.json",
+      "raw_bytes": 11567095,
+      "raw_sha256": "8f6d6d4614ee8b484259d0f2ceef97289f1728bec5fe30950012b0c295259a02",
+      "ignored_copy": ".omx/artifacts/native-listing-baseline-20260913/native-listing-segment-2.json",
+      "untracked_at_archive": true,
+      "gzip_file": "native-listing-segment-2.json.gz",
+      "gzip_bytes": 762228,
+      "gzip_sha256": "6c8b2094e3e1eda3829a86c8b3567d27e005f46020dbf365b672fd05025a571b",
+      "decompressed_sha256": "8f6d6d4614ee8b484259d0f2ceef97289f1728bec5fe30950012b0c295259a02"
+    },
+    {
+      "original_path": "docs/engineering/r2-audit/native-listing-smoke.json",
+      "raw_bytes": 223251,
+      "raw_sha256": "4065a39084a3b4bb5c40f40e68893cc85dd138bbec87600fb4efd95c701156ff",
+      "ignored_copy": ".omx/artifacts/native-listing-baseline-20260913/native-listing-smoke.json",
+      "untracked_at_archive": true
+    },
+    {
+      "original_path": "docs/engineering/r2-audit/native-listing.json",
+      "raw_bytes": 12245055,
+      "raw_sha256": "f1be9c495c8236580f70b2806fb84d7c0b6c32d1d266790a0767a7b4832aad39",
+      "ignored_copy": ".omx/artifacts/native-listing-baseline-20260913/native-listing.json",
+      "untracked_at_archive": true,
+      "gzip_file": "native-listing.json.gz",
+      "gzip_bytes": 807361,
+      "gzip_sha256": "f12bd33508afd28f34108ff475e7b4be25e8185b4ca3547d14569c69cac968c1",
+      "decompressed_sha256": "f1be9c495c8236580f70b2806fb84d7c0b6c32d1d266790a0767a7b4832aad39"
+    }
+  ]
+}

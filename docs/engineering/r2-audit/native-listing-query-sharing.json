@@ -1,0 +1,225 @@
+{
+  "scope": "Actual QueryClient.setQueryData on 100 lexical S3 pages through production immutable incremental accumulator; headless, no native/backend/React rendering",
+  "captured_at": "2026-09-13T14:55:51.629Z",
+  "items": 100000,
+  "page_size": 1000,
+  "order": "alternating variants per trial",
+  "query_version": "5.102.8",
+  "accumulator_sha256": "18d2c96380d04030721fa692bc20576f624a96c5d7682deea60eae9d7c791fb2",
+  "summaries": [
+    {
+      "sharing": "default",
+      "trials": 10,
+      "set_query_data_ms": {
+        "p50": 1354.0642510000052,
+        "p95": 1671.4356700000026
+      },
+      "accumulation_ms": {
+        "p50": 92.43724700000712,
+        "p95": 108.3206199999895
+      },
+      "total_ms": {
+        "p50": 1446.2250000000004,
+        "p95": 1779.8068330000006
+      }
+    },
+    {
+      "sharing": "disabled",
+      "trials": 10,
+      "set_query_data_ms": {
+        "p50": 0.4421679999977641,
+        "p95": 0.6454180000012002
+      },
+      "accumulation_ms": {
+        "p50": 75.88703999999689,
+        "p95": 86.68599900000004
+      },
+      "total_ms": {
+        "p50": 76.49449999999979,
+        "p95": 87.36237499999993
+      }
+    }
+  ],
+  "runs": [
+    {
+      "trial": 0,
+      "sharing": "default",
+      "accumulation_ms": 96.09296000000057,
+      "set_query_data_ms": 1196.4810369999998,
+      "total_ms": 1292.675708,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": false
+    },
+    {
+      "trial": 0,
+      "sharing": "disabled",
+      "accumulation_ms": 76.15054799999984,
+      "set_query_data_ms": 0.6182999999991807,
+      "total_ms": 76.79108400000018,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": true
+    },
+    {
+      "trial": 1,
+      "sharing": "disabled",
+      "accumulation_ms": 86.68599900000004,
+      "set_query_data_ms": 0.6454180000012002,
+      "total_ms": 87.36237499999993,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": true
+    },
+    {
+      "trial": 1,
+      "sharing": "default",
+      "accumulation_ms": 91.31037100000094,
+      "set_query_data_ms": 1267.407875999999,
+      "total_ms": 1358.819875,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": false
+    },
+    {
+      "trial": 2,
+      "sharing": "default",
+      "accumulation_ms": 91.85353099999975,
+      "set_query_data_ms": 1317.3672479999982,
+      "total_ms": 1409.3311249999997,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": false
+    },
+    {
+      "trial": 2,
+      "sharing": "disabled",
+      "accumulation_ms": 75.88703999999689,
+      "set_query_data_ms": 0.5857950000026904,
+      "total_ms": 76.49449999999979,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": true
+    },
+    {
+      "trial": 3,
+      "sharing": "disabled",
+      "accumulation_ms": 72.33800000000338,
+      "set_query_data_ms": 0.4057500000026266,
+      "total_ms": 72.75650000000041,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": true
+    },
+    {
+      "trial": 3,
+      "sharing": "default",
+      "accumulation_ms": 108.3206199999895,
+      "set_query_data_ms": 1671.4356700000026,
+      "total_ms": 1779.8068330000006,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": false
+    },
+    {
+      "trial": 4,
+      "sharing": "default",
+      "accumulation_ms": 97.00454399999762,
+      "set_query_data_ms": 1390.3080429999973,
+      "total_ms": 1487.3474580000002,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": false
+    },
+    {
+      "trial": 4,
+      "sharing": "disabled",
+      "accumulation_ms": 74.6724609999992,
+      "set_query_data_ms": 0.46971100000155275,
+      "total_ms": 75.15579200000047,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": true
+    },
+    {
+      "trial": 5,
+      "sharing": "disabled",
+      "accumulation_ms": 77.37058699999852,
+      "set_query_data_ms": 0.4396710000009989,
+      "total_ms": 77.82237499999974,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": true
+    },
+    {
+      "trial": 5,
+      "sharing": "default",
+      "accumulation_ms": 91.31646099999307,
+      "set_query_data_ms": 1371.9526279999955,
+      "total_ms": 1463.3056660000002,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": false
+    },
+    {
+      "trial": 6,
+      "sharing": "default",
+      "accumulation_ms": 96.94866699999511,
+      "set_query_data_ms": 1445.9737519999962,
+      "total_ms": 1542.9590000000007,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": false
+    },
+    {
+      "trial": 6,
+      "sharing": "disabled",
+      "accumulation_ms": 83.6230859999996,
+      "set_query_data_ms": 0.4841270000088116,
+      "total_ms": 84.12195799999972,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": true
+    },
+    {
+      "trial": 7,
+      "sharing": "disabled",
+      "accumulation_ms": 77.15853700000116,
+      "set_query_data_ms": 0.4421679999977641,
+      "total_ms": 77.62087500000052,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": true
+    },
+    {
+      "trial": 7,
+      "sharing": "default",
+      "accumulation_ms": 92.43724700000712,
+      "set_query_data_ms": 1353.7495800000052,
+      "total_ms": 1446.2250000000004,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": false
+    },
+    {
+      "trial": 8,
+      "sharing": "default",
+      "accumulation_ms": 94.86253599999145,
+      "set_query_data_ms": 1416.871540999995,
+      "total_ms": 1511.7645000000011,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": false
+    },
+    {
+      "trial": 8,
+      "sharing": "disabled",
+      "accumulation_ms": 71.36308500001542,
+      "set_query_data_ms": 0.40475300001162395,
+      "total_ms": 71.7793330000004,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": true
+    },
+    {
+      "trial": 9,
+      "sharing": "disabled",
+      "accumulation_ms": 74.94950400000562,
+      "set_query_data_ms": 0.3949149999953079,
+      "total_ms": 75.35687500000131,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": true
+    },
+    {
+      "trial": 9,
+      "sharing": "default",
+      "accumulation_ms": 90.8462929999987,
+      "set_query_data_ms": 1354.0642510000052,
+      "total_ms": 1444.9412499999999,
+      "final_count": 100000,
+      "final_snapshot_identity_preserved": false
+    }
+  ]
+}

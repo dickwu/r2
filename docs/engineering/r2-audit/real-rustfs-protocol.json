@@ -1,0 +1,109 @@
+{
+  "scope": "Disposable loopback RustFS SDK only; no Tauri application launched",
+  "captured_at": "2026-09-13T13:48:03.982Z",
+  "rustfs_version": "1.0.0-rc.6",
+  "rustfs_commit": "5cd58319ed6148ed7f09f2a4d0b4e46e429f043a",
+  "archive_sha256": "eb3c2b8a6f4bbe2734f9545413922604ba8bc00e50a6463cef3a321c4ca988e7",
+  "binary_sha256": "734160c42de3b82656449e5060fdd941d30ec5ddba27f3535398e4956a3ab167",
+  "harness_sha256": "f8a48aa1e07c2a0b9b73ea30b5ede2dda95164726d4ba3180f940dc43253a9be",
+  "version_output": "rustfs 1.0.0-rc.6\nbuild time   : 2026-09-11 02:40:43 +00:00\nbuild profile: release\nbuild os     : macos-aarch64\nrust version : rustc 1.98.1 (48a229cea 2026-09-01)\nrust channel : stable-aarch64-apple-darwin\ngit branch   : \ngit commit   : 5cd58319ed6148ed7f09f2a4d0b4e46e429f043a\ngit tag      : 1.0.0-rc.6\ngit status   :",
+  "host": {
+    "platform": "darwin",
+    "architecture": "arm64"
+  },
+  "conditions": {
+    "get_match": {
+      "behavior": "enforced",
+      "rejection_status": 412,
+      "protects_object": true,
+      "matching_request_succeeded": true
+    },
+    "put_absent": {
+      "behavior": "enforced",
+      "rejection_status": 412,
+      "protects_object": true,
+      "matching_request_succeeded": true
+    },
+    "put_match": {
+      "behavior": "enforced",
+      "rejection_status": 412,
+      "protects_object": true,
+      "matching_request_succeeded": true
+    },
+    "copy_source_match": {
+      "behavior": "enforced",
+      "rejection_status": 412,
+      "protects_object": true,
+      "matching_request_succeeded": true
+    },
+    "copy_destination_absent": {
+      "behavior": "enforced",
+      "rejection_status": 412,
+      "protects_object": true,
+      "matching_request_succeeded": true
+    },
+    "copy_destination_match": {
+      "behavior": "enforced",
+      "rejection_status": 412,
+      "protects_object": true,
+      "matching_request_succeeded": true
+    },
+    "delete_match": {
+      "behavior": "enforced",
+      "rejection_status": 412,
+      "protects_object": true,
+      "matching_request_succeeded": true
+    },
+    "part_copy_source_match": {
+      "behavior": "enforced",
+      "rejection_status": 412,
+      "protects_object": true,
+      "matching_request_succeeded": true
+    },
+    "complete_absent": {
+      "behavior": "enforced",
+      "rejection_status": 412,
+      "protects_object": true,
+      "matching_request_succeeded": true
+    }
+  },
+  "assertions": [
+    "Range status, boundaries, ETag and bytes verified",
+    "Conditional rejections cross-checked against stored bytes",
+    "Multipart pagination, metadata and full SHA256 verified"
+  ],
+  "listeners": [
+    {
+      "role": "source",
+      "addresses": ["127.0.0.1:63476"],
+      "loopback_only": true
+    },
+    {
+      "role": "destination",
+      "addresses": ["127.0.0.1:63491"],
+      "loopback_only": true
+    }
+  ],
+  "range": {
+    "status": 206,
+    "content_range": "bytes 17-4112/12582912",
+    "sha256": "9ed9cf3b0ed5f03f73e039a22b7275d50749c7f9f0a6028368116ead78639a1f",
+    "exact_bytes": true,
+    "special_key": "中文 +%?# literal%2F-source.bin"
+  },
+  "multipart": {
+    "bytes": 12582912,
+    "parts": 3,
+    "list_pages": 3,
+    "sha256": "2436159857d8711a0ad7f377791c48098b741df3b215ecb55140b2b70db87898",
+    "exact_bytes": true,
+    "metadata_preserved": true
+  },
+  "versioning": {
+    "supported": true,
+    "distinct_versions": true,
+    "pinned_read": true,
+    "pinned_delete_preserves_latest": true
+  },
+  "completed": true
+}
