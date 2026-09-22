@@ -351,6 +351,15 @@ pub async fn delete_cached_file(
     key: &str,
 ) -> DbResult<Option<i64>> {
     let conn = super::cache_scope::write_connection(account_id).await?;
+    delete_cached_file_on(&conn, bucket, account_id, key).await
+}
+
+pub(crate) async fn delete_cached_file_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    key: &str,
+) -> DbResult<Option<i64>> {
     conn.execute("BEGIN TRANSACTION", ()).await?;
 
     let result = async {
@@ -374,9 +383,9 @@ pub async fn delete_cached_file(
         )
         .await?;
         let (parent_path, _) = parse_key(key);
-        super::prefix_sync::invalidate_prefixes_on(&conn, bucket, account_id, &[parent_path])
+        super::prefix_sync::invalidate_prefixes_on(conn, bucket, account_id, &[parent_path])
             .await?;
-        bump_content_revision_on(&conn, bucket, account_id).await?;
+        bump_content_revision_on(conn, bucket, account_id).await?;
 
         Ok(Some(size))
     }
@@ -405,6 +414,15 @@ pub async fn delete_cached_files_batch(
     }
 
     let conn = super::cache_scope::write_connection(account_id).await?;
+    delete_cached_files_batch_on(&conn, bucket, account_id, keys).await
+}
+
+pub(crate) async fn delete_cached_files_batch_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    keys: &[String],
+) -> DbResult<std::collections::HashMap<String, i64>> {
     conn.execute("BEGIN TRANSACTION", ()).await?;
     let result = async {
         let mut file_sizes: std::collections::HashMap<String, i64> =
@@ -464,8 +482,8 @@ pub async fn delete_cached_files_batch(
         let mut prefixes: Vec<String> = keys.iter().map(|key| parse_key(key).0).collect();
         prefixes.sort();
         prefixes.dedup();
-        super::prefix_sync::invalidate_prefixes_on(&conn, bucket, account_id, &prefixes).await?;
-        bump_content_revision_on(&conn, bucket, account_id).await?;
+        super::prefix_sync::invalidate_prefixes_on(conn, bucket, account_id, &prefixes).await?;
+        bump_content_revision_on(conn, bucket, account_id).await?;
 
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(file_sizes)
     }
@@ -491,6 +509,16 @@ pub async fn move_cached_file(
     new_key: &str,
 ) -> DbResult<Option<(i64, String)>> {
     let conn = super::cache_scope::write_connection(account_id).await?;
+    move_cached_file_on(&conn, bucket, account_id, old_key, new_key).await
+}
+
+pub(crate) async fn move_cached_file_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    old_key: &str,
+    new_key: &str,
+) -> DbResult<Option<(i64, String)>> {
     conn.execute("BEGIN TRANSACTION", ()).await?;
 
     let result = async {
@@ -533,8 +561,8 @@ pub async fn move_cached_file(
         let mut prefixes = vec![old_parent_path, new_parent_path];
         prefixes.sort();
         prefixes.dedup();
-        super::prefix_sync::invalidate_prefixes_on(&conn, bucket, account_id, &prefixes).await?;
-        bump_content_revision_on(&conn, bucket, account_id).await?;
+        super::prefix_sync::invalidate_prefixes_on(conn, bucket, account_id, &prefixes).await?;
+        bump_content_revision_on(conn, bucket, account_id).await?;
 
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(file_info)
     }
@@ -563,6 +591,17 @@ pub async fn update_cached_file(
     last_modified: &str,
 ) -> DbResult<(i64, bool)> {
     let conn = super::cache_scope::write_connection(account_id).await?;
+    update_cached_file_on(&conn, bucket, account_id, key, new_size, last_modified).await
+}
+
+pub(crate) async fn update_cached_file_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    key: &str,
+    new_size: i64,
+    last_modified: &str,
+) -> DbResult<(i64, bool)> {
     conn.execute("BEGIN TRANSACTION", ()).await?;
 
     let result = async {
@@ -602,9 +641,9 @@ pub async fn update_cached_file(
         ],
     ).await?;
 
-        super::prefix_sync::invalidate_prefixes_on(&conn, bucket, account_id, &[parent_path])
+        super::prefix_sync::invalidate_prefixes_on(conn, bucket, account_id, &[parent_path])
             .await?;
-        bump_content_revision_on(&conn, bucket, account_id).await?;
+        bump_content_revision_on(conn, bucket, account_id).await?;
 
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>((new_size - old_size, is_new_file))
     }
@@ -1384,12 +1423,22 @@ pub async fn store_file_batch(
         return Ok(());
     }
 
-    const BATCH_SIZE: usize = 1000;
     let conn = super::cache_scope::write_connection(account_id).await?;
+    store_file_batch_on(&conn, bucket, account_id, run_token, files).await
+}
+
+pub(crate) async fn store_file_batch_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    run_token: &str,
+    files: &[CachedFile],
+) -> DbResult<()> {
+    const BATCH_SIZE: usize = 1000;
     conn.execute("BEGIN TRANSACTION", ()).await?;
 
     let tx_result = async {
-        ensure_sync_run_on(&conn, bucket, account_id, run_token).await?;
+        ensure_sync_run_on(conn, bucket, account_id, run_token).await?;
         for chunk in files.chunks(BATCH_SIZE) {
             if chunk.is_empty() {
                 continue;
