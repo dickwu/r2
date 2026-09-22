@@ -70,6 +70,11 @@ const FILE_MODE: u32 = 0o644;
 const MAX_RENAME_KEYS: usize = 1000;
 /// Server-side copies issued at once while renaming a directory.
 const RENAME_COPY_CONCURRENCY: usize = 8;
+/// Times an operation re-derives the key it has to fence after finding that
+/// a rename moved it during the fence wait. Each retry follows a rename that
+/// completed in between, so running out means the name is being moved
+/// continuously and the client is told to try again later.
+const FENCED_KEY_ATTEMPTS: usize = 16;
 
 // ============ Key helpers (pure) ============
 
@@ -764,6 +769,39 @@ impl S3NfsFs {
             EntryKind::Dir => FencePath::prefix(normalize_dir_key(&inode.key)),
             EntryKind::File => FencePath::exact(inode.key.clone()),
         }
+    }
+
+    // Keys change only inside a rename, which holds exclusive fences on the
+    // old key (a directory's whole prefix). A key derived before waiting on a
+    // fence can be stale once the wait ends; one re-derived while the fence is
+    // held stays valid until it is released, because any rename that could
+    // move it — of the file or of an ancestor — overlaps the held path.
+
+    /// Exclusive fence on the entry `name` names in `dirid` once the fence is
+    /// held. The name is resolved before the wait to know what to fence and
+    /// again after it, because a rename holding the fence meanwhile may have
+    /// moved that id to another key; acting on the id alone would then delete
+    /// the file under its new name.
+    async fn fence_existing_child(
+        &self,
+        dirid: fileid3,
+        name: &str,
+    ) -> Result<(FenceGuard, fileid3, Inode), nfsstat3> {
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let dir_key = normalize_dir_key(&self.dir_inode(dirid)?.key);
+            let (id, target) = self.resolve_child(dirid, &dir_key, name).await?;
+            let fence = self
+                .fence_paths(vec![Self::fence_path_for_inode(&target)])
+                .await;
+            if normalize_dir_key(&self.dir_inode(dirid)?.key) != dir_key {
+                continue;
+            }
+            let (current_id, current) = self.resolve_child_fenced(dirid, &dir_key, name).await?;
+            if current_id == id && current.key == target.key {
+                return Ok((fence, id, current));
+            }
+        }
+        Err(nfsstat3::NFS3ERR_JUKEBOX)
     }
 
     fn storage_endpoint(&self) -> &str {
@@ -4215,16 +4253,12 @@ impl NFSFileSystem for S3NfsFs {
     async fn remove(&self, dirid: fileid3, filename: &filename3) -> Result<(), nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
-        let dir = self.dir_inode(dirid)?;
+        self.dir_inode(dirid)?;
         let name = self.child_name(filename)?;
-        let dir_key = normalize_dir_key(&dir.key);
 
         // RMDIR and REMOVE both land here, so the entry's kind decides what
         // "delete" means.
-        let (id, target) = self.resolve_child(dirid, &dir_key, &name).await?;
-        let _fence = Self::fence_path_for_inode(&target);
-        let _fence = self.fence_paths(vec![_fence]).await;
-        let target = self.inode(id)?;
+        let (_fence, id, target) = self.fence_existing_child(dirid, &name).await?;
         let lifecycle = self.lifecycle(&target.key);
         let _access = lifecycle.access.write().await;
         self.ensure_writable()?;

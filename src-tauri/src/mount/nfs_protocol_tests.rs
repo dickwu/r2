@@ -2995,3 +2995,95 @@ async fn a_late_staged_put_cannot_resurrect_a_rename_source_or_its_replaced_targ
         let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
     }
 }
+
+/// A fixture over `bucket` that announces every server-side copy on
+/// `copy_entered` and holds it until `release_copy` grants it a permit.
+async fn copy_gated_fixture(
+    bucket: Arc<std::sync::Mutex<ModelBucket>>,
+    copy_entered: Arc<tokio::sync::Notify>,
+    release_copy: Arc<tokio::sync::Semaphore>,
+) -> crate::test_s3::Fixture {
+    serve(move |request| {
+        let bucket = bucket.clone();
+        let copy_entered = copy_entered.clone();
+        let release_copy = release_copy.clone();
+        async move {
+            if request.headers.contains_key("x-amz-copy-source") {
+                copy_entered.notify_one();
+                release_copy.acquire().await.unwrap().forget();
+            }
+            bucket.lock().unwrap().respond(&request)
+        }
+    })
+    .await
+}
+
+/// `rm d/x` resolved to the file's id while `mv d/x t/y` held the fence.
+/// Once the rename finishes that id names `t/y`, so a REMOVE that acts on the
+/// id instead of the name would delete the file the user just moved.
+#[tokio::test]
+async fn remove_racing_a_rename_never_deletes_the_renamed_file() {
+    let bucket = ModelBucket::with(&[("d/x", b"payload"), ("t/", b"")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture =
+        copy_gated_fixture(bucket.clone(), copy_entered.clone(), release_copy.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "remove-racing-rename");
+    let d = fs
+        .intern_child("d/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let t = fs
+        .intern_child("t/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    // A complete listing lets REMOVE resolve `x` without waiting on anything.
+    let listed = fs.readdir(d, 0, 100).await.unwrap();
+    assert_eq!(directory_names(&listed), ["x"]);
+    let x = listed.entries[0].fileid;
+
+    let rename = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(d, &b"x".as_slice().into(), t, &b"y".as_slice().into())
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let mut removal = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.remove(d, &b"x".as_slice().into()).await }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut removal)
+            .await
+            .is_err(),
+        "REMOVE must wait for the rename that holds d/x"
+    );
+    release_copy.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(3), rename)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let removed = tokio::time::timeout(Duration::from_secs(3), removal)
+        .await
+        .unwrap()
+        .unwrap();
+
+    {
+        let bucket = bucket.lock().unwrap();
+        assert_eq!(
+            bucket.keys(),
+            ["t/", "t/y"],
+            "the renamed file must survive"
+        );
+        assert_eq!(bucket.body("t/y"), Some(b"payload".as_slice()));
+    }
+    assert!(
+        matches!(removed, Err(nfsstat3::NFS3ERR_NOENT)),
+        "d/x no longer exists, so REMOVE must report it missing: {removed:?}"
+    );
+    assert_eq!(fs.inode(x).unwrap().key, "t/y");
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
