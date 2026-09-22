@@ -242,11 +242,26 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
     .await?;
     cache_scope::initialize_on(&conn).await?;
 
-    DB_CONNECTION
-        .set(Mutex::new(conn))
-        .map_err(|_| "Database already initialized")?;
+    if DB_CONNECTION.set(Mutex::new(conn)).is_err() {
+        // Unit tests in several modules each initialize the process-wide
+        // in-memory database once; the first wins and the others reuse it.
+        if cfg!(test) {
+            return Ok(());
+        }
+        return Err("Database already initialized".into());
+    }
 
     Ok(())
+}
+
+/// Initialize the process-wide database for unit tests that exercise code
+/// paths reaching it through `get_connection`.
+#[cfg(test)]
+pub(crate) async fn init_test_db() {
+    static INITIALIZED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    INITIALIZED
+        .get_or_init(|| async { init_db(Path::new(":memory:")).await.unwrap() })
+        .await;
 }
 
 // Re-export session functions

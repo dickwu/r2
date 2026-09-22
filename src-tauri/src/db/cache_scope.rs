@@ -338,6 +338,8 @@ pub async fn invalidate_account_on(conn: &Connection, account_id: &str) -> DbRes
         turso::params![prefix.len() as i64, prefix],
     )
     .await?;
+    // A listing still in flight for this account must not publish as fresh.
+    super::prefix_sync::advance_all_mutation_generations_on(conn, account_id, None).await?;
     Ok(())
 }
 
@@ -423,10 +425,25 @@ pub struct PrefixSnapshot {
 pub struct PrefixPageSnapshot {
     pub prefix_time: Option<i64>,
     pub full_time: Option<i64>,
+    /// When the rows were last known current. None once the folder changed
+    /// after it was listed: neither its marker nor the full index vouch then.
+    pub freshness_time: Option<i64>,
     pub full_sync: bool,
     pub snapshot_token: Option<String>,
     pub skipped_prefixes: Option<Vec<String>>,
     pub page: super::file_cache::CachedFolderPage,
+}
+
+/// Capture the folder's mutation generation before a listing's first request.
+pub async fn capture_prefix_generation(
+    scope: &CacheScope,
+    bucket: &str,
+    prefix: &str,
+) -> DbResult<i64> {
+    let conn = get_connection()?.lock().await;
+    validate_on(&conn, scope).await?;
+    super::prefix_sync::capture_mutation_generation_on(&conn, bucket, &scope.account_id, prefix)
+        .await
 }
 
 #[allow(dead_code)]
@@ -509,11 +526,14 @@ async fn read_prefix_page_on(
     validate_on(conn, scope).await?;
     super::file_cache::ensure_no_local_cache_mutation_on(conn, bucket, &scope.account_id).await?;
     let mut rows = conn.query("SELECT last_synced_at,generation FROM prefix_sync_times WHERE bucket=?1 AND account_id=?2 AND prefix=?3", turso::params![bucket, scope.account_id.as_str(), prefix]).await?;
-    let prefix_marker = match rows.next().await? {
+    let prefix_row = match rows.next().await? {
         Some(row) => Some((row.get::<i64>(0)?, row.get::<i64>(1)?)),
         None => None,
-    }
-    .filter(|(time, _)| *time > 0);
+    };
+    let prefix_marker = prefix_row.filter(|(time, _)| *time > 0);
+    // A kept zero marker: the folder changed locally after it was listed, or
+    // its last listing overlapped such a change.
+    let prefix_changed = prefix_row.is_some() && prefix_marker.is_none();
     let prefix_time = prefix_marker.map(|(time, _)| time);
     let mut rows = conn
         .query(
@@ -526,6 +546,11 @@ async fn read_prefix_page_on(
         None => None,
     };
     let full_time = full_marker.map(|(time, _)| time);
+    let freshness_time = if prefix_changed {
+        None
+    } else {
+        prefix_time.or(full_time)
+    };
     let full_sync = full_marker.is_some();
     let content_revision =
         super::file_cache::content_revision_on(conn, bucket, &scope.account_id).await?;
@@ -558,6 +583,7 @@ async fn read_prefix_page_on(
     Ok(PrefixPageSnapshot {
         prefix_time,
         full_time,
+        freshness_time,
         full_sync,
         snapshot_token,
         skipped_prefixes,
@@ -622,18 +648,29 @@ mod tests {
         }
     }
 
+    /// Publish a complete root listing whose generation was captured first.
+    async fn list_root(conn: &Connection, files: &[super::super::CachedFile]) -> DbResult<()> {
+        let generation = super::super::prefix_sync::capture_mutation_generation_on(
+            conn, "bucket", "account", "",
+        )
+        .await?;
+        super::super::prefix_sync::replace_complete_prefix_on(
+            conn,
+            "bucket",
+            "account",
+            "",
+            files,
+            &[],
+            generation,
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn publish_on(conn: &Connection, scope: CacheScope, key: &str) -> DbResult<()> {
         in_scope(scope, async {
             check_context_on(conn, "account", true).await?;
-            super::super::prefix_sync::replace_complete_prefix_on(
-                conn,
-                "bucket",
-                "account",
-                "",
-                &[file(key)],
-                &[],
-            )
-            .await
+            list_root(conn, &[file(key)]).await
         })
         .await
     }
@@ -673,15 +710,7 @@ mod tests {
         let (_db, conn) = fixture().await;
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
         in_scope(scope.clone(), async {
-            super::super::prefix_sync::replace_complete_prefix_on(
-                &conn,
-                "bucket",
-                "account",
-                "",
-                &[file("a.txt"), file("b.txt")],
-                &[],
-            )
-            .await
+            list_root(&conn, &[file("a.txt"), file("b.txt")]).await
         })
         .await
         .unwrap();
@@ -693,15 +722,7 @@ mod tests {
         assert_eq!(first.snapshot_token.as_deref(), Some("prefix:123:1:1"));
 
         in_scope(scope.clone(), async {
-            super::super::prefix_sync::replace_complete_prefix_on(
-                &conn,
-                "bucket",
-                "account",
-                "",
-                &[file("c.txt"), file("d.txt")],
-                &[],
-            )
-            .await
+            list_root(&conn, &[file("c.txt"), file("d.txt")]).await
         })
         .await
         .unwrap();
@@ -715,15 +736,7 @@ mod tests {
         let (_db, conn) = fixture().await;
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
         in_scope(scope.clone(), async {
-            super::super::prefix_sync::replace_complete_prefix_on(
-                &conn,
-                "bucket",
-                "account",
-                "",
-                &[file("a.txt"), file("b.txt")],
-                &[],
-            )
-            .await
+            list_root(&conn, &[file("a.txt"), file("b.txt")]).await
         })
         .await
         .unwrap();
@@ -781,15 +794,7 @@ mod tests {
         let (_db, conn) = fixture().await;
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
         in_scope(scope.clone(), async {
-            super::super::prefix_sync::replace_complete_prefix_on(
-                &conn,
-                "bucket",
-                "account",
-                "",
-                &[file("a.txt")],
-                &[],
-            )
-            .await
+            list_root(&conn, &[file("a.txt")]).await
         })
         .await
         .unwrap();
@@ -838,15 +843,7 @@ mod tests {
         let (_db, conn) = fixture().await;
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
         in_scope(scope.clone(), async {
-            super::super::prefix_sync::replace_complete_prefix_on(
-                &conn,
-                "bucket",
-                "account",
-                "",
-                &[file("a.txt"), file("b.txt")],
-                &[],
-            )
-            .await
+            list_root(&conn, &[file("a.txt"), file("b.txt")]).await
         })
         .await
         .unwrap();
@@ -1142,16 +1139,7 @@ mod tests {
         conn.execute("DELETE FROM app_state WHERE key='cache_scope_schema'", ())
             .await
             .unwrap();
-        super::super::prefix_sync::replace_complete_prefix_on(
-            &conn,
-            "bucket",
-            "account",
-            "",
-            &[file("unproven")],
-            &[],
-        )
-        .await
-        .unwrap();
+        list_root(&conn, &[file("unproven")]).await.unwrap();
         conn.execute("INSERT INTO sync_meta(bucket,account_id,last_sync,file_count) VALUES ('bucket','account',1,1)", ()).await.unwrap();
         initialize_on(&conn).await.unwrap();
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();

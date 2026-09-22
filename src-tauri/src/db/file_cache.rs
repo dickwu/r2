@@ -261,6 +261,7 @@ async fn invalidate_stale_barrier_on(
         turso::params![bucket, account_id],
     )
     .await?;
+    super::prefix_sync::advance_all_mutation_generations_on(conn, account_id, Some(bucket)).await?;
     bump_content_revision_on(conn, bucket, account_id).await?;
     Ok(())
 }
@@ -445,8 +446,10 @@ pub(crate) async fn delete_cached_file_on(
     conn.execute("BEGIN TRANSACTION", ()).await?;
 
     let result = async {
-        // A running scan may have staged the key even when the cache never had it.
+        // A running scan or folder listing may have seen the key even when the
+        // cache never had it.
         record_sync_mutations_on(conn, bucket, account_id, &[SyncMutation::Delete { key }]).await?;
+        super::prefix_sync::note_local_mutation_on(conn, bucket, account_id, &[key]).await?;
         let mut rows = conn
             .query(
                 "SELECT size FROM cached_files WHERE bucket = ?1 AND account_id = ?2 AND key = ?3",
@@ -466,9 +469,6 @@ pub(crate) async fn delete_cached_file_on(
             turso::params![bucket, account_id, key],
         )
         .await?;
-        let (parent_path, _) = parse_key(key);
-        super::prefix_sync::invalidate_prefixes_on(conn, bucket, account_id, &[parent_path])
-            .await?;
         bump_content_revision_on(conn, bucket, account_id).await?;
 
         Ok(Some(size))
@@ -568,10 +568,8 @@ pub(crate) async fn delete_cached_files_batch_on(
             conn.execute(&sql, params).await?;
         }
 
-        let mut prefixes: Vec<String> = keys.iter().map(|key| parse_key(key).0).collect();
-        prefixes.sort();
-        prefixes.dedup();
-        super::prefix_sync::invalidate_prefixes_on(conn, bucket, account_id, &prefixes).await?;
+        let deleted: Vec<&str> = keys.iter().map(String::as_str).collect();
+        super::prefix_sync::note_local_mutation_on(conn, bucket, account_id, &deleted).await?;
         bump_content_revision_on(conn, bucket, account_id).await?;
 
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(file_sizes)
@@ -638,12 +636,13 @@ pub(crate) async fn move_cached_file_on(
             }],
         )
         .await?;
+        super::prefix_sync::note_local_mutation_on(conn, bucket, account_id, &[old_key, new_key])
+            .await?;
         if file_info.is_none() {
             return Ok(None);
         }
 
         // Compute new parent_path and name
-        let (old_parent_path, _) = parse_key(old_key);
         let (new_parent_path, new_name) = parse_key(new_key);
         let now = chrono::Utc::now().timestamp();
 
@@ -653,7 +652,7 @@ pub(crate) async fn move_cached_file_on(
          WHERE bucket = ?5 AND account_id = ?6 AND key = ?7",
         turso::params![
             new_key,
-            new_parent_path.clone(),
+            new_parent_path,
             new_name,
             now,
             bucket,
@@ -663,10 +662,6 @@ pub(crate) async fn move_cached_file_on(
     )
     .await?;
 
-        let mut prefixes = vec![old_parent_path, new_parent_path];
-        prefixes.sort();
-        prefixes.dedup();
-        super::prefix_sync::invalidate_prefixes_on(conn, bucket, account_id, &prefixes).await?;
         bump_content_revision_on(conn, bucket, account_id).await?;
 
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(file_info)
@@ -738,7 +733,7 @@ pub(crate) async fn update_cached_file_on(
             bucket,
             account_id,
             key,
-            parent_path.clone(),
+            parent_path,
             name,
             new_size,
             last_modified,
@@ -757,8 +752,7 @@ pub(crate) async fn update_cached_file_on(
         )
         .await?;
 
-        super::prefix_sync::invalidate_prefixes_on(conn, bucket, account_id, &[parent_path])
-            .await?;
+        super::prefix_sync::note_local_mutation_on(conn, bucket, account_id, &[key]).await?;
         bump_content_revision_on(conn, bucket, account_id).await?;
 
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>((new_size - old_size, is_new_file))
@@ -2093,6 +2087,11 @@ mod tests {
         .await
         .unwrap();
         // Opening a/ re-lists it from the network while the scan is running.
+        let listed = super::super::prefix_sync::capture_mutation_generation_on(
+            &conn, "bucket", "account", "a/",
+        )
+        .await
+        .unwrap();
         super::super::prefix_sync::replace_complete_prefix_on(
             &conn,
             "bucket",
@@ -2100,6 +2099,7 @@ mod tests {
             "a/",
             &[cached("a/new.txt", 2)],
             &["a/sub/".into()],
+            listed,
         )
         .await
         .unwrap();
