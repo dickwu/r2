@@ -1,14 +1,19 @@
 //! Replayable, identity-bound relay transfers and multipart recovery.
 use super::config::MoveConfig;
 use super::planner::{
-    head_identity, storage_error, verified_destination, verify_unknown_content, TRANSFER_MARKER,
+    head_identity_checked, scope, storage_error, verified_destination, verify_unknown_content,
+    TRANSFER_MARKER,
 };
 use super::state::update_move_status;
 use super::types::{MoveProgress, MAX_CONCURRENT_PARTS};
 use crate::db;
 use crate::db::move_sessions::{get_move_journal, save_move_journal, MoveJournal, SourceIdentity};
 use crate::db::MoveSession;
-use crate::providers::s3_client::{describe_s3_error, is_transient_s3_error};
+use crate::providers::multipart::{complete_receipts, PartReceipt, PartReconciler};
+use crate::providers::operation::{
+    execute as execute_operation, AttemptError, OperationContext, OperationError, OperationKind,
+};
+use crate::providers::s3_client::{describe_s3_error, StorageErrorClass};
 use crate::transfer_progress::SpeedWindow;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::error::ProvideErrorMetadata;
@@ -18,7 +23,7 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use futures_util::{stream, StreamExt};
 use reqwest::Client;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -26,9 +31,7 @@ use tauri::{AppHandle, Emitter};
 
 #[path = "relay_protocol.rs"]
 pub(crate) mod protocol;
-use protocol::{
-    attempt_timeout, fetch_payload, interruptible, retry_delay, Payload, MAX_ATTEMPTS, MIB,
-};
+use protocol::{attempt_timeout, fetch_payload, interruptible, Payload, MAX_ATTEMPTS, MIB};
 
 const MULTIPART_THRESHOLD: u64 = 100 * MIB;
 const GIB: u64 = 1024 * MIB;
@@ -154,9 +157,29 @@ async fn download_part(
     cancelled: &AtomicBool,
     paused: &AtomicBool,
 ) -> Result<Payload, String> {
-    for attempt in 0..MAX_ATTEMPTS {
-        // Generate a new signature for every attempt/part; no transfer keeps an
-        // hour-old URL. Version and If-Match are included in the signed request.
+    let expected = range
+        .map(|(start, end)| end - start + 1)
+        .unwrap_or(source.size);
+    let endpoint = source_config.operation_endpoint();
+    let scope = format!("{}:{}", endpoint, source_config.bucket());
+    let identity = format!(
+        "{}:{}:{}:{:?}",
+        key,
+        source.etag,
+        source.version_id.as_deref().unwrap_or(""),
+        range
+    );
+    let context = OperationContext::new(
+        OperationKind::Get,
+        &endpoint,
+        &scope,
+        &identity,
+        tokio::time::Instant::now() + attempt_timeout(expected),
+        cancelled,
+    )
+    .with_pause(paused)
+    .with_max_attempts(MAX_ATTEMPTS as u32);
+    execute_operation(&context, || async {
         let request = source_client
             .get_object()
             .bucket(source_config.bucket())
@@ -168,44 +191,42 @@ async fn download_part(
             paused,
             request.presigned(
                 PresigningConfig::expires_in(Duration::from_secs(900))
-                    .map_err(|e| e.to_string())?,
+                    .map_err(|e| AttemptError::permanent(e.to_string()))?,
             ),
         )
-        .await?
-        .map_err(|e| format!("Cannot sign source read: {e}"))?;
-        let expected = range
-            .map(|(start, end)| end - start + 1)
-            .unwrap_or(source.size);
-        let result = interruptible(
-            cancelled,
-            paused,
-            tokio::time::timeout(
-                attempt_timeout(expected),
-                fetch_payload(
-                    http,
-                    signed.uri(),
-                    range,
-                    source.size,
-                    &source.etag,
-                    cancelled,
-                    paused,
-                ),
+        .await
+        .map_err(AttemptError::permanent)?
+        .map_err(|e| AttemptError::permanent(format!("Cannot sign source read: {e}")))?;
+        match tokio::time::timeout(
+            attempt_timeout(expected),
+            fetch_payload(
+                http,
+                signed.uri(),
+                range,
+                source.size,
+                &source.etag,
+                cancelled,
+                paused,
             ),
         )
-        .await?;
-        match result {
-            Ok(Ok(payload)) => return Ok(payload),
-            Ok(Err(error)) if error.retryable && attempt + 1 < MAX_ATTEMPTS => {
-                retry_delay(attempt, error.retry_after, cancelled, paused).await?;
+        .await
+        {
+            Ok(Ok(payload)) => Ok(payload),
+            Ok(Err(error)) if error.retryable => {
+                let mut attempt = AttemptError::transient(error.message);
+                if let Some(wait) = error.retry_after {
+                    attempt = attempt.with_retry_after(wait);
+                }
+                Err(attempt)
             }
-            Ok(Err(error)) => return Err(error.message),
-            Err(_) if attempt + 1 < MAX_ATTEMPTS => {
-                retry_delay(attempt, None, cancelled, paused).await?;
-            }
-            Err(_) => return Err("transient: source read exhausted its time budget".into()),
+            Ok(Err(error)) => Err(AttemptError::permanent(error.message)),
+            Err(_) => Err(AttemptError::transient(
+                "source read exhausted its time budget",
+            )),
         }
-    }
-    unreachable!("bounded read attempts return a result")
+    })
+    .await
+    .map_err(|error| super::planner::operation_error("source read", error))
 }
 
 /// The remote inventory is authoritative for an existing MPU, including parts
@@ -218,72 +239,65 @@ async fn reconcile_parts(
     upload_id: &str,
     plan: MultipartPlan,
     total: u64,
+    local: Vec<PartReceipt>,
     cancelled: &AtomicBool,
     paused: &AtomicBool,
-) -> Result<Option<BTreeMap<i32, (String, u64)>>, String> {
-    let mut result = BTreeMap::new();
+) -> Result<Option<std::collections::BTreeMap<i32, PartReceipt>>, String> {
+    let mut reconciler = PartReconciler::new(total, plan.part_size, local)?;
     let mut marker = None;
     let mut seen_markers = HashSet::new();
+    let endpoint = config.operation_endpoint();
+    let list_scope = scope(config)?;
     loop {
-        let mut response = None;
-        for attempt in 0..MAX_ATTEMPTS {
-            match interruptible(
-                cancelled,
-                paused,
-                client
-                    .list_parts()
-                    .bucket(config.bucket())
-                    .key(key)
-                    .upload_id(upload_id)
-                    .set_part_number_marker(marker.clone())
-                    .max_parts(1000)
-                    .send(),
-            )
-            .await?
+        let marker_identity = marker.as_deref().unwrap_or("start");
+        let identity = format!("{upload_id}:{marker_identity}");
+        let context = OperationContext::new(
+            OperationKind::ListParts,
+            &endpoint,
+            &list_scope,
+            &identity,
+            tokio::time::Instant::now() + Duration::from_secs(30),
+            cancelled,
+        )
+        .with_pause(paused)
+        .with_max_attempts(MAX_ATTEMPTS as u32);
+        let page = match execute_operation(&context, || async {
+            client
+                .list_parts()
+                .bucket(config.bucket())
+                .key(key)
+                .upload_id(upload_id)
+                .set_part_number_marker(marker.clone())
+                .max_parts(1000)
+                .send()
+                .await
+                .map_err(|error| AttemptError::from_sdk(&error))
+        })
+        .await
+        {
+            Ok(page) => page,
+            Err(OperationError::Failed { error, .. })
+                if error.class == StorageErrorClass::NotFound
+                    && error.message == "NoSuchUpload" =>
             {
-                Ok(page) => {
-                    response = Some(page);
-                    break;
-                }
-                Err(error) if is_transient_s3_error(&error) && attempt + 1 < MAX_ATTEMPTS => {
-                    retry_delay(attempt, None, cancelled, paused).await?
-                }
-                Err(error) if error.code() == Some("NoSuchUpload") => return Ok(None),
-                Err(error) => {
-                    return Err(storage_error(
-                        "ListParts",
-                        error.code(),
-                        error.raw_response().map(|r| r.status().as_u16()),
-                        describe_s3_error(&error),
-                        false,
-                    ))
-                }
+                return Ok(None);
             }
-        }
-        let page = response.ok_or("ListParts exhausted retry budget")?;
+            Err(error) => return Err(super::planner::operation_error("ListParts", error)),
+        };
         for part in page.parts() {
-            let number = part
-                .part_number()
-                .filter(|p| *p > 0 && *p <= plan.total_parts)
-                .ok_or("ListParts returned an invalid part number")?;
-            let etag = part
-                .e_tag()
-                .filter(|s| !s.is_empty())
-                .ok_or("ListParts returned a missing ETag")?
-                .to_owned();
-            let size = part
-                .size()
-                .and_then(|n| u64::try_from(n).ok())
-                .ok_or("ListParts returned an invalid size")?;
-            let (start, end) = plan.range(number, total);
-            if size != end - start + 1 {
-                return Err(
-                    "conflict: remote multipart geometry differs from the saved plan".into(),
-                );
-            }
-            if result.insert(number, (etag, size)).is_some() {
-                return Err("ListParts returned a duplicate part".into());
-            }
+            reconciler.accept(PartReceipt {
+                number: part
+                    .part_number()
+                    .ok_or("ListParts returned an invalid part number")?,
+                etag: part
+                    .e_tag()
+                    .ok_or("ListParts returned a missing ETag")?
+                    .to_owned(),
+                size: part
+                    .size()
+                    .and_then(|n| u64::try_from(n).ok())
+                    .ok_or("ListParts returned an invalid size")?,
+            })?;
         }
         if !page.is_truncated().unwrap_or(false) {
             break;
@@ -310,7 +324,7 @@ async fn reconcile_parts(
         }
         marker = Some(next);
     }
-    Ok(Some(result))
+    Ok(Some(reconciler.finish()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -339,56 +353,49 @@ async fn transfer_part(
         paused,
     )
     .await?;
-    for attempt in 0..MAX_ATTEMPTS {
+    let endpoint = dest_config.operation_endpoint();
+    let dest_scope = scope(dest_config)?;
+    let identity = format!("{}:{}:{}", upload_id, part, payload.len);
+    let context = OperationContext::new(
+        OperationKind::UploadPart,
+        &endpoint,
+        &dest_scope,
+        &identity,
+        tokio::time::Instant::now() + attempt_timeout(payload.len),
+        cancelled,
+    )
+    .with_pause(paused)
+    .with_max_attempts(MAX_ATTEMPTS as u32);
+    let output = execute_operation(&context, || async {
         let body = payload
             .body
             .try_clone()
-            .ok_or("Upload part payload is not replayable")?;
-        let result = interruptible(
-            cancelled,
-            paused,
-            dest_client
-                .upload_part()
-                .bucket(dest_config.bucket())
-                .key(&session.dest_key)
-                .upload_id(upload_id)
-                .part_number(part)
-                .content_length(payload.len as i64)
-                .body(ByteStream::new(body))
-                .customize()
-                .config_override(data_timeouts(payload.len))
-                .send(),
-        )
-        .await?;
-        match result {
-            Ok(output) => {
-                let etag = output
-                    .e_tag()
-                    .filter(|value| !value.is_empty())
-                    .ok_or("UploadPart returned no ETag")?
-                    .to_owned();
-                db::save_move_upload_part(&session.id, part, &etag, payload.len as i64)
-                    .await
-                    .map_err(|e| format!("Cannot persist uploaded part: {e}"))?;
-                return Ok((part, etag, payload.len));
-            }
-            // Replaying the same part number is safe even when the previous
-            // attempt committed: immutable bytes and upload identity are fixed.
-            Err(error) if is_transient_s3_error(&error) && attempt + 1 < MAX_ATTEMPTS => {
-                retry_delay(attempt, None, cancelled, paused).await?
-            }
-            Err(error) => {
-                return Err(storage_error(
-                    "UploadPart",
-                    error.code(),
-                    error.raw_response().map(|r| r.status().as_u16()),
-                    describe_s3_error(&error),
-                    false,
-                ))
-            }
-        }
-    }
-    unreachable!("bounded part attempts return a result")
+            .ok_or_else(|| AttemptError::permanent("Upload part payload is not replayable"))?;
+        dest_client
+            .upload_part()
+            .bucket(dest_config.bucket())
+            .key(&session.dest_key)
+            .upload_id(upload_id)
+            .part_number(part)
+            .content_length(payload.len as i64)
+            .body(ByteStream::new(body))
+            .customize()
+            .config_override(data_timeouts(payload.len))
+            .send()
+            .await
+            .map_err(|error| AttemptError::from_sdk(&error))
+    })
+    .await
+    .map_err(|error| format!("{error}: UploadPart"))?;
+    let etag = output
+        .e_tag()
+        .filter(|value| !value.is_empty())
+        .ok_or("UploadPart returned no ETag")?
+        .to_owned();
+    db::save_move_upload_part(&session.id, part, &etag, payload.len as i64)
+        .await
+        .map_err(|e| format!("Cannot persist uploaded part: {e}"))?;
+    Ok((part, etag, payload.len))
 }
 
 /// Validate an already-published object before changing recovery phase. With
@@ -422,6 +429,8 @@ pub(crate) async fn reconcile_uploaded_destination(
                 &session.dest_key,
                 &journal.source,
                 &identity,
+                cancelled,
+                paused,
             ),
         )
         .await??;
@@ -452,6 +461,16 @@ pub(crate) async fn recover_absent_multipart(
         )?;
     let plan = MultipartPlan::new(dest_config, journal.source.size, Some(part_size as u64))?;
     let client = dest_config.client().await?;
+    let local = db::get_move_upload_parts(&session.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(number, etag, size)| PartReceipt {
+            number,
+            etag,
+            size: size as u64,
+        })
+        .collect();
     if reconcile_parts(
         &client,
         dest_config,
@@ -459,6 +478,7 @@ pub(crate) async fn recover_absent_multipart(
         &upload_id,
         plan,
         journal.source.size,
+        local,
         cancelled,
         paused,
     )
@@ -495,7 +515,7 @@ async fn recover_missing_upload(
     match interruptible(
         cancelled,
         paused,
-        head_identity(dest_config, &session.dest_key),
+        head_identity_checked(dest_config, &session.dest_key, cancelled, paused),
     )
     .await??
     {
@@ -621,6 +641,16 @@ async fn stream_multipart(
         paused,
     )
     .await?;
+    let local = db::get_move_upload_parts(&session.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(number, etag, size)| PartReceipt {
+            number,
+            etag,
+            size: size as u64,
+        })
+        .collect();
     let completed = reconcile_parts(
         dest_client,
         dest_config,
@@ -628,6 +658,7 @@ async fn stream_multipart(
         &upload_id,
         plan,
         total,
+        local,
         cancelled,
         paused,
     )
@@ -652,16 +683,35 @@ async fn stream_multipart(
     db::delete_move_upload_parts(&session.id)
         .await
         .map_err(|e| format!("Cannot reconcile multipart journal: {e}"))?;
-    for (part, (etag, size)) in &completed {
-        db::save_move_upload_part(&session.id, *part, etag, *size as i64)
-            .await
-            .map_err(|e| format!("Cannot persist reconciled part: {e}"))?;
+    for receipt in completed.values() {
+        db::save_move_upload_part(
+            &session.id,
+            receipt.number,
+            &receipt.etag,
+            receipt.size as i64,
+        )
+        .await
+        .map_err(|e| format!("Cannot persist reconciled part: {e}"))?;
     }
-    let mut uploaded: u64 = completed.values().map(|(_, size)| *size).sum();
+    let mut uploaded: u64 = completed.values().map(|receipt| receipt.size).sum();
     let speed = SpeedWindow::with_baseline(uploaded);
     let pending: Vec<i32> = (1..=plan.total_parts)
         .filter(|part| !completed.contains_key(part))
         .collect();
+    journal.metrics.copy_requests = journal
+        .metrics
+        .copy_requests
+        .saturating_add(pending.len() as u64);
+    journal.metrics.max_copy_in_flight = journal.metrics.max_copy_in_flight.max(
+        pending
+            .len()
+            .min(MAX_CONCURRENT_PARTS)
+            .try_into()
+            .unwrap_or(u32::MAX),
+    );
+    save_move_journal(journal)
+        .await
+        .map_err(|e| format!("Cannot persist move metrics: {e}"))?;
     let stopped = AtomicBool::new(false);
     let source = journal.source.clone();
     let jobs = stream::iter(pending.into_iter().map(|part| {
@@ -699,7 +749,14 @@ async fn stream_multipart(
     while let Some(result) = jobs.next().await {
         match result {
             Ok(Some((part, etag, size))) => {
-                completed.insert(part, (etag, size));
+                completed.insert(
+                    part,
+                    PartReceipt {
+                        number: part,
+                        etag,
+                        size,
+                    },
+                );
                 uploaded += size;
                 let percent = ((uploaded as f64 / total as f64) * 100.0).floor().min(99.0) as u32;
                 let _ = app.emit(
@@ -724,15 +781,13 @@ async fn stream_multipart(
         return Err(error);
     }
     interruptible(cancelled, paused, std::future::ready(())).await?;
-    if completed.len() != plan.total_parts as usize {
-        return Err("Missing upload parts".into());
-    }
-    let parts = completed
+    let receipts = complete_receipts(total, plan.part_size, completed.into_values())?;
+    let parts = receipts
         .into_iter()
-        .map(|(part, (etag, _))| {
+        .map(|receipt| {
             CompletedPart::builder()
-                .part_number(part)
-                .e_tag(etag)
+                .part_number(receipt.number)
+                .e_tag(receipt.etag)
                 .build()
         })
         .collect();
@@ -912,7 +967,7 @@ pub(crate) async fn stream_transfer_without_temp(
     let (identity, head) = interruptible(
         cancelled,
         paused,
-        head_identity(source_config, &session.source_key),
+        head_identity_checked(source_config, &session.source_key, cancelled, paused),
     )
     .await??
     .ok_or("Source object no longer exists")?;
@@ -936,8 +991,12 @@ pub(crate) async fn stream_transfer_without_temp(
         return Err("needs_action: This endpoint did not enforce conditional destination creation; the source and destination were retained".into());
     }
     update_move_status(app, &session.id, "uploading", None).await;
+    journal
+        .metrics
+        .copy_started_at_ms
+        .get_or_insert_with(|| chrono::Utc::now().timestamp_millis());
     save_phase(&mut journal, "transferring").await?;
-    if journal.source.size >= MULTIPART_THRESHOLD {
+    let copied = if journal.source.size >= MULTIPART_THRESHOLD {
         stream_multipart(
             client,
             &source_client,
@@ -953,6 +1012,11 @@ pub(crate) async fn stream_transfer_without_temp(
         )
         .await
     } else {
+        journal.metrics.copy_requests = journal.metrics.copy_requests.saturating_add(1);
+        journal.metrics.max_copy_in_flight = journal.metrics.max_copy_in_flight.max(1);
+        save_move_journal(&journal)
+            .await
+            .map_err(|e| format!("Cannot persist move metrics: {e}"))?;
         stream_single_put(
             client,
             &source_client,
@@ -966,7 +1030,12 @@ pub(crate) async fn stream_transfer_without_temp(
             paused,
         )
         .await
-    }
+    }?;
+    journal.metrics.copy_completed_at_ms = Some(chrono::Utc::now().timestamp_millis());
+    save_move_journal(&journal)
+        .await
+        .map_err(|e| format!("Cannot persist move metrics: {e}"))?;
+    Ok(copied)
 }
 
 #[cfg(test)]
@@ -1051,23 +1120,38 @@ pub(crate) mod tests {
     }
 
     fn xml_response(body: &str) -> String {
-        format!("HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
     }
 
     fn part_xml(number: i32, size: u64) -> String {
-        format!("<Part><PartNumber>{number}</PartNumber><ETag>\"part-{number}\"</ETag><Size>{size}</Size></Part>")
+        format!(
+            "<Part><PartNumber>{number}</PartNumber><ETag>\"part-{number}\"</ETag><Size>{size}</Size></Part>"
+        )
     }
 
     #[tokio::test]
     async fn reconciles_more_than_one_thousand_remote_parts() {
         let first_parts: String = (1..=1000).map(|part| part_xml(part, 20 * MIB)).collect();
-        let first = format!("<ListPartsResult><IsTruncated>true</IsTruncated><NextPartNumberMarker>1000</NextPartNumberMarker>{first_parts}</ListPartsResult>");
+        let first = format!(
+            "<ListPartsResult><IsTruncated>true</IsTruncated><NextPartNumberMarker>1000</NextPartNumberMarker>{first_parts}</ListPartsResult>"
+        );
         let second = format!(
             "<ListPartsResult><IsTruncated>false</IsTruncated>{}</ListPartsResult>",
             part_xml(1001, 20 * MIB)
         );
         let (config, server) = s3_fixture(vec![xml_response(&first), xml_response(&second)]).await;
         let plan = MultipartPlan::new(&config, 1001 * 20 * MIB, Some(20 * MIB)).unwrap();
+        let local = (1..=1001)
+            .map(|number| PartReceipt {
+                number,
+                etag: format!("\"part-{number}\""),
+                size: 20 * MIB,
+            })
+            .collect();
         let parts = reconcile_parts(
             &config.client().await.unwrap(),
             &config,
@@ -1075,6 +1159,7 @@ pub(crate) mod tests {
             "upload",
             plan,
             1001 * 20 * MIB,
+            local,
             &AtomicBool::new(false),
             &AtomicBool::new(false),
         )
@@ -1082,9 +1167,57 @@ pub(crate) mod tests {
         .unwrap();
         let parts = parts.expect("multipart upload still exists");
         assert_eq!(parts.len(), 1001);
-        assert_eq!(parts[&1001], ("\"part-1001\"".into(), 20 * MIB));
+        assert_eq!(parts[&1001].etag, "\"part-1001\"");
+        assert_eq!(parts[&1001].size, 20 * MIB);
         let requests = server.await.unwrap();
         assert!(requests[1].contains("part-number-marker=1000"));
+    }
+
+    #[tokio::test]
+    async fn listparts_retry_reconciles_existing_receipts_without_reupload() {
+        let parts_xml = format!(
+            "<ListPartsResult><IsTruncated>false</IsTruncated>{}{}</ListPartsResult>",
+            part_xml(1, 5 * MIB),
+            part_xml(2, 5 * MIB)
+        );
+        let transient = "HTTP/1.1 503 Unavailable\r\nContent-Type: application/xml\r\nContent-Length: 66\r\nConnection: close\r\n\r\n<Error><Code>ServiceUnavailable</Code><Message>try</Message></Error>"
+            .to_string();
+        let (config, server) = s3_fixture(vec![transient, xml_response(&parts_xml)]).await;
+        let plan = MultipartPlan::new(&config, 10 * MIB, Some(5 * MIB)).unwrap();
+        let local = vec![
+            PartReceipt {
+                number: 1,
+                etag: "\"part-1\"".into(),
+                size: 5 * MIB,
+            },
+            PartReceipt {
+                number: 2,
+                etag: "\"part-2\"".into(),
+                size: 5 * MIB,
+            },
+        ];
+        let parts = reconcile_parts(
+            &config.client().await.unwrap(),
+            &config,
+            "object",
+            "upload",
+            plan,
+            10 * MIB,
+            local,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap()
+        .expect("multipart upload still exists");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[&1].etag, "\"part-1\"");
+        assert_eq!(parts[&2].etag, "\"part-2\"");
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests
+            .iter()
+            .all(|request| request.contains("uploadId=upload")));
     }
 
     #[tokio::test]
@@ -1101,6 +1234,11 @@ pub(crate) mod tests {
         ] {
             let (config, server) = s3_fixture(vec![xml_response(&xml)]).await;
             let plan = MultipartPlan::new(&config, 40 * MIB, Some(20 * MIB)).unwrap();
+            let local = vec![PartReceipt {
+                number: 1,
+                etag: "\"part-1\"".into(),
+                size: 20 * MIB,
+            }];
             assert!(reconcile_parts(
                 &config.client().await.unwrap(),
                 &config,
@@ -1108,6 +1246,7 @@ pub(crate) mod tests {
                 "upload",
                 plan,
                 40 * MIB,
+                local,
                 &AtomicBool::new(false),
                 &AtomicBool::new(false)
             )
@@ -1160,6 +1299,14 @@ pub(crate) mod tests {
         })
     }
 
+    pub(crate) async fn test_db_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static DB_TESTS: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        DB_TESTS
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
     pub(crate) async fn journal_fixture(name: &str, size: u64) -> (MoveSession, MoveJournal) {
         static DATABASE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1201,6 +1348,8 @@ pub(crate) mod tests {
             source_scope: "fixture".into(),
             dest_scope: "fixture".into(),
             destination: None,
+            retry: Default::default(),
+            metrics: Default::default(),
         };
         save_move_journal(&journal).await.unwrap();
         db::save_move_upload_session(&session.id, "expired-upload", (5 * MIB) as i64)
@@ -1225,6 +1374,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn consumed_completion_verifies_content_and_records_copied_without_reupload() {
+        let _guard = test_db_guard().await;
         use crate::test_s3::{serve, Response};
         for changed in [false, true] {
             let (session, mut journal) = journal_fixture("consumed", 8).await;
@@ -1312,6 +1462,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn expired_completion_clears_obsolete_parts_then_uploads_new_conditional_session() {
+        let _guard = test_db_guard().await;
         use crate::test_s3::{serve, Response};
         let (session, mut journal) = journal_fixture("expired", 8).await;
         let fixture = serve(|request| async move {
@@ -1433,6 +1584,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn unknown_completion_requires_missing_mpu_and_fresh_absence_before_reset() {
+        let _guard = test_db_guard().await;
         use crate::test_s3::{serve, Response};
         for missing in [false, true] {
             let (session, mut journal) = journal_fixture("unknown-resume", 8).await;
@@ -1488,6 +1640,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn missing_upload_does_not_clear_foreign_destination_or_failed_head() {
+        let _guard = test_db_guard().await;
         use crate::test_s3::{serve, Response};
         for head_status in [200, 403] {
             let (session, mut journal) = journal_fixture("foreign-or-denied", 8).await;
@@ -1533,6 +1686,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn upload_part_allows_a_response_after_thirty_seconds_without_replay() {
+        let _guard = test_db_guard().await;
         use crate::test_s3::{serve, Response};
         let (session, journal) = journal_fixture("slow-upload", 5 * MIB).await;
         let fixture = serve(|request| async move {
@@ -1594,6 +1748,7 @@ pub(crate) mod tests {
     }
     #[tokio::test]
     async fn unknown_upload_with_a_destination_receipt_never_restarts_after_disappearance() {
+        let _guard = test_db_guard().await;
         use crate::test_s3::{serve, Response};
         let (session, mut journal) = journal_fixture("acknowledged-destination-missing", 8).await;
         let receipt = SourceIdentity {

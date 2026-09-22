@@ -58,20 +58,35 @@ export interface FolderSnapshot {
   freshness: FolderFreshness;
 }
 
+type FrameScheduler = (callback: () => void) => unknown;
+type FrameCanceller = (handle: unknown) => void;
+
 interface LoadFolderItemsOptions<Config> {
   config: Config;
   prefix: string;
   signal?: AbortSignal;
-  readCachedFolder: (config: Config, prefix: string) => Promise<FolderSnapshot | null>;
-  readPrefixFolder: (
+  forceRefresh?: boolean;
+  fallbackSnapshot?: FolderSnapshot | null;
+  readCachedFolder: (
     config: Config,
     prefix: string,
     options: {
       signal?: AbortSignal;
       onUpdate: (snapshot: FolderSnapshot) => void;
     }
+  ) => Promise<FolderSnapshot | null>;
+  readPrefixFolder: (
+    config: Config,
+    prefix: string,
+    options: {
+      signal?: AbortSignal;
+      forceRefresh?: boolean;
+      onUpdate: (snapshot: FolderSnapshot) => void;
+    }
   ) => Promise<FolderSnapshot>;
   onUpdate: (snapshot: FolderSnapshot) => void;
+  scheduleFrame?: FrameScheduler;
+  cancelFrame?: FrameCanceller;
 }
 
 const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
@@ -115,6 +130,113 @@ function compareFileItems(a: FileItem, b: FileItem): number {
   if (a.isFolder && !b.isFolder) return -1;
   if (!a.isFolder && b.isFolder) return 1;
   return nameCollator.compare(a.name, b.name);
+}
+
+function defaultScheduleFrame(callback: () => void): unknown {
+  if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(callback);
+  return setTimeout(callback, 0);
+}
+
+function defaultCancelFrame(handle: unknown) {
+  if (typeof cancelAnimationFrame === 'function' && typeof handle === 'number') {
+    cancelAnimationFrame(handle);
+    return;
+  }
+  clearTimeout(handle as ReturnType<typeof setTimeout>);
+}
+
+export function createFolderUpdatePublisher(
+  onUpdate: (snapshot: FolderSnapshot) => void,
+  options: {
+    signal?: AbortSignal;
+    scheduleFrame?: FrameScheduler;
+    cancelFrame?: FrameCanceller;
+  } = {}
+) {
+  const scheduleFrame = options.scheduleFrame ?? defaultScheduleFrame;
+  const cancelFrame = options.cancelFrame ?? defaultCancelFrame;
+  let publishedFirst = false;
+  let pending: FolderSnapshot | null = null;
+  let scheduled: unknown = null;
+
+  const emit = (snapshot: FolderSnapshot) => {
+    if (options.signal?.aborted) return;
+    onUpdate(snapshot);
+  };
+  const clearScheduled = () => {
+    if (scheduled !== null) {
+      cancelFrame(scheduled);
+      scheduled = null;
+    }
+  };
+  const flush = () => {
+    const snapshot = pending;
+    pending = null;
+    clearScheduled();
+    if (snapshot) emit(snapshot);
+  };
+  const publish = (snapshot: FolderSnapshot, options: { flush?: boolean } = {}) => {
+    if (options.flush || snapshot.complete) {
+      pending = null;
+      clearScheduled();
+      emit(snapshot);
+      publishedFirst = true;
+      return;
+    }
+    if (!publishedFirst) {
+      emit(snapshot);
+      publishedFirst = true;
+      return;
+    }
+    pending = snapshot;
+    if (scheduled === null) {
+      scheduled = scheduleFrame(() => {
+        scheduled = null;
+        flush();
+      });
+    }
+  };
+  const abort = () => {
+    pending = null;
+    clearScheduled();
+  };
+  options.signal?.addEventListener('abort', abort, { once: true });
+  return { publish, flush, abort };
+}
+
+function createWarmOverlay(base: FolderSnapshot | null | undefined) {
+  if (!base?.complete) return (update: FolderSnapshot) => update;
+  let items = base.items;
+  const indexes = new Map(items.map((item, index) => [item.key, index]));
+  return (update: FolderSnapshot): FolderSnapshot => {
+    if (update.complete) return update;
+    let next = items;
+    const additions: FileItem[] = [];
+    for (const item of update.items) {
+      const index = indexes.get(item.key);
+      if (index === undefined) {
+        indexes.set(item.key, next.length + additions.length);
+        additions.push(item);
+        continue;
+      }
+      if (next === items) next = items.slice();
+      next[index] = item;
+    }
+    if (additions.length > 0) {
+      next = next === items ? items.slice() : next;
+      for (const item of additions) next.push(item);
+      next.sort(compareFileItems);
+      indexes.clear();
+      next.forEach((item, index) => indexes.set(item.key, index));
+    }
+    items = next;
+    return {
+      items,
+      complete: false,
+      fromCache: base.fromCache,
+      freshness: 'partial',
+    };
+  };
 }
 
 /** Match the entire navigation identity before accepting any payload. */
@@ -236,14 +358,41 @@ export async function loadFolderItems<Config>({
   config,
   prefix,
   signal,
+  forceRefresh,
+  fallbackSnapshot,
   readCachedFolder,
   readPrefixFolder,
   onUpdate,
+  scheduleFrame,
+  cancelFrame,
 }: LoadFolderItemsOptions<Config>): Promise<FolderSnapshot> {
   signal?.throwIfAborted();
+  const publisher = createFolderUpdatePublisher(onUpdate, { signal, scheduleFrame, cancelFrame });
+  const cacheOverlay = createWarmOverlay(fallbackSnapshot);
   // A cache read failure should not prevent the live provider request.
-  const cached = await readCachedFolder(config, prefix).catch(() => null);
+  const cached = forceRefresh
+    ? null
+    : await readCachedFolder(config, prefix, {
+        signal,
+        onUpdate: (snapshot) => publisher.publish(cacheOverlay(snapshot)),
+      }).catch(() => null);
   signal?.throwIfAborted();
-  if (cached) onUpdate(cached);
-  return readPrefixFolder(config, prefix, { signal, onUpdate });
+  if (cached) {
+    const cachedSnapshot = cacheOverlay(cached);
+    publisher.publish(cachedSnapshot);
+    if (cached.complete && cached.freshness === 'fresh') return cachedSnapshot;
+  }
+  const liveOverlay = createWarmOverlay(cached ?? fallbackSnapshot);
+  try {
+    const result = await readPrefixFolder(config, prefix, {
+      signal,
+      forceRefresh: true,
+      onUpdate: (snapshot) => publisher.publish(liveOverlay(snapshot)),
+    });
+    publisher.flush();
+    return result;
+  } catch (error) {
+    publisher.flush();
+    throw error;
+  }
 }

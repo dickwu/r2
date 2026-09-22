@@ -1,8 +1,12 @@
 //! Backend identity and recovery decisions used by the real move worker.
 use super::config::MoveConfig;
 use crate::db::move_sessions::{MoveJournal, SourceIdentity};
-use aws_sdk_s3::error::ProvideErrorMetadata;
+use crate::providers::operation::{
+    execute as execute_operation, AttemptError, OperationContext, OperationError, OperationKind,
+};
+use crate::providers::s3_client::StorageErrorClass;
 use sha2::{Digest, Sha256};
+use std::{sync::atomic::AtomicBool, time::Duration};
 
 pub(crate) const SINGLE_COPY_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
 pub(crate) const TRANSFER_MARKER: &str = "r2-move-task";
@@ -115,6 +119,17 @@ pub(crate) fn native_aws(config: &MoveConfig) -> bool {
     matches!(config, MoveConfig::Aws(cfg) if cfg.endpoint_host.as_deref().is_none_or(|s| s.trim().is_empty()))
 }
 
+pub(crate) fn general_purpose_copy_bucket(config: &MoveConfig) -> bool {
+    let bucket = config.bucket();
+    !bucket.contains(':') && !bucket.ends_with("--x-s3")
+}
+
+pub(crate) fn compatible_multipart_copy_candidate(source: &MoveConfig, dest: &MoveConfig) -> bool {
+    !matches!(dest, MoveConfig::R2(_))
+        && general_purpose_copy_bucket(source)
+        && general_purpose_copy_bucket(dest)
+}
+
 pub(crate) fn plan_transfer(
     source: &MoveConfig,
     dest: &MoveConfig,
@@ -138,11 +153,10 @@ pub(crate) fn plan_transfer(
         return Ok(TransferPlan::Relay);
     }
     // S3 access points, directory buckets, and Outposts have additional routing
-    // constraints. They do not use the general-purpose bucket copy plan.
-    if [source.bucket(), dest.bucket()]
-        .iter()
-        .any(|b| b.contains(':') || b.ends_with("--x-s3"))
-    {
+    // constraints. They do not use the general-purpose bucket copy plan. R2
+    // stays eligible for a single conditional CopyObject; only its multipart
+    // copy is excluded (see compatible_multipart_copy_candidate).
+    if !general_purpose_copy_bucket(source) || !general_purpose_copy_bucket(dest) {
         return Ok(TransferPlan::Relay);
     }
     if size <= SINGLE_COPY_LIMIT {
@@ -173,6 +187,32 @@ pub(crate) fn encoded_copy_source(bucket: &str, key: &str, version: Option<&str>
     encoded
 }
 
+const HEAD_OPERATION_BUDGET: Duration = Duration::from_secs(30);
+#[cfg(test)]
+static NEVER_CANCELLED_HEAD: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static NEVER_PAUSED_HEAD: AtomicBool = AtomicBool::new(false);
+
+fn head_operation_scope(config: &MoveConfig) -> String {
+    format!("{}:{}", config.operation_endpoint(), config.bucket())
+}
+
+pub(crate) fn operation_error(operation: &str, error: OperationError) -> String {
+    match error {
+        OperationError::Cancelled | OperationError::Paused => error.to_string(),
+        // The attempt already named a task status (a relay read's `needs_auth:`
+        // or `conflict:`, or a pause seen mid-body); keep it as the status.
+        OperationError::Failed { error, .. }
+            if super::worker::FAILURE_STATUSES
+                .iter()
+                .any(|status| error.message.starts_with(&format!("{status}:"))) =>
+        {
+            error.message
+        }
+        other => format!("{}: {operation}: {other}", other.class().label()),
+    }
+}
+
 pub(crate) fn storage_error(
     operation: &str,
     code: Option<&str>,
@@ -184,9 +224,11 @@ pub(crate) fn storage_error(
     format!("{class}: {operation}: {detail}")
 }
 
-pub(crate) async fn head_identity(
+pub(crate) async fn head_identity_checked(
     config: &MoveConfig,
     key: &str,
+    cancelled: &AtomicBool,
+    paused: &AtomicBool,
 ) -> Result<
     Option<(
         SourceIdentity,
@@ -195,8 +237,26 @@ pub(crate) async fn head_identity(
     String,
 > {
     let client = config.client().await?;
-    match crate::providers::s3_client::retry_idempotent(3, || {
-        client.head_object().bucket(config.bucket()).key(key).send()
+    let endpoint = config.operation_endpoint();
+    let scope = head_operation_scope(config);
+    let context = OperationContext::new(
+        OperationKind::Head,
+        &endpoint,
+        &scope,
+        key,
+        tokio::time::Instant::now() + HEAD_OPERATION_BUDGET,
+        cancelled,
+    )
+    .with_pause(paused)
+    .with_max_attempts(3);
+    match execute_operation(&context, || async {
+        client
+            .head_object()
+            .bucket(config.bucket())
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| AttemptError::from_sdk(&error))
     })
     .await
     {
@@ -224,17 +284,30 @@ pub(crate) async fn head_identity(
                 head,
             )))
         }
-        Err(error) => {
-            let code = error.as_service_error().and_then(|e| e.code());
-            let status = error.raw_response().map(|r| r.status().as_u16());
-            if matches!(code, Some("NotFound" | "NoSuchKey" | "NoSuchVersion"))
-                || status == Some(404)
-            {
-                return Ok(None);
-            }
-            Err(storage_error("HEAD", code, status, &error, false))
+        Err(OperationError::Failed { error, .. })
+            if matches!(
+                error.message.as_str(),
+                "NotFound" | "NoSuchKey" | "NoSuchVersion"
+            ) =>
+        {
+            Ok(None)
         }
+        Err(error) => Err(operation_error("HEAD", error)),
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn head_identity(
+    config: &MoveConfig,
+    key: &str,
+) -> Result<
+    Option<(
+        SourceIdentity,
+        aws_sdk_s3::operation::head_object::HeadObjectOutput,
+    )>,
+    String,
+> {
+    head_identity_checked(config, key, &NEVER_CANCELLED_HEAD, &NEVER_PAUSED_HEAD).await
 }
 
 pub(crate) fn verified_destination(
@@ -258,6 +331,7 @@ pub(crate) fn verified_destination(
 /// A lost publication response leaves no destination ETag receipt. Another
 /// writer may preserve our metadata while changing same-sized content, so a
 /// marker/size match alone cannot authorize deleting the source.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn verify_unknown_content(
     source_config: &MoveConfig,
     dest_config: &MoveConfig,
@@ -265,6 +339,8 @@ pub(crate) async fn verify_unknown_content(
     dest_key: &str,
     source: &SourceIdentity,
     destination: &SourceIdentity,
+    cancelled: &AtomicBool,
+    paused: &AtomicBool,
 ) -> Result<(), String> {
     let source_client = source_config.client().await?;
     let dest_client = dest_config.client().await?;
@@ -274,13 +350,19 @@ pub(crate) async fn verify_unknown_content(
             bucket: source_config.bucket(),
             key: source_key,
             identity: source,
+            endpoint: source_config.operation_endpoint(),
+            scope: head_operation_scope(source_config),
         },
         ObjectRead {
             client: &dest_client,
             bucket: dest_config.bucket(),
             key: dest_key,
             identity: destination,
+            endpoint: dest_config.operation_endpoint(),
+            scope: head_operation_scope(dest_config),
         },
+        cancelled,
+        paused,
     )
     .await
 }
@@ -290,107 +372,147 @@ pub(crate) struct ObjectRead<'a> {
     pub bucket: &'a str,
     pub key: &'a str,
     pub identity: &'a SourceIdentity,
+    pub endpoint: String,
+    pub scope: String,
 }
 
 pub(crate) async fn verify_object_content(
     source: ObjectRead<'_>,
     destination: ObjectRead<'_>,
+    cancelled: &AtomicBool,
+    paused: &AtomicBool,
 ) -> Result<(), String> {
+    let identity = format!(
+        "{}:{}:{}|{}:{}:{}",
+        source.key,
+        source.identity.etag,
+        source.identity.version_id.as_deref().unwrap_or_default(),
+        destination.key,
+        destination.identity.etag,
+        destination
+            .identity
+            .version_id
+            .as_deref()
+            .unwrap_or_default()
+    );
+    let context = OperationContext::new(
+        OperationKind::Get,
+        &source.endpoint,
+        &source.scope,
+        &identity,
+        tokio::time::Instant::now()
+            + super::stream::protocol::attempt_timeout(source.identity.size),
+        cancelled,
+    )
+    .with_pause(paused)
+    .with_peer_endpoint(&destination.endpoint)
+    .with_max_attempts(3);
+    execute_operation(&context, || async {
+        verify_object_content_once(&source, &destination).await
+    })
+    .await
+    .map_err(verification_operation_error)
+}
+
+async fn verify_object_content_once(
+    source: &ObjectRead<'_>,
+    destination: &ObjectRead<'_>,
+) -> Result<(), AttemptError> {
     use tokio::io::AsyncReadExt;
-    let operation = async {
-        let source_get = source
-            .client
-            .get_object()
-            .bucket(source.bucket)
-            .key(source.key)
-            .if_match(&source.identity.etag)
-            .set_version_id(source.identity.version_id.clone())
-            .send();
-        let dest_get = destination
-            .client
-            .get_object()
-            .bucket(destination.bucket)
-            .key(destination.key)
-            .if_match(&destination.identity.etag)
-            .set_version_id(destination.identity.version_id.clone())
-            .send();
-        let (source_get, dest_get) = tokio::join!(source_get, dest_get);
-        let source_get = source_get.map_err(|e| {
-            format!(
-                "outcome_unknown: Cannot verify original content: {}",
-                crate::providers::s3_client::describe_s3_error(&e)
-            )
-        })?;
-        let dest_get = dest_get.map_err(|e| {
-            format!(
-                "outcome_unknown: Cannot verify destination content: {}",
-                crate::providers::s3_client::describe_s3_error(&e)
-            )
-        })?;
-        if source_get.e_tag() != Some(source.identity.etag.as_str())
-            || dest_get.e_tag() != Some(destination.identity.etag.as_str())
-            || source_get.content_length() != Some(source.identity.size as i64)
-            || dest_get.content_length() != Some(source.identity.size as i64)
-        {
-            return Err(
-                "conflict: Object identity changed during uncertain-copy verification".into(),
-            );
-        }
-        let mut source_body = source_get.body.into_async_read();
-        let mut dest_body = dest_get.body.into_async_read();
-        let mut left = vec![0; 1024 * 1024];
-        let mut right = vec![0; 1024 * 1024];
-        let mut remaining = source.identity.size;
-        while remaining > 0 {
-            let count = remaining.min(left.len() as u64) as usize;
-            let (a, b) = tokio::join!(
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    source_body.read_exact(&mut left[..count])
-                ),
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    dest_body.read_exact(&mut right[..count])
-                )
-            );
-            a.map_err(|_| "outcome_unknown: Source verification stalled")?
-                .map_err(|e| format!("outcome_unknown: Source verification failed: {e}"))?;
-            b.map_err(|_| "outcome_unknown: Destination verification stalled")?
-                .map_err(|e| format!("outcome_unknown: Destination verification failed: {e}"))?;
-            if left[..count] != right[..count] {
-                return Err("conflict: Destination metadata matches but its content differs; source retained".into());
-            }
-            remaining -= count as u64;
-        }
+    let source_get = source
+        .client
+        .get_object()
+        .bucket(source.bucket)
+        .key(source.key)
+        .if_match(&source.identity.etag)
+        .set_version_id(source.identity.version_id.clone())
+        .send();
+    let dest_get = destination
+        .client
+        .get_object()
+        .bucket(destination.bucket)
+        .key(destination.key)
+        .if_match(&destination.identity.etag)
+        .set_version_id(destination.identity.version_id.clone())
+        .send();
+    let (source_get, dest_get) = tokio::join!(source_get, dest_get);
+    let source_get = source_get.map_err(|error| AttemptError::from_sdk(&error))?;
+    let dest_get = dest_get.map_err(|error| AttemptError::from_sdk(&error))?;
+    if source_get.e_tag() != Some(source.identity.etag.as_str())
+        || dest_get.e_tag() != Some(destination.identity.etag.as_str())
+        || source_get.content_length() != Some(source.identity.size as i64)
+        || dest_get.content_length() != Some(source.identity.size as i64)
+    {
+        return Err(AttemptError::new(
+            StorageErrorClass::Conflict,
+            "Object identity changed during uncertain-copy verification",
+        ));
+    }
+    let mut source_body = source_get.body.into_async_read();
+    let mut dest_body = dest_get.body.into_async_read();
+    let mut left = vec![0; 1024 * 1024];
+    let mut right = vec![0; 1024 * 1024];
+    let mut remaining = source.identity.size;
+    while remaining > 0 {
+        let count = remaining.min(left.len() as u64) as usize;
         let (a, b) = tokio::join!(
             tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                source_body.read(&mut left[..1])
+                Duration::from_secs(30),
+                source_body.read_exact(&mut left[..count])
             ),
             tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                dest_body.read(&mut right[..1])
+                Duration::from_secs(30),
+                dest_body.read_exact(&mut right[..count])
             )
         );
-        if a.map_err(|_| "outcome_unknown: Source verification stalled")?
-            .map_err(|e| e.to_string())?
-            != 0
-            || b.map_err(|_| "outcome_unknown: Destination verification stalled")?
-                .map_err(|e| e.to_string())?
-                != 0
-        {
-            return Err("conflict: Verification response exceeded its object length".into());
+        a.map_err(|_| AttemptError::transient("Source verification stalled"))?
+            .map_err(|e| AttemptError::transient(format!("Source verification failed: {e}")))?;
+        b.map_err(|_| AttemptError::transient("Destination verification stalled"))?
+            .map_err(|e| {
+                AttemptError::transient(format!("Destination verification failed: {e}"))
+            })?;
+        if left[..count] != right[..count] {
+            return Err(AttemptError::new(
+                StorageErrorClass::Conflict,
+                "Destination metadata matches but its content differs; source retained",
+            ));
         }
-        Ok(())
-    };
-    tokio::time::timeout(
-        super::stream::protocol::attempt_timeout(source.identity.size),
-        operation,
-    )
-    .await
-    .map_err(|_| {
-        "outcome_unknown: Content verification exceeded its budget; source retained".to_string()
-    })?
+        remaining -= count as u64;
+    }
+    let (a, b) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(30), source_body.read(&mut left[..1])),
+        tokio::time::timeout(Duration::from_secs(30), dest_body.read(&mut right[..1]))
+    );
+    if a.map_err(|_| AttemptError::transient("Source verification stalled"))?
+        .map_err(|e| AttemptError::transient(format!("Source verification failed: {e}")))?
+        != 0
+        || b.map_err(|_| AttemptError::transient("Destination verification stalled"))?
+            .map_err(|e| AttemptError::transient(format!("Destination verification failed: {e}")))?
+            != 0
+    {
+        return Err(AttemptError::new(
+            StorageErrorClass::Conflict,
+            "Verification response exceeded its object length",
+        ));
+    }
+    Ok(())
+}
+
+fn verification_operation_error(error: OperationError) -> String {
+    match error {
+        OperationError::Cancelled | OperationError::Paused => error.to_string(),
+        OperationError::Deadline { .. } => {
+            "transient: Content verification exceeded its budget; source retained".into()
+        }
+        OperationError::Failed { error, .. } => match error.class {
+            StorageErrorClass::Conflict => format!("conflict: {}", error.message),
+            other => format!(
+                "{}: Content verification failed: {}",
+                other.label(),
+                error.message
+            ),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -454,6 +576,8 @@ mod tests {
                 "destination",
                 &source,
                 &destination,
+                &AtomicBool::new(false),
+                &AtomicBool::new(false),
             )
             .await;
             assert_eq!(result.is_err(), changed, "{result:?}");
@@ -467,6 +591,167 @@ mod tests {
                 .all(|r| r.method == "GET" && r.headers.contains_key("if-match")));
         }
     }
+
+    fn fixture_config(endpoint: &str) -> MoveConfig {
+        MoveConfig::Minio(crate::providers::minio::MinioConfig {
+            bucket: "bucket".into(),
+            access_key_id: "fixture".into(),
+            secret_access_key: "fixture-secret".into(),
+            endpoint_scheme: "http".into(),
+            endpoint_host: endpoint.strip_prefix("http://").unwrap().into(),
+            force_path_style: true,
+        })
+    }
+
+    #[tokio::test]
+    async fn paired_verification_retries_body_transport_and_rechecks_both_objects() {
+        use crate::test_s3::{serve, Response};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let broken_destination = Arc::new(AtomicUsize::new(0));
+        let fixture = serve({
+            let broken_destination = broken_destination.clone();
+            move |request| {
+                let broken_destination = broken_destination.clone();
+                async move {
+                    let source = request
+                        .path
+                        .split('?')
+                        .next()
+                        .unwrap_or_default()
+                        .ends_with("/source");
+                    if !source && broken_destination.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return Response::xml(200, "orig")
+                            .header("etag", "\"destination\"")
+                            .header("content-length", "8");
+                    }
+                    Response::xml(200, "original").header(
+                        "etag",
+                        if source {
+                            "\"source\""
+                        } else {
+                            "\"destination\""
+                        },
+                    )
+                }
+            }
+        })
+        .await;
+        let config = fixture_config(&fixture.endpoint);
+        let source = SourceIdentity {
+            size: 8,
+            etag: "\"source\"".into(),
+            version_id: None,
+        };
+        let destination = SourceIdentity {
+            size: 8,
+            etag: "\"destination\"".into(),
+            version_id: None,
+        };
+        verify_unknown_content(
+            &config,
+            &config,
+            "source",
+            "destination",
+            &source,
+            &destination,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests.iter().filter(|r| r.method == "GET").count(), 4);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r
+                    .path
+                    .split('?')
+                    .next()
+                    .unwrap_or_default()
+                    .ends_with("/source"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r
+                    .path
+                    .split('?')
+                    .next()
+                    .unwrap_or_default()
+                    .ends_with("/destination"))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn paired_verification_does_not_retry_auth_or_cancelled_work() {
+        use crate::test_s3::{serve, Response};
+
+        let fixture = serve(|request| async move {
+            let source = request
+                .path
+                .split('?')
+                .next()
+                .unwrap_or_default()
+                .ends_with("/source");
+            if source {
+                return Response::xml(403, "<Error><Code>AccessDenied</Code></Error>");
+            }
+            Response::xml(200, "original").header("etag", "\"destination\"")
+        })
+        .await;
+        let config = fixture_config(&fixture.endpoint);
+        let source = SourceIdentity {
+            size: 8,
+            etag: "\"source\"".into(),
+            version_id: None,
+        };
+        let destination = SourceIdentity {
+            size: 8,
+            etag: "\"destination\"".into(),
+            version_id: None,
+        };
+        let error = verify_unknown_content(
+            &config,
+            &config,
+            "source",
+            "destination",
+            &source,
+            &destination,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.starts_with("needs_auth:"), "{error}");
+        assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+
+        let cancelled = AtomicBool::new(true);
+        let before = fixture.requests.lock().unwrap().len();
+        let error = verify_unknown_content(
+            &config,
+            &config,
+            "source",
+            "destination",
+            &source,
+            &destination,
+            &cancelled,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.starts_with("cancelled:"), "{error}");
+        assert_eq!(fixture.requests.lock().unwrap().len(), before);
+    }
+
     fn minio(host: &str, bucket: &str, principal: &str) -> MoveConfig {
         MoveConfig::Minio(crate::providers::minio::MinioConfig {
             bucket: bucket.into(),
@@ -547,6 +832,30 @@ mod tests {
         );
     }
     #[test]
+    fn aws_special_buckets_stay_relay_only() {
+        for bucket in [
+            "arn:aws:s3:us-east-1:123456789012:accesspoint/source",
+            "data--x-s3",
+        ] {
+            assert_eq!(
+                plan_transfer(
+                    &aws("us-east-1", bucket),
+                    &aws("us-east-1", "dest"),
+                    "x",
+                    "y",
+                    SINGLE_COPY_LIMIT + 1
+                )
+                .unwrap(),
+                TransferPlan::Relay
+            );
+            assert!(!compatible_multipart_copy_candidate(
+                &aws("us-east-1", bucket),
+                &aws("us-east-1", "dest")
+            ));
+        }
+    }
+
+    #[test]
     fn large_r2_requires_conditional_relay() {
         let r2 = |bucket: &str| {
             MoveConfig::R2(crate::r2::R2Config {
@@ -560,6 +869,25 @@ mod tests {
             plan_transfer(&r2("a"), &r2("b"), "x", "x", SINGLE_COPY_LIMIT + 1).unwrap(),
             TransferPlan::Relay
         );
+        assert!(!compatible_multipart_copy_candidate(&r2("a"), &r2("b")));
+    }
+
+    #[test]
+    fn small_r2_moves_within_an_account_copy_server_side() {
+        let r2 = |bucket: &str| {
+            MoveConfig::R2(crate::r2::R2Config {
+                account_id: "actual-account".into(),
+                bucket: bucket.into(),
+                access_key_id: "key".into(),
+                secret_access_key: "secret".into(),
+            })
+        };
+        for size in [0, 1024 * 1024, SINGLE_COPY_LIMIT] {
+            assert_eq!(
+                plan_transfer(&r2("a"), &r2("b"), "x", "x", size).unwrap(),
+                TransferPlan::SingleCopy
+            );
+        }
     }
     #[test]
     fn copy_source_preserves_literal_special_characters_and_version() {
@@ -582,6 +910,8 @@ mod tests {
             source_scope: "a".into(),
             dest_scope: "b".into(),
             destination: Some(identity.clone()),
+            retry: Default::default(),
+            metrics: Default::default(),
         };
         assert!(verified_destination(&journal, &identity, None).is_err());
         assert!(verified_destination(&journal, &identity, Some("task")).is_ok());
@@ -638,6 +968,88 @@ mod tests {
         (config, task)
     }
 
+    async fn head_sequence_fixture(
+        responses: Vec<&'static str>,
+    ) -> (
+        MoveConfig,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = MoveConfig::Minio(crate::providers::minio::MinioConfig {
+            bucket: "bucket".into(),
+            access_key_id: "fixture".into(),
+            secret_access_key: "fixture".into(),
+            endpoint_scheme: "http".into(),
+            endpoint_host: address.to_string(),
+            force_path_style: true,
+        });
+        let responses = Arc::new(responses);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let task = tokio::spawn({
+            let responses = responses.clone();
+            let attempts = attempts.clone();
+            async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 2048];
+                    loop {
+                        let count = socket.read(&mut buffer).await.unwrap_or(0);
+                        if count == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buffer[..count]);
+                        if request.windows(4).any(|s| s == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    assert!(request.starts_with(b"HEAD /bucket/"));
+                    let index = attempts.fetch_add(1, Ordering::SeqCst);
+                    let response = responses
+                        .get(index)
+                        .or_else(|| responses.last())
+                        .copied()
+                        .unwrap();
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                }
+            }
+        });
+        (config, attempts, task)
+    }
+
+    #[tokio::test]
+    async fn real_sdk_head_retries_transient_once_and_does_not_retry_auth() {
+        use std::sync::atomic::Ordering;
+        let (config, attempts, task) = head_sequence_fixture(vec![
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nETag: \"source\"\r\nConnection: close\r\n\r\n",
+        ])
+        .await;
+        let (identity, _) = head_identity(&config, "x").await.unwrap().unwrap();
+        assert_eq!(identity.etag, "\"source\"");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        task.abort();
+
+        let (config, attempts, task) = head_sequence_fixture(vec![
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nETag: \"source\"\r\nConnection: close\r\n\r\n",
+        ])
+        .await;
+        assert!(head_identity(&config, "x")
+            .await
+            .unwrap_err()
+            .starts_with("needs_auth:"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+
     #[tokio::test]
     async fn real_sdk_head_preserves_identity_and_never_treats_server_errors_as_missing() {
         let (config, task) = head_fixture("HTTP/1.1 200 OK\r\nContent-Length: 7\r\nETag: \"source\"\r\nx-amz-version-id: version-1\r\nConnection: close\r\n\r\n").await;
@@ -647,11 +1059,22 @@ mod tests {
         assert_eq!(identity.version_id.as_deref(), Some("version-1"));
         task.abort();
         for (response, expected) in [
-            ("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", "transient:"),
-            ("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", "needs_auth:"),
+            (
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "transient:",
+            ),
+            (
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "needs_auth:",
+            ),
         ] {
             let (config, task) = head_fixture(response).await;
-            assert!(head_identity(&config, "x").await.unwrap_err().starts_with(expected));
+            assert!(
+                head_identity(&config, "x")
+                    .await
+                    .unwrap_err()
+                    .starts_with(expected)
+            );
             task.abort();
         }
         let (config, task) = head_fixture(

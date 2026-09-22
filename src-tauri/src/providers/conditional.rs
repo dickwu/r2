@@ -63,8 +63,15 @@ pub async fn supported(
         cache.entry(key).or_default().clone()
     };
     cell.get_or_try_init(|| async {
-        probe(client, bucket, scope, condition)
+        // A probe is a long chain of SDK calls. Running it as its own task keeps
+        // that chain off the caller's stack (rename → flush → upload), which an
+        // unoptimised build otherwise overflows. Probe keys are unique per run
+        // and cleanup is time-bounded, so a probe that outlives a cancelled
+        // caller only finishes removing its own objects.
+        let (client, bucket, scope) = (client.clone(), bucket.to_string(), scope.to_string());
+        tokio::spawn(async move { probe(&client, &bucket, &scope, condition).await })
             .await
+            .map_err(|error| format!("Capability probe stopped unexpectedly: {error}"))?
             .map(|answer| (answer, Instant::now()))
     })
     .await

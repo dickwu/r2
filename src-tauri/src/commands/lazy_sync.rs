@@ -2,12 +2,15 @@ use crate::db::cache_scope::{self, CacheConfig, CacheScope};
 use crate::db::{self, CachedFile};
 use crate::providers::aws;
 use crate::providers::minio;
-use crate::providers::s3_client::{describe_s3_error, is_transient_s3_error};
+use crate::providers::operation::{
+    self, execute as execute_operation, AttemptError, Backoff, OperationContext, OperationError,
+    OperationKind,
+};
+use crate::providers::s3_client::{describe_s3_error, StorageErrorClass};
 use crate::r2;
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
-use aws_sdk_s3::operation::list_objects_v2::builders::ListObjectsV2FluentBuilder;
-use aws_sdk_s3::operation::list_objects_v2::{ListObjectsV2Error, ListObjectsV2Output};
+use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -35,6 +38,8 @@ pub struct LazyListInput {
     pub force_refresh: Option<bool>,
     pub request_id: Option<String>,
     pub generation: Option<u64>,
+    pub cache_cursor: Option<String>,
+    pub page_index: Option<usize>,
     pub run_id: Option<String>,
 }
 
@@ -277,6 +282,66 @@ pub async fn get_prefix_cache(input: LazyListInput) -> Result<Option<LazyListRes
     read_prefix_cache(&input, ListScope::new(&input)).await
 }
 
+#[tauri::command]
+pub async fn get_prefix_cache_page(input: LazyListInput) -> Result<Option<FolderPage>, String> {
+    let started = tokio::time::Instant::now();
+    let scope = ListScope::new(&input);
+    let cache_scope = CacheScope::capture(&cache_config(&input))
+        .await
+        .map_err(|e| e.to_string())?;
+    let snapshot = cache_scope::read_prefix_page(
+        &cache_scope,
+        &input.bucket,
+        &input.prefix,
+        input.cache_cursor.as_deref(),
+        1000,
+    )
+    .await
+    .map_err(|e| format!("DB error: {e}"))?;
+    let complete_index = snapshot.full_sync
+        && snapshot
+            .skipped_prefixes
+            .as_ref()
+            .is_some_and(|skipped| !is_under_skipped_prefix(&input.prefix, skipped));
+    let cache_complete = snapshot.prefix_time.is_some() || complete_index;
+    if !cache_complete {
+        return Ok(None);
+    }
+    let freshness_time = snapshot.prefix_time.or(snapshot.full_time);
+    let fresh = freshness_time.is_some_and(|time| {
+        let age = chrono::Utc::now().timestamp() - time;
+        (0..DIRECTORY_TTL_SECS).contains(&age)
+    });
+    let next_cursor = snapshot.page.next_cursor;
+    let complete = next_cursor.is_none();
+    let cache_ms = elapsed_ms(started);
+    let timing = ListTiming {
+        cache_ms,
+        native_elapsed_ms: cache_ms,
+        emit_ms: Some(0.0),
+        ..ListTiming::default()
+    };
+    Ok(Some(FolderPage {
+        scope,
+        page: ListPage {
+            timing,
+            files: snapshot.page.files.iter().map(LazyFileItem::from).collect(),
+            folders: snapshot.page.folders,
+            page_index: input.page_index.unwrap_or(0),
+            next_cursor,
+            complete,
+            from_cache: true,
+            freshness: if !complete {
+                "partial"
+            } else if fresh {
+                "fresh"
+            } else {
+                "stale"
+            },
+        },
+    }))
+}
+
 async fn read_prefix_cache(
     input: &LazyListInput,
     scope: ListScope,
@@ -299,34 +364,39 @@ async fn read_prefix_cache_scoped(
     cache_scope: &CacheScope,
 ) -> Result<Option<LazyListResult>, String> {
     let started = tokio::time::Instant::now();
-    let snapshot = cache_scope::read_prefix_snapshot(cache_scope, &input.bucket, &input.prefix)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
+    let snapshot =
+        cache_scope::read_prefix_page(cache_scope, &input.bucket, &input.prefix, None, 1000)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
     let prefix_time = snapshot.prefix_time;
     let complete_index = snapshot.full_sync
         && snapshot
             .skipped_prefixes
             .as_ref()
             .is_some_and(|skipped| !is_under_skipped_prefix(&input.prefix, skipped));
-    let contents = snapshot.contents;
-    let complete = prefix_time.is_some() || complete_index;
-    if !complete && contents.files.is_empty() && contents.folders.is_empty() {
+    let cache_complete = prefix_time.is_some() || complete_index;
+    let page = snapshot.page;
+    if !cache_complete {
         return Ok(None);
     }
-    let fresh = prefix_time.is_some_and(|time| {
+    let complete = page.next_cursor.is_none();
+    let freshness_time = prefix_time.or(snapshot.full_time);
+    let fresh = freshness_time.is_some_and(|time| {
         let age = chrono::Utc::now().timestamp() - time;
         (0..DIRECTORY_TTL_SECS).contains(&age)
     });
     let mut result = LazyListResult {
         timing: ListTiming::default(),
         scope,
-        files: contents.files.iter().map(LazyFileItem::from).collect(),
-        folders: contents.folders,
+        files: page.files.iter().map(LazyFileItem::from).collect(),
+        folders: page.folders,
         complete,
         from_cache: true,
-        freshness: if fresh {
+        freshness: if !complete {
+            "partial"
+        } else if fresh {
             "fresh"
-        } else if complete {
+        } else if cache_complete {
             "stale"
         } else {
             "partial"
@@ -336,6 +406,103 @@ async fn read_prefix_cache_scoped(
     result.timing.native_elapsed_ms = result.timing.cache_ms;
     result.timing.emit_ms = Some(0.0);
     Ok(Some(result))
+}
+
+async fn emit_fresh_cached_prefix_stream(
+    app: &tauri::AppHandle,
+    input: &LazyListInput,
+    scope: &ListScope,
+    cache_scope: &CacheScope,
+    consumer_started: tokio::time::Instant,
+    cache_ms: f64,
+    cancellation: &RequestCancellation,
+) -> Result<Option<Arc<LazyListResult>>, String> {
+    let mut cursor: Option<String> = None;
+    let mut page_index = 0;
+    let mut files = Vec::new();
+    let mut folders = Vec::new();
+    let mut emit_ms = 0.0;
+    let mut total_cache_ms = cache_ms;
+    loop {
+        if !cancellation.active() {
+            return Err("S3 list cancelled".into());
+        }
+        let page_started = tokio::time::Instant::now();
+        let snapshot = cache_scope::read_prefix_page(
+            cache_scope,
+            &input.bucket,
+            &input.prefix,
+            cursor.as_deref(),
+            1000,
+        )
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+        total_cache_ms += elapsed_ms(page_started);
+        let complete_index = snapshot.full_sync
+            && snapshot
+                .skipped_prefixes
+                .as_ref()
+                .is_some_and(|skipped| !is_under_skipped_prefix(&input.prefix, skipped));
+        let cache_complete = snapshot.prefix_time.is_some() || complete_index;
+        let freshness_time = snapshot.prefix_time.or(snapshot.full_time);
+        let fresh = freshness_time.is_some_and(|time| {
+            let age = chrono::Utc::now().timestamp() - time;
+            (0..DIRECTORY_TTL_SECS).contains(&age)
+        });
+        if !cache_complete || !fresh {
+            return Ok(None);
+        }
+        let next_cursor = snapshot.page.next_cursor.clone();
+        let complete = next_cursor.is_none();
+        let page_files: Vec<LazyFileItem> =
+            snapshot.page.files.iter().map(LazyFileItem::from).collect();
+        let page_folders = snapshot.page.folders;
+        files.extend(page_files.iter().cloned());
+        folders.extend(page_folders.iter().cloned());
+        let timing = ListTiming {
+            cache_ms: total_cache_ms,
+            native_elapsed_ms: elapsed_ms(consumer_started),
+            ..ListTiming::default()
+        };
+        emit_ms += emit_folder_page(
+            app,
+            FolderPage {
+                scope: scope.clone(),
+                page: ListPage {
+                    timing,
+                    files: page_files,
+                    folders: page_folders,
+                    page_index,
+                    next_cursor: next_cursor
+                        .as_ref()
+                        .map(|_| format!("cache:{}", page_index + 1)),
+                    complete,
+                    from_cache: true,
+                    freshness: "fresh",
+                },
+            },
+            consumer_started,
+        )?;
+        if complete {
+            let timing = ListTiming {
+                cache_ms: total_cache_ms,
+                native_elapsed_ms: elapsed_ms(consumer_started),
+                emit_ms: Some(emit_ms),
+                ..ListTiming::default()
+            };
+            return Ok(Some(Arc::new(LazyListResult {
+                timing,
+                scope: scope.clone(),
+                files,
+                folders,
+                complete: true,
+                from_cache: true,
+                freshness: "fresh",
+            })));
+        }
+        cursor = next_cursor;
+        page_index += 1;
+    }
 }
 
 struct RequestCancellation {
@@ -420,30 +587,36 @@ static PREFIX_FLIGHTS: LazyLock<Mutex<HashMap<String, Weak<PrefixFlight>>>> =
 
 fn endpoint_scope(input: &LazyListInput) -> String {
     let provider = input.provider.as_deref().unwrap_or("r2");
-    let host = match provider {
-        "minio" | "rustfs" => input.endpoint_host.clone().unwrap_or_default(),
-        "aws" => input.endpoint_host.clone().unwrap_or_else(|| {
+    match provider {
+        "r2" => format!("r2:{}", input.account_id.trim().to_ascii_lowercase()),
+        "aws"
+            if input
+                .endpoint_host
+                .as_deref()
+                .is_none_or(|host| host.trim().is_empty()) =>
+        {
             format!(
-                "s3.{}.amazonaws.com",
-                input.region.as_deref().unwrap_or("us-east-1")
+                "aws:{}",
+                input
+                    .region
+                    .as_deref()
+                    .unwrap_or("us-east-1")
+                    .trim()
+                    .to_ascii_lowercase()
             )
-        }),
-        _ => format!("{}.r2.cloudflarestorage.com", input.account_id),
-    };
-    let scheme =
-        input
-            .endpoint_scheme
-            .as_deref()
-            .unwrap_or(if matches!(provider, "minio" | "rustfs") {
-                "http"
-            } else {
-                "https"
-            });
-    format!(
-        "{}://{}",
-        scheme.to_ascii_lowercase(),
-        host.trim_end_matches('/').to_ascii_lowercase()
-    )
+        }
+        "aws" => crate::move_transfer::config::physical_operation_endpoint(
+            input.endpoint_scheme.as_deref().unwrap_or("https"),
+            input.endpoint_host.as_deref().unwrap_or_default(),
+            &input.bucket,
+        ),
+        "minio" | "rustfs" => crate::move_transfer::config::physical_operation_endpoint(
+            input.endpoint_scheme.as_deref().unwrap_or("http"),
+            input.endpoint_host.as_deref().unwrap_or_default(),
+            &input.bucket,
+        ),
+        _ => format!("r2:{}", input.account_id.trim().to_ascii_lowercase()),
+    }
 }
 
 fn prefix_flight_key(input: &LazyListInput) -> String {
@@ -528,20 +701,32 @@ async fn list_prefix_internal(
         .map_err(|e| e.to_string())?;
     let mut cache_ms = elapsed_ms(cache_started);
     if !input.force_refresh.unwrap_or(false) {
-        let cache = read_prefix_cache_scoped(&input, scope.clone(), &cache_scope).await?;
         cache_ms = elapsed_ms(cache_started);
-        if let Some(mut cache) = cache.filter(|cache| cache.freshness == "fresh") {
-            if !cancellation.active() {
-                return Err("S3 list cancelled".into());
+        if emit_pages {
+            if let Some(result) = emit_fresh_cached_prefix_stream(
+                &app,
+                &input,
+                &scope,
+                &cache_scope,
+                started,
+                cache_ms,
+                &cancellation,
+            )
+            .await?
+            {
+                return Ok(result);
             }
-            cache.timing.cache_ms = cache_ms;
-            cache.timing.emit_ms = Some(if emit_pages {
-                emit_cached_pages(&app, &cache, started)?
-            } else {
-                0.0
-            });
-            cache.timing.native_elapsed_ms = elapsed_ms(started);
-            return Ok(Arc::new(cache));
+        } else {
+            let cache = read_prefix_cache_scoped(&input, scope.clone(), &cache_scope).await?;
+            if let Some(mut cache) = cache.filter(|cache| cache.freshness == "fresh") {
+                if !cancellation.active() {
+                    return Err("S3 list cancelled".into());
+                }
+                cache.timing.cache_ms = cache_ms;
+                cache.timing.emit_ms = Some(0.0);
+                cache.timing.native_elapsed_ms = elapsed_ms(started);
+                return Ok(Arc::new(cache));
+            }
         }
     }
     if !cancellation.active() {
@@ -614,6 +799,7 @@ fn emit_folder_page(
     Ok(elapsed_ms(started))
 }
 
+#[allow(dead_code)]
 fn emit_cached_pages(
     app: &tauri::AppHandle,
     cache: &LazyListResult,
@@ -705,7 +891,8 @@ async fn fetch_prefix(
     flight: &PrefixFlight,
 ) -> Result<LazyListResult, String> {
     let client = create_client_for_input(&input).await?;
-    let scheduler = endpoint_scheduler(&endpoint_scope(&input));
+    let endpoint = endpoint_scope(&input);
+    let scheduler = endpoint_scheduler(&endpoint);
     let now = chrono::Utc::now().timestamp();
     let mut files = Vec::new();
     let mut folders = Vec::new();
@@ -715,8 +902,14 @@ async fn fetch_prefix(
     let mut seen_folders = HashSet::new();
     let mut page_index = 0;
     loop {
-        let response = list_with_retry_measured(
+        let operation_scope = format!("{}:{}", input.bucket, input.prefix);
+        let response = list_with_shared_executor(
             FOREGROUND_LIST_RETRY,
+            &endpoint,
+            &operation_scope,
+            "",
+            &scheduler,
+            false,
             Some(&flight.measurements),
             || flight.active(),
             || {
@@ -727,7 +920,7 @@ async fn fetch_prefix(
                     .max_keys(1000)
                     .set_prefix((!input.prefix.is_empty()).then(|| input.prefix.clone()))
                     .set_continuation_token(continuation_token.clone());
-                send_scheduled_measured(request, &scheduler, false, Some(&flight.measurements))
+                async move { request.send().await }
             },
         )
         .await
@@ -835,12 +1028,14 @@ fn is_background_run_active(run_id: u64) -> bool {
 // ============ Unlistable Prefixes ============
 
 /// Where a completed sync records the prefixes it could not read.
+#[allow(dead_code)]
 fn skipped_prefixes_key(bucket: &str, account_id: &str) -> String {
     format!("skipped_prefixes:{account_id}:{bucket}")
 }
 
 /// Records what a completed sync skipped, clearing the note when it skipped
 /// nothing — so a bucket heals itself once the provider is fixed.
+#[allow(dead_code)]
 async fn store_skipped_prefixes(bucket: &str, account_id: &str, skipped: &[String]) {
     let key = skipped_prefixes_key(bucket, account_id);
     if skipped.is_empty() {
@@ -902,20 +1097,14 @@ struct ListRetryPolicy {
 }
 
 impl ListRetryPolicy {
-    /// The wait after `failed_attempts` failures in a row: 1×, 2×, 4×… the
-    /// initial backoff, capped.
-    fn backoff(&self, failed_attempts: u32) -> Duration {
-        let doublings = failed_attempts.saturating_sub(1).min(MAX_BACKOFF_DOUBLINGS);
-        self.initial_backoff
-            .saturating_mul(1 << doublings)
-            .min(self.max_backoff)
+    /// The executor's jitter caps: 1×, 2×, 4×… the initial backoff, capped.
+    fn backoff(&self) -> Backoff {
+        Backoff {
+            initial: self.initial_backoff,
+            max: self.max_backoff,
+        }
     }
 }
-
-/// Ceiling on the left shift in `backoff`, so a policy with a large
-/// `max_attempts` cannot overflow it. Neither policy here comes close — six
-/// attempts reach four doublings — so this guards future ones, not these.
-const MAX_BACKOFF_DOUBLINGS: u32 = 16;
 
 /// Foreground requests use at most three attempts with 0.5s and 1s jitter caps.
 const FOREGROUND_LIST_RETRY: ListRetryPolicy = ListRetryPolicy {
@@ -949,8 +1138,138 @@ impl std::fmt::Display for ListFailure {
     }
 }
 
-/// LIST is read-only: dropping an in-flight attempt cannot commit a mutation.
-/// The deadline covers the queue and the SDK request, including SDK retries.
+fn record_operation_delta(
+    before: operation::OperationMetrics,
+    measurements: Option<&ListMeasurements>,
+) {
+    let Some(measurements) = measurements else {
+        return;
+    };
+    let after = operation::metrics();
+    measurements.queue_ns.fetch_add(
+        after
+            .queue_us
+            .saturating_sub(before.queue_us)
+            .saturating_mul(1000),
+        Ordering::Relaxed,
+    );
+    measurements.network_ns.fetch_add(
+        after
+            .network_us
+            .saturating_sub(before.network_us)
+            .saturating_mul(1000),
+        Ordering::Relaxed,
+    );
+    measurements.backoff_ns.fetch_add(
+        after
+            .backoff_us
+            .saturating_sub(before.backoff_us)
+            .saturating_mul(1000),
+        Ordering::Relaxed,
+    );
+}
+
+fn list_failure_from_operation(error: OperationError) -> ListFailure {
+    match error {
+        OperationError::Cancelled | OperationError::Paused => ListFailure::Cancelled,
+        OperationError::Deadline { last } => {
+            let mut message = "S3 list exceeded its 30 second request budget".to_string();
+            if let Some(last) = last {
+                message.push_str("; last attempt: ");
+                message.push_str(&last.message);
+            }
+            ListFailure::Failed(message)
+        }
+        OperationError::Failed { error, attempts } => {
+            let prefix = if error.class == StorageErrorClass::Transient && attempts > 1 {
+                format!("S3 list failed after {attempts} attempts: ")
+            } else {
+                "S3 list failed: ".to_string()
+            };
+            ListFailure::Failed(format!("{prefix}{}", error.message))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn list_with_shared_executor<T, E, Fut>(
+    policy: ListRetryPolicy,
+    endpoint: &str,
+    scope: &str,
+    identity: &str,
+    scheduler: &EndpointScheduler,
+    background: bool,
+    measurements: Option<&ListMeasurements>,
+    is_active: impl Fn() -> bool,
+    send_page: impl Fn() -> Fut,
+) -> Result<T, ListFailure>
+where
+    E: std::error::Error + ProvideErrorMetadata + 'static,
+    Fut: Future<Output = Result<T, SdkError<E, HttpResponse>>>,
+{
+    let cancelled = AtomicBool::new(false);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let before = operation::metrics();
+    let operation = async {
+        let _background = if background {
+            let queue_measure = measurements.map(|m| MeasureInterval::new(&m.queue_ns));
+            let permit = scheduler
+                .background
+                .acquire()
+                .await
+                .expect("private semaphore is never closed");
+            drop(queue_measure);
+            Some(permit)
+        } else {
+            None
+        };
+        let context = OperationContext::new(
+            OperationKind::List,
+            endpoint,
+            scope,
+            identity,
+            deadline,
+            &cancelled,
+        )
+        .with_max_attempts(policy.max_attempts)
+        .with_backoff(policy.backoff());
+        execute_operation(&context, || {
+            let page = send_page();
+            async move {
+                page.await.map_err(|error| {
+                    let class = crate::providers::s3_client::s3_error_class(&error, false);
+                    let message = describe_s3_error(&error);
+                    let retry_after = error
+                        .raw_response()
+                        .and_then(|response| response.headers().get("retry-after"))
+                        .and_then(parse_retry_after_header)
+                        .unwrap_or_default();
+                    AttemptError::new(class, message).with_retry_after(retry_after)
+                })
+            }
+        })
+        .await
+    };
+    tokio::pin!(operation);
+    let cancel_probe = async {
+        loop {
+            if !is_active() {
+                cancelled.store(true, Ordering::SeqCst);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::pin!(cancel_probe);
+    let result = tokio::select! {
+        biased;
+        _ = &mut cancel_probe => Err(OperationError::Cancelled),
+        result = &mut operation => result,
+    };
+    record_operation_delta(before, measurements);
+    result.map_err(list_failure_from_operation)
+}
+
 async fn while_active<T>(
     future: impl Future<Output = T>,
     is_active: &impl Fn() -> bool,
@@ -961,126 +1280,28 @@ async fn while_active<T>(
         if !is_active() {
             return Err(ListFailure::Cancelled);
         }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(ListFailure::Failed(
-                "S3 list exceeded its 30 second request budget".into(),
-            ));
-        }
         tokio::select! {
             biased;
+            _ = tokio::time::sleep_until(deadline) => return Err(ListFailure::Failed("S3 list exceeded its 30 second request budget".into())),
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {},
             result = &mut future => return Ok(result),
-            _ = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + Duration::from_millis(50))) => {},
         }
     }
 }
 
-fn jittered_backoff(cap: Duration) -> Duration {
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0x9e3779b97f4a7c15);
-    let clock = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as u64;
-    let mut sample = SEQUENCE.fetch_add(0x9e3779b97f4a7c15, Ordering::Relaxed) ^ clock;
-    sample ^= sample >> 12;
-    sample ^= sample << 25;
-    sample ^= sample >> 27;
-    Duration::from_nanos(
-        sample.wrapping_mul(0x2545f4914f6cdd1d)
-            % (cap.as_nanos().min(u64::MAX as u128 - 1) as u64 + 1),
-    )
-}
-
-fn retry_after<E>(error: &SdkError<E, HttpResponse>) -> Option<Duration> {
-    let header = error.raw_response()?.headers().get("retry-after")?;
-    if let Ok(seconds) = header.parse::<u64>() {
+fn parse_retry_after_header(value: &str) -> Option<Duration> {
+    if let Ok(seconds) = value.parse::<u64>() {
         return Some(Duration::from_secs(seconds));
     }
-    let date = chrono::DateTime::parse_from_rfc2822(header).ok()?;
+    let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
     (date.with_timezone(&chrono::Utc) - chrono::Utc::now())
         .to_std()
         .ok()
 }
 
-/// Sends the page request until it succeeds, the error is one that will not
-/// go away, the policy is used up, or `is_active` turns false during a wait.
-async fn list_with_retry<T, E, Fut>(
-    policy: ListRetryPolicy,
-    is_active: impl Fn() -> bool,
-    send_page: impl FnMut() -> Fut,
-) -> Result<T, ListFailure>
-where
-    E: std::error::Error + ProvideErrorMetadata + 'static,
-    Fut: Future<Output = Result<T, SdkError<E, HttpResponse>>>,
-{
-    list_with_retry_measured(policy, None, is_active, send_page).await
-}
-
-async fn list_with_retry_measured<T, E, Fut>(
-    policy: ListRetryPolicy,
-    measurements: Option<&ListMeasurements>,
-    is_active: impl Fn() -> bool,
-    mut send_page: impl FnMut() -> Fut,
-) -> Result<T, ListFailure>
-where
-    E: std::error::Error + ProvideErrorMetadata + 'static,
-    Fut: Future<Output = Result<T, SdkError<E, HttpResponse>>>,
-{
-    let max_attempts = policy.max_attempts.max(1);
-    let mut first_failure: Option<String> = None;
-    let mut attempt = 0;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-
-    loop {
-        if !is_active() {
-            return Err(ListFailure::Cancelled);
-        }
-        attempt += 1;
-        let error = match while_active(send_page(), &is_active, deadline).await? {
-            Ok(page) => return Ok(page),
-            Err(error) => error,
-        };
-        let description = describe_s3_error(&error);
-
-        if !is_transient_s3_error(&error) {
-            // A permanent error can arrive after transient ones. Naming only the
-            // last would hide that the provider was already failing, which is
-            // the difference between "bad credentials" and "a bad patch".
-            let mut message = format!("S3 list failed: {description}");
-            if let Some(first) = first_failure.filter(|first| *first != description) {
-                message.push_str("; first attempt: ");
-                message.push_str(&first);
-            }
-            return Err(ListFailure::Failed(message));
-        }
-
-        if attempt >= max_attempts {
-            let mut message = format!("S3 list failed after {attempt} attempts: {description}");
-            if let Some(first) = first_failure.filter(|first| *first != description) {
-                message.push_str("; first attempt: ");
-                message.push_str(&first);
-            }
-            return Err(ListFailure::Failed(message));
-        }
-
-        let backoff =
-            jittered_backoff(policy.backoff(attempt)).max(retry_after(&error).unwrap_or_default());
-        // eprintln, not log::warn — the app registers no `log` backend, so the
-        // macro would discard the one line that explains a slow or failed sync.
-        eprintln!(
-            "S3 list attempt {attempt} of {max_attempts} failed, retrying in {backoff:?}: {description}"
-        );
-        first_failure.get_or_insert(description);
-
-        let _measure =
-            measurements.map(|measurements| MeasureInterval::new(&measurements.backoff_ns));
-        while_active(tokio::time::sleep(backoff), &is_active, deadline).await?;
-    }
-}
-
 const ENDPOINT_LIST_CAPACITY: usize = 4;
 const BACKGROUND_LIST_CAPACITY: usize = ENDPOINT_LIST_CAPACITY - 1;
 struct EndpointScheduler {
-    total: tokio::sync::Semaphore,
     background: tokio::sync::Semaphore,
 }
 static ENDPOINT_SCHEDULERS: LazyLock<Mutex<HashMap<String, Weak<EndpointScheduler>>>> =
@@ -1095,55 +1316,17 @@ fn endpoint_scheduler(scope: &str) -> Arc<EndpointScheduler> {
         return scheduler;
     }
     let scheduler = Arc::new(EndpointScheduler {
-        total: tokio::sync::Semaphore::new(ENDPOINT_LIST_CAPACITY),
         background: tokio::sync::Semaphore::new(BACKGROUND_LIST_CAPACITY),
     });
     schedulers.insert(scope.into(), Arc::downgrade(&scheduler));
     scheduler
 }
 
-/// Background work first takes its own quota, leaving one total permit for
-/// foreground consumers. The enclosing retry future cancels both permit waits
-/// and the network request; permits are always released before retry backoff.
-#[allow(clippy::result_large_err)]
-async fn send_scheduled(
-    request: ListObjectsV2FluentBuilder,
-    scheduler: &EndpointScheduler,
-    background: bool,
-) -> Result<ListObjectsV2Output, SdkError<ListObjectsV2Error, HttpResponse>> {
-    send_scheduled_measured(request, scheduler, background, None).await
-}
-
-#[allow(clippy::result_large_err)]
-async fn send_scheduled_measured(
-    request: ListObjectsV2FluentBuilder,
-    scheduler: &EndpointScheduler,
-    background: bool,
-    measurements: Option<&ListMeasurements>,
-) -> Result<ListObjectsV2Output, SdkError<ListObjectsV2Error, HttpResponse>> {
-    let queue_measure =
-        measurements.map(|measurements| MeasureInterval::new(&measurements.queue_ns));
-    let _background = if background {
-        Some(
-            scheduler
-                .background
-                .acquire()
-                .await
-                .expect("private semaphore is never closed"),
-        )
-    } else {
-        None
-    };
-    let _total = scheduler
-        .total
-        .acquire()
-        .await
-        .expect("private semaphore is never closed");
-    drop(queue_measure);
-    let _network_measure =
-        measurements.map(|measurements| MeasureInterval::new(&measurements.network_ns));
-    request.send().await
-}
+/// Background LIST work first takes a UI-only quota, leaving one shared
+/// operation-executor control permit for foreground LIST/HEAD callers on the
+/// same physical endpoint. The operation executor owns retries, retry-after,
+/// total deadline, endpoint admission and cancellation during queued/network
+/// phases.
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BackgroundScope {
@@ -1266,7 +1449,7 @@ async fn run_background_sync(
     }
 
     // Begin sync (staging table)
-    db::begin_sync(&bucket, &account_id)
+    let sync_run = db::begin_sync(&bucket, &account_id)
         .await
         .map_err(|e| format!("Failed to begin sync: {}", e))?;
 
@@ -1282,7 +1465,8 @@ async fn run_background_sync(
 
     // Create S3 client (provider-aware)
     let client = create_client_for_input(&input).await?;
-    let scheduler = endpoint_scheduler(&endpoint_scope(&input));
+    let endpoint = endpoint_scope(&input);
+    let scheduler = endpoint_scheduler(&endpoint);
 
     // Fetch loop with progress emission
     let mut fetched_count: usize = 0;
@@ -1333,10 +1517,20 @@ async fn run_background_sync(
                 request
             };
 
-            let response = match list_with_retry(
+            let operation_scope = format!("{}:{}", bucket, current_prefix);
+            let response = match list_with_shared_executor(
                 BACKGROUND_LIST_RETRY,
+                &endpoint,
+                &operation_scope,
+                "",
+                &scheduler,
+                true,
+                None,
                 || is_background_run_active(run_id),
-                || send_scheduled(create_request(), &scheduler, true),
+                || {
+                    let request = create_request();
+                    async move { request.send().await }
+                },
             )
             .await
             {
@@ -1453,7 +1647,7 @@ async fn run_background_sync(
             }
 
             if !batch.is_empty() {
-                db::store_file_batch(&bucket, &account_id, &batch)
+                db::store_file_batch(&bucket, &account_id, &sync_run, &batch)
                     .await
                     .map_err(|e| format!("Failed to store files: {e}"))?;
             }
@@ -1479,19 +1673,18 @@ async fn run_background_sync(
         });
     }
 
-    // Finish sync (swap staging -> live)
-    db::finish_sync(&bucket, &account_id, fetched_count)
-        .await
-        .map_err(|e| format!("Failed to finish sync: {}", e))?;
-
-    // Written with the swap, not after it: `finish_sync` is what makes the
-    // cache authoritative, and any folder missing from it must be known before
-    // browsing can trust it.
-    // The swapped index must not inherit freshness from an older delimiter listing.
-    db::prefix_sync::clear_prefix_sync_times(&bucket, &account_id)
-        .await
-        .map_err(|e| format!("Failed to invalidate directory freshness: {e}"))?;
-    store_skipped_prefixes(&bucket, &account_id, &skipped_prefixes).await;
+    // Finish sync atomically: swap files, rebuild tree, publish skipped-prefix
+    // metadata, clear old prefix freshness, and advance the full-sync generation.
+    db::finish_sync_with_metadata(
+        &bucket,
+        &account_id,
+        &sync_run,
+        fetched_count,
+        &folder_keys,
+        &skipped_prefixes,
+    )
+    .await
+    .map_err(|e| format!("Failed to finish sync: {}", e))?;
 
     if !is_background_run_active(run_id) {
         return Ok(BackgroundSyncResult {
@@ -1502,11 +1695,6 @@ async fn run_background_sync(
             skipped_prefixes,
         });
     }
-
-    // Build directory tree
-    db::build_directory_tree_from_db(&bucket, &account_id, &folder_keys, None::<fn(usize, usize)>)
-        .await
-        .map_err(|e| format!("Failed to build tree: {}", e))?;
 
     if !skipped_prefixes.is_empty() {
         eprintln!(
@@ -1542,305 +1730,24 @@ pub async fn cancel_background_sync(run_id: Option<String>) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aws_sdk_s3::error::ErrorMetadata;
     use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error;
-    use aws_sdk_s3::primitives::SdkBody;
-    use std::cell::Cell;
     use tokio::time::Instant;
-
-    type ListError = SdkError<ListObjectsV2Error, HttpResponse>;
-
-    fn service_error(status: u16, code: &str, message: &str) -> ListError {
-        let inner = ListObjectsV2Error::generic(
-            ErrorMetadata::builder().code(code).message(message).build(),
-        );
-        let raw = HttpResponse::new(status.try_into().unwrap(), SdkBody::empty());
-        SdkError::service_error(inner, raw)
-    }
-
-    fn unavailable() -> ListError {
-        service_error(
-            503,
-            "ServiceUnavailable",
-            "The service is unavailable. Please retry.",
-        )
-    }
 
     #[test]
     fn backoff_doubles_up_to_the_cap() {
-        let waits: Vec<Duration> = (1..=6)
-            .map(|failed_attempts| BACKGROUND_LIST_RETRY.backoff(failed_attempts))
+        let waits: Vec<Duration> = (0..6)
+            .map(|failed_attempt| BACKGROUND_LIST_RETRY.backoff().cap(failed_attempt))
             .collect();
 
         assert_eq!(waits, [1, 2, 4, 8, 16, 16].map(Duration::from_secs));
-    }
-
-    // The tests below run on a paused clock: every sleep completes at once, and
-    // `Instant::now()` still reports how long the real thing would have waited.
-
-    #[tokio::test(start_paused = true)]
-    async fn a_provider_that_recovers_is_waited_out() {
-        let calls = Cell::new(0);
-        let started = Instant::now();
-
-        let result = list_with_retry(
-            BACKGROUND_LIST_RETRY,
-            || true,
-            || {
-                calls.set(calls.get() + 1);
-                let outcome = if calls.get() < 3 {
-                    Err(unavailable())
-                } else {
-                    Ok("page")
-                };
-                async move { outcome }
-            },
-        )
-        .await;
-
-        assert_eq!(result, Ok("page"));
-        assert_eq!(calls.get(), 3);
-        assert!(started.elapsed() <= Duration::from_secs(1 + 2));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_mistake_in_the_request_is_not_retried() {
-        let calls = Cell::new(0);
-        let started = Instant::now();
-
-        let result: Result<(), _> = list_with_retry(
-            BACKGROUND_LIST_RETRY,
-            || true,
-            || {
-                calls.set(calls.get() + 1);
-                async { Err(service_error(403, "AccessDenied", "Access Denied")) }
-            },
-        )
-        .await;
-
         assert_eq!(
-            result,
-            Err(ListFailure::Failed(
-                "S3 list failed: AccessDenied: Access Denied".into()
-            ))
+            FOREGROUND_LIST_RETRY.backoff().cap(0),
+            Duration::from_millis(500)
         );
-        assert_eq!(calls.get(), 1);
-        assert_eq!(started.elapsed(), Duration::ZERO);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_outage_that_outlasts_the_policy_is_reported_with_the_attempt_count() {
-        let calls = Cell::new(0);
-        let started = Instant::now();
-
-        let result: Result<(), _> = list_with_retry(
-            BACKGROUND_LIST_RETRY,
-            || true,
-            || {
-                calls.set(calls.get() + 1);
-                async { Err(unavailable()) }
-            },
-        )
-        .await;
-
         assert_eq!(
-            result,
-            Err(ListFailure::Failed(
-                "S3 list failed after 6 attempts: ServiceUnavailable: The service is unavailable. Please retry."
-                    .into()
-            ))
+            FOREGROUND_LIST_RETRY.backoff().cap(1),
+            Duration::from_secs(1)
         );
-        assert_eq!(calls.get(), 6);
-        assert!(started.elapsed() <= Duration::from_secs(30));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_folder_listing_caps_its_jittered_backoff_at_a_second_and_a_half() {
-        let calls = Cell::new(0);
-        let started = Instant::now();
-
-        let result: Result<(), _> = list_with_retry(
-            FOREGROUND_LIST_RETRY,
-            || true,
-            || {
-                calls.set(calls.get() + 1);
-                let error = if calls.get() == 1 {
-                    SdkError::timeout_error("connect took too long")
-                } else {
-                    unavailable()
-                };
-                async move { Err(error) }
-            },
-        )
-        .await;
-
-        assert_eq!(
-            result,
-            Err(ListFailure::Failed(
-                "S3 list failed after 3 attempts: ServiceUnavailable: The service is unavailable. Please retry.; first attempt: request has timed out: connect took too long"
-                    .into()
-            ))
-        );
-        assert_eq!(calls.get(), 3);
-        assert!(started.elapsed() <= Duration::from_millis(500 + 1000));
-    }
-
-    #[test]
-    fn a_skipped_folder_and_everything_under_it_bypasses_the_cache() {
-        let skipped = vec!["insurance-check/status/".to_string()];
-
-        assert!(is_under_skipped_prefix("insurance-check/status/", &skipped));
-        assert!(is_under_skipped_prefix(
-            "insurance-check/status/2026/",
-            &skipped
-        ));
-        // The parent listed fine and legitimately knows about the folder.
-        assert!(!is_under_skipped_prefix("insurance-check/", &skipped));
-        // A sibling sharing the name stem must not be diverted. This holds only
-        // because a recorded prefix keeps the trailing slash that
-        // `common_prefixes()` returns — do not normalise it away.
-        assert!(!is_under_skipped_prefix(
-            "insurance-check/status-archive/",
-            &skipped
-        ));
-        assert!(!is_under_skipped_prefix("", &skipped));
-        assert!(!is_under_skipped_prefix("documents/", &skipped));
-        // A sync that skipped nothing never diverts anything.
-        assert!(!is_under_skipped_prefix("insurance-check/status/", &[]));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_permanent_error_after_transient_ones_keeps_both() {
-        let calls = Cell::new(0);
-
-        let result: Result<(), _> = list_with_retry(
-            BACKGROUND_LIST_RETRY,
-            || true,
-            || {
-                calls.set(calls.get() + 1);
-                let error = if calls.get() < 3 {
-                    unavailable()
-                } else {
-                    service_error(403, "AccessDenied", "Access Denied")
-                };
-                async move { Err(error) }
-            },
-        )
-        .await;
-
-        assert_eq!(
-            result,
-            Err(ListFailure::Failed(
-                "S3 list failed: AccessDenied: Access Denied; first attempt: ServiceUnavailable: The service is unavailable. Please retry."
-                    .into()
-            ))
-        );
-        assert_eq!(calls.get(), 3);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_policy_promising_no_attempts_still_makes_one() {
-        const NONE: ListRetryPolicy = ListRetryPolicy {
-            max_attempts: 0,
-            initial_backoff: Duration::from_secs(1),
-            max_backoff: Duration::from_secs(1),
-        };
-        let calls = Cell::new(0);
-
-        let result: Result<(), _> = list_with_retry(
-            NONE,
-            || true,
-            || {
-                calls.set(calls.get() + 1);
-                async { Err(unavailable()) }
-            },
-        )
-        .await;
-
-        assert_eq!(calls.get(), 1);
-        assert!(matches!(result, Err(ListFailure::Failed(_))));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_cancelled_run_stops_partway_through_a_backoff() {
-        let calls = Cell::new(0);
-        let active = Arc::new(AtomicBool::new(true));
-        let cancel = active.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            cancel.store(false, Ordering::SeqCst);
-        });
-        let started = Instant::now();
-        let result: Result<(), _> = list_with_retry(
-            BACKGROUND_LIST_RETRY,
-            || active.load(Ordering::SeqCst),
-            || {
-                calls.set(calls.get() + 1);
-                let inner =
-                    ListObjectsV2Error::generic(ErrorMetadata::builder().code("SlowDown").build());
-                let mut raw = HttpResponse::new(503.try_into().unwrap(), SdkBody::empty());
-                raw.headers_mut().insert("retry-after", "10");
-                async move { Err(SdkError::service_error(inner, raw)) }
-            },
-        )
-        .await;
-        assert_eq!(result, Err(ListFailure::Cancelled));
-        assert_eq!(calls.get(), 1);
-        assert!(started.elapsed() <= Duration::from_millis(150));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn cancellation_drops_a_pending_network_future() {
-        let active = Arc::new(AtomicBool::new(true));
-        let cancel = active.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            cancel.store(false, Ordering::SeqCst);
-        });
-        let started = Instant::now();
-        let result = list_with_retry(
-            FOREGROUND_LIST_RETRY,
-            || active.load(Ordering::SeqCst),
-            std::future::pending::<Result<(), ListError>>,
-        )
-        .await;
-        assert_eq!(result, Err(ListFailure::Cancelled));
-        assert!(started.elapsed() <= Duration::from_millis(150));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn queue_and_network_share_the_total_budget() {
-        let started = Instant::now();
-        let result = list_with_retry(
-            FOREGROUND_LIST_RETRY,
-            || true,
-            std::future::pending::<Result<(), ListError>>,
-        )
-        .await;
-        assert!(matches!(result, Err(ListFailure::Failed(message)) if message.contains("budget")));
-        assert_eq!(started.elapsed(), Duration::from_secs(30));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn retry_after_is_honoured_without_exceeding_total_budget() {
-        let calls = Cell::new(0);
-        let started = Instant::now();
-        let result: Result<(), _> = list_with_retry(
-            FOREGROUND_LIST_RETRY,
-            || true,
-            || {
-                calls.set(calls.get() + 1);
-                let inner =
-                    ListObjectsV2Error::generic(ErrorMetadata::builder().code("SlowDown").build());
-                let mut raw = HttpResponse::new(503.try_into().unwrap(), SdkBody::empty());
-                raw.headers_mut().insert("retry-after", "120");
-                async move { Err(SdkError::service_error(inner, raw)) }
-            },
-        )
-        .await;
-        assert!(matches!(result, Err(ListFailure::Failed(message)) if message.contains("budget")));
-        assert_eq!(calls.get(), 1);
-        assert_eq!(started.elapsed(), Duration::from_secs(30));
     }
 
     #[test]
@@ -1870,50 +1777,240 @@ mod tests {
         assert_eq!(next_page_cursor(&complete, &mut seen).unwrap(), None);
     }
 
+    #[test]
+    fn endpoint_scope_normalizes_to_physical_endpoint_without_bucket_identity() {
+        let mut input = LazyListInput {
+            account_id: "ACCOUNT".into(),
+            bucket: "bucket-a".into(),
+            access_key_id: "key".into(),
+            secret_access_key: "secret".into(),
+            prefix: String::new(),
+            provider: Some("aws".into()),
+            endpoint_scheme: Some("HTTPS".into()),
+            endpoint_host: Some("Example.COM/tenant/bucket-a".into()),
+            force_path_style: Some(true),
+            region: Some("US-EAST-1".into()),
+            force_refresh: None,
+            request_id: None,
+            generation: None,
+            cache_cursor: None,
+            page_index: None,
+            run_id: None,
+        };
+        assert_eq!(endpoint_scope(&input), "https://example.com/tenant");
+        // Another bucket on the same server shares the scope, whether or not
+        // its endpoint was entered with the bucket as the last path segment.
+        input.bucket = "bucket-b".into();
+        input.endpoint_host = Some("example.com/tenant/bucket-b".into());
+        assert_eq!(endpoint_scope(&input), "https://example.com/tenant");
+        input.endpoint_host = Some("example.com/tenant".into());
+        assert_eq!(endpoint_scope(&input), "https://example.com/tenant");
+        input.endpoint_host = None;
+        assert_eq!(endpoint_scope(&input), "aws:us-east-1");
+        input.provider = Some("r2".into());
+        assert_eq!(endpoint_scope(&input), "r2:account");
+    }
+
     #[tokio::test]
     async fn background_quota_preserves_foreground_capacity_and_isolates_endpoints() {
         let scheduler = endpoint_scheduler("test-background-reserve");
         let same = endpoint_scheduler("test-background-reserve");
         let other = endpoint_scheduler("test-independent-endpoint");
         assert!(Arc::ptr_eq(&scheduler, &same));
+
         let mut permits = Vec::new();
         for _ in 0..BACKGROUND_LIST_CAPACITY {
-            permits.push((
-                scheduler.background.acquire().await.unwrap(),
-                scheduler.total.acquire().await.unwrap(),
-            ));
+            permits.push(scheduler.background.acquire().await.unwrap());
         }
         assert!(scheduler.background.try_acquire().is_err());
-        assert!(scheduler.total.try_acquire().is_ok());
-        assert_eq!(other.total.available_permits(), ENDPOINT_LIST_CAPACITY);
+        assert_eq!(
+            other.background.available_permits(),
+            BACKGROUND_LIST_CAPACITY
+        );
+
+        let result = list_with_shared_executor::<
+            _,
+            aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error,
+            _,
+        >(
+            FOREGROUND_LIST_RETRY,
+            "test-background-reserve",
+            "bucket:",
+            "",
+            &scheduler,
+            false,
+            None,
+            || true,
+            || async { Ok::<_, SdkError<ListObjectsV2Error, HttpResponse>>("foreground-page") },
+        )
+        .await;
+        assert_eq!(result, Ok("foreground-page"));
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn cancelling_a_queued_consumer_leaves_no_permit_or_request() {
-        let scheduler = endpoint_scheduler("test-cancel-queue");
-        let _occupied = scheduler
-            .total
-            .acquire_many(ENDPOINT_LIST_CAPACITY as u32)
-            .await
-            .unwrap();
+    #[tokio::test]
+    async fn ui_list_and_head_share_the_physical_endpoint_control_limit() {
+        const SHARED_CONTROL_LIMIT: usize = 4;
+        let endpoint = "https://shared-control.example";
+        let scheduler = endpoint_scheduler(endpoint);
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut tasks = Vec::new();
+
+        for index in 0..8 {
+            let active = active.clone();
+            let peak = peak.clone();
+            let scheduler = scheduler.clone();
+            tasks.push(tokio::spawn(async move {
+                let scope = format!("bucket:list-{index}");
+                list_with_shared_executor::<
+                    _,
+                    aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error,
+                    _,
+                >(
+                    FOREGROUND_LIST_RETRY,
+                    endpoint,
+                    &scope,
+                    "",
+                    &scheduler,
+                    false,
+                    None,
+                    || true,
+                    || {
+                        let active = active.clone();
+                        let peak = peak.clone();
+                        async move {
+                            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(current, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            Ok::<_, SdkError<ListObjectsV2Error, HttpResponse>>(())
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            }));
+        }
+        for index in 0..8 {
+            let active = active.clone();
+            let peak = peak.clone();
+            let cancelled = cancelled.clone();
+            tasks.push(tokio::spawn(async move {
+                let scope = format!("bucket:head-{index}");
+                let context = OperationContext::new(
+                    OperationKind::Head,
+                    endpoint,
+                    &scope,
+                    "head",
+                    tokio::time::Instant::now() + Duration::from_secs(30),
+                    &cancelled,
+                )
+                .with_max_attempts(1);
+                execute_operation(&context, || {
+                    let active = active.clone();
+                    let peak = peak.clone();
+                    async move {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(current, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok::<_, AttemptError>(())
+                    }
+                })
+                .await
+                .unwrap();
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert!(
+            peak.load(Ordering::SeqCst) <= SHARED_CONTROL_LIMIT,
+            "LIST and HEAD exceeded the shared control limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_queued_list_does_not_dispatch_the_request() {
+        let endpoint = "https://queued-cancel.example";
+        let scheduler = endpoint_scheduler(endpoint);
+        let blockers_cancelled = Arc::new(AtomicBool::new(false));
+        let blockers_active = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut blockers = Vec::new();
+        for index in 0..4 {
+            let cancelled = blockers_cancelled.clone();
+            let active = blockers_active.clone();
+            let release = release.clone();
+            blockers.push(tokio::spawn(async move {
+                let scope = format!("bucket:blocker-{index}");
+                let context = OperationContext::new(
+                    OperationKind::Head,
+                    endpoint,
+                    &scope,
+                    "head",
+                    tokio::time::Instant::now() + Duration::from_secs(30),
+                    &cancelled,
+                )
+                .with_max_attempts(1);
+                execute_operation(&context, || {
+                    let active = active.clone();
+                    let release = release.clone();
+                    async move {
+                        active.fetch_add(1, Ordering::SeqCst);
+                        release.notified().await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok::<_, AttemptError>(())
+                    }
+                })
+                .await
+                .unwrap();
+            }));
+        }
+        let started = tokio::time::Instant::now();
+        while blockers_active.load(Ordering::SeqCst) < 4 {
+            assert!(started.elapsed() < Duration::from_secs(1));
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
         let active = Arc::new(AtomicBool::new(true));
         let cancel = active.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
             cancel.store(false, Ordering::SeqCst);
         });
-        let sent = Cell::new(false);
-        let result: Result<(), ListFailure> = while_active(
-            async {
-                let _permit = scheduler.total.acquire().await.unwrap();
-                sent.set(true);
+        let sent = Arc::new(AtomicUsize::new(0));
+        let result: Result<(), ListFailure> = list_with_shared_executor::<
+            _,
+            aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error,
+            _,
+        >(
+            FOREGROUND_LIST_RETRY,
+            endpoint,
+            "bucket:list",
+            "",
+            &scheduler,
+            false,
+            None,
+            || active.load(Ordering::SeqCst),
+            || {
+                let sent = sent.clone();
+                async move {
+                    sent.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, SdkError<ListObjectsV2Error, HttpResponse>>(())
+                }
             },
-            &|| active.load(Ordering::SeqCst),
-            Instant::now() + Duration::from_secs(30),
         )
         .await;
+
+        release.notify_waiters();
+        for blocker in blockers {
+            blocker.await.unwrap();
+        }
         assert_eq!(result, Err(ListFailure::Cancelled));
-        assert!(!sent.get());
+        assert_eq!(sent.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1979,6 +2076,8 @@ mod tests {
             force_refresh: Some(true),
             request_id: None,
             generation: None,
+            cache_cursor: None,
+            page_index: None,
             run_id: None,
         };
         let fixture_flight = |input: LazyListInput| {
@@ -2111,32 +2210,6 @@ mod tests {
         assert_eq!(timing.network_ms, 0.0);
         assert_eq!(timing.backoff_ms, 0.0);
         assert_eq!(timing.db_ms, 0.0);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn retry_timing_counts_actual_sleep_without_changing_the_attempt_budget() {
-        let measurements = ListMeasurements::default();
-        let started = Instant::now();
-        let calls = Cell::new(0);
-        let result = list_with_retry_measured(
-            FOREGROUND_LIST_RETRY,
-            Some(&measurements),
-            || true,
-            || {
-                calls.set(calls.get() + 1);
-                let outcome = if calls.get() < 3 {
-                    Err(unavailable())
-                } else {
-                    Ok("page")
-                };
-                async move { outcome }
-            },
-        )
-        .await;
-        assert_eq!(result, Ok("page"));
-        assert_eq!(calls.get(), 3);
-        assert!((measurements.snapshot().backoff_ms - elapsed_ms(started)).abs() < 0.001);
-        assert!(measurements.snapshot().backoff_ms <= 1500.0);
     }
 
     #[tokio::test(start_paused = true)]

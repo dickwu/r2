@@ -1,6 +1,7 @@
 import { redactSecrets } from './diagnostics/redact';
 
-type FolderCommand = 'get_prefix_cache' | 'list_prefix_stream' | 'cancel_prefix_list';
+type FolderCommand =
+  'get_prefix_cache' | 'get_prefix_cache_page' | 'list_prefix_stream' | 'cancel_prefix_list';
 interface FolderScope {
   provider: string;
   account_id: string;

@@ -67,6 +67,9 @@ pub(super) async fn pending_operations(root: &Path) -> Result<Vec<stage::StageRe
                 path: entry.path(),
                 snapshot: None,
                 publication_guard: None,
+                checkpoint_lsn: 0,
+                wal_bytes: None,
+                first_dirty_at: None,
             })
         }
         .await;
@@ -87,13 +90,23 @@ impl S3NfsFs {
         &self,
         key: &str,
     ) -> Result<Option<aws_sdk_s3::operation::head_object::HeadObjectOutput>, nfsstat3> {
-        match crate::providers::s3_client::retry_idempotent(3, || {
-            self.inner
-                .client
-                .head_object()
-                .bucket(&self.inner.bucket)
-                .key(key)
-                .send()
+        let request = self
+            .inner
+            .client
+            .head_object()
+            .bucket(&self.inner.bucket)
+            .key(key);
+        let scope = self.storage_scope(key);
+        let context =
+            self.read_operation_context(OperationKind::Head, &scope, "", Duration::from_secs(30));
+        match execute_storage_operation(&context, || {
+            let request = request.clone();
+            async move {
+                request
+                    .send()
+                    .await
+                    .map_err(|error| AttemptError::from_sdk(&error))
+            }
         })
         .await
         {
@@ -101,17 +114,11 @@ impl S3NfsFs {
                 self.io_succeeded();
                 Ok(Some(head))
             }
-            Err(error)
-                if matches!(map_s3_error(&error), nfsstat3::NFS3ERR_NOENT)
-                    && error.as_service_error().and_then(|e| e.code()) != Some("NoSuchBucket") =>
-            {
+            Err(error) if matches!(error.class(), StorageErrorClass::NotFound) => {
                 self.io_succeeded();
                 Ok(None)
             }
-            Err(error) => {
-                self.io_failed(format!("HEAD: {}", describe_s3_error(&error)));
-                Err(map_s3_error(&error))
-            }
+            Err(error) => Err(self.map_operation_error("HEAD", error)),
         }
     }
 
@@ -269,6 +276,7 @@ impl S3NfsFs {
         if record.state == "namespace_recovery" {
             let intent: NamespaceIntent = serde_json::from_slice(&bytes)
                 .map_err(|e| format!("Incomplete namespace identity: {e}"))?;
+            let _fence = self.fence_exact_key(&intent.key).await;
             self.apply_namespace_intent(&record.path, &intent)
                 .await
                 .map_err(|e| {
@@ -280,6 +288,17 @@ impl S3NfsFs {
         } else {
             let journal: RenameJournal =
                 serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            let from_fence = if journal.from.ends_with('/') {
+                FencePath::prefix(normalize_dir_key(&journal.from))
+            } else {
+                FencePath::exact(journal.from.clone())
+            };
+            let to_fence = if journal.to.ends_with('/') {
+                FencePath::prefix(normalize_dir_key(&journal.to))
+            } else {
+                FencePath::exact(journal.to.clone())
+            };
+            let _fence = self.fence_paths(vec![from_fence, to_fence]).await;
             let pairs = journal
                 .objects
                 .iter()
@@ -324,7 +343,6 @@ impl S3NfsFs {
     }
 
     pub async fn resume_namespace_operations(&self) -> Result<(), String> {
-        let _namespace = self.inner.namespace.write().await;
         self.inner
             .recovery_errors
             .lock()

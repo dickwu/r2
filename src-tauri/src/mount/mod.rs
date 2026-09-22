@@ -24,5 +24,8 @@ mod quota;
 mod read_cache;
 pub mod recovery;
 mod stage;
+mod stage_commit;
+mod stage_wal;
 
 pub use manager::{manager, MountInfo, MountProvider, MountRequest};
+pub use quota::available_space;

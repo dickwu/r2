@@ -2,10 +2,13 @@
 use super::*;
 use crate::move_transfer::stream::{
     data_timeouts,
-    protocol::{attempt_timeout, fetch_payload, interruptible, retry_delay, Payload, MAX_ATTEMPTS},
+    protocol::{attempt_timeout, fetch_payload, Payload, MAX_ATTEMPTS},
     shared_http_client, MultipartPlan,
 };
-use crate::providers::{conditional::Condition, s3_client::is_transient_s3_error};
+use crate::providers::{
+    conditional::Condition,
+    multipart::{complete_receipts, PartReceipt, PartReconciler},
+};
 use aws_sdk_s3::presigning::PresigningConfig;
 use std::collections::HashSet;
 
@@ -78,15 +81,26 @@ impl S3NfsFs {
         stage::write_json_atomic(&path, &journal)
             .await
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        let head = self
+        let request = self
             .inner
             .client
             .head_object()
             .bucket(&self.inner.bucket)
-            .key(&object.from)
-            .send()
-            .await
-            .map_err(|e| map_s3_error(&e))?;
+            .key(&object.from);
+        let scope = self.storage_scope(&object.from);
+        let context =
+            self.read_operation_context(OperationKind::Head, &scope, "", Duration::from_secs(30));
+        let head = execute_storage_operation(&context, || {
+            let request = request.clone();
+            async move {
+                request
+                    .send()
+                    .await
+                    .map_err(|error| AttemptError::from_sdk(&error))
+            }
+        })
+        .await
+        .map_err(|error| self.map_operation_error("HEAD", error))?;
         if head.e_tag() != Some(object.source_etag.as_str())
             || head.content_length() != Some(object.size as i64)
         {
@@ -95,47 +109,78 @@ impl S3NfsFs {
         if journal.upload_id.is_some() {
             let mut marker: Option<String> = None;
             let mut seen = HashSet::new();
-            let mut parts = BTreeMap::new();
+            let local = journal
+                .parts
+                .iter()
+                .map(|(number, etag)| {
+                    Self::rename_part_receipt(&plan, object.size, *number, etag.clone())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut reconciler =
+                PartReconciler::new(object.size, plan.part_size, local).map_err(|message| {
+                    log::error!("mount: invalid rename multipart journal: {message}");
+                    nfsstat3::NFS3ERR_IO
+                })?;
             loop {
-                let page = self
+                let upload_id = journal
+                    .upload_id
+                    .as_deref()
+                    .ok_or(nfsstat3::NFS3ERR_IO)?
+                    .to_string();
+                let request = self
                     .inner
                     .client
                     .list_parts()
                     .bucket(&self.inner.bucket)
                     .key(&object.to)
-                    .upload_id(journal.upload_id.as_deref().ok_or(nfsstat3::NFS3ERR_IO)?)
-                    .set_part_number_marker(marker.clone())
-                    .send()
-                    .await;
+                    .upload_id(upload_id)
+                    .set_part_number_marker(marker.clone());
+                let scope = self.storage_scope(&object.to);
+                let context = self.read_operation_context(
+                    OperationKind::ListParts,
+                    &scope,
+                    "",
+                    Duration::from_secs(30),
+                );
+                let page = execute_storage_operation(&context, || {
+                    let request = request.clone();
+                    async move {
+                        request
+                            .send()
+                            .await
+                            .map_err(|error| AttemptError::from_sdk(&error))
+                    }
+                })
+                .await;
                 let page = match page {
                     Ok(page) => page,
-                    Err(error)
-                        if error.as_service_error().and_then(|e| e.code())
-                            == Some("NoSuchUpload") =>
-                    {
+                    Err(error) if matches!(error.class(), StorageErrorClass::NotFound) => {
                         journal.upload_id = None;
                         journal.parts.clear();
                         journal.completing = false;
                         break;
                     }
-                    Err(error) => return Err(map_s3_error(&error)),
+                    Err(error) => return Err(self.map_operation_error("ListParts", error)),
                 };
                 for part in page.parts() {
                     let number = part.part_number().ok_or(nfsstat3::NFS3ERR_IO)?;
-                    if number < 1 || number > plan.total_parts {
+                    let size = part
+                        .size()
+                        .filter(|size| *size >= 0)
+                        .ok_or(nfsstat3::NFS3ERR_IO)? as u64;
+                    let receipt = Self::rename_part_receipt(
+                        &plan,
+                        object.size,
+                        number,
+                        part.e_tag().ok_or(nfsstat3::NFS3ERR_IO)?.to_string(),
+                    )?;
+                    if size != receipt.size {
                         return Err(nfsstat3::NFS3ERR_IO);
                     }
-                    let (start, end) = plan.range(number, object.size);
-                    if part.size() != Some((end - start + 1) as i64)
-                        || parts
-                            .insert(
-                                number,
-                                part.e_tag().ok_or(nfsstat3::NFS3ERR_IO)?.to_string(),
-                            )
-                            .is_some()
-                    {
-                        return Err(nfsstat3::NFS3ERR_IO);
-                    }
+                    reconciler.accept(receipt).map_err(|message| {
+                        log::error!("mount: invalid rename ListParts receipt: {message}");
+                        nfsstat3::NFS3ERR_IO
+                    })?;
                 }
                 if !page.is_truncated().unwrap_or(false) {
                     break;
@@ -151,7 +196,11 @@ impl S3NfsFs {
                 marker = Some(next);
             }
             if journal.upload_id.is_some() {
-                journal.parts = parts;
+                journal.parts = reconciler
+                    .finish()
+                    .into_iter()
+                    .map(|(number, part)| (number, part.etag))
+                    .collect();
             }
             stage::write_json_atomic(&path, &journal)
                 .await
@@ -185,100 +234,69 @@ impl S3NfsFs {
         if let Some(version) = &object.source_version {
             source.push_str(&format!("?versionId={}", urlencoding::encode(version)));
         }
-        let paused = AtomicBool::new(false);
-        for number in 1..=plan.total_parts {
-            if journal.parts.contains_key(&number) {
-                continue;
-            }
-            let (start, end) = plan.range(number, object.size);
-            let length = end - start + 1;
-            let payload = if server_parts {
-                None
-            } else {
-                Some(self.rename_range(object, start, end).await?)
-            };
-            let mut etag = None;
-            for attempt in 0..MAX_ATTEMPTS {
-                let result = if let Some(payload) = &payload {
-                    let body =
-                        ByteStream::new(payload.body.try_clone().ok_or(nfsstat3::NFS3ERR_IO)?);
-                    interruptible(
-                        &self.inner.shutdown,
-                        &paused,
-                        self.inner
-                            .client
-                            .upload_part()
-                            .bucket(&self.inner.bucket)
-                            .key(&object.to)
-                            .upload_id(&upload_id)
-                            .part_number(number)
-                            .content_length(length as i64)
-                            .body(body)
-                            .customize()
-                            .config_override(data_timeouts(length))
-                            .send(),
-                    )
-                    .await
-                    .map_err(|_| nfsstat3::NFS3ERR_IO)?
-                    .map(|r| r.e_tag().map(str::to_string))
-                    .map_err(|e| (is_transient_s3_error(&e), map_s3_error(&e)))
-                } else {
-                    let request = self
-                        .inner
-                        .client
-                        .upload_part_copy()
-                        .bucket(&self.inner.bucket)
-                        .key(&object.to)
-                        .upload_id(&upload_id)
-                        .part_number(number)
-                        .copy_source(&source)
-                        .copy_source_range(format!("bytes={start}-{end}"));
-                    let request = if object.source_version.is_some() {
-                        request
-                    } else {
-                        request.copy_source_if_match(&object.source_etag)
-                    };
-                    interruptible(&self.inner.shutdown, &paused, request.send())
-                        .await
-                        .map_err(|_| nfsstat3::NFS3ERR_IO)?
-                        .map(|r| {
-                            r.copy_part_result()
-                                .and_then(|p| p.e_tag())
-                                .map(str::to_string)
-                        })
-                        .map_err(|e| (is_transient_s3_error(&e), map_s3_error(&e)))
-                };
-                match result {
-                    Ok(value) => {
-                        etag = value;
-                        break;
-                    }
-                    Err((true, _)) if attempt + 1 < MAX_ATTEMPTS => {
-                        retry_delay(attempt, None, &self.inner.shutdown, &paused)
-                            .await
-                            .map_err(|_| nfsstat3::NFS3ERR_IO)?
-                    }
-                    Err((_, status)) => return Err(status),
+        let pending = (1..=plan.total_parts)
+            .filter(|number| !journal.parts.contains_key(number))
+            .collect::<Vec<_>>();
+        let stopped = AtomicBool::new(false);
+        let jobs = stream::iter(pending.into_iter().map(|number| {
+            let stopped = &stopped;
+            let upload_id = &upload_id;
+            let source = &source;
+            async move {
+                if stopped.load(Ordering::SeqCst) {
+                    return Ok(None);
                 }
+                let result = self
+                    .copy_rename_part(object, upload_id, source, server_parts, number, &plan)
+                    .await;
+                if result.is_err() {
+                    stopped.store(true, Ordering::SeqCst);
+                }
+                result.map(Some)
             }
-            journal
-                .parts
-                .insert(number, etag.ok_or(nfsstat3::NFS3ERR_IO)?);
-            stage::write_json_atomic(&path, &journal)
-                .await
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        }))
+        .buffer_unordered(4);
+        tokio::pin!(jobs);
+        let mut first_error = None;
+        while let Some(result) = jobs.next().await {
+            match result {
+                Ok(Some((number, etag))) => {
+                    journal.parts.insert(number, etag);
+                    stage::write_json_atomic(&path, &journal)
+                        .await
+                        .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                }
+                Ok(None) => {}
+                Err(status) if first_error.is_none() => {
+                    first_error = Some(status);
+                }
+                Err(_) => {}
+            }
+        }
+        if let Some(status) = first_error {
+            return Err(status);
         }
         journal.completing = true;
         stage::write_json_atomic(&path, &journal)
             .await
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        let parts = journal
+        let receipts = journal
             .parts
             .iter()
             .map(|(number, etag)| {
+                Self::rename_part_receipt(&plan, object.size, *number, etag.clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let parts = complete_receipts(object.size, plan.part_size, receipts)
+            .map_err(|message| {
+                log::error!("mount: incomplete rename multipart completion: {message}");
+                nfsstat3::NFS3ERR_IO
+            })?
+            .into_iter()
+            .map(|part| {
                 CompletedPart::builder()
-                    .part_number(*number)
-                    .e_tag(etag)
+                    .part_number(part.number)
+                    .e_tag(part.etag)
                     .build()
             })
             .collect();
@@ -316,6 +334,131 @@ impl S3NfsFs {
         }
     }
 
+    fn rename_part_receipt(
+        plan: &MultipartPlan,
+        total: u64,
+        number: i32,
+        etag: String,
+    ) -> Result<PartReceipt, nfsstat3> {
+        if !(1..=plan.total_parts).contains(&number) {
+            return Err(nfsstat3::NFS3ERR_IO);
+        }
+        let (start, end) = plan.range(number, total);
+        Ok(PartReceipt {
+            number,
+            etag,
+            size: end - start + 1,
+        })
+    }
+
+    pub(super) async fn copy_rename_part(
+        &self,
+        object: &RenameObject,
+        upload_id: &str,
+        source: &str,
+        server_parts: bool,
+        number: i32,
+        plan: &MultipartPlan,
+    ) -> Result<(i32, String), nfsstat3> {
+        let (start, end) = plan.range(number, object.size);
+        let length = end - start + 1;
+        if !server_parts {
+            let payload = self.rename_range(object, start, end).await?;
+            let scope = self.storage_scope(&object.to);
+            let identity = format!(
+                "{}:{}:{}:{start}-{end}:{upload_id}:{number}",
+                object.from,
+                object.source_etag,
+                object.source_version.as_deref().unwrap_or_default()
+            );
+            let context = self
+                .read_operation_context(
+                    OperationKind::UploadPart,
+                    &scope,
+                    &identity,
+                    attempt_timeout(length),
+                )
+                .with_max_attempts(MAX_ATTEMPTS as u32);
+            let etag = execute_storage_operation(&context, || async {
+                let body = payload
+                    .body
+                    .try_clone()
+                    .ok_or_else(|| AttemptError::permanent("Relay payload is not replayable"))?;
+                let response = self
+                    .inner
+                    .client
+                    .upload_part()
+                    .bucket(&self.inner.bucket)
+                    .key(&object.to)
+                    .upload_id(upload_id)
+                    .part_number(number)
+                    .content_length(length as i64)
+                    .body(ByteStream::new(body))
+                    .customize()
+                    .config_override(data_timeouts(length))
+                    .send()
+                    .await
+                    .map_err(|error| AttemptError::from_sdk(&error))?;
+                response
+                    .e_tag()
+                    .filter(|etag| !etag.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| AttemptError::permanent("UploadPart returned no ETag"))
+            })
+            .await
+            .map_err(|error| self.map_operation_error("UploadPart", error))?;
+            return Ok((number, etag));
+        }
+
+        let request = self
+            .inner
+            .client
+            .upload_part_copy()
+            .bucket(&self.inner.bucket)
+            .key(&object.to)
+            .upload_id(upload_id)
+            .part_number(number)
+            .copy_source(source)
+            .copy_source_range(format!("bytes={start}-{end}"));
+        let request = if object.source_version.is_some() {
+            request
+        } else {
+            request.copy_source_if_match(&object.source_etag)
+        };
+        let scope = self.storage_scope(&object.to);
+        let identity = format!(
+            "{}:{}:{}:{start}-{end}:{}:{upload_id}:{number}",
+            object.from,
+            object.source_etag,
+            object.source_version.as_deref().unwrap_or_default(),
+            object.to
+        );
+        let context = self.read_operation_context(
+            OperationKind::UploadPartCopy,
+            &scope,
+            &identity,
+            attempt_timeout(length),
+        );
+        let etag = execute_storage_operation(&context, || {
+            let request = request.clone();
+            async move {
+                let response = request
+                    .send()
+                    .await
+                    .map_err(|error| AttemptError::from_sdk(&error))?;
+                response
+                    .copy_part_result()
+                    .and_then(|part| part.e_tag())
+                    .filter(|etag| !etag.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| AttemptError::permanent("UploadPartCopy returned no ETag"))
+            }
+        })
+        .await
+        .map_err(|error| self.map_operation_error("UploadPartCopy", error))?;
+        Ok((number, etag))
+    }
+
     async fn rename_range(
         &self,
         object: &RenameObject,
@@ -324,7 +467,24 @@ impl S3NfsFs {
     ) -> Result<Payload, nfsstat3> {
         let http = shared_http_client().map_err(|_| nfsstat3::NFS3ERR_IO)?;
         let paused = AtomicBool::new(false);
-        for attempt in 0..MAX_ATTEMPTS {
+        let length = end - start + 1;
+        let scope = self.storage_scope(&object.from);
+        let identity = format!(
+            "{}:{}:{}:{start}-{end}",
+            object.from,
+            object.source_etag,
+            object.source_version.as_deref().unwrap_or_default()
+        );
+        let context = self
+            .read_operation_context(
+                OperationKind::Get,
+                &scope,
+                &identity,
+                attempt_timeout(length),
+            )
+            .with_pause(&paused)
+            .with_max_attempts(MAX_ATTEMPTS as u32);
+        execute_storage_operation(&context, || async {
             let signed = self
                 .inner
                 .client
@@ -335,12 +495,14 @@ impl S3NfsFs {
                 .set_version_id(object.source_version.clone())
                 .presigned(
                     PresigningConfig::expires_in(Duration::from_secs(900))
-                        .map_err(|_| nfsstat3::NFS3ERR_IO)?,
+                        .map_err(|error| AttemptError::permanent(error.to_string()))?,
                 )
                 .await
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-            let result = tokio::time::timeout(
-                attempt_timeout(end - start + 1),
+                .map_err(|error| {
+                    AttemptError::permanent(format!("Cannot sign source read: {error}"))
+                })?;
+            match tokio::time::timeout(
+                attempt_timeout(length),
                 fetch_payload(
                     &http,
                     signed.uri(),
@@ -352,17 +514,20 @@ impl S3NfsFs {
                 ),
             )
             .await
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-            match result {
-                Ok(payload) => return Ok(payload),
-                Err(error) if error.retryable && attempt + 1 < MAX_ATTEMPTS => {
-                    retry_delay(attempt, error.retry_after, &self.inner.shutdown, &paused)
-                        .await
-                        .map_err(|_| nfsstat3::NFS3ERR_IO)?
+            {
+                Ok(Ok(payload)) => Ok(payload),
+                Ok(Err(error)) if error.retryable => {
+                    let mut attempt = AttemptError::transient(error.message);
+                    if let Some(wait) = error.retry_after {
+                        attempt = attempt.with_retry_after(wait);
+                    }
+                    Err(attempt)
                 }
-                Err(_) => return Err(nfsstat3::NFS3ERR_IO),
+                Ok(Err(error)) => Err(AttemptError::permanent(error.message)),
+                Err(_) => Err(AttemptError::transient("Source response body timed out")),
             }
-        }
-        Err(nfsstat3::NFS3ERR_IO)
+        })
+        .await
+        .map_err(|error| self.map_operation_error("GET", error))
     }
 }

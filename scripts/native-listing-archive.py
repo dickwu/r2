@@ -62,26 +62,41 @@ def summary(data: dict, canonical_name: str, raw_hash: str) -> str:
     title = '# Native listing after the snapshot-sharing correction' if ungated else '# Native listing baseline'
     build = ('**Build:** ' + data.get('declared_build_profile', 'unspecified') + '. The source revision and exact executable hash define this run; the runtime debug flag alone does not describe dependency optimization.') if ungated else '**Build caveat:** release optimization with debug assertions enabled across the dependency graph to expose the connector. This may add overhead absent from a shipped release. React Query still used its default structural sharing in this baseline.'
     interpretation = ('**Interpretation:** primary cold responses were ungated. Separate gated controls demonstrate first-page rendering while the next HTTP response is withheld; they are excluded from the latency percentiles. The frame proxy is not an OS compositor or physical first-pixel timestamp.') if ungated else '**Interpretation:** cold samples held page 2 until the first matching row had two animation-frame callbacks. They prove controlled first-page delivery; they are not ungated burst-cold latency measurements. Ungated cold behavior exists only as priming diagnostics in this baseline. The frame proxy is not an OS compositor or physical first-pixel timestamp.'
+    protocol = data.get('measurement_protocol', {})
+    cases = protocol.get('cases') or sorted({sample.get('mode') for sample in data.get('samples', [])})
+    trials = protocol.get('trials_per_case', 30)
+    budget = data.get('local_fixture_first_page_budget', {})
     lines = [
         title, '',
-        f"Captured {data['captured_at']}. This baseline contains {len(data['samples'])} valid native navigation samples, 30 for each size/cache case, across {len(data.get('measurement_runs', {}))} recorded run segments.", '',
+        f"Captured {data['captured_at']}. This trace contains {len(data['samples'])} valid native navigation samples, {trials} for each size/cache case, across {len(data.get('measurement_runs', {}))} recorded run segments.", '',
+        f"Cases: {', '.join(cases)}.", '',
         f"App identifier: `{data['app_id']}`. Executable SHA256: `{data['binary_sha256']}`.", '',
         build, '',
         'All data and credentials were generated for a loopback ListObjectsV2 fixture. The measurements include the real Tauri webview, production SDK, SQLite, IPC, React and Virtuoso. They do not establish real-provider/WAN performance.', '',
         '| Items | Case | First DOM p50 / p95 (ms) | First frame proxy p50 / p95 (ms) | Full native completion p50 / p95 (ms) |',
         '| ---: | --- | ---: | ---: | ---: |',
     ]
-    labels = {'cold': 'Cold, ungated' if ungated else 'Cold, second page gated', 'query-warm': 'React Query memory', 'sqlite-warm': 'SQLite cache'}
+    labels = {
+        'cold': 'Cold, ungated' if ungated else 'Cold, second page gated',
+        'cold-ungated': 'Cold, ungated',
+        'cold-gated': 'Cold, second page gated',
+        'query-warm': 'React Query memory',
+        'sqlite-warm': 'SQLite warm revalidate',
+        'fresh-cache': 'Fresh SQLite cache, zero LIST',
+        'warm-delay': 'Warm snapshot with delayed refresh',
+        'warm-error': 'Warm snapshot with refresh error',
+    }
     for item in data['summary']:
         metrics = item['metrics']
         pairs = []
         for key in ('first_dom_ms', 'first_visible_frame_proxy_ms', 'full_completion_ms'):
             metric = metrics[key]
             pairs.append(f"{number(metric['p50'])} / {number(metric['p95'])}")
-        lines.append(f"| {item['size']:,} | {labels[item['mode']]} | " + ' | '.join(pairs) + ' |')
+        lines.append(f"| {item['size']:,} | {labels.get(item['mode'], item['mode'])} | " + ' | '.join(pairs) + ' |')
     lines += ['',
         interpretation, '',
-        'Memory hits have no new native listing. SQLite-warm samples recreate the webview/QueryClient while preserving the database; they include native cache transfer and concurrent revalidation. Percentiles use nearest rank. Raw stage counters, scope IDs, arrays of per-page timings and interrupted observations are retained in the compressed traces.', '',
+        (f"Declared local first-page budget before NEXT-06 result collection: 100k fresh SQLite zero-LIST p95 <= {budget.get('sqlite_fresh_100k_p95')} ms. Basis: {budget.get('basis')}" if budget else ''), '',
+        'Memory hits have no new native listing. Fresh-cache samples assert zero foreground LIST requests while reading SQLite through paged IPC. SQLite-warm/delay/error cases recreate the webview/QueryClient while preserving the database and retain per-page timing, cache/network/db/ipc/merge/react/frame/full-completion observations when emitted by the frozen binary. Percentiles use nearest rank. Raw stage counters, scope IDs, arrays of per-page timings and interrupted observations are retained in the compressed traces.', '',
         'Both 10k and 100k navigation-cancellation checks recorded zero post-navigation fixture requests, no obsolete final page and the root view still visible. Generated accounts and native processes were cleaned up for all run segments. OS-hidden or unfocused preparation/measurement attempts were preserved in provenance rather than included as valid latency samples.', '',
         ('This run uses immutable snapshot handoff with structural sharing disabled for folder queries. Comparisons with the baseline also differ in dependency debug assertions; the separate small `native-listing-query-sharing.json` benchmark isolates only the sharing option headlessly.' if ungated else 'The baseline exposed the remaining 100k SQLite/frame delay. The separate small `native-listing-query-sharing.json` benchmark isolates the cost of default QueryClient deep structural sharing; it is headless evidence, not a native speedup claim.'), '',
         f"Canonical raw JSON SHA256: `{raw_hash}`. [Lossless canonical trace]({canonical_name}.gz) and [SHA256 manifest](manifest.json) preserve exact original bytes and referenced segments. The manifest inventories additional transient raw traces copied to the ignored archive directory.", '',
@@ -116,7 +131,12 @@ def main():
         parser.error('The raw copy directory must already be ignored by git')
     canonical = source / args.canonical
     data = json.loads(canonical.read_bytes())
-    assert data.get('navigation_matrix_complete') and len(data['samples']) == 180
+    protocol = data.get('measurement_protocol', {})
+    cases = protocol.get('cases') or ['cold', 'query-warm', 'sqlite-warm']
+    sizes = sorted({sample['size'] for sample in data.get('samples', [])})
+    trials = protocol.get('trials_per_case', 30)
+    expected_samples = len(cases) * len(sizes) * trials
+    assert data.get('navigation_matrix_complete') and len(data['samples']) == expected_samples
     compressed_names = referenced_files(canonical, source)
     sources = [path for path in sorted(source.glob('native-listing*.json')) if path.name not in KEEP]
     assert compressed_names.issubset({path.name for path in sources})

@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use crate::providers::resources::{ByteLease, ResourceKind};
 use tokio::sync::OnceCell;
 
 /// Bytes fetched per chunk. Large enough to amortize the per-request round
@@ -94,11 +95,36 @@ pub fn should_prefetch(previous: Option<u64>, current: u64, bytes_into_chunk: u6
     }
 }
 
+/// Accounting follows the shared byte owner, so eviction cannot release the
+/// charge while an active reader still holds a clone of the payload Arc.
+#[derive(Debug)]
+pub struct CachedBytes {
+    data: Vec<u8>,
+    _usage: ByteLease,
+}
+
+impl CachedBytes {
+    pub fn new(data: Vec<u8>) -> Self {
+        let usage = ByteLease::new(ResourceKind::ReadCache, data.len() as u64);
+        Self {
+            data,
+            _usage: usage,
+        }
+    }
+}
+
+impl std::ops::Deref for CachedBytes {
+    type Target = Vec<u8>;
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
 /// One cached chunk. The cell starts empty and is filled by whichever reader
 /// gets there first; everyone else awaits the same fetch instead of issuing
 /// their own.
 pub struct Chunk {
-    pub cell: OnceCell<Arc<Vec<u8>>>,
+    pub cell: OnceCell<Arc<CachedBytes>>,
     /// When the fetch that fills this chunk began, for [`CHUNK_TTL`].
     fetched_at: Instant,
     /// Filled byte count, recorded under the cache lock by `note_filled` so
@@ -428,7 +454,9 @@ mod tests {
 
     fn filled_slot(cache: &ReadCache, file: u64, index: u64, len: usize) {
         let slot = cache.slot(file, index);
-        slot.cell.set(Arc::new(vec![0u8; len])).expect("fresh cell");
+        slot.cell
+            .set(Arc::new(CachedBytes::new(vec![0u8; len])))
+            .expect("fresh cell");
         cache.note_filled(file, index, &slot, len as u64);
     }
 
@@ -516,7 +544,10 @@ mod tests {
         let fresh = cache.slot(1, 0);
         assert!(!Arc::ptr_eq(&orphan, &fresh));
 
-        orphan.cell.set(Arc::new(vec![0u8; 64])).expect("cell");
+        orphan
+            .cell
+            .set(Arc::new(CachedBytes::new(vec![0u8; 64])))
+            .expect("cell");
         cache.note_filled(1, 0, &orphan, 64);
         assert_eq!(
             cache.cached_bytes(),

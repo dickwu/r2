@@ -82,6 +82,19 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      - name: Acceptance harness self-tests (offline)
+        # bash -eo pipefail fails on the first failing self-test; the Windows
+        # pwsh default would only report the last command's exit code.
+        shell: bash
+        run: |
+          node scripts/r2-audit-manifest.mjs --self-test
+          node scripts/r2-protocol-audit.mjs --self-test
+          node scripts/aws-s3-protocol-audit.mjs --self-test
+          node scripts/provider-fault-audit.mjs --self-test
+          node scripts/vm-boundary-audit.mjs --self-test
+          python3 scripts/vm-powerloss-audit.py --self-test
+          python3 scripts/run-native-nfs-test.py --self-test
+
       - name: Frontend checks
         run: bun run check
 
@@ -105,7 +118,7 @@ jobs:
       # The image still reports a lone SDK 10.0.26100.0 as of 2026-09-13; the
       # "Install dependencies (Windows)" step logs that list so the skip can
       # be lifted knowingly.
-      - name: Rust tests
+      - name: Rust tests${{ contains(matrix.platform, 'windows') && ' (Windows compile-only)' || '' }}
         run: cargo test --manifest-path src-tauri/Cargo.toml --workspace ${{ contains(matrix.platform, 'windows') && '--no-run' || '' }}
 
       - name: Native Linux NFS integration
@@ -123,7 +136,7 @@ jobs:
       # skipped test as success). Validate the Windows prerequisites the
       # prepare step just established; the mount itself is covered by the
       # Linux job and by on-device verification until the image converges.
-      - name: Native Windows NFS integration
+      - name: Native Windows NFS prerequisite validation (no runtime mount)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: python scripts/run-native-nfs-test.py --validate-only

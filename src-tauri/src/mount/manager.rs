@@ -88,6 +88,8 @@ pub struct MountInfo {
     pub dirty_bytes: u64,
     pub oldest_dirty_ms: u64,
     pub last_successful_io: Option<i64>,
+    pub resources: crate::providers::resources::ResourceSnapshot,
+    pub commit: super::stage_commit::CommitMetrics,
 }
 
 /// Payload of the `mount-changed` event: always the complete mount list.
@@ -104,6 +106,7 @@ pub struct MountRequest {
     pub provider: MountProvider,
     pub account_id: String,
     pub bucket: String,
+    pub operation_endpoint: String,
     /// Absolute directory path (unix) or drive specifier such as `Z:` (Windows).
     pub local_path: String,
     pub client: Client,
@@ -276,9 +279,10 @@ impl MountManager {
             )?;
         }
 
-        let fs = S3NfsFs::new(
+        let fs = S3NfsFs::new_with_endpoint(
             request.client,
             request.bucket.clone(),
+            request.operation_endpoint.clone(),
             request.read_only,
             staging_dir,
         );
@@ -364,6 +368,8 @@ impl MountManager {
             dirty_bytes: health.dirty_bytes,
             oldest_dirty_ms: health.oldest_dirty_ms,
             last_successful_io: health.last_successful_io,
+            resources: health.resources,
+            commit: health.commit,
         };
 
         // The registry guard must not be held across the cleanup await below.
@@ -715,6 +721,8 @@ fn spawn_supervisor(
                 info.dirty_bytes = health.dirty_bytes;
                 info.oldest_dirty_ms = health.oldest_dirty_ms;
                 info.last_successful_io = health.last_successful_io;
+                info.resources = health.resources;
+                info.commit = health.commit;
                 if info.health != MountHealth::Offline {
                     if let Some(error) = health.last_error {
                         info.health = MountHealth::Degraded;
@@ -1259,6 +1267,8 @@ mod tests {
             dirty_bytes: 0,
             oldest_dirty_ms: 0,
             last_successful_io: None,
+            resources: crate::providers::resources::ResourceSnapshot::default(),
+            commit: crate::mount::stage_commit::CommitMetrics::default(),
         }
     }
 

@@ -81,6 +81,13 @@ impl DirListing {
             None
         }
     }
+
+    fn child_named(&self, name: &str) -> Option<DirChild> {
+        self.children
+            .binary_search_by(|child| child.name.as_str().cmp(name))
+            .ok()
+            .and_then(|index| self.children.get(index).cloned())
+    }
 }
 
 /// A future common prefix can sort before an already received file when its
@@ -279,6 +286,31 @@ impl S3NfsFs {
         Ok(fresh.and_then(|listing| listing.view_if_ready(after_name, all)))
     }
 
+    pub(super) fn cached_directory_child(
+        &self,
+        dirid: fileid3,
+        dir_key: &str,
+        name: &str,
+    ) -> Result<Option<(Option<DirChild>, bool, u64)>, nfsstat3> {
+        let dirs = self
+            .inner
+            .dirs
+            .read()
+            .map_err(|_| nfsstat3::NFS3ERR_SERVERFAULT)?;
+        Ok(dirs
+            .get(&dirid)
+            .filter(|listing| {
+                listing.key == dir_key && listing.fetched_at.elapsed() < DIR_CACHE_TTL
+            })
+            .map(|listing| {
+                (
+                    listing.child_named(name),
+                    listing.complete,
+                    listing.generation,
+                )
+            }))
+    }
+
     async fn advance_directory_page(
         &self,
         dirid: fileid3,
@@ -301,10 +333,20 @@ impl S3NfsFs {
         }
         // Cancellation drops this request before any listing/cursor mutation;
         // the next caller resumes from the last committed provider page.
-        let response = request.send().await.map_err(|error| {
-            self.io_failed(format!("List: {}", describe_s3_error(&error)));
-            map_s3_error(&error)
-        })?;
+        let scope = self.storage_scope(dir_key);
+        let context =
+            self.read_operation_context(OperationKind::List, &scope, "", Duration::from_secs(30));
+        let response = execute_storage_operation(&context, || {
+            let request = request.clone();
+            async move {
+                request
+                    .send()
+                    .await
+                    .map_err(|error| AttemptError::from_sdk(&error))
+            }
+        })
+        .await
+        .map_err(|error| self.map_operation_error("List", error))?;
         let page = ProviderPage::parse(&response, dir_key)
             .inspect_err(|_| self.io_failed("List returned an invalid directory page".into()))?;
         let mut dirs = self

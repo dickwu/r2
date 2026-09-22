@@ -64,7 +64,12 @@ pub fn available_space(path: &Path) -> std::io::Result<u64> {
             free: *mut u64,
         ) -> i32;
     }
-    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let probe = if path.exists() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let path: Vec<u16> = probe.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut available = 0;
     // SAFETY: the path is NUL terminated, available is writable, and Windows
     // explicitly allows null pointers for the two unused output parameters.

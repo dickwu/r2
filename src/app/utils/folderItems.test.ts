@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, expect, test } from 'bun:test';
 import {
   createFolderPageAccumulator,
+  createFolderUpdatePublisher,
   buildFileItems,
   loadFolderItems,
   type FolderSnapshot,
@@ -34,6 +35,102 @@ const emptyCache: FolderSnapshot = {
   fromCache: true,
   freshness: 'stale',
 };
+
+describe('folder update frame publisher', () => {
+  const snapshot = (key: string, complete = false): FolderSnapshot => ({
+    items: [{ key, name: key, isFolder: false }],
+    complete,
+    fromCache: true,
+    freshness: complete ? 'fresh' : 'partial',
+  });
+
+  function scheduler() {
+    const callbacks: Array<() => void> = [];
+    const cancelled = new Set<number>();
+    return {
+      callbacks,
+      schedule: (callback: () => void) => {
+        callbacks.push(callback);
+        return callbacks.length - 1;
+      },
+      cancel: (handle: unknown) => cancelled.add(handle as number),
+      run: () =>
+        callbacks.splice(0).forEach((callback, index) => {
+          if (!cancelled.has(index)) callback();
+        }),
+    };
+  }
+
+  test('publishes first update immediately and coalesces later partials to one frame', () => {
+    const frames = scheduler();
+    const updates: string[] = [];
+    const publisher = createFolderUpdatePublisher((update) => updates.push(update.items[0].key), {
+      scheduleFrame: frames.schedule,
+      cancelFrame: frames.cancel,
+    });
+    publisher.publish(snapshot('first'));
+    publisher.publish(snapshot('second'));
+    publisher.publish(snapshot('third'));
+
+    expect(updates).toEqual(['first']);
+    frames.run();
+    expect(updates).toEqual(['first', 'third']);
+  });
+
+  test('flushes pending partial before surfacing refresh errors', async () => {
+    const frames = scheduler();
+    const updates: string[] = [];
+    await assert.rejects(
+      loadFolderItems({
+        config: {},
+        prefix: '',
+        scheduleFrame: frames.schedule,
+        cancelFrame: frames.cancel,
+        readCachedFolder: async () => null,
+        readPrefixFolder: async (_config, _prefix, options) => {
+          options.onUpdate(snapshot('first'));
+          options.onUpdate(snapshot('pending'));
+          throw new Error('offline');
+        },
+        onUpdate: (update) => updates.push(update.items[0].key),
+      }),
+      /offline/
+    );
+    expect(updates).toEqual(['first', 'pending']);
+  });
+
+  test('complete final update cancels pending partial and publishes immediately', () => {
+    const frames = scheduler();
+    const updates: string[] = [];
+    const publisher = createFolderUpdatePublisher((update) => updates.push(update.items[0].key), {
+      scheduleFrame: frames.schedule,
+      cancelFrame: frames.cancel,
+    });
+    publisher.publish(snapshot('first'));
+    publisher.publish(snapshot('pending'));
+    publisher.publish(snapshot('final', true));
+    frames.run();
+
+    expect(updates).toEqual(['first', 'final']);
+  });
+
+  test('abort clears scheduled publication from obsolete generation', () => {
+    const frames = scheduler();
+    const controller = new AbortController();
+    const updates: string[] = [];
+    const publisher = createFolderUpdatePublisher((update) => updates.push(update.items[0].key), {
+      signal: controller.signal,
+      scheduleFrame: frames.schedule,
+      cancelFrame: frames.cancel,
+    });
+    publisher.publish(snapshot('first'));
+    publisher.publish(snapshot('pending'));
+    controller.abort();
+    frames.run();
+
+    expect(updates).toEqual(['first']);
+  });
+});
 
 describe('folder stale while revalidate', () => {
   test('publishes valid empty cache before the network resolves and propagates refresh errors', async () => {
@@ -115,6 +212,202 @@ describe('folder stale while revalidate', () => {
     });
     await assert.rejects(pending);
     expect(started).toBe(false);
+  });
+
+  test('fresh complete cache satisfies normal navigation without live refresh', async () => {
+    let started = false;
+    const result = await loadFolderItems({
+      config: {},
+      prefix: '',
+      readCachedFolder: async () => ({ ...emptyCache, freshness: 'fresh' }),
+      readPrefixFolder: async () => {
+        started = true;
+        return emptyCache;
+      },
+      onUpdate: () => {},
+    });
+    expect(result).toEqual({ ...emptyCache, freshness: 'fresh' });
+    expect(started).toBe(false);
+  });
+
+  test('manual refresh bypasses the fresh cache shortcut', async () => {
+    let started = false;
+    const live = { ...emptyCache, fromCache: false, freshness: 'fresh' as const };
+    const result = await loadFolderItems({
+      config: {},
+      prefix: '',
+      forceRefresh: true,
+      readCachedFolder: async () => ({ ...emptyCache, freshness: 'fresh' }),
+      readPrefixFolder: async (_config, _prefix, options) => {
+        started = true;
+        expect(options.forceRefresh).toBe(true);
+        return live;
+      },
+      onUpdate: () => {},
+    });
+    expect(result).toEqual(live);
+    expect(started).toBe(true);
+  });
+
+  test('manual refresh overlays live partial pages onto the current query snapshot', async () => {
+    const fallback: FolderSnapshot = {
+      items: [
+        { key: 'a.txt', name: 'a.txt', isFolder: false, size: 1 },
+        { key: 'z.txt', name: 'z.txt', isFolder: false, size: 9 },
+      ],
+      complete: true,
+      fromCache: true,
+      freshness: 'fresh',
+    };
+    const livePartial: FolderSnapshot = {
+      items: [{ key: 'a.txt', name: 'a.txt', isFolder: false, size: 2 }],
+      complete: false,
+      fromCache: false,
+      freshness: 'partial',
+    };
+    const updates: FolderSnapshot[] = [];
+    await assert.rejects(
+      loadFolderItems({
+        config: {},
+        prefix: '',
+        forceRefresh: true,
+        fallbackSnapshot: fallback,
+        readCachedFolder: async () => {
+          throw new Error('must not read cache');
+        },
+        readPrefixFolder: async (_config, _prefix, options) => {
+          options.onUpdate(livePartial);
+          throw new Error('offline');
+        },
+        onUpdate: (snapshot) => updates.push(snapshot),
+      }),
+      /offline/
+    );
+    expect(updates.map((snapshot) => snapshot.items.length)).toEqual([2]);
+    expect(updates[0].items.map((item) => [item.key, item.size])).toEqual([
+      ['a.txt', 2],
+      ['z.txt', 9],
+    ]);
+  });
+
+  test('warm cache paging overlays partial cache pages onto the current query snapshot', async () => {
+    const fallback: FolderSnapshot = {
+      items: [
+        { key: 'a.txt', name: 'a.txt', isFolder: false, size: 1 },
+        { key: 'z.txt', name: 'z.txt', isFolder: false, size: 9 },
+      ],
+      complete: true,
+      fromCache: true,
+      freshness: 'fresh',
+    };
+    const cachePartial: FolderSnapshot = {
+      items: [{ key: 'a.txt', name: 'a.txt', isFolder: false, size: 2 }],
+      complete: false,
+      fromCache: true,
+      freshness: 'partial',
+    };
+    const cacheComplete: FolderSnapshot = {
+      items: [
+        { key: 'a.txt', name: 'a.txt', isFolder: false, size: 2 },
+        { key: 'z.txt', name: 'z.txt', isFolder: false, size: 9 },
+      ],
+      complete: true,
+      fromCache: true,
+      freshness: 'stale',
+    };
+    const updates: FolderSnapshot[] = [];
+    await assert.rejects(
+      loadFolderItems({
+        config: {},
+        prefix: '',
+        fallbackSnapshot: fallback,
+        readCachedFolder: async (_config, _prefix, options) => {
+          options.onUpdate(cachePartial);
+          return cacheComplete;
+        },
+        readPrefixFolder: async () => {
+          throw new Error('offline');
+        },
+        onUpdate: (snapshot) => updates.push(snapshot),
+      }),
+      /offline/
+    );
+    expect(updates.map((snapshot) => snapshot.items.length)).toEqual([2, 2]);
+    expect(updates[0].items.map((item) => [item.key, item.size])).toEqual([
+      ['a.txt', 2],
+      ['z.txt', 9],
+    ]);
+    expect(updates[1]).toEqual(cacheComplete);
+  });
+
+  test('warm partial refresh overlays verified rows without dropping unseen cached rows', async () => {
+    const cached: FolderSnapshot = {
+      items: [
+        { key: 'a.txt', name: 'a.txt', isFolder: false, size: 1, lastModified: 'old' },
+        { key: 'z.txt', name: 'z.txt', isFolder: false, size: 9, lastModified: 'old' },
+      ],
+      complete: true,
+      fromCache: true,
+      freshness: 'stale',
+    };
+    const livePartial: FolderSnapshot = {
+      items: [{ key: 'a.txt', name: 'a.txt', isFolder: false, size: 2, lastModified: 'new' }],
+      complete: false,
+      fromCache: false,
+      freshness: 'partial',
+    };
+    const updates: FolderSnapshot[] = [];
+    await assert.rejects(
+      loadFolderItems({
+        config: {},
+        prefix: '',
+        readCachedFolder: async () => cached,
+        readPrefixFolder: async (_config, _prefix, options) => {
+          options.onUpdate(livePartial);
+          throw new Error('offline');
+        },
+        onUpdate: (snapshot) => updates.push(snapshot),
+      }),
+      /offline/
+    );
+    expect(updates).toHaveLength(2);
+    expect(updates[1].items.map((item) => [item.key, item.size])).toEqual([
+      ['a.txt', 2],
+      ['z.txt', 9],
+    ]);
+    expect(updates[1].complete).toBe(false);
+    expect(updates[1].freshness).toBe('partial');
+  });
+
+  test('final warm refresh page can remove cached rows after full confirmation', async () => {
+    const cached: FolderSnapshot = {
+      items: [
+        { key: 'a.txt', name: 'a.txt', isFolder: false, size: 1 },
+        { key: 'deleted.txt', name: 'deleted.txt', isFolder: false, size: 2 },
+      ],
+      complete: true,
+      fromCache: true,
+      freshness: 'stale',
+    };
+    const liveComplete: FolderSnapshot = {
+      items: [{ key: 'a.txt', name: 'a.txt', isFolder: false, size: 3 }],
+      complete: true,
+      fromCache: false,
+      freshness: 'fresh',
+    };
+    const updates: FolderSnapshot[] = [];
+    const result = await loadFolderItems({
+      config: {},
+      prefix: '',
+      readCachedFolder: async () => cached,
+      readPrefixFolder: async (_config, _prefix, options) => {
+        options.onUpdate(liveComplete);
+        return liveComplete;
+      },
+      onUpdate: (snapshot) => updates.push(snapshot),
+    });
+    expect(updates[1].items.map((item) => item.key)).toEqual(['a.txt']);
+    expect(result.items.map((item) => item.key)).toEqual(['a.txt']);
   });
 });
 

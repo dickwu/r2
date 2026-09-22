@@ -1,0 +1,124 @@
+name: Windows native behavior
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'src-tauri/**'
+      - 'scripts/run-native-nfs-test.py'
+      - 'scripts/prepare-windows-nfs.ps1'
+      - '.github/workflows/windows-native.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-behavior:
+    # A separate runtime gate from the preview-image compile/prerequisite lane.
+    # No loader failure, reboot request, empty test run or skipped mount passes.
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      # The runner context is not available to job-level env.
+      - name: Place the Cargo target directory in runner temp
+        shell: pwsh
+        run: '"CARGO_TARGET_DIR=$env:RUNNER_TEMP\r2-native-target" | Out-File $env:GITHUB_ENV -Append -Encoding utf8'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Select the Windows 10 SDK for native execution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = '10.0.19041.0'
+          $sdkLib = "${env:ProgramFiles(x86)}\Windows Kits\10\Lib\$sdk"
+          if (-not (Test-Path $sdkLib)) { throw "Required runtime SDK is absent: $sdk" }
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -property installationPath
+          if (-not $vs) { throw 'Visual Studio installation is absent' }
+          $devcmd = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          $command = "`"$devcmd`" -arch=x64 -host_arch=x64 -winsdk=$sdk >nul && set"
+          $configured = & $env:ComSpec /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot initialize the selected SDK/toolchain' }
+          $selected = @{}
+          foreach ($line in $configured) {
+            $pair = $line -split '=', 2
+            if ($pair.Length -eq 2 -and $pair[0] -match '^(PATH|LIB|LIBPATH|INCLUDE|WindowsSdkDir|WindowsSDKVersion|VCToolsInstallDir|VCINSTALLDIR|VSINSTALLDIR)$') {
+              $selected[$pair[0]] = $pair[1]
+              "$($pair[0])=$($pair[1])" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
+          if ($selected.WindowsSDKVersion.TrimEnd('\') -ne $sdk) { throw 'Selected SDK does not match the runtime gate' }
+          "R2_NATIVE_SDK=$sdk" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install native runtime libraries
+        shell: pwsh
+        run: |
+          choco install ffmpeg sqlite -y
+          if ($LASTEXITCODE -ne 0) { throw 'Native runtime dependency installation failed' }
+          'FFMPEG_DIR=C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg' | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          'SQLITE3_LIB_DIR=C:\ProgramData\chocolatey\lib\SQLite\tools' | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          'C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin' | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+          'C:\ProgramData\chocolatey\lib\SQLite\tools' | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Prepare frontend assets
+        run: |
+          bun install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun run build
+
+      - name: Execute Rust tests on Windows
+        id: rust
+        shell: pwsh
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --workspace 2>&1 | Tee-Object -FilePath windows-rust-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare disposable Windows NFS client
+        run: ./scripts/prepare-windows-nfs.ps1
+
+      - name: Execute native mount read write rename unmount
+        id: nfs
+        shell: pwsh
+        run: |
+          for ($iteration = 1; $iteration -le 3; $iteration++) {
+            python scripts/run-native-nfs-test.py 2>&1 | Tee-Object -FilePath "windows-nfs-$iteration.log"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Record exact runtime evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $binaries = @(Get-ChildItem "$env:CARGO_TARGET_DIR\debug\deps\r2_lib-*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
+            @{ path = $_.FullName; sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+          })
+          @{
+            source_commit = (git rev-parse HEAD)
+            source_tree = (git rev-parse 'HEAD^{tree}')
+            runner_image = $env:ImageVersion
+            platform = [System.Environment]::OSVersion.VersionString
+            sdk = $env:R2_NATIVE_SDK
+            mode = 'native_behavior'
+            rust_outcome = '${{ steps.rust.outcome }}'
+            nfs_outcome = '${{ steps.nfs.outcome }}'
+            binaries = $binaries
+          } | ConvertTo-Json -Depth 5 | Out-File windows-native-evidence.json -Encoding utf8
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: windows-native-evidence
+          path: |
+            windows-native-evidence.json
+            windows-rust-tests.log
+            windows-nfs-*.log
+          if-no-files-found: error

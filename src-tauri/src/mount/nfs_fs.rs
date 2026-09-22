@@ -27,7 +27,12 @@ use aws_sdk_s3::primitives::{ByteStream, Length};
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, MetadataDirective};
 use aws_sdk_s3::Client;
 
-use crate::providers::s3_client::describe_s3_error;
+use crate::providers::operation::{
+    execute as execute_storage_operation, AttemptError, OperationContext, OperationError,
+    OperationKind, OperationMetrics,
+};
+use crate::providers::resources::{ByteLease, ResourceKind};
+use crate::providers::s3_client::{describe_s3_error, StorageErrorClass};
 use futures_util::{stream, StreamExt};
 use nfsserve::nfs::{
     fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfstime3, sattr3, set_atime, set_mtime,
@@ -42,11 +47,13 @@ use tokio::task::JoinHandle;
 use super::progress::{MountProgress, TransferKind, TransferTracker};
 use super::read_cache::{self, ReadCache};
 use super::stage::{self, FlushState, Stage, StageInit, UploadSnapshot};
+use fence::{FenceGuard, FencePath, NamespaceFences};
 
 /// Reserved root id. `0` is reserved by the protocol and must never be used.
 const ROOT_ID: fileid3 = 1;
 /// How long a directory listing is served before it is re-fetched from S3.
 const DIR_CACHE_TTL: Duration = Duration::from_secs(30);
+const NEGATIVE_LOOKUP_TTL: Duration = Duration::from_secs(2);
 const LIST_PAGE_SIZE: i32 = 1000;
 /// Staged-size growth that earns a queued transfer another progress event.
 /// A 1 GiB copy reports ~128 times over its whole staging phase — enough for
@@ -397,6 +404,19 @@ struct DirChild {
 
 use directory_listing::{DirListing, DirectoryCookie};
 
+#[derive(Debug, Clone)]
+struct NegativeLookup {
+    generation: u64,
+    stored_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct PositiveLookup {
+    generation: u64,
+    fileid: fileid3,
+    stored_at: Instant,
+}
+
 // ============ Flush events ============
 
 /// Payload of `mount-flush-error`: one staged file could not be uploaded.
@@ -494,6 +514,10 @@ pub struct FsHealthSnapshot {
     pub oldest_dirty_ms: u64,
     pub last_error: Option<String>,
     pub last_successful_io: Option<i64>,
+    pub resources: crate::providers::resources::ResourceSnapshot,
+    pub operations: OperationMetrics,
+    pub commit: super::stage_commit::CommitMetrics,
+    pub fences: fence::FenceMetrics,
 }
 
 #[derive(Default, Clone)]
@@ -502,9 +526,24 @@ struct IoHealth {
     last_error: Option<String>,
 }
 
+type AsyncGate = AsyncMutex<()>;
+type LookupKey = (fileid3, String);
+type DirectoryFlights = HashMap<fileid3, Weak<AsyncGate>>;
+type LookupFlights = HashMap<LookupKey, Weak<AsyncGate>>;
+
+#[derive(Default, Clone)]
+struct StageHealthStats {
+    dirty: bool,
+    size: u64,
+    first_dirty_at: Option<i64>,
+    last_error: Option<String>,
+}
+
 // ============ Filesystem ============
 #[path = "directory_listing.rs"]
 mod directory_listing;
+#[path = "fence.rs"]
+mod fence;
 #[path = "namespace_recovery.rs"]
 mod namespace_recovery;
 #[cfg(test)]
@@ -529,6 +568,7 @@ pub struct S3NfsFs {
 pub struct FsInner {
     client: Client,
     bucket: String,
+    endpoint: String,
     read_only: bool,
     /// Directory holding this mount's staging files.
     staging_root: PathBuf,
@@ -548,7 +588,11 @@ pub struct FsInner {
     shutdown: AtomicBool,
     directory_generation: AtomicU64,
     directory_cookies: RwLock<HashMap<(fileid3, fileid3), DirectoryCookie>>,
-    directory_flights: AsyncMutex<HashMap<fileid3, Weak<AsyncMutex<()>>>>,
+    directory_flights: AsyncMutex<DirectoryFlights>,
+    lookup_flights: AsyncMutex<LookupFlights>,
+    negative_lookups: RwLock<HashMap<(fileid3, String), NegativeLookup>>,
+    positive_lookups: RwLock<HashMap<(fileid3, String), PositiveLookup>>,
+    namespace_fences: Arc<NamespaceFences>,
     read_identities: AsyncMutex<HashMap<fileid3, ReadIdentity>>,
     /// Chunked cache behind the read path; see [`super::read_cache`].
     read_cache: ReadCache,
@@ -564,12 +608,25 @@ pub struct FsInner {
     quota: AsyncMutex<super::quota::StageQuota>,
     pending_renames: RwLock<HashMap<PathBuf, (String, String)>>,
     io_health: std::sync::Mutex<IoHealth>,
+    stage_health: std::sync::Mutex<HashMap<fileid3, StageHealthStats>>,
     quarantined: RwLock<Vec<stage::StageRecovery>>,
     recovery_errors: std::sync::Mutex<Vec<String>>,
 }
 
 impl S3NfsFs {
+    #[cfg(test)]
     pub fn new(client: Client, bucket: String, read_only: bool, staging_root: PathBuf) -> Self {
+        let endpoint = format!("mount-test:{bucket}");
+        Self::new_with_endpoint(client, bucket, endpoint, read_only, staging_root)
+    }
+
+    pub fn new_with_endpoint(
+        client: Client,
+        bucket: String,
+        endpoint: String,
+        read_only: bool,
+        staging_root: PathBuf,
+    ) -> Self {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         bucket.hash(&mut hasher);
         let fsid = hasher.finish();
@@ -578,6 +635,7 @@ impl S3NfsFs {
             inner: Arc::new(FsInner {
                 client,
                 bucket,
+                endpoint,
                 read_only,
                 staging_root,
                 inodes: RwLock::new(InodeTable::new()),
@@ -591,6 +649,10 @@ impl S3NfsFs {
                 directory_generation: AtomicU64::new(1),
                 directory_cookies: RwLock::new(HashMap::new()),
                 directory_flights: AsyncMutex::new(HashMap::new()),
+                lookup_flights: AsyncMutex::new(HashMap::new()),
+                negative_lookups: RwLock::new(HashMap::new()),
+                positive_lookups: RwLock::new(HashMap::new()),
+                namespace_fences: Arc::new(NamespaceFences::default()),
                 read_identities: AsyncMutex::new(HashMap::new()),
                 read_cache: ReadCache::new(),
                 prefetch_slots: Arc::new(Semaphore::new(read_cache::PREFETCH_CONCURRENCY)),
@@ -602,6 +664,7 @@ impl S3NfsFs {
                 quota: AsyncMutex::new(super::quota::StageQuota::default()),
                 pending_renames: RwLock::new(HashMap::new()),
                 io_health: std::sync::Mutex::new(IoHealth::default()),
+                stage_health: std::sync::Mutex::new(HashMap::new()),
                 quarantined: RwLock::new(Vec::new()),
                 recovery_errors: std::sync::Mutex::new(Vec::new()),
             }),
@@ -674,6 +737,73 @@ impl S3NfsFs {
         lock
     }
 
+    async fn fence_exact_key(&self, key: &str) -> FenceGuard {
+        self.inner
+            .namespace_fences
+            .acquire(vec![FencePath::exact(key)])
+            .await
+    }
+
+    async fn fence_exact_key_shared(&self, key: &str) -> FenceGuard {
+        self.inner
+            .namespace_fences
+            .acquire_shared(vec![FencePath::exact(key)])
+            .await
+    }
+
+    async fn fence_paths(&self, paths: Vec<FencePath>) -> FenceGuard {
+        self.inner.namespace_fences.acquire(paths).await
+    }
+
+    async fn fence_paths_shared(&self, paths: Vec<FencePath>) -> FenceGuard {
+        self.inner.namespace_fences.acquire_shared(paths).await
+    }
+
+    fn fence_path_for_inode(inode: &Inode) -> FencePath {
+        match inode.kind {
+            EntryKind::Dir => FencePath::prefix(normalize_dir_key(&inode.key)),
+            EntryKind::File => FencePath::exact(inode.key.clone()),
+        }
+    }
+
+    fn storage_endpoint(&self) -> &str {
+        &self.inner.endpoint
+    }
+
+    fn storage_scope(&self, scope: &str) -> String {
+        if scope.is_empty() {
+            self.inner.bucket.clone()
+        } else {
+            format!("{}:{scope}", self.inner.bucket)
+        }
+    }
+
+    fn map_operation_error(&self, label: &str, error: OperationError) -> nfsstat3 {
+        self.io_failed(format!("{label}: {error}"));
+        match error.class() {
+            StorageErrorClass::NeedsAuth => nfsstat3::NFS3ERR_ACCES,
+            StorageErrorClass::NotFound => nfsstat3::NFS3ERR_NOENT,
+            _ => nfsstat3::NFS3ERR_IO,
+        }
+    }
+
+    fn read_operation_context<'a>(
+        &'a self,
+        kind: OperationKind,
+        scope: &'a str,
+        identity: &'a str,
+        budget: Duration,
+    ) -> OperationContext<'a> {
+        OperationContext::new(
+            kind,
+            self.storage_endpoint(),
+            scope,
+            identity,
+            tokio::time::Instant::now() + budget,
+            &self.inner.shutdown,
+        )
+    }
+
     pub fn stop_accepting_writes(&self) {
         self.inner.accepting_writes.store(false, Ordering::SeqCst);
         self.inner.shutdown.store(true, Ordering::SeqCst);
@@ -681,6 +811,12 @@ impl S3NfsFs {
 
     pub async fn wait_for_mutations(&self) {
         drop(self.inner.namespace.write().await);
+        drop(
+            self.inner
+                .namespace_fences
+                .acquire(vec![FencePath::prefix("")])
+                .await,
+        );
     }
 
     pub async fn pending_upload_count(&self) -> usize {
@@ -705,6 +841,57 @@ impl S3NfsFs {
                 .unwrap_or(1)
     }
 
+    fn record_stage_health(&self, id: fileid3, stage: &Stage) {
+        let mut health = self
+            .inner
+            .stage_health
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if stage.evicted {
+            health.remove(&id);
+            return;
+        }
+        health.insert(
+            id,
+            StageHealthStats {
+                dirty: stage.dirty,
+                size: stage.size,
+                first_dirty_at: stage.first_dirty_at,
+                last_error: stage.last_error.clone(),
+            },
+        );
+    }
+
+    fn record_pending_stage_health(
+        &self,
+        id: fileid3,
+        size: u64,
+        first_dirty_at: i64,
+        last_error: Option<String>,
+    ) {
+        self.inner
+            .stage_health
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(
+                id,
+                StageHealthStats {
+                    dirty: true,
+                    size,
+                    first_dirty_at: Some(first_dirty_at),
+                    last_error,
+                },
+            );
+    }
+
+    fn remove_stage_health(&self, id: fileid3) {
+        self.inner
+            .stage_health
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&id);
+    }
+
     pub async fn health_snapshot(&self) -> FsHealthSnapshot {
         let io = self
             .inner
@@ -712,13 +899,17 @@ impl S3NfsFs {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        let handles: Vec<_> = self.inner.stages.lock().await.values().cloned().collect();
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let mut health = FsHealthSnapshot {
             pending_uploads: 0,
             dirty_bytes: 0,
             oldest_dirty_ms: 0,
             last_error: io.last_error,
             last_successful_io: io.last_successful_io,
+            resources: crate::providers::resources::snapshot(),
+            operations: crate::providers::operation::metrics(),
+            commit: super::stage_commit::metrics(),
+            fences: self.inner.namespace_fences.metrics(),
         };
         if let Ok(records) = self.inner.quarantined.read() {
             health.pending_uploads += records.len();
@@ -726,16 +917,22 @@ impl S3NfsFs {
                 health.last_error = record.error.clone();
             }
         }
-        for handle in handles {
-            let stage = handle.lock().await;
-            if stage.dirty && !stage.evicted {
+        let stage_health = self
+            .inner
+            .stage_health
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        for stage in stage_health.values() {
+            if stage.dirty {
                 health.pending_uploads += 1;
                 health.dirty_bytes = health.dirty_bytes.saturating_add(stage.size);
-                health.oldest_dirty_ms = health
-                    .oldest_dirty_ms
-                    .max(stage.last_write.elapsed().as_millis().min(u64::MAX as u128) as u64);
-                if stage.last_error.is_some() {
-                    health.last_error = stage.last_error.clone();
+                if let Some(first_dirty_at) = stage.first_dirty_at {
+                    let age = now_ms.saturating_sub(first_dirty_at).max(0) as u64;
+                    health.oldest_dirty_ms = health.oldest_dirty_ms.max(age);
+                }
+                if let Some(error) = &stage.last_error {
+                    health.last_error = Some(error.clone());
                 }
             }
         }
@@ -853,13 +1050,9 @@ impl S3NfsFs {
                     stage.mtime_secs,
                 )
                 .map_err(|e| format!("{:?}", e))?;
-            self.inner.quota.lock().await.restore(
-                id,
-                stage
-                    .size
-                    .max(stage.snapshot.as_ref().map(|s| s.size).unwrap_or(0))
-                    .saturating_mul(2),
-            );
+            let reservation = stage.reservation_bytes().await;
+            self.inner.quota.lock().await.restore(id, reservation);
+            self.record_stage_health(id, &stage);
             self.inner
                 .stages
                 .lock()
@@ -875,6 +1068,38 @@ impl S3NfsFs {
         root: &Path,
     ) -> Result<Vec<stage::StageRecovery>, String> {
         namespace_recovery::pending_operations(root).await
+    }
+
+    fn pending_rename_overlaps(a: &str, b: &str) -> bool {
+        a == b || (a.ends_with('/') && b.starts_with(a)) || (b.ends_with('/') && a.starts_with(b))
+    }
+
+    fn ensure_rename_not_blocked(
+        &self,
+        from: &str,
+        to: &str,
+        own_journal: &Path,
+    ) -> Result<(), nfsstat3> {
+        let renames = self
+            .inner
+            .pending_renames
+            .read()
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+        for (path, (pending_from, pending_to)) in renames.iter() {
+            if path == own_journal {
+                continue;
+            }
+            if [pending_from.as_str(), pending_to.as_str()]
+                .iter()
+                .any(|pending| {
+                    Self::pending_rename_overlaps(from, pending)
+                        || Self::pending_rename_overlaps(to, pending)
+                })
+            {
+                return Err(nfsstat3::NFS3ERR_IO);
+            }
+        }
+        Ok(())
     }
 
     fn ensure_rename_available(&self, key: &str) -> Result<(), nfsstat3> {
@@ -897,10 +1122,9 @@ impl S3NfsFs {
             .read()
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
         if renames.values().any(|(from, to)| {
-            [from, to].iter().any(|prefix| {
-                key == prefix.as_str()
-                    || (prefix.ends_with('/') && key.starts_with(prefix.as_str()))
-            })
+            [from, to]
+                .iter()
+                .any(|prefix| Self::pending_rename_overlaps(key, prefix.as_str()))
         }) {
             return Err(nfsstat3::NFS3ERR_IO);
         }
@@ -981,11 +1205,20 @@ impl S3NfsFs {
     }
 
     fn invalidate_dir(&self, dirid: fileid3) {
+        self.inner
+            .directory_generation
+            .fetch_add(1, Ordering::SeqCst);
         if let Ok(mut dirs) = self.inner.dirs.write() {
             dirs.remove(&dirid);
             if let Ok(mut cookies) = self.inner.directory_cookies.write() {
                 cookies.retain(|(directory, _), _| *directory != dirid);
             }
+        }
+        if let Ok(mut cache) = self.inner.negative_lookups.write() {
+            cache.retain(|(directory, _), _| *directory != dirid);
+        }
+        if let Ok(mut cache) = self.inner.positive_lookups.write() {
+            cache.retain(|(directory, _), _| *directory != dirid);
         }
     }
 
@@ -1097,38 +1330,199 @@ impl S3NfsFs {
         }
     }
 
-    /// Resolves a name the cached listing does not contain by asking S3
-    /// directly, which covers objects written after the listing was taken.
-    async fn lookup_uncached(
+    fn negative_lookup_hit(&self, dirid: fileid3, name: &str, generation: u64) -> bool {
+        self.inner
+            .negative_lookups
+            .read()
+            .map(|cache| {
+                cache.get(&(dirid, name.to_string())).is_some_and(|entry| {
+                    entry.generation == generation
+                        && entry.stored_at.elapsed() < NEGATIVE_LOOKUP_TTL
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn remember_negative_lookup(&self, dirid: fileid3, name: &str, generation: u64) {
+        if let Ok(mut cache) = self.inner.negative_lookups.write() {
+            cache.retain(|_, entry| entry.stored_at.elapsed() < NEGATIVE_LOOKUP_TTL);
+            cache.insert(
+                (dirid, name.to_string()),
+                NegativeLookup {
+                    generation,
+                    stored_at: Instant::now(),
+                },
+            );
+        }
+    }
+
+    fn positive_lookup_hit(&self, dirid: fileid3, name: &str, generation: u64) -> Option<fileid3> {
+        self.inner.positive_lookups.read().ok().and_then(|cache| {
+            cache.get(&(dirid, name.to_string())).and_then(|entry| {
+                (entry.generation == generation && entry.stored_at.elapsed() < DIR_CACHE_TTL)
+                    .then_some(entry.fileid)
+            })
+        })
+    }
+
+    fn remember_positive_lookup(
+        &self,
+        dirid: fileid3,
+        name: &str,
+        generation: u64,
+        fileid: fileid3,
+    ) {
+        if let Ok(mut cache) = self.inner.positive_lookups.write() {
+            cache.retain(|_, entry| entry.stored_at.elapsed() < DIR_CACHE_TTL);
+            cache.insert(
+                (dirid, name.to_string()),
+                PositiveLookup {
+                    generation,
+                    fileid,
+                    stored_at: Instant::now(),
+                },
+            );
+        }
+    }
+
+    fn inode_matches_child(
         &self,
         dirid: fileid3,
         dir_key: &str,
         name: &str,
-    ) -> Result<fileid3, nfsstat3> {
-        let key = child_key(dir_key, name, false);
-        let head = self
+        inode: &Inode,
+    ) -> bool {
+        inode.parent == dirid
+            && inode.key == child_key(dir_key, name, matches!(inode.kind, EntryKind::Dir))
+    }
+
+    async fn lookup_flight(&self, dirid: fileid3, name: &str) -> Arc<AsyncMutex<()>> {
+        let mut flights = self.inner.lookup_flights.lock().await;
+        flights.retain(|_, value| value.strong_count() != 0);
+        let key = (dirid, name.to_string());
+        let flight = flights
+            .get(&key)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| Arc::new(AsyncMutex::new(())));
+        flights.insert(key, Arc::downgrade(&flight));
+        flight
+    }
+
+    async fn directory_child_exists(&self, dir_key: &str, name: &str) -> Result<bool, nfsstat3> {
+        let prefix = child_key(dir_key, name, true);
+        let request = self
             .inner
             .client
-            .head_object()
+            .list_objects_v2()
             .bucket(&self.inner.bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(|e| map_s3_error(&e))?;
+            .prefix(&prefix)
+            .delimiter("/")
+            .max_keys(1);
+        let scope = self.storage_scope(&prefix);
+        let context =
+            self.read_operation_context(OperationKind::List, &scope, "", Duration::from_secs(30));
+        let response = execute_storage_operation(&context, || {
+            let request = request.clone();
+            async move {
+                request
+                    .send()
+                    .await
+                    .map_err(|error| AttemptError::from_sdk(&error))
+            }
+        })
+        .await
+        .map_err(|error| self.map_operation_error("List", error))?;
+        self.io_succeeded();
+        Ok(response.common_prefixes().iter().any(|common| {
+            common
+                .prefix()
+                .is_some_and(|value| value.starts_with(&prefix))
+        }) || response
+            .contents()
+            .iter()
+            .any(|object| object.key().is_some_and(|key| key.starts_with(&prefix))))
+    }
 
-        let size = head.content_length().unwrap_or(0).max(0) as u64;
-        let mtime = head
-            .last_modified()
-            .map(|time| time.secs())
-            .unwrap_or_default();
-        let mtime = u32::try_from(mtime.max(0)).unwrap_or(u32::MAX);
+    async fn lookup_exact_child(
+        &self,
+        dirid: fileid3,
+        dir_key: &str,
+        name: &str,
+        generation: u64,
+        fence: bool,
+        flight: bool,
+    ) -> Result<Option<(fileid3, Inode)>, nfsstat3> {
+        let _flight = if flight {
+            let flight = self.lookup_flight(dirid, name).await;
+            Some(flight.lock_owned().await)
+        } else {
+            None
+        };
+        let _fence = if fence {
+            Some(
+                self.fence_paths_shared(vec![
+                    FencePath::exact(child_key(dir_key, name, false)),
+                    FencePath::prefix(child_key(dir_key, name, true)),
+                ])
+                .await,
+            )
+        } else {
+            None
+        };
 
-        let mut inodes = self
-            .inner
-            .inodes
-            .write()
-            .map_err(|_| nfsstat3::NFS3ERR_SERVERFAULT)?;
-        Ok(inodes.intern(&key, dirid, EntryKind::File, size, mtime))
+        if let Some((child, complete, current_generation)) =
+            self.cached_directory_child(dirid, dir_key, name)?
+        {
+            if let Some(child) = child {
+                let inode = self.inode(child.fileid)?;
+                if self.inode_matches_child(dirid, dir_key, name, &inode)
+                    && (inode.kind == EntryKind::Dir
+                        || complete
+                        || self
+                            .positive_lookup_hit(dirid, name, current_generation)
+                            .is_some_and(|id| id == child.fileid))
+                {
+                    return Ok(Some((child.fileid, inode)));
+                }
+            }
+            if complete {
+                return Ok(None);
+            }
+            if current_generation == generation && self.negative_lookup_hit(dirid, name, generation)
+            {
+                return Ok(None);
+            }
+        }
+
+        if let Some(fileid) = self.positive_lookup_hit(dirid, name, generation) {
+            let inode = self.inode(fileid)?;
+            if self.inode_matches_child(dirid, dir_key, name, &inode) {
+                return Ok(Some((fileid, inode)));
+            }
+        }
+        if self.negative_lookup_hit(dirid, name, generation) {
+            return Ok(None);
+        }
+
+        if self.directory_child_exists(dir_key, name).await? {
+            let key = child_key(dir_key, name, true);
+            let id = self.intern_child(&key, dirid, EntryKind::Dir, DIR_SIZE, 0)?;
+            self.remember_positive_lookup(dirid, name, generation, id);
+            return Ok(Some((id, self.inode(id)?)));
+        }
+
+        let key = child_key(dir_key, name, false);
+        match self.head_object(&key).await? {
+            Some((size, mtime)) => {
+                let id = self.intern_child(&key, dirid, EntryKind::File, size, mtime)?;
+                self.remember_positive_lookup(dirid, name, generation, id);
+                Ok(Some((id, self.inode(id)?)))
+            }
+            None => {
+                self.remember_negative_lookup(dirid, name, generation);
+                Ok(None)
+            }
+        }
     }
 
     /// The child of `dirid` named `name`, resolved through the cached listing so
@@ -1139,11 +1533,86 @@ impl S3NfsFs {
         dir_key: &str,
         name: &str,
     ) -> Result<Option<(fileid3, Inode)>, nfsstat3> {
-        let children = self.children_of(dirid, dir_key).await?;
-        let Some(child) = children.iter().find(|child| child.name == name) else {
-            return Ok(None);
-        };
-        Ok(Some((child.fileid, self.inode(child.fileid)?)))
+        if let Some((child, complete, generation)) =
+            self.cached_directory_child(dirid, dir_key, name)?
+        {
+            if let Some(child) = child {
+                let inode = self.inode(child.fileid)?;
+                if self.inode_matches_child(dirid, dir_key, name, &inode)
+                    && (inode.kind == EntryKind::Dir
+                        || complete
+                        || self
+                            .positive_lookup_hit(dirid, name, generation)
+                            .is_some_and(|id| id == child.fileid))
+                {
+                    return Ok(Some((child.fileid, inode)));
+                }
+                return self
+                    .lookup_exact_child(dirid, dir_key, name, generation, true, true)
+                    .await;
+            }
+            if complete {
+                return Ok(None);
+            }
+            let children = self.children_of(dirid, dir_key).await?;
+            return children
+                .binary_search_by(|child| child.name.as_str().cmp(name))
+                .ok()
+                .and_then(|index| children.get(index).cloned())
+                .map(|child| {
+                    let inode = self.inode(child.fileid)?;
+                    Ok((child.fileid, inode))
+                })
+                .transpose();
+        }
+
+        let generation = self.inner.directory_generation.load(Ordering::SeqCst);
+        self.lookup_exact_child(dirid, dir_key, name, generation, true, true)
+            .await
+    }
+
+    async fn lookup_child_fenced(
+        &self,
+        dirid: fileid3,
+        dir_key: &str,
+        name: &str,
+    ) -> Result<Option<(fileid3, Inode)>, nfsstat3> {
+        if let Some((child, complete, generation)) =
+            self.cached_directory_child(dirid, dir_key, name)?
+        {
+            if let Some(child) = child {
+                let inode = self.inode(child.fileid)?;
+                if self.inode_matches_child(dirid, dir_key, name, &inode)
+                    && (inode.kind == EntryKind::Dir
+                        || complete
+                        || self
+                            .positive_lookup_hit(dirid, name, generation)
+                            .is_some_and(|id| id == child.fileid))
+                {
+                    return Ok(Some((child.fileid, inode)));
+                }
+                return self
+                    .lookup_exact_child(dirid, dir_key, name, generation, false, false)
+                    .await;
+            }
+            if complete {
+                return Ok(None);
+            }
+            let children = self.children_of(dirid, dir_key).await?;
+            return children
+                .binary_search_by(|child| child.name.as_str().cmp(name))
+                .ok()
+                .and_then(|index| children.get(index).cloned())
+                .map(|child| {
+                    let inode = self.inode(child.fileid)?;
+                    Ok((child.fileid, inode))
+                })
+                .transpose();
+        }
+
+        let generation = self.inner.directory_generation.load(Ordering::SeqCst);
+        self.lookup_exact_child(dirid, dir_key, name, generation, false, false)
+            .await
     }
 
     async fn resolve_child(
@@ -1157,22 +1626,42 @@ impl S3NfsFs {
             .ok_or(nfsstat3::NFS3ERR_NOENT)
     }
 
+    async fn resolve_child_fenced(
+        &self,
+        dirid: fileid3,
+        dir_key: &str,
+        name: &str,
+    ) -> Result<(fileid3, Inode), nfsstat3> {
+        self.lookup_child_fenced(dirid, dir_key, name)
+            .await?
+            .ok_or(nfsstat3::NFS3ERR_NOENT)
+    }
+
     /// Size and modification time of an object, or `None` when it is not there.
     async fn head_object(&self, key: &str) -> Result<Option<(u64, u32)>, nfsstat3> {
-        let head = self
+        let request = self
             .inner
             .client
             .head_object()
             .bucket(&self.inner.bucket)
-            .key(key)
-            .send()
-            .await;
-        let head = match head {
-            Ok(head) => head,
-            Err(error) if matches!(map_s3_error(&error), nfsstat3::NFS3ERR_NOENT) => {
-                return Ok(None)
+            .key(key);
+        let scope = self.storage_scope(key);
+        let context =
+            self.read_operation_context(OperationKind::Head, &scope, "", Duration::from_secs(30));
+        let head = match execute_storage_operation(&context, || {
+            let request = request.clone();
+            async move {
+                request
+                    .send()
+                    .await
+                    .map_err(|error| AttemptError::from_sdk(&error))
             }
-            Err(error) => return Err(map_s3_error(&error)),
+        })
+        .await
+        {
+            Ok(head) => head,
+            Err(error) if matches!(error.class(), StorageErrorClass::NotFound) => return Ok(None),
+            Err(error) => return Err(self.map_operation_error("HEAD", error)),
         };
 
         let size = head.content_length().unwrap_or(0).max(0) as u64;
@@ -1274,7 +1763,7 @@ impl S3NfsFs {
         key: &str,
         index: u64,
         identity: &ReadIdentity,
-    ) -> Result<Arc<Vec<u8>>, nfsstat3> {
+    ) -> Result<Arc<read_cache::CachedBytes>, nfsstat3> {
         let object_size = identity.size;
         let cache_version = format!(
             "{}:{}",
@@ -1292,45 +1781,76 @@ impl S3NfsFs {
                 let len = read_cache::chunk_len(index, object_size);
                 let range = format!("bytes={}-{}", start, start + len.max(1) - 1);
 
-                let response = self
-                    .inner
-                    .client
-                    .get_object()
-                    .bucket(&self.inner.bucket)
-                    .key(key)
-                    .range(&range)
-                    .if_match(&identity.etag)
-                    .set_version_id(identity.version_id.clone())
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        log::error!("mount: failed to read \"{}\": {}", key, e);
-                        self.io_failed(format!("Read: {}", describe_s3_error(&e)));
-                        map_s3_error(&e)
-                    })?;
-
                 let expected_range = format!("bytes {}-{}/{}", start, start + len - 1, object_size);
-                if response.content_range() != Some(expected_range.as_str())
-                    || response.content_length() != Some(len as i64)
-                    || response.e_tag() != Some(identity.etag.as_str())
-                {
-                    return Err(nfsstat3::NFS3ERR_IO);
-                }
-                let bytes = tokio::time::timeout(Duration::from_secs(30), response.body.collect())
-                    .await
-                    .map_err(|_| nfsstat3::NFS3ERR_IO)?
-                    .map_err(|e| {
-                        log::error!("mount: failed to buffer \"{}\": {}", key, e);
-                        nfsstat3::NFS3ERR_IO
-                    })?
-                    .into_bytes()
-                    .to_vec();
+                let scope = self.storage_scope(key);
+                let frozen_identity = format!("{cache_version}:{range}");
+                let context = self.read_operation_context(
+                    OperationKind::Get,
+                    &scope,
+                    &frozen_identity,
+                    Duration::from_secs(90),
+                );
+                let (bytes, body_lease) = execute_storage_operation(&context, || {
+                    let request = self
+                        .inner
+                        .client
+                        .get_object()
+                        .bucket(&self.inner.bucket)
+                        .key(key)
+                        .range(&range)
+                        .if_match(&identity.etag)
+                        .set_version_id(identity.version_id.clone());
+                    let expected_range = expected_range.clone();
+                    async move {
+                        let response = request
+                            .send()
+                            .await
+                            .map_err(|error| AttemptError::from_sdk(&error))?;
 
-                if bytes.len() as u64 != len {
-                    return Err(nfsstat3::NFS3ERR_IO);
-                }
+                        if response.content_range() != Some(expected_range.as_str())
+                            || response.content_length() != Some(len as i64)
+                            || response.e_tag() != Some(identity.etag.as_str())
+                        {
+                            return Err(AttemptError::permanent(
+                                "GET returned headers outside the frozen read identity",
+                            ));
+                        }
+
+                        let body_lease = ByteLease::new(ResourceKind::ResponseBody, len);
+                        let body = tokio::time::timeout(Duration::from_secs(30), async move {
+                            let capacity = usize::try_from(len)
+                                .map_err(|_| AttemptError::permanent("GET body is too large"))?;
+                            let mut stream = response.body;
+                            let mut body = Vec::with_capacity(capacity);
+                            while let Some(chunk) = stream.next().await {
+                                let chunk = chunk.map_err(|error| {
+                                    log::error!("mount: failed to buffer \"{}\": {}", key, error);
+                                    AttemptError::transient("GET body read failed")
+                                })?;
+                                if body.len().saturating_add(chunk.len()) > capacity {
+                                    return Err(AttemptError::permanent(
+                                        "GET body exceeded Content-Length",
+                                    ));
+                                }
+                                body.extend_from_slice(&chunk);
+                            }
+                            Ok::<_, AttemptError>(body)
+                        })
+                        .await
+                        .map_err(|_| AttemptError::transient("GET body read timed out"))??;
+                        if body.len() as u64 != len {
+                            return Err(AttemptError::transient(
+                                "GET body length did not match Content-Length",
+                            ));
+                        }
+                        Ok((body, body_lease))
+                    }
+                })
+                .await
+                .map_err(|error| self.map_operation_error("Read", error))?;
                 self.io_succeeded();
-                let bytes = Arc::new(bytes);
+                let bytes = Arc::new(read_cache::CachedBytes::new(bytes));
+                drop(body_lease);
                 self.inner.read_cache.note_filled_version(
                     id,
                     &cache_version,
@@ -1388,6 +1908,7 @@ impl S3NfsFs {
             let identity = identity.clone();
             tokio::spawn(async move {
                 let _permit = permit;
+                let _fence = fs.fence_exact_key_shared(&key).await;
                 let _ = fs.chunk_bytes(id, &key, index, &identity).await;
             });
         }
@@ -1441,14 +1962,9 @@ impl S3NfsFs {
             return self.copy_large_object(object, token).await;
         }
         let head = self
-            .inner
-            .client
-            .head_object()
-            .bucket(&self.inner.bucket)
-            .key(&object.from)
-            .send()
-            .await
-            .map_err(|e| map_s3_error(&e))?;
+            .object_head(&object.from)
+            .await?
+            .ok_or(nfsstat3::NFS3ERR_NOENT)?;
         if head.e_tag() != Some(object.source_etag.as_str())
             || head.content_length() != Some(object.size as i64)
         {
@@ -1584,29 +2100,14 @@ impl S3NfsFs {
                 let mut objects = Vec::with_capacity(pairs.len());
                 for (from, to) in pairs {
                     let head = self
-                        .inner
-                        .client
-                        .head_object()
-                        .bucket(&self.inner.bucket)
-                        .key(&from)
-                        .send()
-                        .await
-                        .map_err(|e| map_s3_error(&e))?;
-                    let replaced_etag = match self
-                        .inner
-                        .client
-                        .head_object()
-                        .bucket(&self.inner.bucket)
-                        .key(&to)
-                        .send()
-                        .await
-                    {
-                        Ok(head) => Some(head.e_tag().ok_or(nfsstat3::NFS3ERR_IO)?.to_string()),
-                        Err(error) if matches!(map_s3_error(&error), nfsstat3::NFS3ERR_NOENT) => {
-                            None
-                        }
-                        Err(error) => return Err(map_s3_error(&error)),
-                    };
+                        .object_head(&from)
+                        .await?
+                        .ok_or(nfsstat3::NFS3ERR_NOENT)?;
+                    let replaced_etag = self
+                        .object_head(&to)
+                        .await?
+                        .map(|head| head.e_tag().ok_or(nfsstat3::NFS3ERR_IO).map(str::to_string))
+                        .transpose()?;
                     objects.push(RenameObject {
                         from,
                         to,
@@ -1655,16 +2156,8 @@ impl S3NfsFs {
             if object.phase != "copying" {
                 continue;
             }
-            match self
-                .inner
-                .client
-                .head_object()
-                .bucket(&self.inner.bucket)
-                .key(&object.to)
-                .send()
-                .await
-            {
-                Ok(head)
+            match self.object_head(&object.to).await {
+                Ok(Some(head))
                     if head.metadata().and_then(|m| m.get("r2-rename-operation"))
                         == Some(&journal.token)
                         && head.content_length() == Some(object.size as i64) =>
@@ -1690,33 +2183,41 @@ impl S3NfsFs {
                             .map(str::to_string),
                     };
                     use crate::move_transfer::planner::{verify_object_content, ObjectRead};
+                    let paused = AtomicBool::new(false);
                     verify_object_content(
                         ObjectRead {
                             client: &self.inner.client,
                             bucket: &self.inner.bucket,
                             key: &object.from,
                             identity: &source,
+                            endpoint: self.storage_endpoint().to_string(),
+                            scope: self.storage_scope(&object.from),
                         },
                         ObjectRead {
                             client: &self.inner.client,
                             bucket: &self.inner.bucket,
                             key: &object.to,
                             identity: &destination,
+                            endpoint: self.storage_endpoint().to_string(),
+                            scope: self.storage_scope(&object.to),
                         },
+                        &self.inner.shutdown,
+                        &paused,
                     )
                     .await
                     .map_err(|_| nfsstat3::NFS3ERR_IO)?;
                     object.phase = "copied".into();
                 }
-                Ok(head)
+                Ok(Some(head))
                     if object.replaced_etag.is_some()
                         && head.e_tag() == object.replaced_etag.as_deref() =>
                 {
                     object.phase = "pending".into();
                 }
-                Err(error) if matches!(map_s3_error(&error), nfsstat3::NFS3ERR_NOENT) => {
+                Ok(None) => {
                     object.phase = "pending".into();
                 }
+                Err(error) => return Err(error),
                 _ => return Err(nfsstat3::NFS3ERR_IO),
             }
         }
@@ -1772,14 +2273,9 @@ impl S3NfsFs {
                 continue;
             }
             let dest = self
-                .inner
-                .client
-                .head_object()
-                .bucket(&self.inner.bucket)
-                .key(&object.to)
-                .send()
-                .await
-                .map_err(|e| map_s3_error(&e))?;
+                .object_head(&object.to)
+                .await?
+                .ok_or(nfsstat3::NFS3ERR_NOENT)?;
             if dest.e_tag() != object.destination_etag.as_deref()
                 || dest.metadata().and_then(|m| m.get("r2-rename-operation"))
                     != Some(&journal.token)
@@ -1824,20 +2320,28 @@ impl S3NfsFs {
 
     /// Whether the directory holds nothing but its own folder marker.
     async fn dir_is_empty(&self, dir_key: &str) -> Result<bool, nfsstat3> {
-        let response = self
+        let request = self
             .inner
             .client
             .list_objects_v2()
             .bucket(&self.inner.bucket)
             .prefix(dir_key)
             .delimiter("/")
-            .max_keys(2)
-            .send()
-            .await
-            .map_err(|e| {
-                log::error!("mount: failed to list \"{}\": {}", dir_key, e);
-                map_s3_error(&e)
-            })?;
+            .max_keys(2);
+        let scope = self.storage_scope(dir_key);
+        let context =
+            self.read_operation_context(OperationKind::List, &scope, "", Duration::from_secs(30));
+        let response = execute_storage_operation(&context, || {
+            let request = request.clone();
+            async move {
+                request
+                    .send()
+                    .await
+                    .map_err(|error| AttemptError::from_sdk(&error))
+            }
+        })
+        .await
+        .map_err(|error| self.map_operation_error("List", error))?;
 
         let keys: Vec<&str> = response.contents().iter().filter_map(|o| o.key()).collect();
         Ok(dir_listing_is_empty(
@@ -1866,10 +2370,24 @@ impl S3NfsFs {
                 request = request.continuation_token(token);
             }
 
-            let response = request.send().await.map_err(|e| {
-                log::error!("mount: failed to list \"{}\": {}", prefix, e);
-                map_s3_error(&e)
-            })?;
+            let scope = self.storage_scope(prefix);
+            let context = self.read_operation_context(
+                OperationKind::List,
+                &scope,
+                "",
+                Duration::from_secs(30),
+            );
+            let response = execute_storage_operation(&context, || {
+                let request = request.clone();
+                async move {
+                    request
+                        .send()
+                        .await
+                        .map_err(|error| AttemptError::from_sdk(&error))
+                }
+            })
+            .await
+            .map_err(|error| self.map_operation_error("List", error))?;
 
             for object in response.contents() {
                 if let Some(key) = object.key() {
@@ -2000,6 +2518,7 @@ impl S3NfsFs {
         guard.evicted = true;
         guard.remove_files().await;
         stages.remove(&id);
+        self.remove_stage_health(id);
         self.inner.quota.lock().await.release(id);
         drop(stages);
         // Any transfer row this stage had is moot now — the content it was
@@ -2094,58 +2613,161 @@ impl S3NfsFs {
         head: &aws_sdk_s3::operation::head_object::HeadObjectOutput,
         tracker: Option<&TransferTracker>,
     ) -> Result<(), nfsstat3> {
-        let response = self
-            .inner
-            .client
-            .get_object()
-            .bucket(&self.inner.bucket)
-            .key(&inode.key)
-            .if_match(head.e_tag().ok_or(nfsstat3::NFS3ERR_IO)?)
-            .set_version_id(
-                head.version_id()
-                    .filter(|v| *v != "null")
-                    .map(str::to_string),
-            )
-            .send()
-            .await
-            .map_err(|e| {
-                log::error!("mount: failed to stage \"{}\": {}", inode.key, e);
-                map_s3_error(&e)
-            })?;
-
         let expected = head
             .content_length()
             .filter(|size| *size >= 0)
             .ok_or(nfsstat3::NFS3ERR_IO)? as u64;
-        if response.content_length() != Some(expected as i64) || response.e_tag() != head.e_tag() {
+        if stage.size != 0 {
             return Err(nfsstat3::NFS3ERR_IO);
         }
-        let mut body = response.body;
-        let mut offset = 0u64;
-        while let Some(chunk) = tokio::time::timeout(Duration::from_secs(30), body.next())
-            .await
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?
-        {
-            let chunk = chunk.map_err(|e| {
-                log::error!("mount: failed to stage \"{}\": {}", inode.key, e);
-                nfsstat3::NFS3ERR_IO
-            })?;
-            if offset.saturating_add(chunk.len() as u64) > expected {
-                return Err(nfsstat3::NFS3ERR_IO);
+        let etag = head.e_tag().ok_or(nfsstat3::NFS3ERR_IO)?.to_string();
+        let version = head
+            .version_id()
+            .filter(|v| *v != "null")
+            .map(str::to_string);
+        let scope = self.storage_scope(&inode.key);
+        let identity = format!(
+            "{}:{}:{}:{}",
+            inode.key,
+            etag,
+            version.as_deref().unwrap_or_default(),
+            expected
+        );
+        let context = self.read_operation_context(
+            OperationKind::Get,
+            &scope,
+            &identity,
+            crate::move_transfer::stream::protocol::attempt_timeout(expected),
+        );
+        let temp = execute_storage_operation(&context, || {
+            let key = inode.key.clone();
+            let etag = etag.clone();
+            let version = version.clone();
+            async move {
+                self.download_object_to_private_file(&key, &etag, version, expected)
+                    .await
             }
-            stage.write_at(offset, &chunk).await.map_err(|e| {
-                log::error!("mount: failed to stage \"{}\": {}", inode.key, e);
-                nfsstat3::NFS3ERR_IO
-            })?;
-            offset = offset.saturating_add(chunk.len() as u64);
-            if let Some(tracker) = tracker {
-                tracker.set(offset);
+        })
+        .await
+        .map_err(|error| self.map_operation_error("GET", error))?;
+        let apply = async {
+            use tokio::io::AsyncReadExt;
+            let mut file = tokio::fs::File::open(&temp)
+                .await
+                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let mut offset = 0u64;
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                if read == 0 {
+                    break;
+                }
+                if offset.saturating_add(read as u64) > expected {
+                    return Err(nfsstat3::NFS3ERR_IO);
+                }
+                stage.write_at(offset, &buffer[..read]).await.map_err(|e| {
+                    log::error!("mount: failed to stage \"{}\": {}", inode.key, e);
+                    nfsstat3::NFS3ERR_IO
+                })?;
+                offset = offset.saturating_add(read as u64);
+                if let Some(tracker) = tracker {
+                    tracker.set(offset);
+                }
+            }
+            if offset == expected {
+                Ok(())
+            } else {
+                Err(nfsstat3::NFS3ERR_IO)
             }
         }
-        if offset != expected {
-            return Err(nfsstat3::NFS3ERR_IO);
+        .await;
+        let _ = tokio::fs::remove_file(&temp).await;
+        apply
+    }
+
+    async fn download_object_to_private_file(
+        &self,
+        key: &str,
+        etag: &str,
+        version: Option<String>,
+        expected: u64,
+    ) -> Result<PathBuf, AttemptError> {
+        use std::sync::atomic::AtomicU64;
+        use tokio::io::AsyncWriteExt;
+        static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+        let temp = self.inner.staging_root.join(format!(
+            ".stage-get-{}-{}-{}.tmp",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = async {
+            let response = self
+                .inner
+                .client
+                .get_object()
+                .bucket(&self.inner.bucket)
+                .key(key)
+                .if_match(etag)
+                .set_version_id(version)
+                .send()
+                .await
+                .map_err(|error| AttemptError::from_sdk(&error))?;
+            if response.content_length() != Some(expected as i64) || response.e_tag() != Some(etag)
+            {
+                return Err(AttemptError::permanent(
+                    "GET response identity did not match the staged source",
+                ));
+            }
+            if let Some(parent) = temp.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|error| AttemptError::permanent(error.to_string()))?;
+            }
+            let mut file = tokio::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temp)
+                .await
+                .map_err(|error| AttemptError::permanent(error.to_string()))?;
+            let mut lease = ByteLease::new(ResourceKind::ResponseBody, expected);
+            let mut body = response.body;
+            let mut offset = 0u64;
+            while let Some(chunk) = tokio::time::timeout(Duration::from_secs(30), body.next())
+                .await
+                .map_err(|_| AttemptError::transient("GET body read timed out"))?
+            {
+                let chunk = chunk.map_err(|_| AttemptError::transient("GET body read failed"))?;
+                if offset.saturating_add(chunk.len() as u64) > expected {
+                    return Err(AttemptError::permanent(
+                        "GET response body exceeded promised content length",
+                    ));
+                }
+                file.write_all(&chunk)
+                    .await
+                    .map_err(|error| AttemptError::permanent(error.to_string()))?;
+                offset = offset.saturating_add(chunk.len() as u64);
+            }
+            if offset != expected {
+                return Err(AttemptError::transient(
+                    "GET body ended before promised length",
+                ));
+            }
+            file.flush()
+                .await
+                .map_err(|error| AttemptError::permanent(error.to_string()))?;
+            drop(file);
+            lease.resize(0);
+            Ok(temp.clone())
         }
-        Ok(())
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&temp).await;
+        }
+        result
     }
 
     /// Unpublishes a stage and deletes its backing file, used when the object is
@@ -2181,6 +2803,7 @@ impl S3NfsFs {
         // Unlinked before the map entry goes, for the reason in `unpublish`.
         guard.remove_files().await;
         stages.remove(&id);
+        self.remove_stage_health(id);
         self.inner.quota.lock().await.release(id);
     }
 
@@ -2261,8 +2884,12 @@ impl S3NfsFs {
                     retryable: matches!(e, nfsstat3::NFS3ERR_IO | nfsstat3::NFS3ERR_JUKEBOX),
                     uncertain: false,
                 })? {
-                    None=>journal.precondition=Some(PublicationGuard::Absent),
-                    Some(_)=>return Err(UploadFailure::local("Stage has no original object identity; export it before replacing an existing object")),
+                    None => journal.precondition = Some(PublicationGuard::Absent),
+                    Some(_) => {
+                        return Err(UploadFailure::local(
+                            "Stage has no original object identity; export it before replacing an existing object",
+                        ));
+                    }
                 }
             }
         }
@@ -2332,83 +2959,104 @@ impl S3NfsFs {
 
     async fn snapshot_verified_etag(&self, key: &str, snapshot: &UploadSnapshot) -> Option<String> {
         use tokio::io::AsyncReadExt;
-        let verify = async {
-            let head = self.object_head(key).await.ok().flatten()?;
-            if head.content_length() != i64::try_from(snapshot.size).ok()
-                || head.metadata().and_then(|m| m.get("r2-stage-snapshot"))
-                    != Some(&snapshot.token())
-            {
-                return None;
-            }
-            let etag = head.e_tag()?;
-            let Ok(response) = self
-                .inner
-                .client
-                .get_object()
-                .bucket(&self.inner.bucket)
-                .key(key)
-                .if_match(etag)
-                .set_version_id(
-                    head.version_id()
-                        .filter(|v| *v != "null")
-                        .map(str::to_string),
-                )
-                .send()
-                .await
-            else {
-                return None;
-            };
-            if response.e_tag() != Some(etag)
-                || response.content_length() != Some(snapshot.size as i64)
-            {
-                return None;
-            }
-            let Ok(mut local) = tokio::fs::File::open(&snapshot.path).await else {
-                return None;
-            };
-            if local.metadata().await.map(|m| m.len()).ok() != Some(snapshot.size) {
-                return None;
-            }
-            let mut remote = response.body.into_async_read();
-            let mut expected = vec![0; 1024 * 1024];
-            let mut received = vec![0; 1024 * 1024];
-            let mut remaining = snapshot.size;
-            while remaining > 0 {
-                let count = remaining.min(expected.len() as u64) as usize;
-                let (a, b) = tokio::join!(
-                    tokio::time::timeout(
-                        Duration::from_secs(30),
-                        local.read_exact(&mut expected[..count])
-                    ),
-                    tokio::time::timeout(
-                        Duration::from_secs(30),
-                        remote.read_exact(&mut received[..count])
-                    )
-                );
-                if !matches!(a, Ok(Ok(_)))
-                    || !matches!(b, Ok(Ok(_)))
-                    || expected[..count] != received[..count]
-                {
-                    return None;
-                }
-                remaining -= count as u64;
-            }
-            if matches!(
-                tokio::time::timeout(Duration::from_secs(30), remote.read(&mut received[..1]))
-                    .await,
-                Ok(Ok(0))
-            ) {
-                Some(etag.to_string())
-            } else {
-                None
-            }
-        };
-        tokio::time::timeout(
+        let head = self.object_head(key).await.ok().flatten()?;
+        if head.content_length() != i64::try_from(snapshot.size).ok()
+            || head.metadata().and_then(|m| m.get("r2-stage-snapshot")) != Some(&snapshot.token())
+        {
+            return None;
+        }
+        let etag = head.e_tag()?.to_string();
+        let version = head
+            .version_id()
+            .filter(|v| *v != "null")
+            .map(str::to_string);
+        let scope = self.storage_scope(key);
+        let identity = format!(
+            "{}:{}:{}:{}:{}",
+            key,
+            etag,
+            version.as_deref().unwrap_or_default(),
+            snapshot.size,
+            snapshot.token()
+        );
+        let context = self.read_operation_context(
+            OperationKind::Get,
+            &scope,
+            &identity,
             crate::move_transfer::stream::protocol::attempt_timeout(snapshot.size),
-            verify,
-        )
+        );
+        execute_storage_operation(&context, || {
+            let etag = etag.clone();
+            let version = version.clone();
+            async move {
+                let response = self
+                    .inner
+                    .client
+                    .get_object()
+                    .bucket(&self.inner.bucket)
+                    .key(key)
+                    .if_match(&etag)
+                    .set_version_id(version)
+                    .send()
+                    .await
+                    .map_err(|error| AttemptError::from_sdk(&error))?;
+                if response.e_tag() != Some(etag.as_str())
+                    || response.content_length() != Some(snapshot.size as i64)
+                {
+                    return Err(AttemptError::permanent(
+                        "Snapshot verification GET identity changed",
+                    ));
+                }
+                let Ok(mut local) = tokio::fs::File::open(&snapshot.path).await else {
+                    return Err(AttemptError::permanent("Snapshot file is unreadable"));
+                };
+                if local.metadata().await.map(|m| m.len()).ok() != Some(snapshot.size) {
+                    return Err(AttemptError::permanent("Snapshot file size changed"));
+                }
+                let mut remote = response.body.into_async_read();
+                let mut expected = vec![0; 1024 * 1024];
+                let mut received = vec![0; 1024 * 1024];
+                let mut remaining = snapshot.size;
+                while remaining > 0 {
+                    let count = remaining.min(expected.len() as u64) as usize;
+                    let (a, b) = tokio::join!(
+                        tokio::time::timeout(
+                            Duration::from_secs(30),
+                            local.read_exact(&mut expected[..count])
+                        ),
+                        tokio::time::timeout(
+                            Duration::from_secs(30),
+                            remote.read_exact(&mut received[..count])
+                        )
+                    );
+                    if !matches!(a, Ok(Ok(_))) {
+                        return Err(AttemptError::permanent("Snapshot local read failed"));
+                    }
+                    if !matches!(b, Ok(Ok(_))) {
+                        return Err(AttemptError::transient(
+                            "Snapshot verification GET body failed",
+                        ));
+                    }
+                    if expected[..count] != received[..count] {
+                        return Err(AttemptError::permanent("Snapshot content mismatch"));
+                    }
+                    remaining -= count as u64;
+                }
+                if matches!(
+                    tokio::time::timeout(Duration::from_secs(30), remote.read(&mut received[..1]))
+                        .await,
+                    Ok(Ok(0))
+                ) {
+                    Ok(etag)
+                } else {
+                    Err(AttemptError::permanent(
+                        "Snapshot verification GET returned extra bytes",
+                    ))
+                }
+            }
+        })
         .await
-        .unwrap_or(None)
+        .ok()
     }
 
     async fn upload_stage_file(
@@ -2526,33 +3174,46 @@ impl S3NfsFs {
             let mut marker: Option<String> = None;
             let mut parts = BTreeMap::new();
             loop {
-                let response = crate::providers::s3_client::retry_idempotent(attempts, || {
-                    self.inner
-                        .client
-                        .list_parts()
-                        .bucket(&self.inner.bucket)
-                        .key(key)
-                        .upload_id(journal.upload_id.as_deref().unwrap_or_default())
-                        .set_part_number_marker(marker.clone())
-                        .max_parts(1000)
-                        .send()
+                let upload_id = journal.upload_id.clone().unwrap_or_default();
+                let request = self
+                    .inner
+                    .client
+                    .list_parts()
+                    .bucket(&self.inner.bucket)
+                    .key(key)
+                    .upload_id(upload_id)
+                    .set_part_number_marker(marker.clone())
+                    .max_parts(1000);
+                let scope = self.storage_scope(key);
+                let context = self
+                    .read_operation_context(
+                        OperationKind::ListParts,
+                        &scope,
+                        "",
+                        Duration::from_secs(30),
+                    )
+                    .with_max_attempts(attempts);
+                let response = execute_storage_operation(&context, || {
+                    let request = request.clone();
+                    async move {
+                        request
+                            .send()
+                            .await
+                            .map_err(|error| AttemptError::from_sdk(&error))
+                    }
                 })
                 .await;
                 let response = match response {
                     Ok(response) => response,
-                    Err(error)
-                        if error.as_service_error().and_then(|error| error.code())
-                            == Some("NoSuchUpload") =>
-                    {
+                    Err(error) if matches!(error.class(), StorageErrorClass::NotFound) => {
                         journal.upload_id = None;
                         journal.parts.clear();
                         journal.completing = false;
                         break;
                     }
                     Err(error) => {
-                        let mut failure = upload_error(&error);
-                        failure.retryable =
-                            crate::providers::s3_client::is_transient_s3_error(&error);
+                        let mut failure = UploadFailure::local(error.to_string());
+                        failure.retryable = matches!(error.class(), StorageErrorClass::Transient);
                         failure.uncertain = false;
                         return Err(failure);
                     }
@@ -2636,40 +3297,46 @@ impl S3NfsFs {
                     return Ok(());
                 }
                 let outcome: Result<(), UploadFailure> = async {
-                    let response = crate::providers::s3_client::retry_idempotent_with_budget(
-                        attempts,
-                        crate::move_transfer::stream::protocol::attempt_timeout(length),
-                        || async {
-                            let body = ByteStream::read_from()
-                                .path(&snapshot.path)
-                                .offset(offset)
-                                .length(Length::Exact(length))
-                                .build()
-                                .await
-                                .map_err(SdkError::construction_failure)?;
-                            self.inner
-                                .client
-                                .upload_part()
-                                .bucket(&self.inner.bucket)
-                                .key(key)
-                                .upload_id(upload_id)
-                                .part_number(part_number)
-                                .body(body)
-                                .customize()
-                                .config_override(crate::move_transfer::stream::data_timeouts(
-                                    length,
-                                ))
-                                .send()
-                                .await
-                        },
-                    )
+                    let scope = self.storage_scope(key);
+                    let identity = format!(
+                        "{}:{}:{}:{}:{}:{}",
+                        key, upload_id, part_number, offset, length, snapshot.generation
+                    );
+                    let context = self
+                        .read_operation_context(
+                            OperationKind::UploadPart,
+                            &scope,
+                            &identity,
+                            crate::move_transfer::stream::protocol::attempt_timeout(length),
+                        )
+                        .with_max_attempts(attempts);
+                    let response = execute_storage_operation(&context, || async {
+                        let body = ByteStream::read_from()
+                            .path(&snapshot.path)
+                            .offset(offset)
+                            .length(Length::Exact(length))
+                            .build()
+                            .await
+                            .map_err(|error| AttemptError::permanent(error.to_string()))?;
+                        self.inner
+                            .client
+                            .upload_part()
+                            .bucket(&self.inner.bucket)
+                            .key(key)
+                            .upload_id(upload_id)
+                            .part_number(part_number)
+                            .body(body)
+                            .customize()
+                            .config_override(crate::move_transfer::stream::data_timeouts(length))
+                            .send()
+                            .await
+                            .map_err(|error| AttemptError::from_sdk(&error))
+                    })
                     .await
-                    .map_err(|error| {
-                        let mut failure = upload_error(&error);
-                        failure.retryable =
-                            crate::providers::s3_client::is_transient_s3_error(&error);
-                        failure.uncertain = false;
-                        failure
+                    .map_err(|error| UploadFailure {
+                        message: format!("UploadPart: {error}"),
+                        retryable: matches!(error.class(), StorageErrorClass::Transient),
+                        uncertain: false,
                     })?;
                     let etag = response
                         .e_tag()
@@ -2810,6 +3477,7 @@ impl S3NfsFs {
             tokio::spawn(async move {
                 let _permit = permit;
                 let _namespace = fs.inner.namespace.read().await;
+                let _fence = fs.fence_exact_key_shared(&key).await;
                 let lifecycle = fs.lifecycle(&key);
                 let _access = lifecycle.access.read().await;
                 let _publication = lifecycle.publication.lock().await;
@@ -2901,6 +3569,7 @@ impl S3NfsFs {
         };
         guard.state = FlushState::Uploading;
         guard.persist().await.map_err(UploadFailure::local)?;
+        self.record_stage_health(id, &guard);
         drop(guard);
         let result = self
             .upload_with_attempts(id, &job.key, &job.snapshot, attempts)
@@ -2919,14 +3588,17 @@ impl S3NfsFs {
                 guard.state = FlushState::Idle;
                 guard.last_error = None;
                 guard.snapshot = None;
+                guard.release_snapshot_accounting();
                 if stage::upload_settles_stage(job.snapshot.generation, guard.dirty_gen) {
                     guard.dirty = false;
+                    guard.first_dirty_at = None;
                     guard.flush_requested = false;
                     self.update_inode_attrs(job.id, job.snapshot.size, guard.mtime_secs);
                 } else if let Some(progress) = self.progress() {
                     progress.waiting(id, &guard.key, guard.size);
                 }
                 guard.persist().await.map_err(UploadFailure::local)?;
+                self.record_stage_health(id, &guard);
                 job.snapshot.remove().await;
             }
             Err(error) => {
@@ -2946,6 +3618,7 @@ impl S3NfsFs {
                     FlushState::Paused
                 };
                 guard.persist().await.map_err(UploadFailure::local)?;
+                self.record_stage_health(id, &guard);
             }
         }
         drop(guard);
@@ -3085,6 +3758,7 @@ impl S3NfsFs {
                 let _permit = permit;
                 let key = handle.lock().await.key.clone();
                 let _namespace = fs.inner.namespace.read().await;
+                let _fence = fs.fence_exact_key_shared(&key).await;
                 let lifecycle = fs.lifecycle(&key);
                 let _access = lifecycle.access.read().await;
                 let _publication = lifecycle.publication.lock().await;
@@ -3167,12 +3841,10 @@ impl NFSFileSystem for S3NfsFs {
         }
 
         let dir_key = normalize_dir_key(&dir.key);
-        let children = self.children_of(dirid, &dir_key).await?;
-        if let Some(child) = children.iter().find(|child| child.name == name) {
-            return Ok(child.fileid);
-        }
-
-        self.lookup_uncached(dirid, &dir_key, name).await
+        self.lookup_child(dirid, &dir_key, name)
+            .await?
+            .map(|(id, _)| id)
+            .ok_or(nfsstat3::NFS3ERR_NOENT)
     }
 
     async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
@@ -3186,6 +3858,8 @@ impl NFSFileSystem for S3NfsFs {
     async fn setattr(&self, id: fileid3, setattr: sattr3) -> Result<fattr3, nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
+        let inode = self.inode(id)?;
+        let _fence = self.fence_exact_key_shared(&inode.key).await;
         let inode = self.inode(id)?;
         let lifecycle = self.lifecycle(&inode.key);
         let _access = lifecycle.access.read().await;
@@ -3235,17 +3909,26 @@ impl NFSFileSystem for S3NfsFs {
             }
             self.reserve_stage(
                 id,
-                size.max(guard.snapshot.as_ref().map(|s| s.size).unwrap_or(0)),
+                size.max(guard.snapshot.as_ref().map(|s| s.size).unwrap_or(0))
+                    .saturating_add(4096),
             )
             .await?;
             let newly_dirty = !guard.dirty;
-            guard
-                .truncate_durable(size, now_secs())
-                .await
-                .map_err(|e| {
+            let pending_dirty_at = guard
+                .first_dirty_at
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+            self.record_pending_stage_health(id, size, pending_dirty_at, guard.last_error.clone());
+            let truncate_result = guard.truncate_durable(size, now_secs()).await;
+            if let Err(e) = truncate_result {
+                self.record_stage_health(id, &guard);
+                return Err({
                     log::error!("mount: failed to resize \"{}\": {}", inode.key, e);
                     nfsstat3::NFS3ERR_IO
-                })?;
+                });
+            }
+            let reservation = guard.reservation_bytes().await;
+            self.inner.quota.lock().await.restore(id, reservation);
+            self.record_stage_health(id, &guard);
             guard.flush_requested = times_touched;
             if newly_dirty {
                 guard.reported_size = guard.size;
@@ -3285,13 +3968,15 @@ impl NFSFileSystem for S3NfsFs {
     ) -> Result<(Vec<u8>, bool), nfsstat3> {
         let _namespace = self.inner.namespace.read().await;
         let inode = self.inode(id)?;
+        let _fence = self.fence_exact_key_shared(&inode.key).await;
+        let inode = self.inode(id)?;
+        self.ensure_rename_available(&inode.key)?;
         if inode.kind != EntryKind::File {
             return Err(nfsstat3::NFS3ERR_ISDIR);
         }
 
         // Staged content is newer than anything in the bucket.
         if let Some(mut guard) = self.stage_guard(id).await {
-            let size = guard.size;
             let data = guard.read_at(offset, count as usize).await.map_err(|e| {
                 log::error!(
                     "mount: failed to read the stage for \"{}\": {}",
@@ -3300,6 +3985,7 @@ impl NFSFileSystem for S3NfsFs {
                 );
                 nfsstat3::NFS3ERR_IO
             })?;
+            let size = guard.size;
             let eof = offset.saturating_add(data.len() as u64) >= size;
             return Ok((data, eof));
         }
@@ -3350,6 +4036,8 @@ impl NFSFileSystem for S3NfsFs {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
         let inode = self.inode(id)?;
+        let _fence = self.fence_exact_key_shared(&inode.key).await;
+        let inode = self.inode(id)?;
         let lifecycle = self.lifecycle(&inode.key);
         let _access = lifecycle.access.read().await;
         self.ensure_writable()?;
@@ -3374,15 +4062,27 @@ impl NFSFileSystem for S3NfsFs {
                     .ok_or(nfsstat3::NFS3ERR_FBIG)?,
             )
             .max(guard.snapshot.as_ref().map(|s| s.size).unwrap_or(0));
-        self.reserve_stage(id, size).await?;
+        self.reserve_stage(
+            id,
+            size.saturating_add(data.len() as u64).saturating_add(4096),
+        )
+        .await?;
         let newly_dirty = !guard.dirty;
-        guard
-            .write_durable(offset, data, now_secs())
-            .await
-            .map_err(|e| {
+        let pending_dirty_at = guard
+            .first_dirty_at
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+        self.record_pending_stage_health(id, size, pending_dirty_at, guard.last_error.clone());
+        let write_result = guard.write_durable(offset, data, now_secs()).await;
+        if let Err(e) = write_result {
+            self.record_stage_health(id, &guard);
+            return Err({
                 log::error!("mount: failed to stage a write to \"{}\": {}", inode.key, e);
                 nfsstat3::NFS3ERR_IO
-            })?;
+            });
+        }
+        let reservation = guard.reservation_bytes().await;
+        self.inner.quota.lock().await.restore(id, reservation);
+        self.record_stage_health(id, &guard);
 
         // The copy is surfaced as a queued upload from its first write, and
         // its reported total follows the staged size in steps — the first
@@ -3410,6 +4110,7 @@ impl NFSFileSystem for S3NfsFs {
         let name = self.child_name(filename)?;
         let dir_key = normalize_dir_key(&dir.key);
         let key = child_key(&dir_key, &name, false);
+        let _fence = self.fence_exact_key(&key).await;
         let lifecycle = self.lifecycle(&key);
         let _access = lifecycle.access.write().await;
         self.ensure_writable()?;
@@ -3457,6 +4158,7 @@ impl NFSFileSystem for S3NfsFs {
         let name = self.child_name(filename)?;
         let dir_key = normalize_dir_key(&dir.key);
         let key = child_key(&dir_key, &name, false);
+        let _fence = self.fence_exact_key(&key).await;
         let lifecycle = self.lifecycle(&key);
         let _access = lifecycle.access.write().await;
         self.ensure_writable()?;
@@ -3495,6 +4197,7 @@ impl NFSFileSystem for S3NfsFs {
         // S3 tool understands, and is what makes an empty directory visible at
         // all — without it there is no prefix to list.
         let key = child_key(&dir_key, &name, true);
+        let _fence = self.fence_exact_key(&key).await;
         let lifecycle = self.lifecycle(&key);
         let _access = lifecycle.access.write().await;
         self.ensure_writable()?;
@@ -3519,6 +4222,9 @@ impl NFSFileSystem for S3NfsFs {
         // RMDIR and REMOVE both land here, so the entry's kind decides what
         // "delete" means.
         let (id, target) = self.resolve_child(dirid, &dir_key, &name).await?;
+        let _fence = Self::fence_path_for_inode(&target);
+        let _fence = self.fence_paths(vec![_fence]).await;
+        let target = self.inode(id)?;
         let lifecycle = self.lifecycle(&target.key);
         let _access = lifecycle.access.write().await;
         self.ensure_writable()?;
@@ -3561,9 +4267,6 @@ impl NFSFileSystem for S3NfsFs {
         to_filename: &filename3,
     ) -> Result<(), nfsstat3> {
         self.ensure_writable()?;
-        // Renames take one namespace fence, so source/target/prefix lock order
-        // cannot deadlock and target uploads are settled before replacement.
-        let _namespace = self.inner.namespace.write().await;
         self.ensure_writable()?;
         let from_dir = self.dir_inode(from_dirid)?;
         let to_dir = self.dir_inode(to_dirid)?;
@@ -3593,7 +4296,7 @@ impl NFSFileSystem for S3NfsFs {
                 break;
             }
         }
-        let (id, source) = match recovered_source {
+        let (_id, source) = match recovered_source.clone() {
             Some(source) => source,
             None => {
                 self.resolve_child(from_dirid, &from_dir_key, &from_name)
@@ -3605,13 +4308,36 @@ impl NFSFileSystem for S3NfsFs {
         if target_key == source.key {
             return Ok(());
         }
+        let _fence = self
+            .fence_paths(vec![
+                Self::fence_path_for_inode(&source),
+                if is_dir {
+                    FencePath::prefix(normalize_dir_key(&target_key))
+                } else {
+                    FencePath::exact(target_key.clone())
+                },
+            ])
+            .await;
+        let (id, source) = match recovered_source {
+            Some(source) => source,
+            None => {
+                self.resolve_child_fenced(from_dirid, &from_dir_key, &from_name)
+                    .await?
+            }
+        };
+        let is_dir = source.kind == EntryKind::Dir;
+        let target_key = child_key(&to_dir_key, &to_name, is_dir);
+        let journal_path = self.rename_journal_path(&source.key, &target_key);
+        self.ensure_rename_not_blocked(&source.key, &target_key, &journal_path)?;
         self.ensure_key_settled(&source.key).await?;
         self.ensure_key_settled(&target_key).await?;
 
         // What is already at the destination decides whether this rename is
         // allowed at all. Checked after the same-name shortcut above, since
         // there the destination *is* the source.
-        let destination = self.lookup_child(to_dirid, &to_dir_key, &to_name).await?;
+        let destination = self
+            .lookup_child_fenced(to_dirid, &to_dir_key, &to_name)
+            .await?;
         let destination_dir_is_empty = match &destination {
             Some((_, inode)) if inode.kind == EntryKind::Dir => {
                 self.dir_is_empty(&normalize_dir_key(&inode.key)).await?

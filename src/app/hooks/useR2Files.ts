@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
@@ -18,6 +18,7 @@ export type { FileItem } from '@/app/utils/folderItems';
 
 export function useR2Files(config: StorageConfig | null, prefix: string = '') {
   const queryClient = useQueryClient();
+  const forceNextRefresh = useRef(false);
   const namespace = useStorageNamespace(config);
   const queryKey = useMemo(
     () => [
@@ -50,10 +51,14 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
     queryKey,
     queryFn: async ({ signal }): Promise<FolderSnapshot> => {
       if (!config) throw new Error('Storage account is not configured');
+      const forceRefresh = forceNextRefresh.current;
+      forceNextRefresh.current = false;
       return loadFolderItems({
         config,
         prefix,
         signal,
+        forceRefresh,
+        fallbackSnapshot: queryClient.getQueryData<FolderSnapshot>(queryKey),
         readCachedFolder: getPrefixCache,
         readPrefixFolder: streamFolderPrefix,
         onUpdate: (snapshot) => {
@@ -162,6 +167,7 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
   }, [invalidator]);
 
   const refresh = useCallback(async () => {
+    forceNextRefresh.current = true;
     await queryClient.invalidateQueries({ queryKey });
   }, [queryClient, queryKey]);
 

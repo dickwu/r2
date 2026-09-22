@@ -203,9 +203,43 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
 
     // Create move sessions table
     conn.execute_batch(move_sessions::get_table_sql()).await?;
+    // Idempotent compatibility for existing databases created before task-level retry scheduling.
+    let _ = conn
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS move_task_retries (
+                task_id TEXT PRIMARY KEY,
+                next_attempt_at INTEGER,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error_class TEXT,
+                phase TEXT
+            );",
+        )
+        .await;
 
     // Create prefix sync times table (for lazy sync)
     conn.execute_batch(prefix_sync::get_table_sql()).await?;
+    let _ = conn
+        .execute(
+            "ALTER TABLE sync_meta ADD COLUMN generation INTEGER NOT NULL DEFAULT 0",
+            (),
+        )
+        .await;
+    let _ = conn
+        .execute(
+            "ALTER TABLE prefix_sync_times ADD COLUMN generation INTEGER NOT NULL DEFAULT 0",
+            (),
+        )
+        .await;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS bucket_content_revisions (
+            bucket TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (bucket, account_id)
+        )",
+        (),
+    )
+    .await?;
     cache_scope::initialize_on(&conn).await?;
 
     DB_CONNECTION
@@ -253,8 +287,9 @@ pub use rustfs_accounts::{
 pub use rustfs_buckets::{list_rustfs_buckets_by_account, save_rustfs_buckets_for_account};
 // Re-export file cache functions
 pub use file_cache::{
-    begin_sync, calculate_folder_size, clear_file_cache, clear_full_sync_marker,
-    delete_cached_file, delete_cached_files_batch, finish_sync, get_all_cached_files,
+    begin_local_cache_mutation, begin_sync, calculate_folder_size, clear_file_cache,
+    clear_full_sync_marker, delete_cached_file, delete_cached_files_batch,
+    finish_local_cache_mutation, finish_sync_with_metadata, get_all_cached_files,
     get_all_directory_nodes, get_bucket_summary, get_cached_file_size, get_directory_node,
     get_directory_nodes, get_folder_contents, move_cached_file, parse_key, search_cached_files,
     store_file_batch, update_cached_file,

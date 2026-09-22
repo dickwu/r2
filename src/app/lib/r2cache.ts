@@ -1,9 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import {
-  buildFileItems,
-  type FolderFreshness,
+  createFolderPageAccumulator,
   type FolderPage,
+  type FolderRequestScope,
   type FolderSnapshot,
 } from '@/app/utils/folderItems';
 import { readFolderStream } from './folderStream';
@@ -328,48 +328,44 @@ export async function listPrefix(
 
 export async function getPrefixCache(
   config: StorageConfig,
-  prefix: string
+  prefix: string,
+  options: {
+    signal?: AbortSignal;
+    onUpdate?: (snapshot: FolderSnapshot) => void;
+  } = {}
 ): Promise<FolderSnapshot | null> {
-  const cached = await observeFolderRequest(
-    'get_prefix_cache',
-    { provider: config.provider, account_id: config.accountId, bucket: config.bucket, prefix },
-    () =>
-      invoke<
-        | (LazyListResult & {
-            provider: string;
-            account_id: string;
-            bucket: string;
-            complete: boolean;
-            freshness: FolderFreshness;
-          })
-        | null
-      >('get_prefix_cache', {
-        input: { ...getConnectionInput(config), prefix },
-      })
-  );
-  if (!cached) return null;
-  if (
-    cached.provider !== config.provider ||
-    cached.account_id !== config.accountId ||
-    cached.bucket !== config.bucket ||
-    cached.prefix !== prefix
-  ) {
-    throw new Error('Cached folder scope does not match the requested folder');
-  }
-  return {
-    items: buildFileItems(
-      cached.files.map((file) => ({
-        key: file.key,
-        size: file.size,
-        lastModified: file.last_modified,
-      })),
-      cached.folders,
-      prefix
-    ),
-    complete: cached.complete,
-    fromCache: true,
-    freshness: cached.freshness,
+  const scope: FolderRequestScope = {
+    provider: config.provider,
+    account_id: config.accountId,
+    bucket: config.bucket,
+    prefix,
+    request_id: crypto.randomUUID(),
+    generation: ++folderGeneration,
   };
+  const accumulator = createFolderPageAccumulator(scope);
+  let cursor: string | null = null;
+  let pageIndex = 0;
+  for (;;) {
+    options.signal?.throwIfAborted();
+    const page = await observeFolderRequest('get_prefix_cache_page', scope, () =>
+      invoke<FolderPage | null>('get_prefix_cache_page', {
+        input: {
+          ...getConnectionInput(config),
+          ...scope,
+          cache_cursor: cursor,
+          page_index: pageIndex,
+        },
+      })
+    );
+    if (!page) return null;
+    const snapshot = accumulator.accept(page);
+    if (!snapshot) throw new Error('Cached folder scope does not match the requested folder');
+    options.onUpdate?.(snapshot);
+    if (snapshot.complete) return snapshot;
+    if (!page.next_cursor) throw new Error('Cached folder page did not include a cursor');
+    cursor = page.next_cursor;
+    pageIndex += 1;
+  }
 }
 
 let folderGeneration = 0;
@@ -379,6 +375,7 @@ export async function streamFolderPrefix(
   prefix: string,
   options: {
     signal?: AbortSignal;
+    forceRefresh?: boolean;
     onUpdate: (snapshot: FolderSnapshot) => void;
   }
 ): Promise<FolderSnapshot> {
@@ -397,7 +394,11 @@ export async function streamFolderPrefix(
       start: () =>
         observeFolderRequest('list_prefix_stream', scope, () =>
           invoke('list_prefix_stream', {
-            input: { ...getConnectionInput(config), ...scope, force_refresh: true },
+            input: {
+              ...getConnectionInput(config),
+              ...scope,
+              force_refresh: options.forceRefresh ?? false,
+            },
           })
         ),
       cancel: () =>

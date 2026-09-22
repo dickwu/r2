@@ -259,6 +259,7 @@ pub async fn mount_bucket(
 
     let client = input.create_client().await?;
     let transfer_config = input.storage_config()?;
+    let operation_endpoint = transfer_config.operation_endpoint();
     let staging_root = staging_root(&app)?;
     let namespace_id = input.namespace_id()?;
 
@@ -269,6 +270,7 @@ pub async fn mount_bucket(
             provider: input.provider,
             account_id: input.account_id,
             bucket: input.bucket,
+            operation_endpoint,
             local_path,
             client,
             read_only: input.read_only.unwrap_or(false),

@@ -9,13 +9,23 @@ import type {
 // Preserve exports used by Tauri's event module regardless of test order.
 // None of the functions under test actually invoke the backend.
 const tauriCore = await import('@tauri-apps/api/core');
+const invokeCalls: Array<{ command: string; args: any }> = [];
+let invokeMock: (command: string, args: any) => Promise<unknown> = async () => undefined;
 mock.module('@tauri-apps/api/core', () => ({
   ...tauriCore,
-  invoke: async () => undefined,
+  invoke: async (command: string, args: any) => {
+    invokeCalls.push({ command, args });
+    return invokeMock(command, args);
+  },
 }));
 
-const { isBucketPublic, buildPublicUrl, buildBucketBaseUrl, hasSigningCredentials } =
-  await import('./r2cache');
+const {
+  isBucketPublic,
+  buildPublicUrl,
+  buildBucketBaseUrl,
+  hasSigningCredentials,
+  getPrefixCache,
+} = await import('./r2cache');
 
 function r2(overrides: Partial<R2StorageConfig> = {}): R2StorageConfig {
   return {
@@ -141,5 +151,67 @@ describe('S3-family providers support domain + prefix too', () => {
   test('AWS public bucket without a domain derives from the endpoint (vhost style)', () => {
     const cfg = aws({ isPublic: true }) as StorageConfig;
     expect(buildPublicUrl(cfg, 'x.png')).toBe('https://bkt.s3.us-east-1.amazonaws.com/x.png');
+  });
+});
+
+describe('paged prefix cache IPC', () => {
+  test('streams cache pages without invoking the aggregate cache command', async () => {
+    invokeCalls.length = 0;
+    const cfg = r2({ accessKeyId: 'ak', secretAccessKey: 'sk' }) as StorageConfig;
+    invokeMock = async (_command, args) => {
+      const input = args.input;
+      const base = {
+        provider: input.provider,
+        account_id: input.account_id,
+        bucket: input.bucket,
+        prefix: input.prefix,
+        request_id: input.request_id,
+        generation: input.generation,
+        from_cache: true,
+        freshness: 'partial',
+      };
+      if (!input.cache_cursor) {
+        return {
+          ...base,
+          files: Array.from({ length: 1000 }, (_, index) => ({
+            key: `file-${index.toString().padStart(4, '0')}.txt`,
+            name: `file-${index.toString().padStart(4, '0')}.txt`,
+            size: index,
+            last_modified: 'old',
+          })),
+          folders: [],
+          page_index: 0,
+          next_cursor: 'cursor-1',
+          complete: false,
+        };
+      }
+      return {
+        ...base,
+        files: [
+          {
+            key: 'file-1000.txt',
+            name: 'file-1000.txt',
+            size: 1000,
+            last_modified: 'old',
+          },
+        ],
+        folders: [],
+        page_index: 1,
+        next_cursor: null,
+        complete: true,
+        freshness: 'stale',
+      };
+    };
+    const updates: number[] = [];
+    const snapshot = await getPrefixCache(cfg, '', {
+      onUpdate: (update) => updates.push(update.items.length),
+    });
+    expect(snapshot?.items).toHaveLength(1001);
+    expect(snapshot?.freshness).toBe('stale');
+    expect(updates).toEqual([1000, 1001]);
+    expect(invokeCalls.map((call) => call.command)).toEqual([
+      'get_prefix_cache_page',
+      'get_prefix_cache_page',
+    ]);
   });
 });

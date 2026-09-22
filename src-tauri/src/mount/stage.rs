@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
+use crate::providers::resources::{ByteLease, DiskLease, ResourceKind};
+
+use super::{stage_commit, stage_wal};
+
 /// How long a file must go untouched before it is uploaded. Long enough to span
 /// the gap between the WRITEs of one copy, short enough that a user who drops a
 /// file in and looks at the bucket sees it there.
@@ -45,6 +49,8 @@ pub const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024;
 pub const PART_SIZE: u64 = 20 * 1024 * 1024;
 /// Parts uploaded concurrently within one multipart flush.
 pub const PART_CONCURRENCY: usize = 4;
+const CHECKPOINT_WAL_BYTES: u64 = 32 * 1024 * 1024;
+const CHECKPOINT_RECORDS: u64 = 256;
 
 /// Where a flush is in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +157,10 @@ pub struct Stage {
     /// sequential writes and reopening per write would dominate the cost.
     file: File,
     path: PathBuf,
+    stage_lease: ByteLease,
+    snapshot_lease: ByteLease,
+    wal_lease: ByteLease,
+    wal_tail_repaired: bool,
     /// Key this stage belongs to, so the flusher does not have to re-resolve
     /// the inode — and stays correct if the inode is re-keyed by a rename.
     pub key: String,
@@ -160,6 +170,12 @@ pub struct Stage {
     /// Bumped by every write. Captured before an upload so a write that lands
     /// mid-upload is noticed instead of being lost.
     pub dirty_gen: u64,
+    applied_gen: u64,
+    pub checkpoint_lsn: u64,
+    pub next_lsn: u64,
+    records_since_checkpoint: u64,
+    bytes_since_checkpoint: u64,
+    pub first_dirty_at: Option<i64>,
     pub last_write: Instant,
     /// Set by the `utimes` a client sends at the end of a copy — the closest
     /// thing NFSv3 offers to a close notification — to skip the debounce.
@@ -237,9 +253,15 @@ pub struct StageRecovery {
     pub snapshot: Option<UploadSnapshot>,
     #[serde(default)]
     pub publication_guard: Option<PublicationGuard>,
+    #[serde(default)]
+    pub checkpoint_lsn: u64,
+    #[serde(default)]
+    pub first_dirty_at: Option<i64>,
+    #[serde(skip)]
+    pub wal_bytes: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 enum DurableChange {
     Write { offset: u64, data: Vec<u8> },
     Resize { size: u64 },
@@ -285,6 +307,7 @@ async fn replay_write(root: &Path, intent_path: &Path) -> std::io::Result<StageR
     }
     file.flush().await?;
     file.sync_all().await?;
+    stage_commit::record_file_sync_bytes(intent.state.size);
     if file.metadata().await?.len() != intent.state.size {
         return Err(std::io::Error::other("Replayed write size mismatch"));
     }
@@ -306,6 +329,7 @@ pub async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io:
     let mut file = File::create(&temporary).await?;
     file.write_all(&bytes).await?;
     file.sync_all().await?;
+    stage_commit::record_file_sync_bytes(bytes.len() as u64);
     drop(file);
     tokio::fs::rename(&temporary, path).await?;
     sync_parent(path).await
@@ -315,6 +339,7 @@ pub async fn sync_parent(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         File::open(parent).await?.sync_all().await?;
+        stage_commit::record_parent_sync();
     }
     #[cfg(not(unix))]
     let _ = path;
@@ -323,6 +348,7 @@ pub async fn sync_parent(path: &Path) -> std::io::Result<()> {
 
 pub async fn replay_write_intents(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     let mut errors = Vec::new();
+    errors.extend(stage_wal::replay_all(root).await?);
     let mut dir = tokio::fs::read_dir(root).await.map_err(|e| e.to_string())?;
     while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
         if entry.file_name().to_string_lossy().ends_with(".write.json") {
@@ -346,6 +372,9 @@ pub fn unreadable_record(path: PathBuf, key: String, error: String) -> StageReco
         path,
         snapshot: None,
         publication_guard: None,
+        checkpoint_lsn: 0,
+        first_dirty_at: None,
+        wal_bytes: None,
     }
 }
 
@@ -398,6 +427,7 @@ pub async fn recovery_entries(root: &Path) -> Result<Vec<StageRecovery>, String>
     while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
         paths.push(entry.path());
     }
+    let wal_index = stage_wal::recovery_index(root).await?;
     for path in paths
         .iter()
         .filter(|path| path.to_string_lossy().ends_with(".write.json"))
@@ -445,6 +475,35 @@ pub async fn recovery_entries(root: &Path) -> Result<Vec<StageRecovery>, String>
         if let Some(record) = pending.remove(&record.path) {
             entries.push(record);
             continue;
+        }
+        record.wal_bytes = Some(
+            wal_index
+                .uncheckpointed_bytes_for_after(&record.path, record.checkpoint_lsn)
+                .map_err(|e| e.to_string())?,
+        );
+        if let Some(summary) = wal_index
+            .summary_for_after(&record.path, record.checkpoint_lsn, record.generation)
+            .map_err(|e| e.to_string())?
+        {
+            if summary.record.generation > record.generation {
+                if record.key != summary.record.key {
+                    entries.push(unreadable_record(
+                        path.clone(),
+                        record.key,
+                        "WAL key does not match durable stage manifest".into(),
+                    ));
+                    continue;
+                }
+                record.size = summary.record.resulting_size;
+                record.mtime_secs = summary.record.mtime_secs;
+                record.generation = summary.record.generation;
+                record.dirty = true;
+                record.checkpoint_lsn = summary.record.lsn;
+                record.wal_bytes = Some(0);
+                if record.first_dirty_at.is_none() {
+                    record.first_dirty_at = Some(summary.record.dirty_at_ms);
+                }
+            }
         }
         if !record.dirty {
             continue;
@@ -526,6 +585,27 @@ impl UploadSnapshot {
     }
 }
 
+async fn copy_file_native_with_lease(
+    source: PathBuf,
+    destination: PathBuf,
+    bytes: u64,
+    lease: DiskLease,
+) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let result: std::io::Result<()> = (|| {
+            std::fs::copy(&source, &destination)?;
+            std::fs::File::open(&destination)?.sync_all()?;
+            Ok(())
+        })();
+        drop(lease);
+        result
+    })
+    .await
+    .map_err(std::io::Error::other)??;
+    stage_commit::record_file_sync_bytes(bytes);
+    Ok(())
+}
+
 impl Stage {
     /// Creates an empty staging file, replacing any leftover from a previous
     /// session.
@@ -543,11 +623,21 @@ impl Stage {
         Ok(Self {
             file,
             path,
+            stage_lease: ByteLease::new(ResourceKind::Stage, 0),
+            snapshot_lease: ByteLease::new(ResourceKind::Snapshot, 0),
+            wal_lease: ByteLease::new(ResourceKind::Wal, 0),
+            wal_tail_repaired: true,
             key,
             size: 0,
             mtime_secs,
             dirty: false,
             dirty_gen: 0,
+            applied_gen: 0,
+            checkpoint_lsn: 0,
+            next_lsn: 1,
+            records_since_checkpoint: 0,
+            bytes_since_checkpoint: 0,
+            first_dirty_at: None,
             last_write: Instant::now(),
             flush_requested: false,
             reported_size: 0,
@@ -570,14 +660,35 @@ impl Stage {
                 "Stage size does not match its durable journal",
             ));
         }
+        let wal_bytes = match record.wal_bytes {
+            Some(bytes) => bytes,
+            None => stage_wal::uncheckpointed_bytes_for(&record.path, record.checkpoint_lsn)
+                .await
+                .unwrap_or(0),
+        };
+        let snapshot_bytes = record
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.size)
+            .unwrap_or(0);
         Ok(Self {
             file,
             path: record.path,
+            stage_lease: ByteLease::new(ResourceKind::Stage, record.size),
+            snapshot_lease: ByteLease::new(ResourceKind::Snapshot, snapshot_bytes),
+            wal_lease: ByteLease::new(ResourceKind::Wal, wal_bytes),
+            wal_tail_repaired: false,
             key: record.key,
             size: record.size,
             mtime_secs: record.mtime_secs,
             dirty: record.dirty,
             dirty_gen: record.generation,
+            applied_gen: record.generation,
+            checkpoint_lsn: record.checkpoint_lsn,
+            next_lsn: record.checkpoint_lsn.saturating_add(1),
+            records_since_checkpoint: 0,
+            bytes_since_checkpoint: 0,
+            first_dirty_at: record.first_dirty_at,
             last_write: Instant::now(),
             flush_requested: true,
             reported_size: record.size,
@@ -604,6 +715,7 @@ impl Stage {
     pub async fn persist(&mut self) -> std::io::Result<()> {
         self.file.flush().await?;
         self.file.sync_all().await?;
+        stage_commit::record_file_sync_bytes(self.size);
         let state = match self.state {
             FlushState::Uploading => "uploading",
             FlushState::Paused => "paused",
@@ -623,6 +735,9 @@ impl Stage {
                 path: self.path.clone(),
                 snapshot: self.snapshot.clone(),
                 publication_guard: self.publication_guard.clone(),
+                checkpoint_lsn: self.checkpoint_lsn,
+                first_dirty_at: self.first_dirty_at,
+                wal_bytes: None,
             },
         )
         .await
@@ -639,11 +754,46 @@ impl Stage {
             )
             .await?;
             self.size = record.size;
+            self.stage_lease.resize(self.size);
             self.dirty_gen = record.generation;
+            self.applied_gen = record.generation;
+            self.checkpoint_lsn = record.checkpoint_lsn;
+            self.next_lsn = self.checkpoint_lsn.saturating_add(1);
+            self.records_since_checkpoint = 0;
+            self.bytes_since_checkpoint = 0;
             self.dirty = record.dirty;
             self.mtime_secs = record.mtime_secs;
             self.publication_guard = record.publication_guard;
+            self.first_dirty_at = record.first_dirty_at;
             self.last_write = Instant::now();
+            self.refresh_wal_lease().await;
+        }
+        if let Some(summary) = stage_wal::replay_file_after_generation(
+            &self.path,
+            self.checkpoint_lsn,
+            self.applied_gen,
+        )
+        .await?
+        {
+            if self.key != summary.record.key {
+                return Err(std::io::Error::other(
+                    "WAL key does not match durable stage manifest",
+                ));
+            }
+            self.key = summary.record.key;
+            self.size = summary.record.resulting_size;
+            self.stage_lease.resize(self.size);
+            self.dirty_gen = summary.record.generation;
+            self.applied_gen = summary.record.generation;
+            self.next_lsn = summary.next_lsn;
+            self.records_since_checkpoint = 0;
+            self.bytes_since_checkpoint = 0;
+            self.dirty = true;
+            self.mtime_secs = summary.record.mtime_secs;
+            self.first_dirty_at
+                .get_or_insert(summary.record.dirty_at_ms);
+            self.last_write = Instant::now();
+            self.refresh_wal_lease().await;
         }
         Ok(())
     }
@@ -655,31 +805,97 @@ impl Stage {
         mtime: u32,
     ) -> std::io::Result<()> {
         self.replay_pending_write().await?;
-        let intent = WriteIntent {
-            state: StageRecovery {
-                key: self.key.clone(),
-                size,
-                mtime_secs: mtime,
-                generation: self.dirty_gen.saturating_add(1),
-                dirty: true,
-                state: "waiting".into(),
-                error: None,
-                path: self.path.clone(),
-                snapshot: self.snapshot.clone(),
-                publication_guard: self.publication_guard.clone(),
-            },
-            change,
+        if self.checkpoint_lsn == 0 && self.dirty_gen == 0 {
+            self.write_recovery_manifest().await?;
+        }
+        let generation = self.dirty_gen.saturating_add(1);
+        let lsn = self.next_lsn;
+        let (op, offset, payload) = match &change {
+            DurableChange::Write { offset, data } => {
+                (stage_wal::WalOp::Write, *offset, data.clone())
+            }
+            DurableChange::Resize { .. } => (stage_wal::WalOp::Truncate, 0, Vec::new()),
         };
-        let path = self.path.with_extension("write.json");
-        write_json_atomic(&path, &intent).await?;
-        // Once the intent is durable, an older in-flight upload must no longer
-        // be allowed to mark this stage clean, even if disk I/O now fails.
+        let wal_path = stage_wal::wal_path(&self.path);
+        if !self.wal_tail_repaired {
+            stage_wal::repair_tail(&wal_path).await?;
+            self.wal_tail_repaired = true;
+        }
+        let dirty_at_ms = self
+            .first_dirty_at
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+        let record = stage_wal::WalRecord {
+            lsn,
+            generation,
+            op,
+            offset,
+            resulting_size: size,
+            mtime_secs: mtime,
+            dirty_at_ms,
+            data_name: stage_wal::data_name(&self.path)?,
+            key: self.key.clone(),
+            payload,
+        };
+        let wal_parent = wal_path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("Missing WAL folder"))?;
+        let wal_record_bytes = stage_wal::estimated_record_len(&record)?;
+        let wal_growth = DiskLease::reserve(wal_parent, wal_record_bytes, || {
+            super::available_space(wal_parent)
+        })?;
+        let data_growth = match record.op {
+            stage_wal::WalOp::Write => record.payload.len() as u64,
+            stage_wal::WalOp::Truncate => size.saturating_sub(self.size),
+        };
+        let data_growth = if data_growth > 0 {
+            Some(DiskLease::reserve(&self.path, data_growth, || {
+                super::available_space(&self.path)
+            })?)
+        } else {
+            None
+        };
+
+        self.wal_tail_repaired = false;
+        match stage_wal::append_record_unchecked(&wal_path, &record).await {
+            Ok(assigned_lsn) => {
+                self.wal_tail_repaired = true;
+                self.wal_lease
+                    .resize(self.wal_lease.bytes().saturating_add(wal_record_bytes));
+                stage_commit::commit(vec![wal_path.clone()]).await?;
+                drop(wal_growth);
+                self.next_lsn = assigned_lsn.saturating_add(1);
+                self.records_since_checkpoint = self.records_since_checkpoint.saturating_add(1);
+                self.bytes_since_checkpoint =
+                    self.bytes_since_checkpoint.saturating_add(wal_record_bytes);
+            }
+            Err(error) => return Err(error),
+        }
+        // Once the WAL record is durable, an older in-flight upload must no
+        // longer be allowed to mark this stage clean, even if data I/O now
+        // fails. Recovery will replay the WAL record.
         self.dirty = true;
-        self.dirty_gen = intent.state.generation;
+        self.dirty_gen = generation;
+        self.first_dirty_at.get_or_insert(dirty_at_ms);
         self.last_write = Instant::now();
+        match change {
+            DurableChange::Write { offset, data } => {
+                self.file.seek(SeekFrom::Start(offset)).await?;
+                self.file.write_all(&data).await?;
+                self.file.set_len(size).await?;
+            }
+            DurableChange::Resize { size } => self.file.set_len(size).await?,
+        }
+        self.file.flush().await?;
+        drop(data_growth);
         self.size = size;
+        self.stage_lease.resize(size);
+        debug_assert_eq!(self.stage_lease.bytes(), self.size);
         self.mtime_secs = mtime;
-        self.replay_pending_write().await
+        self.applied_gen = generation;
+        if self.should_checkpoint().await {
+            self.checkpoint_durable().await?;
+        }
+        Ok(())
     }
 
     pub async fn write_durable(
@@ -707,6 +923,36 @@ impl Stage {
         .await
     }
 
+    async fn write_recovery_manifest(&self) -> std::io::Result<()> {
+        self.file.sync_all().await?;
+        stage_commit::record_file_sync_bytes(self.size);
+        let state = match self.state {
+            FlushState::Uploading => "uploading",
+            FlushState::Paused => "paused",
+            FlushState::Failed { .. } => "failed",
+            FlushState::Idle => "waiting",
+        };
+        write_json_atomic(
+            &self.manifest_path(),
+            &StageRecovery {
+                key: self.key.clone(),
+                size: self.size,
+                mtime_secs: self.mtime_secs,
+                generation: self.dirty_gen,
+                dirty: self.dirty,
+                state: state.to_string(),
+                error: self.last_error.clone(),
+                path: self.path.clone(),
+                snapshot: self.snapshot.clone(),
+                publication_guard: self.publication_guard.clone(),
+                checkpoint_lsn: self.checkpoint_lsn,
+                first_dirty_at: self.first_dirty_at,
+                wal_bytes: None,
+            },
+        )
+        .await
+    }
+
     pub async fn truncate_durable(&mut self, size: u64, mtime: u32) -> std::io::Result<()> {
         self.durable_change(DurableChange::Resize { size }, size, mtime)
             .await
@@ -720,13 +966,18 @@ impl Stage {
         if let Some(snapshot) = &self.snapshot {
             return Ok(snapshot.clone());
         }
-        self.file.flush().await?;
-        self.file.sync_all().await?;
+        self.checkpoint_durable().await?;
         let path = self
             .path
             .with_extension(format!("g{}.snapshot", self.dirty_gen));
-        tokio::fs::copy(&self.path, &path).await?;
-        File::open(&path).await?.sync_all().await?;
+        let snapshot_parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("Missing snapshot folder"))?;
+        let snapshot_growth = DiskLease::reserve(snapshot_parent, self.size, || {
+            super::available_space(snapshot_parent)
+        })?;
+        copy_file_native_with_lease(self.path.clone(), path.clone(), self.size, snapshot_growth)
+            .await?;
         let snapshot = UploadSnapshot {
             path,
             generation: self.dirty_gen,
@@ -734,17 +985,21 @@ impl Stage {
             publication_guard: self.publication_guard.clone(),
         };
         self.snapshot = Some(snapshot.clone());
+        self.snapshot_lease.resize(snapshot.size);
         self.persist().await?;
         Ok(snapshot)
     }
 
-    pub async fn remove_files(&self) {
+    pub async fn remove_files(&mut self) {
         let _ = tokio::fs::remove_file(self.path.with_extension("write.json")).await;
         let _ = tokio::fs::remove_file(self.manifest_path()).await;
         let _ = tokio::fs::remove_file(&self.path).await;
         if let Some(snapshot) = &self.snapshot {
             snapshot.remove().await;
         }
+        self.stage_lease.resize(0);
+        self.snapshot_lease.resize(0);
+        self.wal_lease.resize(0);
         let _ = sync_parent(&self.path).await;
     }
 
@@ -762,11 +1017,13 @@ impl Stage {
         self.file.write_all(data).await?;
         self.file.flush().await?;
         self.size = self.size.max(offset.saturating_add(data.len() as u64));
+        self.stage_lease.resize(self.size);
         Ok(())
     }
 
     /// Reads up to `count` bytes at `offset`, stopping at end of file.
     pub async fn read_at(&mut self, offset: u64, count: usize) -> std::io::Result<Vec<u8>> {
+        self.replay_pending_write().await?;
         if offset >= self.size || count == 0 {
             return Ok(Vec::new());
         }
@@ -791,6 +1048,7 @@ impl Stage {
         self.file.set_len(size).await?;
         self.file.flush().await?;
         self.size = size;
+        self.stage_lease.resize(size);
         Ok(())
     }
 
@@ -813,6 +1071,41 @@ impl Stage {
             now.saturating_duration_since(self.last_write),
             now,
         )
+    }
+
+    pub async fn reservation_bytes(&self) -> u64 {
+        let snapshot = self.snapshot.as_ref().map(|s| s.size).unwrap_or(0);
+        self.size.saturating_add(snapshot)
+    }
+
+    pub fn release_snapshot_accounting(&mut self) {
+        self.snapshot_lease.resize(0);
+    }
+
+    async fn should_checkpoint(&self) -> bool {
+        self.records_since_checkpoint >= CHECKPOINT_RECORDS
+            || self.bytes_since_checkpoint >= CHECKPOINT_WAL_BYTES
+    }
+
+    async fn checkpoint_durable(&mut self) -> std::io::Result<()> {
+        self.replay_pending_write().await?;
+        self.file.flush().await?;
+        self.file.sync_all().await?;
+        stage_commit::record_file_sync_bytes(self.size);
+        self.checkpoint_lsn = self.next_lsn.saturating_sub(1);
+        self.persist().await?;
+        stage_wal::checkpoint(&self.path, self.checkpoint_lsn).await?;
+        self.records_since_checkpoint = 0;
+        self.bytes_since_checkpoint = 0;
+        self.wal_lease.resize(0);
+        Ok(())
+    }
+
+    async fn refresh_wal_lease(&mut self) {
+        let wal_bytes = stage_wal::uncheckpointed_bytes_for(&self.path, self.checkpoint_lsn)
+            .await
+            .unwrap_or(0);
+        self.wal_lease.resize(wal_bytes);
     }
 }
 
@@ -844,6 +1137,9 @@ mod tests {
                 path: path.clone(),
                 snapshot: None,
                 publication_guard: None,
+                checkpoint_lsn: 0,
+                first_dirty_at: None,
+                wal_bytes: None,
             },
             change: DurableChange::Write {
                 offset: 0,
@@ -895,6 +1191,378 @@ mod tests {
             .unwrap();
         assert_eq!(restored.read_at(0, 100).await.unwrap(), b"co");
         drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_wal_synced_before_data_recovers_the_acknowledged_write() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-wal-before-data-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        drop(stage);
+        let wal = stage_wal::wal_path(&path);
+        stage_wal::append_record(
+            &wal,
+            &stage_wal::WalRecord {
+                lsn: 1,
+                generation: 1,
+                op: stage_wal::WalOp::Write,
+                offset: 0,
+                resulting_size: 3,
+                mtime_secs: 1,
+                dirty_at_ms: 1,
+                data_name: stage_wal::data_name(&path).unwrap(),
+                key: "key".into(),
+                payload: b"abc".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+        stage_commit::commit(vec![wal]).await.unwrap();
+
+        replay_write_intents(&root).await.unwrap();
+        let record = recovery_entries(&root).await.unwrap().remove(0);
+        let mut restored = Stage::restore(record).await.unwrap();
+        assert_eq!(restored.read_at(0, 10).await.unwrap(), b"abc");
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn data_synced_before_manifest_still_recovers_from_wal() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-data-before-manifest-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        let wal = stage_wal::wal_path(&path);
+        stage_wal::append_record(
+            &wal,
+            &stage_wal::WalRecord {
+                lsn: 1,
+                generation: 1,
+                op: stage_wal::WalOp::Write,
+                offset: 0,
+                resulting_size: 3,
+                mtime_secs: 1,
+                dirty_at_ms: 1,
+                data_name: stage_wal::data_name(&path).unwrap(),
+                key: "key".into(),
+                payload: b"abc".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+        stage_commit::commit(vec![wal]).await.unwrap();
+        stage.write_at(0, b"abc").await.unwrap();
+        stage.file.sync_all().await.unwrap();
+        drop(stage);
+
+        replay_write_intents(&root).await.unwrap();
+        let record = recovery_entries(&root).await.unwrap().remove(0);
+        let mut restored = Stage::restore(record).await.unwrap();
+        assert_eq!(restored.read_at(0, 10).await.unwrap(), b"abc");
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manifest_checkpoint_before_wal_truncate_does_not_replay_old_records() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-manifest-before-wal-truncate-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        let wal = stage_wal::wal_path(&path);
+        stage_wal::append_record(
+            &wal,
+            &stage_wal::WalRecord {
+                lsn: 1,
+                generation: 1,
+                op: stage_wal::WalOp::Write,
+                offset: 0,
+                resulting_size: 3,
+                mtime_secs: 1,
+                dirty_at_ms: 1,
+                data_name: stage_wal::data_name(&path).unwrap(),
+                key: "key".into(),
+                payload: b"abc".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+        stage_commit::commit(vec![wal.clone()]).await.unwrap();
+        stage.write_at(0, b"abc").await.unwrap();
+        stage.file.sync_all().await.unwrap();
+        stage.dirty = true;
+        stage.dirty_gen = 1;
+        stage.checkpoint_lsn = 1;
+        stage.next_lsn = 2;
+        stage.first_dirty_at = Some(chrono::Utc::now().timestamp_millis());
+        stage.persist().await.unwrap();
+        drop(stage);
+
+        let record = recovery_entries(&root).await.unwrap().remove(0);
+        assert_eq!(record.checkpoint_lsn, 1);
+        let mut restored = Stage::restore(record).await.unwrap();
+        assert_eq!(restored.read_at(0, 10).await.unwrap(), b"abc");
+        assert!(tokio::fs::try_exists(wal).await.unwrap());
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn one_write_across_many_stages_does_not_checkpoint_each_stage() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-many-stage-no-checkpoint-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let mut stages = Vec::new();
+        for index in 0..100usize {
+            let path = root.join(format!("{index}.data"));
+            let mut stage = Stage::create(path, format!("key/{index}"), 1)
+                .await
+                .unwrap();
+            stage.write_durable(0, &[index as u8], 1).await.unwrap();
+            assert_eq!(
+                stage.checkpoint_lsn, 0,
+                "single-write stage checkpointed early"
+            );
+            assert_eq!(stage.records_since_checkpoint, 1);
+            stages.push(stage);
+        }
+        assert!(!tokio::fs::try_exists(root.join(".stage.wal.highwater"))
+            .await
+            .unwrap());
+        drop(stages);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_wal_accounting_tracks_owned_records_not_metadata_per_stage() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-shared-wal-accounting-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let mut first = Stage::create(root.join("first.data"), "first".into(), 1)
+            .await
+            .unwrap();
+        let mut second = Stage::create(root.join("second.data"), "second".into(), 1)
+            .await
+            .unwrap();
+        first.write_durable(0, b"first", 1).await.unwrap();
+        second.write_durable(0, b"second", 1).await.unwrap();
+        let wal_len = tokio::fs::metadata(root.join(".stage.wal"))
+            .await
+            .unwrap()
+            .len();
+        let owned_wal_bytes = first
+            .wal_lease
+            .bytes()
+            .saturating_add(second.wal_lease.bytes());
+        assert_eq!(owned_wal_bytes, wal_len);
+        assert!(first.wal_lease.bytes() < wal_len);
+        assert!(second.wal_lease.bytes() < wal_len);
+        assert_eq!(first.reservation_bytes().await, first.size);
+        assert_eq!(second.reservation_bytes().await, second.size);
+        drop(first);
+        drop(second);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_entries_scans_shared_wal_once_for_many_stages() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-recovery-one-scan-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        for index in 0..100usize {
+            let path = root.join(format!("{index}.data"));
+            let mut stage = Stage::create(path, format!("key/{index}"), 1)
+                .await
+                .unwrap();
+            stage.write_durable(0, &[index as u8], 1).await.unwrap();
+            stage.persist().await.unwrap();
+        }
+        let before = stage_wal::root_wal_scan_count();
+        let entries = recovery_entries(&root).await.unwrap();
+        let after_entries = stage_wal::root_wal_scan_count();
+        assert_eq!(entries.len(), 100);
+        assert_eq!(after_entries.saturating_sub(before), 1);
+        for record in entries {
+            let restored = Stage::restore(record).await.unwrap();
+            drop(restored);
+        }
+        assert_eq!(stage_wal::root_wal_scan_count(), after_entries);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sequential_and_random_repeated_writes_recover_exact_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-repeated-writes-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        let mut expected = vec![0u8; 8192];
+        for index in 0..32usize {
+            let offset = (index * 173) % 4096;
+            let len = 17 + (index * 29) % 511;
+            let payload = vec![(index as u8).wrapping_mul(7).wrapping_add(3); len];
+            stage
+                .write_durable(offset as u64, &payload, index as u32 + 1)
+                .await
+                .unwrap();
+            expected[offset..offset + len].copy_from_slice(&payload);
+        }
+        for index in 0..32usize {
+            let offset = (8191usize.wrapping_sub(index * 197)) % 4096;
+            let len = 1 + (index * 31) % 257;
+            let payload = vec![(index as u8).wrapping_mul(11).wrapping_add(5); len];
+            stage
+                .write_durable(offset as u64, &payload, index as u32 + 33)
+                .await
+                .unwrap();
+            expected[offset..offset + len].copy_from_slice(&payload);
+        }
+        let size = stage.size as usize;
+        let expected = expected[..size].to_vec();
+        drop(stage);
+
+        replay_write_intents(&root).await.unwrap();
+        let record = recovery_entries(&root).await.unwrap().remove(0);
+        let mut restored = Stage::restore(record).await.unwrap();
+        assert_eq!(restored.read_at(0, size).await.unwrap(), expected);
+        assert_eq!(restored.dirty_gen, 64);
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "local WAL ACK benchmark; run intentionally on the target filesystem"]
+    async fn wal_ack_latency_matrix() {
+        let sizes = [4 * 1024usize, 128 * 1024, 1024 * 1024];
+        let concurrency = [1usize, 10, 100];
+        for size in sizes {
+            for files in concurrency {
+                let root = std::env::temp_dir().join(format!(
+                    "r2-wal-bench-{}-{}-{}-{}",
+                    std::process::id(),
+                    size,
+                    files,
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap()
+                ));
+                tokio::fs::create_dir_all(&root).await.unwrap();
+                let before = stage_commit::metrics();
+                let started = Instant::now();
+                let payload = vec![7u8; size];
+                let mut tasks = Vec::new();
+                for index in 0..files {
+                    let path = root.join(format!("{index}.data"));
+                    let payload = payload.clone();
+                    tasks.push(tokio::spawn(async move {
+                        let mut stage = Stage::create(path, format!("bench/{index}"), 1)
+                            .await
+                            .unwrap();
+                        let ack_started = Instant::now();
+                        stage.write_durable(0, &payload, 1).await.unwrap();
+                        ack_started.elapsed().as_micros()
+                    }));
+                }
+                let mut ack_micros = Vec::with_capacity(files);
+                for task in tasks {
+                    ack_micros.push(task.await.unwrap());
+                }
+                ack_micros.sort_unstable();
+                let percentile = |values: &[u128], pct: usize| -> u128 {
+                    if values.is_empty() {
+                        return 0;
+                    }
+                    let index = ((values.len() - 1) * pct) / 100;
+                    values[index]
+                };
+                let elapsed = started.elapsed();
+                let wal_bytes = tokio::fs::metadata(root.join(".stage.wal"))
+                    .await
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                let recovery_started = Instant::now();
+                replay_write_intents(&root).await.unwrap();
+                let recovery_ms = recovery_started.elapsed().as_millis();
+                let after = stage_commit::metrics();
+                let sync_bytes = after.sync_bytes.saturating_sub(before.sync_bytes);
+                let payload_bytes = (size as u64).saturating_mul(files as u64);
+                eprintln!(
+                    "wal_ack size={} files={} elapsed_ms={} ack_p50_us={} ack_p95_us={} sync_batches={} sync_files={} sync_parents={} sync_bytes={} sync_gib={:.6} payload_gib={:.6} wal_bytes={} wal_gib={:.6} workers_started={} recovery_ms={} cpu=external_time_l",
+                    size,
+                    files,
+                    elapsed.as_millis(),
+                    percentile(&ack_micros, 50),
+                    percentile(&ack_micros, 95),
+                    after.sync_batches.saturating_sub(before.sync_batches),
+                    after.sync_files.saturating_sub(before.sync_files),
+                    after.sync_parents.saturating_sub(before.sync_parents),
+                    sync_bytes,
+                    sync_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+                    payload_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+                    wal_bytes,
+                    wal_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+                    after.workers_started.saturating_sub(before.workers_started),
+                    recovery_ms,
+                );
+                tokio::fs::remove_dir_all(root).await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "snapshot copy measurement; run intentionally on the target filesystem"]
+    async fn snapshot_copy_measurement() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-snapshot-copy-bench-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let path = root.join("record.data");
+        let mut stage = Stage::create(path, "snapshot/bench".into(), 1)
+            .await
+            .unwrap();
+        let payload = vec![3u8; 16 * 1024 * 1024];
+        for (index, chunk) in payload.chunks(1024 * 1024).enumerate() {
+            stage
+                .write_durable((index * 1024 * 1024) as u64, chunk, 1)
+                .await
+                .unwrap();
+        }
+        let started = Instant::now();
+        let snapshot = stage.upload_snapshot().await.unwrap();
+        let elapsed = started.elapsed();
+        let source_len = tokio::fs::metadata(stage.path()).await.unwrap().len();
+        let snapshot_len = tokio::fs::metadata(&snapshot.path).await.unwrap().len();
+        eprintln!(
+            "snapshot_copy source_bytes={} snapshot_bytes={} elapsed_ms={} copy_impl=std_fs_copy_spawn_blocking",
+            source_len,
+            snapshot_len,
+            elapsed.as_millis()
+        );
+        drop(stage);
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 

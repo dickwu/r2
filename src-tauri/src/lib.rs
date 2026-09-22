@@ -396,6 +396,7 @@ pub fn run() {
             // Lazy sync commands
             commands::lazy_sync::list_prefix,
             commands::lazy_sync::get_prefix_cache,
+            commands::lazy_sync::get_prefix_cache_page,
             commands::lazy_sync::list_prefix_stream,
             commands::lazy_sync::cancel_prefix_list,
             commands::lazy_sync::start_background_sync,

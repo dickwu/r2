@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::config::MoveConfig;
 use super::finishing::{run_cache_operations, run_delete_original};
 use super::planner::{
-    head_identity, plan_transfer, recovery_step, scope, verified_destination, RecoveryStep,
+    head_identity_checked, plan_transfer, recovery_step, scope, verified_destination, RecoveryStep,
     TransferPlan, TRANSFER_MARKER,
 };
 use super::state::{update_move_status, update_move_status_with_progress};
@@ -185,7 +185,7 @@ async fn move_file_internal(
                 let observed = super::stream::protocol::interruptible(
                     cancelled,
                     paused,
-                    head_identity(dest_config, &session.dest_key),
+                    head_identity_checked(dest_config, &session.dest_key, cancelled, paused),
                 )
                 .await??;
                 if let Some((identity, head)) = observed {
@@ -204,6 +204,8 @@ async fn move_file_internal(
                             &session.dest_key,
                             &journal.source,
                             &identity,
+                            cancelled,
+                            paused,
                         )
                         .await?;
                     }
@@ -249,7 +251,7 @@ async fn move_file_internal(
             _ => {
                 return Err(
                     "needs_action: Unrecognized move recovery phase; source retained".into(),
-                )
+                );
             }
         }
     }
@@ -265,7 +267,7 @@ async fn move_file_internal(
     let (source_identity, source_head) = super::stream::protocol::interruptible(
         cancelled,
         paused,
-        head_identity(source_config, &session.source_key),
+        head_identity_checked(source_config, &session.source_key, cancelled, paused),
     )
     .await??
     .ok_or_else(|| "not_found: Move source does not exist".to_string())?;
@@ -283,15 +285,17 @@ async fn move_file_internal(
             task_id: session.id.clone(),
             stage: "transferring".into(),
             source: source_identity,
-            source_scope,
-            dest_scope,
+            source_scope: source_scope.clone(),
+            dest_scope: dest_scope.clone(),
             destination: None,
+            retry: Default::default(),
+            metrics: Default::default(),
         },
     };
     if let Some((identity, head)) = super::stream::protocol::interruptible(
         cancelled,
         paused,
-        head_identity(dest_config, &session.dest_key),
+        head_identity_checked(dest_config, &session.dest_key, cancelled, paused),
     )
     .await??
     {
@@ -339,6 +343,22 @@ async fn move_file_internal(
             plan = TransferPlan::Relay;
         }
     }
+    if plan == TransferPlan::Relay
+        && journal.source.size > super::planner::SINGLE_COPY_LIMIT
+        && super::planner::compatible_multipart_copy_candidate(source_config, dest_config)
+        && source_scope == dest_scope
+    {
+        use crate::providers::conditional::Condition;
+        if dest_config
+            .supports_condition(Condition::PartCopySource)
+            .await?
+            && dest_config
+                .supports_condition(Condition::CompleteCreate)
+                .await?
+        {
+            plan = TransferPlan::MultipartCopy;
+        }
+    }
     let uploaded_size = match plan {
         TransferPlan::SingleCopy | TransferPlan::MultipartCopy => {
             super::server_copy::copy(
@@ -347,6 +367,7 @@ async fn move_file_internal(
                 dest_config,
                 &source_head,
                 &mut journal,
+                Some(app),
                 cancelled,
                 paused,
             )
@@ -375,7 +396,7 @@ async fn move_file_internal(
     let (destination, head) = super::stream::protocol::interruptible(
         cancelled,
         paused,
-        head_identity(dest_config, &session.dest_key),
+        head_identity_checked(dest_config, &session.dest_key, cancelled, paused),
     )
     .await??
     .ok_or("outcome_unknown: Destination not visible after upload")?;
@@ -394,6 +415,8 @@ async fn move_file_internal(
             &session.dest_key,
             &journal.source,
             &destination,
+            cancelled,
+            paused,
         )
         .await?;
     }
@@ -412,16 +435,20 @@ async fn move_file_internal(
     }))
 }
 
+/// Task statuses a failure message can lead with (`<status>: …`); anything
+/// else is `error`.
+pub(crate) const FAILURE_STATUSES: [&str; 7] = [
+    "paused",
+    "cancelled",
+    "needs_auth",
+    "conflict",
+    "outcome_unknown",
+    "needs_action",
+    "delete_pending",
+];
+
 fn failure_status(error: &str) -> &'static str {
-    for status in [
-        "paused",
-        "cancelled",
-        "needs_auth",
-        "conflict",
-        "outcome_unknown",
-        "needs_action",
-        "delete_pending",
-    ] {
+    for status in FAILURE_STATUSES {
         if error.starts_with(&format!("{status}:")) {
             return status;
         }
@@ -446,8 +473,69 @@ pub(crate) fn recovery_failure_status(error: &str, phase: Option<&str>) -> &'sta
     }
 }
 
-async fn report_failure(app: &AppHandle, task_id: &str, error: String) {
-    let phase = get_move_journal(task_id).await;
+fn retry_phase(error: &str, fallback: &str) -> String {
+    error
+        .split(':')
+        .nth(1)
+        .map(str::trim)
+        .filter(|phase| !phase.is_empty() && !phase.contains(' '))
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn schedule_retry_wakeup(app: AppHandle, session: &MoveSession, next_attempt_at: i64) {
+    let task_id = session.id.clone();
+    let source_bucket = session.source_bucket.clone();
+    let source_account_id = session.source_account_id.clone();
+    let delay = (next_attempt_at - chrono::Utc::now().timestamp()).max(0) as u64;
+    tokio::spawn(async move {
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        }
+        let ready = match (
+            db::move_sessions::get_move_session(&task_id).await,
+            get_move_journal(&task_id).await,
+        ) {
+            (Ok(Some(session)), Ok(Some(journal))) => {
+                session.status == "pending"
+                    && journal.retry.next_attempt_at == Some(next_attempt_at)
+                    && next_attempt_at <= chrono::Utc::now().timestamp()
+            }
+            _ => false,
+        };
+        if ready {
+            schedule_queue_continuation(app, source_bucket, source_account_id);
+        }
+    });
+}
+
+fn schedule_retry_wakeup_for_source(
+    app: AppHandle,
+    source_bucket: String,
+    source_account_id: String,
+    next_attempt_at: i64,
+) {
+    let delay = (next_attempt_at - chrono::Utc::now().timestamp()).max(0) as u64;
+    tokio::spawn(async move {
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        }
+        match db::move_sessions::get_next_move_retry_attempt_for_source(
+            &source_bucket,
+            &source_account_id,
+        )
+        .await
+        {
+            Ok(Some(next)) if next <= chrono::Utc::now().timestamp() => {
+                schedule_queue_continuation(app, source_bucket, source_account_id);
+            }
+            _ => {}
+        }
+    });
+}
+
+async fn report_failure(app: &AppHandle, session: &MoveSession, error: String) {
+    let phase = get_move_journal(&session.id).await;
     let status = match &phase {
         Ok(journal) => recovery_failure_status(
             &error,
@@ -455,12 +543,56 @@ async fn report_failure(app: &AppHandle, task_id: &str, error: String) {
         ),
         Err(_) => "needs_action",
     };
+    let transient_retry = error.starts_with("transient:") || error.contains(": transient:");
+    let journal_for_retry = phase.as_ref().ok().and_then(|journal| journal.as_ref());
     let error = if status == "outcome_unknown" {
-        format!("outcome_unknown: {error}. A remote mutation may have committed; its recovery record was retained.")
+        format!(
+            "outcome_unknown: {error}. A remote mutation may have committed; its recovery record was retained."
+        )
     } else {
         error
     };
-    update_move_status(app, task_id, status, Some(error)).await;
+    if transient_retry {
+        let phase_name = journal_for_retry
+            .map(|journal| retry_phase(&error, &journal.stage))
+            .unwrap_or_else(|| retry_phase(&error, "preflight"));
+        let scheduled = if journal_for_retry.is_some() {
+            db::move_sessions::schedule_move_retry(&session.id, &phase_name, "transient").await
+        } else {
+            db::move_sessions::schedule_move_task_retry(&session.id, &phase_name, "transient").await
+        };
+        match scheduled {
+            Ok(Some(next_attempt_at)) => {
+                let message = format!("{error}; retry scheduled at {next_attempt_at}");
+                update_move_status(app, &session.id, "pending", Some(message)).await;
+                if journal_for_retry.is_some() {
+                    schedule_retry_wakeup(app.clone(), session, next_attempt_at);
+                } else {
+                    schedule_retry_wakeup_for_source(
+                        app.clone(),
+                        session.source_bucket.clone(),
+                        session.source_account_id.clone(),
+                        next_attempt_at,
+                    );
+                }
+                return;
+            }
+            Ok(None) => {}
+            Err(schedule_error) => {
+                update_move_status(
+                    app,
+                    &session.id,
+                    "needs_action",
+                    Some(format!(
+                        "Cannot persist retry schedule: {schedule_error}; {error}"
+                    )),
+                )
+                .await;
+                return;
+            }
+        }
+    }
+    update_move_status(app, &session.id, status, Some(error)).await;
 }
 
 /// Spawn a move task
@@ -564,15 +696,21 @@ pub(crate) async fn spawn_move_task(
             };
             match finished {
                 Ok(()) => {
+                    let _ = db::move_sessions::clear_move_retry(&session.id).await;
+                    let _ = db::move_sessions::clear_move_task_retry(&session.id).await;
                     update_move_status_with_progress(&app, &session.id, "success", 100, None).await
                 }
-                Err(error) => report_failure(&app, &session.id, error).await,
+                Err(error) => report_failure(&app, &session, error).await,
             }
         }
-        Ok(None) => update_move_status_with_progress(&app, &session.id, "success", 100, None).await,
+        Ok(None) => {
+            let _ = db::move_sessions::clear_move_retry(&session.id).await;
+            let _ = db::move_sessions::clear_move_task_retry(&session.id).await;
+            update_move_status_with_progress(&app, &session.id, "success", 100, None).await
+        }
         Err(error) => {
             error!("move_failed: {} error={}", task_id, error);
-            report_failure(&app, &task_id, error).await;
+            report_failure(&app, &session, error).await;
         }
     }
     cleanup_registries(&task_id);
@@ -648,6 +786,20 @@ async fn continue_move_queue(app: &AppHandle, source_bucket: &str, source_accoun
     match get_pending_sessions_to_start(source_bucket, source_account_id).await {
         Ok((next_sessions, slots_available)) => {
             if next_sessions.is_empty() || slots_available <= 0 {
+                if let Ok(Some(next_attempt_at)) =
+                    db::move_sessions::get_next_move_retry_attempt_for_source(
+                        source_bucket,
+                        source_account_id,
+                    )
+                    .await
+                {
+                    schedule_retry_wakeup_for_source(
+                        app.clone(),
+                        source_bucket.to_string(),
+                        source_account_id.to_string(),
+                        next_attempt_at,
+                    );
+                }
                 debug!(
                     "continue_move_queue: no pending sessions for {}/{}",
                     source_account_id, source_bucket
@@ -831,8 +983,9 @@ mod recovery_tests {
     #[tokio::test]
     async fn legacy_transferring_multipart_verifies_bytes_before_adopting_destination() {
         use super::*;
-        use crate::move_transfer::stream::tests::{fixture_config, journal_fixture};
+        use crate::move_transfer::stream::tests::{fixture_config, journal_fixture, test_db_guard};
         use crate::test_s3::{serve, Response};
+        let _guard = test_db_guard().await;
         for (our_marker, changed) in [(true, false), (true, true), (false, false)] {
             let (session, mut journal) = journal_fixture("legacy-multipart", 8).await;
             journal.stage = "transferring".into();
@@ -872,10 +1025,11 @@ mod recovery_tests {
             })
             .await;
             let config = fixture_config(&fixture.endpoint);
-            let (identity, head) = head_identity(&config, &session.dest_key)
-                .await
-                .unwrap()
-                .unwrap();
+            let (identity, head) =
+                crate::move_transfer::planner::head_identity(&config, &session.dest_key)
+                    .await
+                    .unwrap()
+                    .unwrap();
             let result = reconcile_legacy_multipart(
                 &config,
                 &config,

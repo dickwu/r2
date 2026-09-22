@@ -58,8 +58,18 @@ async fn failed_head_never_reaches_zero_byte_put() {
     let name: filename3 = b"existing".as_slice().into();
     assert!(fs.create(ROOT_ID, &name, sattr3::default()).await.is_err());
     let requests = fixture.requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "HEAD");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.method == "HEAD")
+            .count(),
+        3,
+        "transient HEAD failures should retry in the common executor"
+    );
+    assert!(
+        requests.iter().all(|request| request.method == "HEAD"),
+        "a failed existence probe must never reach zero-byte PUT"
+    );
 }
 
 #[tokio::test]
@@ -80,15 +90,12 @@ async fn editing_a_cached_zero_byte_inode_preserves_new_remote_content() {
         .unwrap();
     fs.write(id, 1, b"X").await.unwrap();
     assert_eq!(fs.read(id, 0, 100).await.unwrap().0, b"tXil");
-    assert!(fixture
-        .requests
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|r| r.method == "GET"
+    assert!(fixture.requests.lock().unwrap().iter().any(|r| {
+        r.method == "GET"
             && r.headers
                 .get("if-match")
-                .is_some_and(|value| value == "\"version\"")));
+                .is_some_and(|value| value == "\"version\"")
+    }));
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
 }
 
@@ -201,6 +208,284 @@ async fn storage_health_recovers_after_successful_io() {
     let health = fs.health_snapshot().await;
     assert!(health.last_error.is_none());
     assert!(health.last_successful_io.is_some());
+}
+
+#[tokio::test]
+async fn chunk_read_retries_a_transient_get_inside_the_same_identity() {
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fixture = serve({
+        let attempts = attempts.clone();
+        move |request| {
+            let attempts = attempts.clone();
+            async move {
+                if request.method == "HEAD" {
+                    Response::empty(200)
+                        .header("content-length", 4)
+                        .header("etag", "\"retry\"")
+                } else if request.method == "GET" {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Response::empty(503)
+                    } else {
+                        Response::xml(206, "data")
+                            .header("content-range", "bytes 0-3/4")
+                            .header("etag", "\"retry\"")
+                    }
+                } else {
+                    Response::empty(400)
+                }
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "read-get-retry");
+    let id = fs
+        .intern_child("note", ROOT_ID, EntryKind::File, 4, 0)
+        .unwrap();
+
+    assert_eq!(fs.read(id, 0, 4).await.unwrap().0, b"data");
+    assert_eq!(
+        fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == "GET")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn chunk_read_does_not_retry_authorization_failures() {
+    let fixture = serve(|request| async move {
+        if request.method == "HEAD" {
+            Response::empty(200)
+                .header("content-length", 4)
+                .header("etag", "\"auth\"")
+        } else if request.method == "GET" {
+            Response::empty(403)
+        } else {
+            Response::empty(400)
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "read-get-auth");
+    let id = fs
+        .intern_child("note", ROOT_ID, EntryKind::File, 4, 0)
+        .unwrap();
+
+    assert!(matches!(
+        fs.read(id, 0, 4).await,
+        Err(nfsstat3::NFS3ERR_ACCES)
+    ));
+    assert_eq!(
+        fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == "GET")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn chunk_read_rejects_identity_header_mismatch_without_retry() {
+    let fixture = serve(|request| async move {
+        if request.method == "HEAD" {
+            Response::empty(200)
+                .header("content-length", 1)
+                .header("etag", "\"short\"")
+        } else if request.method == "GET" {
+            Response {
+                status: 206,
+                headers: Vec::new(),
+                body: b"x".to_vec(),
+            }
+            .header("content-range", "bytes 0-1/1")
+            .header("content-length", "1")
+            .header("etag", "\"short\"")
+        } else {
+            Response::empty(400)
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "read-get-header-mismatch");
+    let id = fs
+        .intern_child("note", ROOT_ID, EntryKind::File, 1, 0)
+        .unwrap();
+
+    assert!(matches!(fs.read(id, 0, 1).await, Err(nfsstat3::NFS3ERR_IO)));
+    assert_eq!(
+        fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == "GET")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn stage_prime_retries_interrupted_body_without_applying_partial_bytes() {
+    let gets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fixture = serve({
+        let gets = gets.clone();
+        move |request| {
+            let gets = gets.clone();
+            async move {
+                if request.method == "HEAD" {
+                    return Response::empty(200)
+                        .header("content-length", 4)
+                        .header("etag", "\"stage\"");
+                }
+                if request.method == "GET" {
+                    if gets.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return Response {
+                            status: 200,
+                            headers: vec![
+                                ("content-length".into(), "4".into()),
+                                ("etag".into(), "\"stage\"".into()),
+                            ],
+                            body: b"da".to_vec(),
+                        };
+                    }
+                    return Response::xml(200, "data").header("etag", "\"stage\"");
+                }
+                Response::empty(400)
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "stage-get-body-retry");
+    let id = fs
+        .intern_child("note", ROOT_ID, EntryKind::File, 4, 0)
+        .unwrap();
+
+    fs.write(id, 1, b"X").await.unwrap();
+    assert_eq!(fs.read(id, 0, 4).await.unwrap().0, b"dXta");
+    assert_eq!(gets.load(Ordering::SeqCst), 2);
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+#[tokio::test]
+async fn stage_prime_does_not_retry_authorization_failures() {
+    let fixture = serve(|request| async move {
+        if request.method == "HEAD" {
+            Response::empty(200)
+                .header("content-length", 4)
+                .header("etag", "\"stage-auth\"")
+        } else if request.method == "GET" {
+            Response::empty(403)
+        } else {
+            Response::empty(400)
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "stage-get-auth");
+    let id = fs
+        .intern_child("note", ROOT_ID, EntryKind::File, 4, 0)
+        .unwrap();
+
+    assert!(matches!(
+        fs.write(id, 1, b"X").await,
+        Err(nfsstat3::NFS3ERR_ACCES)
+    ));
+    assert_eq!(
+        fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == "GET")
+            .count(),
+        1
+    );
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+#[tokio::test]
+async fn relay_rename_upload_part_retries_transient_upload_and_honors_cancel_before_get() {
+    const PART: u64 = 5 * 1024 * 1024;
+    let puts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fixture = serve({
+        let puts = puts.clone();
+        move |request| {
+            let puts = puts.clone();
+            async move {
+                if request.method == "GET" {
+                    return Response {
+                        status: 206,
+                        headers: vec![
+                            ("content-length".into(), PART.to_string()),
+                            (
+                                "content-range".into(),
+                                format!("bytes 0-{}/{}", PART - 1, PART),
+                            ),
+                            ("etag".into(), "\"relay-source\"".into()),
+                        ],
+                        body: vec![b'r'; PART as usize],
+                    };
+                }
+                if request.method == "PUT" {
+                    if puts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return Response::xml(
+                            503,
+                            "<Error><Code>ServiceUnavailable</Code></Error>",
+                        );
+                    }
+                    // S3 returns a part's ETag as a response header, not a body.
+                    return Response::empty(200).header("etag", "\"relay-part\"");
+                }
+                Response::empty(400)
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "relay-upload-part-retry");
+    let object = RenameObject {
+        from: "source".into(),
+        to: "target".into(),
+        source_etag: "\"relay-source\"".into(),
+        size: PART,
+        destination_etag: None,
+        phase: "pending".into(),
+        replaced_etag: None,
+        source_version: None,
+    };
+    let plan = crate::move_transfer::stream::MultipartPlan::new(
+        fs.inner.transfer_config.get().unwrap(),
+        PART,
+        Some(PART),
+    )
+    .unwrap();
+    assert_eq!(
+        fs.copy_rename_part(&object, "upload", "", false, 1, &plan)
+            .await
+            .unwrap(),
+        (1, "\"relay-part\"".into())
+    );
+    assert_eq!(puts.load(Ordering::SeqCst), 2);
+
+    let cancelled = filesystem(fixture.client.clone(), "relay-upload-part-cancel");
+    cancelled.stop_accepting_writes();
+    assert!(cancelled
+        .copy_rename_part(&object, "upload", "", false, 1, &plan)
+        .await
+        .is_err());
+    let get_count = fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.method == "GET")
+        .count();
+    assert_eq!(get_count, 1, "cancelled retry must not start another GET");
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+    let _ = tokio::fs::remove_dir_all(cancelled.staging_root()).await;
 }
 
 #[tokio::test]
@@ -565,7 +850,7 @@ async fn quota_rejection_does_not_acknowledge_or_replace_staged_bytes() {
     let fixture = serve(|_| async { Response::empty(404) }).await;
     let fs = filesystem(fixture.client.clone(), "quota");
     let id = intern(&fs, "note").await;
-    fs.configure_quota(8).await;
+    fs.configure_quota(8_210).await;
     fs.write(id, 0, b"four").await.unwrap();
     assert!(matches!(
         fs.write(id, 0, b"too long").await,
@@ -638,6 +923,7 @@ async fn rename_failure_before_copy_does_not_freeze_the_destination_stage() {
         .await
         .unwrap());
     assert_ne!(fs.stage_guard(b).await.unwrap().state, FlushState::Paused);
+    assert_eq!(fs.read(b, 0, 100).await.unwrap().0, b"BBBB");
     {
         let _namespace = fs.inner.namespace.write().await;
         fs.flush_stage_blocking(b).await.unwrap();
@@ -885,9 +1171,13 @@ async fn uncertain_large_copy_completes_existing_parts_without_recopying() {
     let path = fs
         .staging_root()
         .join(format!("rename-part-recovery-{:016x}.json", hash.finish()));
+    let part_size = stage::planned_part_size(size);
     let journal = stage::MultipartJournal {
         upload_id: Some("already-uploaded".into()),
-        part_size: stage::planned_part_size(size),
+        part_size,
+        parts: (1..=308)
+            .map(|number| (number, format!("\"p{number}\"")))
+            .collect(),
         completing: true,
         precondition: Some(stage::PublicationGuard::Absent),
         ..Default::default()
@@ -1426,6 +1716,330 @@ async fn partial_directory_cache_does_not_establish_lookup_absence() {
 }
 
 #[tokio::test]
+async fn lookup_of_published_partial_child_does_not_fetch_the_rest_of_the_directory() {
+    let second_entered = Arc::new(tokio::sync::Notify::new());
+    let release_second = Arc::new(tokio::sync::Notify::new());
+    let fixture = serve({
+        let second_entered = second_entered.clone();
+        let release_second = release_second.clone();
+        move |request| {
+            let second_entered = second_entered.clone();
+            let release_second = release_second.clone();
+            async move {
+                if request.path.contains("continuation-token=next") {
+                    second_entered.notify_one();
+                    release_second.notified().await;
+                    directory_response(&["omega"], &[], None)
+                } else {
+                    directory_response(&["alpha", "beta"], &[], Some("next"))
+                }
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "partial-positive-lookup");
+    let page = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+    assert_eq!(directory_names(&page), ["alpha"]);
+    assert!(!page.end);
+
+    let alpha: filename3 = b"alpha".as_slice().into();
+    let looked_up = tokio::time::timeout(Duration::from_millis(250), fs.lookup(ROOT_ID, &alpha))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(looked_up, page.entries[0].fileid);
+    {
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.path.contains("continuation-token=next")),
+            "exact lookup must not fetch unrelated directory pages"
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), second_entered.notified())
+            .await
+            .is_err()
+    );
+    release_second.notify_waiters();
+}
+
+#[tokio::test]
+async fn exact_lookup_probes_directory_before_colliding_file_and_singleflights() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture = serve({
+        let entered = entered.clone();
+        let release = release.clone();
+        move |request| {
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                if request.method == "GET" && request.path.contains("list-type") {
+                    if request.path.contains("prefix=photos%2F") {
+                        entered.notify_one();
+                        release.acquire().await.unwrap().forget();
+                        return directory_response(&["photos/inside.jpg"], &[], None);
+                    }
+                    directory_response(&["photos", "zeta"], &[], Some("next"))
+                } else if request.method == "HEAD" {
+                    Response::empty(200)
+                        .header("content-length", 3)
+                        .header("etag", "\"file\"")
+                } else {
+                    Response::empty(400)
+                }
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "exact-directory-singleflight");
+    let first = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+    assert!(!first.end);
+
+    let a = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.lookup_child(ROOT_ID, "", "photos").await }
+    });
+    entered.notified().await;
+    let b = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.lookup_child(ROOT_ID, "", "photos").await }
+    });
+    release.add_permits(1);
+
+    let a = a.await.unwrap().unwrap().unwrap();
+    let b = b.await.unwrap().unwrap().unwrap();
+    assert_eq!(a.0, b.0);
+    assert_eq!(a.1.kind, EntryKind::Dir);
+
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.path.contains("prefix=photos%2F"))
+            .count(),
+        1
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.method == "HEAD" && request.path.ends_with("/photos")),
+        "directory wins without also probing the colliding object"
+    );
+}
+
+#[tokio::test]
+async fn no_listing_rename_allows_concurrent_target_exact_lookup_after_fence_release() {
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Notify::new());
+    let copied = Arc::new(std::sync::Mutex::new(None::<String>));
+    let removed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fixture = serve({
+        let copy_entered = copy_entered.clone();
+        let release_copy = release_copy.clone();
+        let copied = copied.clone();
+        let removed = removed.clone();
+        move |request| {
+            let copy_entered = copy_entered.clone();
+            let release_copy = release_copy.clone();
+            let copied = copied.clone();
+            let removed = removed.clone();
+            async move {
+                if request.path.contains(".r2-operation-checks/") {
+                    if request.method == "DELETE" && request.headers.contains_key("if-match") {
+                        return Response::xml(
+                            412,
+                            "<Error><Code>PreconditionFailed</Code></Error>",
+                        );
+                    }
+                    return Response::empty(if request.method == "DELETE" { 204 } else { 200 })
+                        .header("etag", "\"probe\"")
+                        .header(
+                            "content-length",
+                            if request.method == "HEAD" { 8 } else { 0 },
+                        );
+                }
+                if request.method == "GET" && request.path.contains("list-type") {
+                    return directory_response(&[], &[], None);
+                }
+                let key = request
+                    .path
+                    .split('?')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_start_matches("/photos/")
+                    .to_string();
+                match request.method.as_str() {
+                    "HEAD" if key == "source" && !removed.load(Ordering::SeqCst) => {
+                        Response::empty(200)
+                            .header("content-length", 1)
+                            .header("etag", "\"source\"")
+                    }
+                    "HEAD" if key == "target" => {
+                        if let Some(token) = copied.lock().unwrap().clone() {
+                            Response::empty(200)
+                                .header("content-length", 1)
+                                .header("etag", "\"copied\"")
+                                .header("x-amz-meta-r2-rename-operation", token)
+                        } else {
+                            Response::empty(404)
+                        }
+                    }
+                    "HEAD" => Response::empty(404),
+                    "PUT"
+                        if key == "target" && request.headers.contains_key("x-amz-copy-source") =>
+                    {
+                        copy_entered.notify_one();
+                        release_copy.notified().await;
+                        *copied.lock().unwrap() = request
+                            .headers
+                            .get("x-amz-meta-r2-rename-operation")
+                            .cloned();
+                        Response::xml(
+                            200,
+                            "<CopyObjectResult><ETag>&quot;copied&quot;</ETag></CopyObjectResult>",
+                        )
+                    }
+                    "DELETE" if key == "source" => {
+                        removed.store(true, Ordering::SeqCst);
+                        Response::empty(204)
+                    }
+                    _ => Response::empty(400),
+                }
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "no-listing-rename-lookup");
+    let source_name: filename3 = b"source".as_slice().into();
+    let target_name: filename3 = b"target".as_slice().into();
+    let source_id = fs.lookup(ROOT_ID, &source_name).await.unwrap();
+    assert_eq!(fs.inode(source_id).unwrap().key, "source");
+
+    let rename = tokio::spawn({
+        let fs = fs.clone();
+        let source_name = source_name.clone();
+        let target_name = target_name.clone();
+        async move {
+            fs.rename(ROOT_ID, &source_name, ROOT_ID, &target_name)
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), copy_entered.notified())
+        .await
+        .expect("rename should reach the slow copy without deadlocking on its own exact lookup");
+
+    let target_lookup = tokio::spawn({
+        let fs = fs.clone();
+        let target_name = target_name.clone();
+        async move { fs.lookup(ROOT_ID, &target_name).await }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), async {
+            while !target_lookup.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_err(),
+        "target exact lookup should wait on the rename fence while copy is in flight"
+    );
+    release_copy.notify_one();
+
+    let rename_result = tokio::time::timeout(Duration::from_secs(2), rename)
+        .await
+        .unwrap()
+        .unwrap();
+    if let Err(status) = rename_result {
+        eprintln!(
+            "rename failed with {status:?}; requests: {:?}",
+            fixture.requests.lock().unwrap()
+        );
+        panic!("rename failed");
+    }
+    let target_id = tokio::time::timeout(Duration::from_secs(2), target_lookup)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(target_id, source_id);
+    assert_eq!(fs.inode(target_id).unwrap().key, "target");
+    assert!(fixture.requests.lock().unwrap().iter().any(|request| {
+        request.method == "PUT"
+            && request.path.starts_with("/photos/target")
+            && request.headers.contains_key("x-amz-copy-source")
+    }));
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+#[tokio::test]
+async fn exact_lookup_negative_cache_is_generation_scoped() {
+    let found = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fixture = serve({
+        let found = found.clone();
+        move |request| {
+            let found = found.clone();
+            async move {
+                if request.method == "GET" && request.path.contains("list-type") {
+                    if request.path.contains("prefix=missing%2F") {
+                        return Response::xml(
+                            200,
+                            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
+                        );
+                    }
+                    return directory_response(&[], &[], None);
+                }
+                if request.method == "HEAD" && request.path.starts_with("/photos/missing") {
+                    if found.load(Ordering::SeqCst) {
+                        Response::empty(200)
+                            .header("content-length", 1)
+                            .header("etag", "\"found\"")
+                    } else {
+                        Response::empty(404)
+                    }
+                } else {
+                    Response::empty(400)
+                }
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "negative-generation");
+    assert!(fs
+        .lookup_child(ROOT_ID, "", "missing")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(fs
+        .lookup_child(ROOT_ID, "", "missing")
+        .await
+        .unwrap()
+        .is_none());
+
+    found.store(true, Ordering::SeqCst);
+    fs.invalidate_dir(ROOT_ID);
+    assert!(fs
+        .lookup_child(ROOT_ID, "", "missing")
+        .await
+        .unwrap()
+        .is_some());
+
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.path.contains("prefix=missing%2F"))
+            .count(),
+        2,
+        "the second miss should use the generation-bound negative cache before invalidation"
+    );
+}
+
+#[tokio::test]
 async fn concurrent_first_readdir_requests_share_one_provider_page() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -1776,6 +2390,10 @@ async fn renaming_a_directory_preserves_an_unrelated_directorys_active_cookies()
                             Response::empty(200)
                                 .header("content-length", 1)
                                 .header("etag", "\"source\"")
+                        } else if matches!(key.as_str(), "B/a" | "B/b" | "B/c") {
+                            Response::empty(200)
+                                .header("content-length", 1)
+                                .header("etag", "\"b-object\"")
                         } else if let Some(token) = copied.lock().unwrap().get(&key) {
                             Response::empty(200)
                                 .header("content-length", 1)
@@ -1785,8 +2403,7 @@ async fn renaming_a_directory_preserves_an_unrelated_directorys_active_cookies()
                             Response::empty(404)
                         }
                     }
-                    "PUT" => {
-                        assert!(request.headers.contains_key("x-amz-copy-source"));
+                    "PUT" if request.headers.contains_key("x-amz-copy-source") => {
                         copy_entered.notify_one();
                         copy_permits.acquire().await.unwrap().forget();
                         copied.lock().unwrap().insert(
@@ -1802,6 +2419,15 @@ async fn renaming_a_directory_preserves_an_unrelated_directorys_active_cookies()
                             "<CopyObjectResult><ETag>&quot;copied&quot;</ETag></CopyObjectResult>",
                         )
                     }
+                    "PUT" if key == "B/a" => Response::empty(200).header("etag", "\"b-stage\""),
+                    "GET" if key == "B/a" => Response {
+                        status: 206,
+                        headers: Vec::new(),
+                        body: b"b".to_vec(),
+                    }
+                    .header("content-range", "bytes 0-0/1")
+                    .header("content-length", "1")
+                    .header("etag", "\"b-object\""),
                     "DELETE" => {
                         assert_eq!(
                             request.headers.get("if-match").map(String::as_str),
@@ -1840,9 +2466,47 @@ async fn renaming_a_directory_preserves_an_unrelated_directorys_active_cookies()
     tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
         .await
         .unwrap();
-    let middle_b = fs.readdir(b, first_b.entries[0].fileid, 1).await.unwrap();
+    let b_file = first_b.entries[0].fileid;
+    let middle_b = fs.readdir(b, b_file, 1).await.unwrap();
     assert_eq!(directory_names(&middle_b), ["b"]);
     assert!(!middle_b.end);
+    assert_eq!(fs.read(b_file, 0, 1).await.unwrap().0, b"b");
+    fs.write(b_file, 0, b"Z").await.unwrap();
+    let _pending = tokio::time::timeout(Duration::from_secs(3), fs.drain(1, 1))
+        .await
+        .expect("unrelated subtree flush should not wait for A rename");
+    assert!(
+        fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.method == "PUT" && request.path.starts_with("/photos/B/a")),
+        "unrelated subtree writeback must be allowed while A rename is stalled"
+    );
+    let mut late_child = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.create(a, &b"late".as_slice().into(), sattr3::default())
+                .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut late_child)
+            .await
+            .is_err(),
+        "new children under A must wait behind A's rename prefix fence"
+    );
+    assert!(
+        !fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.path.contains("A/late")),
+        "blocked late child must not publish before the rename fence releases"
+    );
+    late_child.abort();
     copy_permits.add_permits(2);
     tokio::time::timeout(Duration::from_secs(3), rename)
         .await
@@ -1882,5 +2546,64 @@ async fn renaming_a_directory_preserves_an_unrelated_directorys_active_cookies()
         b_requests, 2,
         "unrelated listing must not restart after rename"
     );
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+#[tokio::test]
+async fn wait_for_mutations_waits_for_scoped_fence_participants() {
+    let fixture = serve(|_| async { Response::empty(500) }).await;
+    let fs = filesystem(fixture.client.clone(), "wait-scoped-fence");
+    let held = fs.fence_exact_key("busy").await;
+    let mut waiter = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.wait_for_mutations().await }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut waiter)
+            .await
+            .is_err(),
+        "wait_for_mutations must wait for scoped fence participants outside the namespace lock"
+    );
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .unwrap()
+        .unwrap();
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+#[tokio::test]
+async fn pending_rename_record_blocks_source_and_target_prefix_operations() {
+    let fixture = serve(|_| async { Response::empty(500) }).await;
+    let fs = filesystem(fixture.client.clone(), "pending-rename-prefix");
+    let source_dir = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let source_file = fs
+        .intern_child("A/file", source_dir, EntryKind::File, 1, 0)
+        .unwrap();
+    let target_file = fs
+        .intern_child("C/file", ROOT_ID, EntryKind::File, 1, 0)
+        .unwrap();
+    let record = fs.rename_journal_path("A/", "C/");
+    fs.inner
+        .pending_renames
+        .write()
+        .unwrap()
+        .insert(record, ("A/".into(), "C/".into()));
+
+    assert!(matches!(
+        fs.read(source_file, 0, 1).await,
+        Err(nfsstat3::NFS3ERR_IO)
+    ));
+    assert!(matches!(
+        fs.write(target_file, 0, b"x").await,
+        Err(nfsstat3::NFS3ERR_IO)
+    ));
+    assert!(matches!(
+        fs.create(source_dir, &b"late".as_slice().into(), sattr3::default())
+            .await,
+        Err(nfsstat3::NFS3ERR_IO)
+    ));
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
 }

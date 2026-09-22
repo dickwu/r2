@@ -35,24 +35,60 @@ from xml.sax.saxutils import escape
 
 REPO = Path(__file__).resolve().parents[1]
 
+SIZES = (10_000, 100_000)
+ACCEPTANCE_TRIALS_PER_CASE = 30
+LOCAL_FIXTURE_FIRST_PAGE_BUDGET_MS = {
+    "sqlite_fresh_100k_p95": 250,
+    "basis": "Declared before collecting NEXT-06 results; compared with old local baseline p95s 99ms DOM / 54ms frame from pre-paged harness artifacts.",
+    "scope": "Loopback fixture, local SQLite, first visible frame proxy for a 100k fresh SQLite first page with zero foreground LIST requests.",
+}
+SAMPLE_MODES = (
+    "cold-ungated",
+    "cold-gated",
+    "query-warm",
+    "sqlite-warm",
+    "fresh-cache",
+    "warm-delay",
+    "warm-error",
+)
+MODE_LABELS = {
+    "cold-ungated": "Cold, ungated",
+    "cold-gated": "Cold, second page gated",
+    "query-warm": "React Query memory",
+    "sqlite-warm": "SQLite warm revalidate",
+    "fresh-cache": "Fresh SQLite cache, zero LIST",
+    "warm-delay": "Warm snapshot with delayed refresh",
+    "warm-error": "Warm snapshot with refresh error",
+}
+NETWORK_MODES = {"cold-ungated", "cold-gated", "sqlite-warm", "warm-delay"}
+CACHE_IPC_MODES = {"sqlite-warm", "fresh-cache", "warm-delay", "warm-error"}
+ZERO_LIST_MODES = {"query-warm", "fresh-cache", "warm-error"}
+SNAPSHOT_RETENTION_MODES = {"warm-delay", "warm-error"}
+
 
 class ListingFixture:
     def __init__(self, trials: int):
         self.bucket = "listing-audit-" + uuid.uuid4().hex[:12]
         self.datasets = {
-            f"cold-{size}-{trial:03d}/": size
-            for size in (10_000, 100_000)
+            f"cold-ungated-{size}-{trial:03d}/": size
+            for size in SIZES
             for trial in range(trials)
         }
-        self.datasets.update({f"cancel-{size}/": size for size in (10_000, 100_000)})
-        self.datasets.update({f"control-{size}/": size for size in (10_000, 100_000)})
+        self.datasets.update({
+            f"cold-gated-{size}-{trial:03d}/": size
+            for size in SIZES
+            for trial in range(trials)
+        })
+        self.datasets.update({f"cancel-{size}/": size for size in SIZES})
+        self.datasets.update({f"control-{size}/": size for size in SIZES})
         # Match S3 lexical listing order while exercising the UI's different
         # natural numeric order, instead of giving it pre-sorted numeric input.
-        self.suffixes = {size: sorted(f"file-{index}.txt" for index in range(size)) for size in (10_000, 100_000)}
+        self.suffixes = {size: sorted(f"file-{index}.txt" for index in range(size)) for size in SIZES}
         self.calls: list[dict] = []
         self.lock = threading.Lock()
         self.active_trial: str | None = None
         self.gates: dict[str, threading.Event] = {}
+        self.error_prefixes: set[str] = set()
         self.stopping = threading.Event()
         fixture = self
 
@@ -92,6 +128,10 @@ class ListingFixture:
                 try:
                     body, offset = fixture.page(prefix, query.get("continuation-token"), query.get("max-keys", "1000"))
                     record["offset"] = offset
+                except RuntimeError as error:
+                    record["error"] = str(error)
+                    self.respond(503, b"<Error><Code>SlowDown</Code></Error>")
+                    return
                 except ValueError as error:
                     record["error"] = str(error)
                     self.respond(400, b"<Error><Code>InvalidArgument</Code></Error>")
@@ -160,6 +200,8 @@ class ListingFixture:
             contents = "".join(f"<CommonPrefixes><Prefix>{escape(key)}</Prefix></CommonPrefixes>" for key in sorted(self.datasets))
             count, total, end = len(self.datasets), len(self.datasets), len(self.datasets)
         else:
+            if prefix in self.error_prefixes:
+                raise RuntimeError("Injected fixture LIST error")
             total = self.datasets.get(prefix)
             if total is None:
                 raise ValueError("Unknown fixture prefix")
@@ -232,7 +274,7 @@ OBSERVER_JS = r"""
   };
   const observed = event => {
     const detail = event.detail;
-    if (!detail || !['get_prefix_cache','list_prefix_stream','cancel_prefix_list'].includes(detail.command)) return;
+    if (!detail || !['get_prefix_cache','get_prefix_cache_page','list_prefix_stream','cancel_prefix_list'].includes(detail.command)) return;
     if (detail.provider !== 'minio' || detail.account_id !== audit.account_id || detail.bucket !== audit.bucket) return;
     let row = audit.ipc.find(candidate => candidate.operation_id === detail.operation_id);
     if (detail.phase === 'start') {
@@ -243,7 +285,7 @@ OBSERVER_JS = r"""
     } else if (row) {
       row.finished_at = detail.at; row.duration_ms = detail.at - row.started_at;
       if (detail.phase === 'error') row.error = detail.error;
-      else if (detail.command === 'get_prefix_cache') row.cache = detail.result;
+      else if (detail.command === 'get_prefix_cache' || detail.command === 'get_prefix_cache_page') row.cache = detail.result;
       else if (detail.command === 'list_prefix_stream') row.summary = detail.result;
     }
   };
@@ -377,8 +419,12 @@ class NativeAudit:
             "schema": 1,
             "measurement_run_id": self.run_id,
             "measurement_runs": {},
-            "measurement_protocol": {"version": 2, "primary_cold": "ungated", "app_variant": "post-structural-sharing-fix",
-                "gated_controls": "Separate one-per-size first-page control, excluded from the 180-sample matrix",
+            "measurement_protocol": {"version": 3, "primary_cold": "ungated", "app_variant": "NEXT-06 paged SQLite cache",
+                "cases": list(SAMPLE_MODES),
+                "trials_per_case": args.trials,
+                "acceptance_trials_per_case": ACCEPTANCE_TRIALS_PER_CASE,
+                "historical_180_sample_protocol": "Superseded by the expanded NEXT-06 matrix; old artifacts are not modified",
+                "smoke_profile": "Partial only: exercises the same case definitions with fewer trials and cannot mark navigation_matrix_complete",
                 "startup": "r2:shell-ready document-origin mark; initial process document and configured webview reloads are reported separately"},
             "scope": "Real Tauri main webview, production SDK/SQLite/IPC/React/Virtuoso; generated loopback ListObjectsV2 fixture only",
             "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -399,6 +445,7 @@ class NativeAudit:
             "metrics_unavailable": [
                 "OS compositor or physical first-pixel timestamp (double-rAF is a frame opportunity proxy)",
                 "Rust queue/network/DB timing: absent until a timing-enabled native binary is supplied",
+                "React commit timing beyond DOM/frame proxy unless emitted by the webview instrumentation",
                 "Actual launch-to-interactive or physical-startup timing: shell-ready is a document initialization/commit proxy; webview reloads are not cold process launches",
                 "Real provider/WAN latency and throughput; fixture metadata has no stored object payloads",
             ],
@@ -408,6 +455,7 @@ class NativeAudit:
                 "emit_to_js_estimate": "Browser timeOrigin + event arrival minus native Unix emit timestamp; cross-clock estimate includes serialization, IPC and JS event scheduling",
                 "roundtrip_residual": "Frontend observed roundtrip minus native elapsed duration; includes framework dispatch/serialization and JS scheduling, not pure transport",
             },
+            "local_fixture_first_page_budget": LOCAL_FIXTURE_FIRST_PAGE_BUDGET_MS,
             "samples": [], "gated_controls": [], "startup_samples": [], "cancellations": [], "screenshots": [], "failures": [],
         }
 
@@ -416,7 +464,7 @@ class NativeAudit:
             assert previous["binary_sha256"] == self.evidence["binary_sha256"], "Resume requires the identical frozen executable"
             assert previous["app_id"] == args.app_id and previous["requested_trials_per_case"] == args.trials
             assert not previous.get("smoke_only"), "Smoke samples cannot become acceptance samples"
-            assert previous.get("measurement_protocol", {}).get("version") == 2 and previous["measurement_protocol"]["primary_cold"] == "ungated", "Cannot mix gated baseline samples into the ungated protocol"
+            assert previous.get("measurement_protocol", {}).get("version") == 3 and previous["measurement_protocol"]["primary_cold"] == "ungated", "Cannot mix older baseline samples into the NEXT-06 paged-cache protocol"
             previous_id = previous.get("measurement_run_id", "previous-" + previous["captured_at"])
             self.evidence["measurement_runs"].update(previous.get("measurement_runs", {}))
             self.evidence["measurement_runs"].setdefault(previous_id, {key: previous.get(key) for key in (
@@ -426,13 +474,14 @@ class NativeAudit:
             for cancellation in previous.get("cancellations", []):
                 cancellation.setdefault("measurement_run_id", previous_id)
             self.evidence["samples"] = previous["samples"]
-            for entry in previous["samples"] + previous.get("gated_controls", []) + previous.get("priming_samples", []):
+            for entry in previous["samples"] + previous.get("gated_controls", []) + previous.get("priming_samples", []) + previous.get("retention_controls", []):
                 fixture.datasets[entry["prefix"]] = entry["size"]
             self.evidence["cancellations"] = previous.get("cancellations", [])
             self.evidence["gated_controls"] = previous.get("gated_controls", [])
             self.evidence["startup_samples"] = previous.get("startup_samples", [])
             self.evidence["screenshots"] = previous.get("screenshots", [])
             self.evidence["priming_samples"] = previous.get("priming_samples", [])
+            self.evidence["retention_controls"] = previous.get("retention_controls", [])
             self.evidence["interrupted_attempts"] = previous.get("interrupted_attempts", [])
             self.evidence["owned_app_activations"] = previous.get("owned_app_activations", [])
             self.evidence["resume_history"] = previous.get("resume_history", []) + [{
@@ -673,12 +722,20 @@ class NativeAudit:
 
     def finish_trial(self, trial_id, prefix, total, mode, expect_network):
         first = self.wait(lambda: (value if (value := self.validated_snapshot())["trial"]["first_frame_at"] is not None else False), "expected row frame", 30)
-        if mode == "gated-control":
+        if mode in ("gated-control", "cold-gated"):
             if first["trial"]["final_page_at"] is not None:
-                raise AssertionError("First-page control row was not displayed before gated page 2 completed")
+                raise AssertionError("First-page gated row was not displayed before gated page 2 completed")
             self.fixture.release(prefix)
+        if mode in SNAPSHOT_RETENTION_MODES:
+            self.js("document.querySelector('button[title=Refresh]')?.click(); true")
+            if mode == "warm-delay":
+                self.fixture.release(prefix)
         if expect_network:
             result = self.wait(lambda: (value if (value := self.validated_snapshot())["trial"]["final_page_at"] is not None and value["trial"]["full_network_frame_at"] is not None and (self.args.smoke or any(row.get("summary", {}).get("complete") for row in value["ipc"] if row["command"] == "list_prefix_stream" and row["prefix"] == prefix)) else False), "complete native listing", 90)
+        elif mode == "warm-error":
+            result = self.wait(lambda: (value if (value := self.validated_snapshot())["trial"].get("final_page_at") is not None and any(row.get("error") for row in value["ipc"] if row["command"] == "list_prefix_stream" and row["prefix"] == prefix) else False), "refresh error after cached snapshot", 45)
+        elif mode in CACHE_IPC_MODES:
+            result = self.wait(lambda: (value if (value := self.validated_snapshot())["trial"].get("final_page_at") is not None else False), "complete cached listing", 30)
         else:
             result = first
         trial = result["trial"]
@@ -711,16 +768,27 @@ class NativeAudit:
             emitted = timing.get("emit_started_unix_ms")
             event["emit_to_js_wall_estimate_ms"] = None if emitted is None else trial["viewport"]["timeOrigin"] + event["arrived_at"] - emitted
         trial["first_page_emit_to_js_estimate_ms"] = trial["pages"][0]["emit_to_js_wall_estimate_ms"] if trial["pages"] else None
-        rows = [row for row in result["ipc"] if row["command"] == "get_prefix_cache" and row["prefix"] == prefix]
-        trial["native_cache_read_ms"] = rows[0]["duration_ms"] if rows else None
-        cache_timing = (rows[0].get("cache") or {}).get("timing") if rows else None
-        trial["cache_roundtrip_outside_native_ms"] = rows[0]["duration_ms"] - cache_timing["native_elapsed_ms"] if cache_timing and "native_elapsed_ms" in cache_timing else None
-        trial["cache_result"] = rows[0].get("cache") if rows else "unobserved (smoke only)" if self.args.smoke else "query-memory-hit"
+        cache_rows = [row for row in result["ipc"] if row["command"] in ("get_prefix_cache", "get_prefix_cache_page") and row["prefix"] == prefix]
+        aggregate_cache_rows = [row for row in cache_rows if row["command"] == "get_prefix_cache"]
+        paged_cache_rows = [row for row in cache_rows if row["command"] == "get_prefix_cache_page"]
+        trial["cache_ipc_commands"] = [row["command"] for row in cache_rows]
+        trial["native_cache_read_ms"] = sum(row["duration_ms"] for row in cache_rows) if cache_rows else None
+        first_cache_payload = next((row.get("cache") for row in cache_rows if row.get("cache") is not None), None)
+        cache_timing = (first_cache_payload or {}).get("page", first_cache_payload or {}).get("timing") if first_cache_payload else None
+        trial["cache_roundtrip_outside_native_ms"] = cache_rows[0]["duration_ms"] - cache_timing["native_elapsed_ms"] if cache_rows and cache_timing and "native_elapsed_ms" in cache_timing else None
+        trial["cache_result"] = first_cache_payload if first_cache_payload is not None else "unobserved (smoke only)" if self.args.smoke else "query-memory-hit"
+        trial["paged_cache_ipc_count"] = len(paged_cache_rows)
+        trial["aggregate_cache_ipc_count"] = len(aggregate_cache_rows)
+        trial["cache_page_count"] = sum(1 for page in trial["pages"] if page.get("from_cache"))
+        trial["live_page_count"] = sum(1 for page in trial["pages"] if not page.get("from_cache"))
+
         if expect_network:
-            assert len(trial["pages"]) == total // 1000, f"Expected {total//1000} pages, saw {len(trial['pages'])}"
-            assert [page["page_index"] for page in trial["pages"]] == list(range(total // 1000))
-            assert sum(page["files"] for page in trial["pages"]) == total
-            assert trial["pages"][-1]["complete"] and all(not page["complete"] for page in trial["pages"][:-1])
+            expected_pages = total // 1000
+            live_pages = [page for page in trial["pages"] if not page.get("from_cache")]
+            assert len(live_pages) == expected_pages, f"Expected {expected_pages} live pages, saw {len(live_pages)}"
+            assert [page["page_index"] for page in live_pages] == list(range(expected_pages))
+            assert sum(page["files"] for page in live_pages) == total
+            assert live_pages[-1]["complete"] and all(not page["complete"] for page in live_pages[:-1])
             summary_rows = [row for row in result["ipc"] if row["command"] == "list_prefix_stream" and row.get("summary")]
             if summary_rows:
                 assert summary_rows[0]["summary"]["total_items"] == total
@@ -731,15 +799,34 @@ class NativeAudit:
                 assert self.args.smoke, "Native summary observation missing"
                 trial["full_completion_ms"] = None
                 trial["full_completion_basis"] = "SMOKE ONLY: sequential pages plus full UI item count; native invoke completion unobserved"
-        else:
+        elif mode == "query-warm":
             assert not trial["pages"], "Memory warm navigation unexpectedly started a new listing"
-            assert not rows, "Memory warm navigation unexpectedly read the native cache"
+            assert not cache_rows, "Memory warm navigation unexpectedly read the native cache"
             trial["full_completion_ms"] = None
             trial["full_completion_basis"] = "Already-complete React Query snapshot from preceding verified full listing"
-        if mode in ("cold", "gated-control") and (rows or not self.args.smoke):
+        else:
+            assert paged_cache_rows or self.args.smoke, f"{mode} did not use paged cache IPC"
+            assert not aggregate_cache_rows, "Paged cache case unexpectedly used aggregate get_prefix_cache"
+            assert trial["pages"], f"{mode} did not publish cached pages"
+            assert trial["pages"][-1]["complete"], f"{mode} cached pages did not complete"
+            trial["full_completion_ms"] = trial["final_page_ms"]
+            trial["full_completion_basis"] = "Complete cached snapshot via paged SQLite IPC"
+
+        if mode in ZERO_LIST_MODES:
+            assert trial["foreground_request_count"] == 0, f"{mode} made foreground LIST requests"
+        if mode in ("cold-ungated", "cold-gated", "gated-control") and (cache_rows or not self.args.smoke):
             assert trial["cache_result"] is None, "Cold trial accidentally had a native cache snapshot"
-        if mode == "sqlite-warm" and (rows or not self.args.smoke):
-            assert trial["cache_result"]["complete"] and trial["cache_result"]["files"] == total
+        if mode in CACHE_IPC_MODES and (cache_rows or not self.args.smoke):
+            assert paged_cache_rows, f"{mode} did not use get_prefix_cache_page"
+        if mode == "fresh-cache":
+            assert trial["foreground_request_count"] == 0
+            assert trial["cache_page_count"] > 0
+        if mode in SNAPSHOT_RETENTION_MODES:
+            trial["warm_snapshot_retention_assertion"] = "First frame arrives from the cached full snapshot before the delayed/error manual refresh is allowed to shrink visible rows"
+            if mode == "warm-error":
+                assert any(row.get("error") for row in trial["ipc"] if row["command"] == "list_prefix_stream" and row["prefix"] == prefix) or self.args.smoke
+            else:
+                assert trial["visible_before_final_page"] or self.args.smoke
         if mode == "warm-prime":
             self.evidence.setdefault("priming_samples", []).append(trial)
         elif mode == "gated-control":
@@ -775,89 +862,109 @@ class NativeAudit:
         self.wait(lambda: self.js(f"[...document.querySelectorAll('.statusbar .sb-stat')].some(el => el.textContent.trim() === {expected})"), "new retry directory in actual root listing", 30)
         self.ipc("cancel_background_sync")
 
-    def measured_case(self, trial_id, prefix, total, mode, expect_network=True):
+    def measured_case(self, trial_id, prefix, total, mode, expect_network=None):
+        if expect_network is None:
+            expect_network = mode in NETWORK_MODES
         for attempt in range(5):
             actual_prefix = prefix
             try:
-                if mode == "sqlite-warm":
+                if mode in CACHE_IPC_MODES:
                     self.fixture.active_trial = None
-                    self.reload({"kind": "sqlite-warm-reload", "size": total, "trial_id": trial_id, "attempt": attempt + 1})
+                    self.reload({"kind": f"{mode}-reload", "size": total, "trial_id": trial_id, "attempt": attempt + 1})
                 else:
                     self.root()
-                if mode in ("cold", "gated-control"):
+                if mode in ("cold-ungated", "cold-gated", "cold", "gated-control"):
                     if attempt:
                         actual_prefix = prefix.rstrip('/') + f"-retry-{attempt}/"
                         self.refresh_root_for_alias(actual_prefix, total)
                     self.ensure_fixture_selection()
                     self.ipc("clear_file_cache")
-                if mode == "gated-control":
+                if mode in ("cold-gated", "gated-control", "warm-delay"):
                     self.fixture.gates[actual_prefix] = threading.Event()
-                self.navigate(trial_id, actual_prefix, total, mode)
-                self.finish_trial(trial_id, actual_prefix, total, mode, expect_network)
+                if mode == "warm-error":
+                    self.fixture.error_prefixes.add(actual_prefix)
+                try:
+                    self.navigate(trial_id, actual_prefix, total, mode)
+                    self.finish_trial(trial_id, actual_prefix, total, mode, expect_network)
+                finally:
+                    if mode == "warm-error":
+                        self.fixture.error_prefixes.discard(actual_prefix)
                 return actual_prefix
             except MeasurementOccluded as error:
                 self.record_interruption(error, attempt + 1)
         raise MeasurementOccluded(f"Owned window was hidden in five {mode} attempts; valid samples are retained")
 
-    def measure(self):
-        completed = {sample["id"] for sample in self.evidence["samples"]}
-        for total in (10_000, 100_000):
-            needed = any(f"{total}-{mode}-{index:03d}" not in completed
-                for mode in ("cold", "query-warm", "sqlite-warm") for index in range(self.args.trials))
-            if not needed:
-                if not any(case["size"] == total for case in self.evidence["gated_controls"]):
-                    self.gated_control(total)
-                if not any(case["size"] == total for case in self.evidence["cancellations"]):
-                    self.cancel_trial(total)
+    def ensure_completed_prefix(self, total, completed):
+        candidates = [sample for sample in self.evidence["samples"] if sample["size"] == total and sample["mode"] == "cold-ungated"]
+        if candidates:
+            prefix = candidates[-1]["prefix"]
+        else:
+            trial_id = f"{total}-cold-ungated-prime"
+            prefix = f"cold-ungated-{total}-prime/"
+            self.fixture.datasets[prefix] = total
+            self.refresh_root_for_alias(prefix, total)
+            self.measured_case(trial_id, prefix, total, "warm-prime", True)
+        if not self.js("Boolean(window.__nativeListingAudit.completed_prefixes[" + json.dumps(prefix) + "])"):
+            self.root()
+            prime_id = f"{total}-resume-prime"
+            self.measured_case(prime_id, prefix, total, "warm-prime", True)
+        return prefix
+
+    def measure_mode(self, total, mode, completed, warm_prefix=None):
+        for index in range(self.args.trials):
+            trial_id = f"{total}-{mode}-{index:03d}"
+            if trial_id in completed:
                 continue
-            for index in range(self.args.trials):
-                trial_id = f"{total}-cold-{index:03d}"
-                if trial_id in completed:
-                    continue
-                prefix = f"cold-{total}-{index:03d}/"
-                # No response gate in the primary cold latency distribution.
-                self.measured_case(trial_id, prefix, total, "cold")
-            last_id = f"{total}-cold-{self.args.trials - 1:03d}"
-            last_prefix = next(sample["prefix"] for sample in self.evidence["samples"] if sample["id"] == last_id)
-            if not self.js("Boolean(window.__nativeListingAudit.completed_prefixes[" + json.dumps(last_prefix) + "])"):
+            if mode in ("cold-ungated", "cold-gated"):
+                prefix = f"{mode}-{total}-{index:03d}/"
+            else:
+                prefix = warm_prefix
+                assert prefix, f"{mode} requires a completed warm prefix"
+            if mode == "query-warm":
                 self.root()
-                prime_id = f"{total}-resume-prime"
-                self.measured_case(prime_id, last_prefix, total, "warm-prime")
-            for index in range(self.args.trials):
-                trial_id = f"{total}-query-warm-{index:03d}"
-                if trial_id in completed:
-                    continue
-                self.root()
-                age_expression = "performance.now() - (window.__nativeListingAudit.completed_prefixes[" + json.dumps(last_prefix) + "] ?? -Infinity)"
+                age_expression = "performance.now() - (window.__nativeListingAudit.completed_prefixes[" + json.dumps(prefix) + "] ?? -Infinity)"
                 if self.js(age_expression) >= 20_000:
                     self.wait(lambda: self.js(age_expression) >= 30_200, "query-cache priming expiry", 15)
                     prime_id = f"{total}-query-prime-{index:03d}"
-                    self.navigate(prime_id, last_prefix, total, "warm-prime")
-                    self.finish_trial(prime_id, last_prefix, total, "warm-prime", True)
+                    self.navigate(prime_id, prefix, total, "warm-prime")
+                    self.finish_trial(prime_id, prefix, total, "warm-prime", True)
                     self.root()
-                self.measured_case(trial_id, last_prefix, total, "query-warm", False)
-            for index in range(self.args.trials):
-                trial_id = f"{total}-sqlite-warm-{index:03d}"
-                if trial_id in completed:
-                    continue
-                self.measured_case(trial_id, last_prefix, total, "sqlite-warm")
+            self.measured_case(trial_id, prefix, total, mode)
+            completed.add(trial_id)
+
+    def measure(self):
+        completed = {sample["id"] for sample in self.evidence["samples"]}
+        for total in SIZES:
+            needed = any(f"{total}-{mode}-{index:03d}" not in completed for mode in SAMPLE_MODES for index in range(self.args.trials))
+            if not needed:
+                if not any(case["size"] == total for case in self.evidence["cancellations"]):
+                    self.cancel_trial(total)
+                continue
+            self.measure_mode(total, "cold-ungated", completed)
+            self.measure_mode(total, "cold-gated", completed)
+            warm_prefix = self.ensure_completed_prefix(total, completed)
+            for mode in ("query-warm", "fresh-cache", "sqlite-warm", "warm-delay", "warm-error"):
+                self.measure_mode(total, mode, completed, warm_prefix)
             screenshot = self.args.output.with_name(f"native-listing-{total}.png")
             try:
                 capture = self.cli("screenshot", str(screenshot), "--overwrite")
                 self.evidence["screenshots"].append({"path": str(screenshot), "capture": capture, "outside_timed_trial": True, "measurement_run_id": self.run_id})
             except Exception as error:
                 self.evidence["screenshots"].append({"path": str(screenshot), "error": str(error)})
-            if not any(case["size"] == total for case in self.evidence["gated_controls"]):
-                self.gated_control(total)
             if not any(case["size"] == total for case in self.evidence["cancellations"]):
                 self.cancel_trial(total)
         self.summarize()
         with self.args.binary.open("rb") as executable:
             assert hashlib.file_digest(executable, "sha256").hexdigest() == self.evidence["binary_sha256"], "Frozen executable changed during measurements"
-        assert len(self.evidence["samples"]) == self.args.trials * 6
-        assert len(self.evidence["gated_controls"]) == 2 and len(self.evidence["cancellations"]) == 2
-        self.evidence["navigation_matrix_complete"] = not self.args.smoke and self.args.trials >= 30
+        expected_samples = self.args.trials * len(SIZES) * len(SAMPLE_MODES)
+        assert len(self.evidence["samples"]) == expected_samples
+        assert len(self.evidence["cancellations"]) == len(SIZES)
+        self.evidence["navigation_matrix_complete"] = not self.args.smoke and self.args.trials >= ACCEPTANCE_TRIALS_PER_CASE
         self.evidence["acceptance_complete"] = False
+        if getattr(self.args, "latest_output", None):
+            latest = self.args.latest_output
+            latest.parent.mkdir(parents=True, exist_ok=True)
+            latest.write_text(json.dumps(self.evidence, indent=2) + "\n")
         self.save()
 
     def gated_control(self, total):
@@ -899,11 +1006,11 @@ class NativeAudit:
             values = sorted(values)
             return values[min(len(values)-1, math.ceil(len(values)*fraction)-1)] if values else None
         summaries = []
-        for size in (10_000, 100_000):
-            for mode in ("cold", "query-warm", "sqlite-warm"):
+        for size in SIZES:
+            for mode in SAMPLE_MODES:
                 samples = [sample for sample in self.evidence["samples"] if sample["size"] == size and sample["mode"] == mode]
                 metrics = {}
-                for field in ("first_dom_ms", "first_visible_frame_proxy_ms", "first_page_ms", "final_page_ms", "full_completion_ms", "full_snapshot_dom_ms", "full_network_frame_proxy_ms", "native_cache_read_ms", "file_item_array_sort_ms", "file_item_sort_before_first_frame_ms", "accumulation_ms", "accumulation_before_first_frame_ms", "first_page_emit_to_js_estimate_ms", "cache_roundtrip_outside_native_ms", "stream_roundtrip_outside_native_ms", "fixture_second_page_hold_ms"):
+                for field in ("first_dom_ms", "first_visible_frame_proxy_ms", "first_page_ms", "final_page_ms", "full_completion_ms", "full_snapshot_dom_ms", "full_network_frame_proxy_ms", "native_cache_read_ms", "file_item_array_sort_ms", "file_item_sort_before_first_frame_ms", "accumulation_ms", "accumulation_before_first_frame_ms", "first_page_emit_to_js_estimate_ms", "cache_roundtrip_outside_native_ms", "stream_roundtrip_outside_native_ms", "fixture_second_page_hold_ms", "foreground_request_count", "paged_cache_ipc_count", "aggregate_cache_ipc_count", "cache_page_count", "live_page_count"):
                     values = [sample[field] for sample in samples if sample.get(field) is not None]
                     metrics[field] = {"n": len(values), "p50": quantile(values, .5), "p95": quantile(values, .95)}
                 for field in ("queue_ms", "network_ms", "backoff_ms", "db_ms", "cache_ms", "native_elapsed_ms", "emit_ms"):
@@ -911,9 +1018,9 @@ class NativeAudit:
                     metrics["native_" + field] = {"n": len(values), "p50": quantile(values, .5), "p95": quantile(values, .95)}
                 summaries.append({"size": size, "mode": mode, "trials": len(samples), "metrics": metrics})
         self.evidence["summary"] = summaries
-        selected_startups = {sample.get("startup_sample_id") for sample in self.evidence["samples"] if sample["mode"] == "sqlite-warm"}
+        selected_startups = {sample.get("startup_sample_id") for sample in self.evidence["samples"] if sample["mode"] in CACHE_IPC_MODES}
         startup_summaries = []
-        groups = [("process-initial-document", None), ("sqlite-warm-reload", 10_000), ("sqlite-warm-reload", 100_000)]
+        groups = [("process-initial-document", None)] + [(f"{mode}-reload", size) for mode in sorted(CACHE_IPC_MODES) for size in SIZES]
         for kind, size in groups:
             samples = [entry for entry in self.evidence["startup_samples"] if entry["context"]["kind"] == kind and
                 (size is None or entry["context"].get("size") == size) and (kind == "process-initial-document" or entry["id"] in selected_startups)]
@@ -965,8 +1072,8 @@ def self_test():
     fixture = ListingFixture(30)
     try:
         fixture.start()
-        for size in (10_000, 100_000):
-            prefix = f"cold-{size}-000/"
+        for size in SIZES:
+            prefix = f"cold-ungated-{size}-000/"
             token, count, pages = None, 0, 0
             while True:
                 query = {"list-type": "2", "prefix": prefix, "delimiter": "/", "max-keys": "1000"}
@@ -984,12 +1091,14 @@ def self_test():
                     break
             assert count == size and pages == size // 1000
         try:
-            fixture.page("cold-10000-000/", "foreign|1000", "1000")
+            fixture.page("cold-ungated-10000-000/", "foreign|1000", "1000")
             raise AssertionError("Foreign continuation token accepted")
         except ValueError:
             pass
         subprocess.run(["node", "--check"], input=OBSERVER_JS, text=True, check=True, capture_output=True)
-        print("Fixture actual HTTP pagination (10/100 pages), cursor scope, and injected JavaScript syntax passed; no app launched.")
+        expected = len(SIZES) * len(SAMPLE_MODES) * ACCEPTANCE_TRIALS_PER_CASE
+        assert expected == 420
+        print("Fixture actual HTTP pagination (10/100 pages), expanded 420-sample matrix metadata, cursor scope, and injected JavaScript syntax passed; no app launched.")
     finally:
         fixture.stop()
 
@@ -1002,7 +1111,8 @@ def main():
     parser.add_argument("--expected-sha256", help="Require the exact frozen executable supplied by the build owner")
     parser.add_argument("--pid-file", type=Path, default=REPO / "src-tauri/target/.connector.json")
     parser.add_argument("--resume-from", type=Path, help="Retain valid samples from the same frozen binary and collect only missing cases")
-    parser.add_argument("--output", type=Path, default=REPO / ".omx/artifacts/native-listing-post-sharing-20260913/native-listing.json")
+    parser.add_argument("--output", type=Path, default=REPO / ".omx/artifacts/native-listing-next06/native-listing.json")
+    parser.add_argument("--latest-output", type=Path, help="Optional extra copy, for root-owned .omx/latest handoff paths")
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument("--smoke", action="store_true", help="Development run; always marks acceptance incomplete")
     parser.add_argument("--self-test", action="store_true", help="Validate disposable HTTP pagination and JS syntax without launching an app")

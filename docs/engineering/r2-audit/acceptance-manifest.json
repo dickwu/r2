@@ -1,0 +1,366 @@
+{
+  "schema_version": 1,
+  "description": "Provider, OS and fault acceptance gates for the R2 audit. Status artifacts are generated from this manifest.",
+  "gates": [
+    {
+      "id": "rustfs-protocol",
+      "title": "RustFS protocol capability probes",
+      "category": "provider",
+      "mode": "real_loopback_protocol",
+      "evidence": "real-rustfs-protocol.json",
+      "require_current_git": true,
+      "required_checks": [
+        {
+          "pointer": "/completed",
+          "expect": true
+        },
+        {
+          "pointer": "/range/exact_bytes",
+          "expect": true
+        },
+        {
+          "pointer": "/multipart/exact_bytes",
+          "expect": true
+        },
+        {
+          "pointer": "/versioning/supported",
+          "expect": true
+        }
+      ],
+      "provider_version_from": "/rustfs_version",
+      "provider_commit_from": "/rustfs_commit",
+      "provider_binary_sha256_from": "/binary_sha256",
+      "harnesses": [
+        "scripts/native-rustfs-audit.mjs"
+      ]
+    },
+    {
+      "id": "rustfs-native",
+      "title": "RustFS native Tauri Move and macOS NFS",
+      "category": "provider_os",
+      "mode": "real_loopback_native",
+      "evidence": "real-rustfs-native.json",
+      "require_current_git": true,
+      "required_checks": [
+        {
+          "pointer": "/completed",
+          "expect": true
+        },
+        {
+          "pointer": "/native/moves/0/status",
+          "expect": "success"
+        },
+        {
+          "pointer": "/native/moves/1/status",
+          "expect": "success"
+        },
+        {
+          "pointer": "/native/nfs/write_read_unmount",
+          "expect": "passed"
+        },
+        {
+          "pointer": "/native/nfs/rename",
+          "expect": "completed"
+        },
+        {
+          "pointer": "/native/nfs/delete",
+          "expect": "completed"
+        }
+      ],
+      "provider_version_from": "/rustfs_version",
+      "provider_commit_from": "/rustfs_commit",
+      "provider_binary_sha256_from": "/binary_sha256",
+      "app_binary_sha256_from": "/native/app_binary_sha256",
+      "harnesses": [
+        "scripts/native-rustfs-audit.mjs",
+        "scripts/run-native-nfs-test.py"
+      ],
+      "require_current_source": true,
+      "source_fingerprint_from": "/source_fingerprint/production_source_sha256"
+    },
+    {
+      "id": "minio-native",
+      "title": "MinIO native Tauri Move and macOS NFS compatibility limits",
+      "category": "provider_os",
+      "mode": "real_loopback_native",
+      "evidence": "real-minio.json",
+      "required_checks": [
+        {
+          "pointer": "/moves/0/status",
+          "expect": [
+            "success",
+            "needs_action"
+          ]
+        },
+        {
+          "pointer": "/moves/1/status",
+          "expect": "success"
+        },
+        {
+          "pointer": "/nfs/write_read_unmount",
+          "expect": "passed"
+        }
+      ],
+      "limited_when": [
+        {
+          "pointer": "/moves/0/status",
+          "equals": "needs_action"
+        },
+        {
+          "pointer": "/nfs/rename_delete",
+          "equals": "safely rejected: conditional deletion unsupported by this MinIO revision"
+        }
+      ],
+      "provider_commit_from": "/minio_commit",
+      "app_id_from": "/app_id",
+      "harnesses": [
+        "scripts/native-minio-audit.mjs"
+      ],
+      "require_current_source": true,
+      "source_fingerprint_from": "/source_fingerprint_before/production_source_sha256",
+      "app_binary_sha256_from": "/app_binary_sha256"
+    },
+    {
+      "id": "cloudflare-r2-protocol",
+      "title": "Cloudflare R2 protocol probes in a dedicated bucket",
+      "category": "provider",
+      "mode": "prepared_remote_provider",
+      "evidence": "real-r2-protocol.json",
+      "status_when_missing": "prepared_not_executed",
+      "required_checks": [
+        {
+          "pointer": "/status",
+          "expect": "observations_collected"
+        },
+        {
+          "pointer": "/range/exact_bytes",
+          "expect": true
+        },
+        {
+          "pointer": "/multipart/exact_bytes",
+          "expect": true
+        },
+        {
+          "pointer": "/cleanup_complete",
+          "expect": true
+        },
+        {
+          "pointer": "/conditions/get_match/behavior",
+          "expect": [
+            "enforced",
+            "rejected_unsupported"
+          ]
+        },
+        {
+          "pointer": "/conditions/put_absent/behavior",
+          "expect": [
+            "enforced",
+            "rejected_unsupported"
+          ]
+        },
+        {
+          "pointer": "/conditions/copy_source_match/behavior",
+          "expect": [
+            "enforced",
+            "rejected_unsupported"
+          ]
+        }
+      ],
+      "harnesses": [
+        "scripts/r2-protocol-audit.mjs"
+      ]
+    },
+    {
+      "id": "aws-s3-provider",
+      "title": "AWS S3 provider acceptance",
+      "category": "provider",
+      "mode": "prepared_remote_provider_with_client_side_response_loss",
+      "status_when_missing": "prepared_not_executed",
+      "evidence": "real-aws-s3.json",
+      "required_checks": [
+        {
+          "pointer": "/status",
+          "expect": "observations_collected"
+        },
+        {
+          "pointer": "/range/exact_bytes",
+          "expect": true
+        },
+        {
+          "pointer": "/multipart/exact_bytes",
+          "expect": true
+        },
+        {
+          "pointer": "/cleanup_complete",
+          "expect": true
+        },
+        {
+          "pointer": "/conditions/copy_source_wrong_etag_precondition",
+          "expect": "protected"
+        },
+        {
+          "pointer": "/conditions/complete_response_loss",
+          "expect": "reconciled_after_client_side_response_drop"
+        },
+        {
+          "pointer": "/conditions/complete_response_loss_fault/fired",
+          "expect": true
+        },
+        {
+          "pointer": "/conditions/complete_response_loss_fault/request_count",
+          "expect": 1
+        },
+        {
+          "pointer": "/conditions/delete_response_loss",
+          "expect": "reconciled_after_client_side_response_drop"
+        },
+        {
+          "pointer": "/conditions/delete_response_loss_fault/fired",
+          "expect": true
+        },
+        {
+          "pointer": "/conditions/delete_response_loss_fault/request_count",
+          "expect": 1
+        },
+        {
+          "pointer": "/bucket_matrix_mode",
+          "expect": [
+            "same_bucket",
+            "cross_bucket"
+          ]
+        }
+      ],
+      "harnesses": [
+        "scripts/aws-s3-protocol-audit.mjs"
+      ]
+    },
+    {
+      "id": "linux-native-nfs",
+      "title": "Linux native NFS runtime smoke",
+      "category": "os",
+      "mode": "ci_runtime",
+      "status_when_missing": "ci_only_not_reproduced_locally",
+      "evidence": "linux-native-nfs.json",
+      "harnesses": [
+        "scripts/run-native-nfs-test.py"
+      ]
+    },
+    {
+      "id": "windows-native-nfs",
+      "title": "Windows native NFS runtime behavior",
+      "category": "os",
+      "mode": "prepared_runner_required",
+      "status_when_missing": "prerequisite_only",
+      "evidence": "windows-native-nfs.json",
+      "harnesses": [
+        "scripts/run-native-nfs-test.py"
+      ]
+    },
+    {
+      "id": "windows-native-nfs-behavior",
+      "title": "Windows native NFS behavioral runtime gate",
+      "category": "os",
+      "mode": "prepared_windows_behavior_ci",
+      "status_when_missing": "prepared_not_executed",
+      "evidence": "windows-native-nfs-behavior.json",
+      "required_checks": [
+        {
+          "pointer": "/status",
+          "expect": "observations_collected"
+        },
+        {
+          "pointer": "/native_nfs/write_read_rename_unmount",
+          "expect": "passed"
+        },
+        {
+          "pointer": "/sdk",
+          "expect": "10.0.19041.0"
+        },
+        {
+          "pointer": "/runner",
+          "expect": "windows-2022"
+        }
+      ],
+      "harnesses": [
+        "scripts/run-native-nfs-test.py",
+        ".github/workflows/windows-native.yml"
+      ],
+      "require_current_source": true,
+      "source_fingerprint_from": "/source_fingerprint/production_source_sha256"
+    },
+    {
+      "id": "network-fault-matrix",
+      "title": "Provider network fault matrix",
+      "category": "fault",
+      "mode": "partial_fault_runtime",
+      "status_when_missing": "not_implemented",
+      "evidence": "network-fault-matrix.json",
+      "required_checks": [
+        {
+          "pointer": "/status",
+          "expect": "observations_collected"
+        },
+        {
+          "pointer": "/scenarios/first-list-503-then-success/status",
+          "expect": "passed"
+        },
+        {
+          "pointer": "/scenarios/ten-second-outage-recovers/status",
+          "expect": "passed"
+        },
+        {
+          "pointer": "/scenarios/five-minute-outage-persists/status",
+          "expect": "passed"
+        },
+        {
+          "pointer": "/scenarios/retry-after-honored/status",
+          "expect": "passed"
+        },
+        {
+          "pointer": "/scenarios/body-stall-reloads-identity/status",
+          "expect": "passed"
+        },
+        {
+          "pointer": "/scenarios/cancel-stops-new-dispatch/status",
+          "expect": "passed"
+        }
+      ],
+      "harnesses": [
+        "scripts/provider-fault-audit.mjs"
+      ],
+      "require_current_source": true,
+      "source_fingerprint_from": "/source_fingerprint_before/production_source_sha256",
+      "app_binary_sha256_from": "/app_binary_sha256_before"
+    },
+    {
+      "id": "power-loss-matrix",
+      "title": "Stable NFS ACK power-loss matrix (disposable VM)",
+      "category": "fault",
+      "mode": "prepared_disposable_vm_power_loss",
+      "status_when_missing": "prepared_not_executed",
+      "evidence": "power-loss-matrix.json",
+      "required_checks": [
+        {
+          "pointer": "/passed",
+          "expect": true
+        },
+        {
+          "pointer": "/mode",
+          "expect": [
+            "kernel_nfs_ack_vm_powercut_matrix",
+            "smoke"
+          ]
+        }
+      ],
+      "harnesses": [
+        "scripts/vm-boundary-audit.mjs",
+        "scripts/vm-powerloss-audit.py",
+        "scripts/vm-powerloss-runner.swift",
+        "src-tauri/src/mount/vm_powercut_tests.rs"
+      ],
+      "require_current_source": true,
+      "source_fingerprint_from": "/build/production_source_sha256",
+      "app_binary_sha256_from": "/build/binary_sha256"
+    }
+  ]
+}

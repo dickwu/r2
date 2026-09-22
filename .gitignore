@@ -67,3 +67,6 @@ docs/superpowers/
 
 # gstack browse-tool session state (like .omc/)
 .gstack/
+
+# Python bytecode from the audit/test harness scripts
+__pycache__/

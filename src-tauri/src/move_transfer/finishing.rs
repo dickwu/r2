@@ -15,7 +15,7 @@ use tauri::AppHandle;
 
 use super::config::MoveConfig;
 use super::planner::{
-    head_identity, native_aws, storage_error, verified_destination, TRANSFER_MARKER,
+    head_identity_checked, native_aws, storage_error, verified_destination, TRANSFER_MARKER,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -90,10 +90,17 @@ pub(crate) async fn run_delete_original(
         .await
         .map_err(|e| e.to_string())?
         .ok_or("Missing move journal; source retained")?;
+    journal
+        .metrics
+        .verification_started_at_ms
+        .get_or_insert_with(|| chrono::Utc::now().timestamp_millis());
+    save_move_journal(&journal)
+        .await
+        .map_err(|e| format!("Cannot persist verification metrics: {e}"))?;
     let (destination, head) = super::stream::protocol::interruptible(
         cancelled,
         paused,
-        head_identity(dest_config, &session.dest_key),
+        head_identity_checked(dest_config, &session.dest_key, cancelled, paused),
     )
     .await??
     .ok_or("conflict: Verified destination disappeared; source retained")?;
@@ -107,9 +114,10 @@ pub(crate) async fn run_delete_original(
     let source = super::stream::protocol::interruptible(
         cancelled,
         paused,
-        head_identity(source_config, &session.source_key),
+        head_identity_checked(source_config, &session.source_key, cancelled, paused),
     )
     .await??;
+    journal.metrics.verification_completed_at_ms = Some(chrono::Utc::now().timestamp_millis());
     if let Some((identity, _)) = source {
         if identity != journal.source {
             return Err(
@@ -117,6 +125,10 @@ pub(crate) async fn run_delete_original(
                     .into(),
             );
         }
+        journal
+            .metrics
+            .delete_started_at_ms
+            .get_or_insert_with(|| chrono::Utc::now().timestamp_millis());
         journal.stage = "delete_pending".into();
         save_move_journal(&journal)
             .await
@@ -147,6 +159,7 @@ pub(crate) async fn run_delete_original(
         save_move_journal(&journal)
             .await
             .map_err(|e| format!("Cannot persist deletion intent: {e}"))?;
+        check_control(cancelled, paused)?;
         if let Err(error) =
             super::stream::protocol::interruptible(cancelled, paused, request.send()).await?
         {
@@ -178,7 +191,7 @@ pub(crate) async fn run_delete_original(
             && super::stream::protocol::interruptible(
                 cancelled,
                 paused,
-                head_identity(source_config, &session.source_key),
+                head_identity_checked(source_config, &session.source_key, cancelled, paused),
             )
             .await??
             .is_some()
@@ -190,6 +203,7 @@ pub(crate) async fn run_delete_original(
             return Err("needs_action: Copied source version was removed; a different version remains at the source key and has been retained".into());
         }
     }
+    journal.metrics.delete_completed_at_ms = Some(chrono::Utc::now().timestamp_millis());
     journal.stage = "complete".into();
     save_move_journal(&journal)
         .await

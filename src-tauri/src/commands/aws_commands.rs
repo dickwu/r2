@@ -53,12 +53,6 @@ pub struct SyncResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct IndexingProgress {
-    current: usize,
-    total: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct FolderLoadProgress {
     pub pages: usize,
     pub items: usize,
@@ -157,7 +151,7 @@ async fn sync_aws_bucket_scoped(
 
     let _ = app.emit("sync-phase", "fetching");
 
-    db::begin_sync(&bucket, &account_id)
+    let sync_run = db::begin_sync(&bucket, &account_id)
         .await
         .map_err(|e| format!("Failed to clear cache: {}", e))?;
 
@@ -166,12 +160,13 @@ async fn sync_aws_bucket_scoped(
     let store_bucket = bucket.clone();
     let store_account_id = account_id.clone();
     let store_app = app.clone();
+    let store_sync_run = sync_run.clone();
     let store_scope = db::cache_scope::current_scope().ok_or("Missing sync cache scope")?;
     let store_handle = tokio::spawn(db::cache_scope::in_scope(store_scope, async move {
         let mut stored_count: usize = 0;
         while let Some(batch) = rx.recv().await {
             let batch_len = batch.len();
-            db::store_file_batch(&store_bucket, &store_account_id, &batch)
+            db::store_file_batch(&store_bucket, &store_account_id, &store_sync_run, &batch)
                 .await
                 .map_err(|e| format!("Failed to store files: {}", e))?;
             stored_count += batch_len;
@@ -254,20 +249,18 @@ async fn sync_aws_bucket_scoped(
         .map_err(|e| format!("Store task panicked: {}", e))?
         .map_err(|e| format!("Store failed: {}", e))?;
 
-    db::finish_sync(&bucket, &account_id, stored_count)
-        .await
-        .map_err(|e| format!("Failed to update sync metadata: {}", e))?;
-
     let _ = app.emit("sync-phase", "indexing");
 
-    let app_clone = app.clone();
-    let indexing_callback = move |current: usize, total: usize| {
-        let _ = app_clone.emit("indexing-progress", IndexingProgress { current, total });
-    };
-
-    db::build_directory_tree_from_db(&bucket, &account_id, &folder_keys, Some(indexing_callback))
-        .await
-        .map_err(|e| format!("Failed to build directory tree: {}", e))?;
+    db::finish_sync_with_metadata(
+        &bucket,
+        &account_id,
+        &sync_run,
+        stored_count,
+        &folder_keys,
+        &[],
+    )
+    .await
+    .map_err(|e| format!("Failed to publish sync cache: {}", e))?;
 
     let _ = app.emit("sync-phase", "complete");
 

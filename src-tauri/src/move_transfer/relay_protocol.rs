@@ -1,5 +1,6 @@
 //! The relay HTTP contract, resource reservations, and replayable payloads.
 //! A signed URL is only an address: each read still proves range and identity.
+use crate::providers::resources::{ByteLease, DiskLease, ResourceKind};
 use aws_sdk_s3::primitives::{ByteStream, SdkBody};
 use futures_util::StreamExt;
 use reqwest::{header, Client, Response, StatusCode};
@@ -67,32 +68,6 @@ pub(crate) async fn interruptible<T>(
 pub(crate) fn attempt_timeout(bytes: u64) -> Duration {
     // A progressing large part gets time proportional to size; idle bodies have a separate bound.
     Duration::from_secs(30 + bytes.div_ceil(128 * 1024))
-}
-
-pub(crate) async fn retry_delay(
-    attempt: usize,
-    retry_after: Option<Duration>,
-    cancelled: &AtomicBool,
-    paused: &AtomicBool,
-) -> Result<(), String> {
-    static ENTROPY: AtomicU64 = AtomicU64::new(0);
-    let salt = ENTROPY.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-    let cap_ms = 250_u64.saturating_mul(1 << attempt.min(5));
-    let jitter = Duration::from_millis(
-        nanos.wrapping_add(salt.wrapping_mul(6364136223846793005)) % (cap_ms + 1),
-    );
-    let wait = jitter.max(retry_after.unwrap_or_default());
-    // An excessive Retry-After requires a future persisted-job retry, not a hidden long sleep.
-    if wait > Duration::from_secs(30) {
-        return Err(
-            "transient: server requested a retry after the current operation budget".into(),
-        );
-    }
-    interruptible(cancelled, paused, tokio::time::sleep(wait)).await
 }
 
 pub(crate) fn validate_response(
@@ -200,6 +175,7 @@ pub(crate) struct Payload {
     _file: Option<TempPart>,
     _reservation: OwnedSemaphorePermit,
     _spool_reservation: Option<OwnedSemaphorePermit>,
+    _lease: ByteLease,
 }
 
 fn buffer_budget() -> Arc<Semaphore> {
@@ -255,6 +231,14 @@ pub(crate) async fn fetch_payload(
     .await
     .map_err(ReadError::permanent)?
     .map_err(|_| ReadError::permanent("Relay byte budget closed"))?;
+    let lease = ByteLease::new(
+        if spool {
+            ResourceKind::RelaySpool
+        } else {
+            ResourceKind::RelayBuffer
+        },
+        expected,
+    );
     let mut request = client
         .get(url)
         .header(header::IF_MATCH, etag)
@@ -306,6 +290,7 @@ pub(crate) async fn fetch_payload(
 
     let mut temp = None;
     let mut file = None;
+    let mut disk_lease = None;
     let mut buffer = Vec::new();
     if spool {
         static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
@@ -313,7 +298,16 @@ pub(crate) async fn fetch_payload(
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
+        let temp_dir = std::env::temp_dir();
+        disk_lease = Some(
+            DiskLease::reserve(&temp_dir, expected, || {
+                crate::mount::available_space(&temp_dir)
+            })
+            .map_err(|e| {
+                ReadError::permanent(format!("Cannot reserve relay part cache disk space: {e}"))
+            })?,
+        );
+        let path = temp_dir.join(format!(
             "r2-relay-{}-{now}-{}.part",
             std::process::id(),
             NEXT_FILE.fetch_add(1, Ordering::Relaxed)
@@ -371,6 +365,7 @@ pub(crate) async fn fetch_payload(
             .await
             .map_err(|e| ReadError::permanent(format!("Cannot flush relay part cache: {e}")))?;
         drop(file);
+        drop(disk_lease.take());
         ByteStream::from_path(&temp.as_ref().expect("spooled payload has a path").0)
             .await
             .map_err(|e| ReadError::permanent(format!("Cannot reopen relay part cache: {e}")))?
@@ -383,6 +378,7 @@ pub(crate) async fn fetch_payload(
         _file: temp,
         _reservation: reservation,
         _spool_reservation: spool_reservation,
+        _lease: lease,
     })
 }
 

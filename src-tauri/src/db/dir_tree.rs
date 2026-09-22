@@ -403,6 +403,188 @@ impl DirectoryTreeBuilder {
     }
 }
 
+pub(crate) async fn rebuild_directory_tree_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    folder_keys: &[String],
+) -> DbResult<()> {
+    let mut rows = conn
+        .query(
+            "SELECT parent_path, COUNT(*), SUM(size), MAX(last_modified)
+             FROM cached_files
+             WHERE bucket = ?1 AND account_id = ?2
+             GROUP BY parent_path",
+            turso::params![bucket, account_id],
+        )
+        .await?;
+
+    let mut direct_stats: HashMap<String, (i32, i64, Option<String>)> = HashMap::new();
+    while let Some(row) = rows.next().await? {
+        let parent_path: String = row.get(0)?;
+        let count: i64 = row.get(1)?;
+        let size: i64 = row.get(2)?;
+        let last_modified: Option<String> = row.get(3)?;
+        direct_stats.insert(parent_path, (count as i32, size, last_modified));
+    }
+    drop(rows);
+
+    let mut all_dirs: HashSet<String> = HashSet::new();
+    all_dirs.insert(String::new());
+
+    for parent_path in direct_stats.keys() {
+        let mut current = parent_path.clone();
+        while !current.is_empty() {
+            all_dirs.insert(current.clone());
+            let without_trailing = current.trim_end_matches('/');
+            current = match without_trailing.rfind('/') {
+                Some(pos) => without_trailing[..=pos].to_string(),
+                None => String::new(),
+            };
+        }
+    }
+
+    for key in folder_keys {
+        let key_trimmed = key.trim_end_matches('/');
+        if key_trimmed.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = key_trimmed.split('/').collect();
+        for i in 0..parts.len() {
+            all_dirs.insert(format!("{}/", parts[0..=i].join("/")));
+        }
+    }
+
+    let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
+    for dir in &all_dirs {
+        if dir.is_empty() {
+            continue;
+        }
+        let parent = compute_parent_path(dir);
+        children_map.entry(parent).or_default().push(dir.clone());
+    }
+
+    let mut sorted_dirs: Vec<String> = all_dirs.into_iter().collect();
+    sorted_dirs.sort_by_key(|p| std::cmp::Reverse(p.matches('/').count()));
+
+    let mut aggregates: HashMap<String, (i32, i64, Option<String>)> = HashMap::new();
+    let mut nodes: Vec<ComputedNode> = Vec::with_capacity(sorted_dirs.len());
+
+    for path in &sorted_dirs {
+        let (direct_count, direct_size, direct_last_mod) =
+            direct_stats.get(path).cloned().unwrap_or((0, 0, None));
+        let mut sub_count: i32 = 0;
+        let mut sub_size: i64 = 0;
+        let mut sub_last_mod: Option<String> = None;
+
+        if let Some(child_dirs) = children_map.get(path) {
+            for child in child_dirs {
+                if let Some((count, size, last_mod)) = aggregates.get(child) {
+                    sub_count += count;
+                    sub_size += size;
+                    if let Some(lm) = last_mod {
+                        sub_last_mod = match sub_last_mod {
+                            None => Some(lm.clone()),
+                            Some(ref curr) if lm > curr => Some(lm.clone()),
+                            other => other,
+                        };
+                    }
+                }
+            }
+        }
+
+        let last_modified = match (direct_last_mod.as_deref(), sub_last_mod) {
+            (Some(d), Some(s)) => Some(if d > s.as_str() { d.to_string() } else { s }),
+            (Some(d), None) => Some(d.to_string()),
+            (None, Some(s)) => Some(s),
+            (None, None) => None,
+        };
+        let total_count = direct_count + sub_count;
+        let total_size = direct_size + sub_size;
+        aggregates.insert(
+            path.clone(),
+            (total_count, total_size, last_modified.clone()),
+        );
+        nodes.push(ComputedNode {
+            path: path.clone(),
+            parent_path: compute_parent_path(path),
+            file_count: direct_count,
+            total_file_count: total_count,
+            size: direct_size,
+            total_size,
+            last_modified,
+        });
+    }
+
+    store_directory_nodes_on(conn, bucket, account_id, &nodes).await
+}
+
+async fn store_directory_nodes_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    nodes: &[ComputedNode],
+) -> DbResult<()> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "DELETE FROM directory_tree WHERE bucket = ?1 AND account_id = ?2",
+        turso::params![bucket, account_id],
+    )
+    .await?;
+
+    for chunk in nodes.chunks(DB_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders: Vec<String> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let b = i * 10;
+                format!(
+                    "(?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{}, ?{})",
+                    b + 1,
+                    b + 2,
+                    b + 3,
+                    b + 4,
+                    b + 5,
+                    b + 6,
+                    b + 7,
+                    b + 8,
+                    b + 9,
+                    b + 10
+                )
+            })
+            .collect();
+        let sql = format!(
+            "INSERT INTO directory_tree
+             (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated)
+             VALUES {}",
+            placeholders.join(", ")
+        );
+        let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 10);
+        for node in chunk {
+            params.push(bucket.to_string().into());
+            params.push(account_id.to_string().into());
+            params.push(node.path.clone().into());
+            params.push(node.parent_path.clone().into());
+            params.push(node.file_count.into());
+            params.push(node.total_file_count.into());
+            params.push(node.size.into());
+            params.push(node.total_size.into());
+            params.push(
+                node.last_modified
+                    .clone()
+                    .map(|s| s.into())
+                    .unwrap_or(turso::Value::Null),
+            );
+            params.push(now.into());
+        }
+        conn.execute(&sql, params).await?;
+    }
+    Ok(())
+}
+
 impl Default for DirectoryTreeBuilder {
     fn default() -> Self {
         Self::new()

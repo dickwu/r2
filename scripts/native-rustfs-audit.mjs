@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash, randomBytes } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdtemp, mkdir, readFile, writeFile, rename, unlink, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -50,6 +50,49 @@ async function fileSha(path) {
   for await (const bytes of createReadStream(path)) hash.update(bytes);
   return hash.digest('hex');
 }
+
+async function writeDeterministicFile(path, size, seed) {
+  assert(Number.isSafeInteger(size) && size >= 0, 'deterministic file size must be safe');
+  const hash = createHash('sha256');
+  const chunkSize = 1024 * 1024;
+  const chunk = Buffer.alloc(chunkSize);
+  let written = 0;
+  await new Promise((resolve, reject) => {
+    const stream = createWriteStream(path, { mode: 0o600 });
+    stream.on('error', reject);
+    stream.on('finish', resolve);
+    function writeMore() {
+      while (written < size) {
+        const length = Math.min(chunkSize, size - written);
+        for (let index = 0; index < length; index++) {
+          chunk[index] = (written + index + seed * 131) % 251;
+        }
+        const view = chunk.subarray(0, length);
+        hash.update(view);
+        written += length;
+        if (!stream.write(view)) {
+          stream.once('drain', writeMore);
+          return;
+        }
+      }
+      stream.end();
+    }
+    writeMore();
+  });
+  return { path, size, sha256: hash.digest('hex') };
+}
+
+async function streamingObjectSha(client, key, selectedBucket = bucket) {
+  const response = await send(client, new GetObjectCommand({ Bucket: selectedBucket, Key: key }));
+  const hash = createHash('sha256');
+  let size = 0;
+  for await (const chunk of response.Body) {
+    const bytes = Buffer.from(chunk);
+    size += bytes.length;
+    hash.update(bytes);
+  }
+  return { size, sha256: hash.digest('hex'), etag: response.ETag };
+}
 assert.equal(await fileSha(archive), expectedArchiveSha, 'RustFS archive SHA256 mismatch');
 // Check extracted bytes against the verified archive before executing them.
 await run('python3', [
@@ -73,6 +116,7 @@ let connectorPort;
 let mountId;
 let mountDetached = true;
 const MiB = 1024 * 1024;
+const GiB = 1024 * MiB;
 const bucket = 'audit-objects';
 const wrongEtag = '"00000000000000000000000000000000"';
 const evidence = {
@@ -811,11 +855,45 @@ async function nativePhase(source, destination) {
       region: 'us-east-1',
     };
   }
-  for (const size of [12, 128 * MiB]) {
+  const nativeSizes = [12, 128 * MiB];
+  const largeBytes = process.env.RUSTFS_AUDIT_LARGE_BYTES
+    ? Number.parseInt(process.env.RUSTFS_AUDIT_LARGE_BYTES, 10)
+    : 0;
+  if (largeBytes) {
+    assert(
+      largeBytes >= 6 * GiB,
+      'RUSTFS_AUDIT_LARGE_BYTES must be at least 6GiB so the large app path cannot collapse to the 128MiB smoke case'
+    );
+    nativeSizes.push(largeBytes);
+    evidence.native.large_file_mode = {
+      requested_bytes: largeBytes,
+      payload: 'file-backed deterministic stream; no full-size Buffer allocation',
+      status: 'configured',
+    };
+  } else {
+    evidence.native.large_file_mode = {
+      minimum_bytes: 6 * GiB,
+      payload: 'file-backed deterministic stream; no full-size Buffer allocation',
+      status: 'not_requested',
+      reason:
+        'Set RUSTFS_AUDIT_LARGE_BYTES>=6442450944 with a fresh isolated app binary to execute',
+    };
+  }
+  for (const size of nativeSizes) {
     const key = `native/中文 +%?#-${size}.bin`;
     const destKey = `moved/${key}`;
-    const content = Buffer.alloc(size, 37);
-    await put(source.client, key, content);
+    const payloadFile =
+      size >= GiB
+        ? await writeDeterministicFile(join(root, `payload-${size}.bin`), size, 37)
+        : null;
+    const content = payloadFile ? null : Buffer.alloc(size, 37);
+    const expectedSha = payloadFile ? payloadFile.sha256 : sha(content);
+    await put(
+      source.client,
+      key,
+      payloadFile ? createReadStream(payloadFile.path) : content,
+      payloadFile ? { ContentLength: payloadFile.size } : {}
+    );
     await put(destination.client, key, Buffer.from('wrong source on destination'));
     const started = performance.now();
     await ipc('start_batch_move', {
@@ -846,9 +924,20 @@ async function nativePhase(source, destination) {
     );
     const published = await exists(destination.client, destKey);
     const retained = await exists(source.client, key);
-    if (published)
-      assert.equal(sha((await bytes(destination.client, destKey)).bytes), sha(content));
-    if (retained) assert.equal(sha((await bytes(source.client, key)).bytes), sha(content));
+    if (published) {
+      const remote = payloadFile
+        ? await streamingObjectSha(destination.client, destKey)
+        : { sha256: sha((await bytes(destination.client, destKey)).bytes), size };
+      assert.equal(remote.sha256, expectedSha);
+      assert.equal(remote.size, size);
+    }
+    if (retained) {
+      const remote = payloadFile
+        ? await streamingObjectSha(source.client, key)
+        : { sha256: sha((await bytes(source.client, key)).bytes), size };
+      assert.equal(remote.sha256, expectedSha);
+      assert.equal(remote.size, size);
+    }
     assert(published || retained, 'Move lost both copies');
     if (task.status === 'success') assert(published && !retained);
     if (task.status === 'needs_action') assert(retained);
@@ -862,7 +951,8 @@ async function nativePhase(source, destination) {
       status: task.status,
       destination_verified: published,
       source_retained: retained,
-      sha256: sha(content),
+      sha256: expectedSha,
+      payload_storage: payloadFile ? 'file_stream' : 'buffer',
       error: task.error ?? null,
     });
   }

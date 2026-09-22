@@ -60,90 +60,44 @@ pub fn classify_storage_error(
     }
 }
 
+/// How a failed request should be handled. `Transient` is a failure that
+/// passes on its own — a provider that is briefly unavailable or throttling,
+/// or a connection that dropped — rather than one the caller has to change
+/// something about: credentials, bucket, the request.
+///
+/// The HTTP status is the main signal: S3-compatible servers agree on 5xx and
+/// 429 for "not now" far more than they agree on error codes, and whatever sits
+/// in front of one — Cloudflare's edge, for R2 — answers with 52x statuses and
+/// no S3 error code at all. `TRANSIENT_ERROR_CODES` covers the ones sent with
+/// some other status. For reads, a truncated/unparseable response or a
+/// connector error the transport declined to categorise is worth another try;
+/// the SDK's own classifier retries neither.
 pub fn s3_error_class<E: ProvideErrorMetadata>(
     error: &SdkError<E, HttpResponse>,
     mutation: bool,
 ) -> StorageErrorClass {
-    if matches!(error, SdkError::ConstructionFailure(_)) {
+    if matches!(error, SdkError::ConstructionFailure(_))
+        || matches!(error, SdkError::DispatchFailure(failure) if failure.is_user())
+    {
         return StorageErrorClass::Permanent;
+    }
+    if matches!(
+        error,
+        SdkError::ResponseError(_) | SdkError::TimeoutError(_)
+    ) {
+        // An incomplete/unparseable success response is recoverable for a
+        // read/immutable part, but cannot prove a publication did not happen.
+        return if mutation {
+            StorageErrorClass::OutcomeUnknown
+        } else {
+            StorageErrorClass::Transient
+        };
     }
     classify_storage_error(
         error.code(),
         error.raw_response().map(|r| r.status().as_u16()),
         mutation,
     )
-}
-
-/// One retry owner for replayable operations (HEAD/GET/LIST or the same
-/// immutable multipart part). Publications and deletion require reconciliation.
-#[allow(clippy::result_large_err)] // Preserve the SDK's typed error and response metadata.
-pub async fn retry_idempotent<T, E, F, Fut>(
-    attempts: u32,
-    mut send: F,
-) -> Result<T, SdkError<E, HttpResponse>>
-where
-    E: ProvideErrorMetadata,
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, SdkError<E, HttpResponse>>>,
-{
-    retry_idempotent_with_budget(attempts, Duration::from_secs(30), &mut send).await
-}
-
-#[allow(clippy::result_large_err)] // This is an SDK-compatible retry boundary.
-pub async fn retry_idempotent_with_budget<T, E, F, Fut>(
-    attempts: u32,
-    budget: Duration,
-    mut send: F,
-) -> Result<T, SdkError<E, HttpResponse>>
-where
-    E: ProvideErrorMetadata,
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, SdkError<E, HttpResponse>>>,
-{
-    let deadline = tokio::time::Instant::now() + budget;
-    for attempt in 0..attempts.clamp(1, 3) {
-        let result = tokio::time::timeout_at(deadline, send())
-            .await
-            .unwrap_or_else(|_| {
-                Err(SdkError::timeout_error(
-                    "Storage operation exhausted its configured deadline",
-                ))
-            });
-        match result {
-            Ok(output) => return Ok(output),
-            Err(error) => {
-                if !is_transient_s3_error(&error) || attempt + 1 >= attempts.clamp(1, 3) {
-                    return Err(error);
-                }
-                let retry_after = error
-                    .raw_response()
-                    .and_then(|r| r.headers().get("retry-after"))
-                    .and_then(|value| {
-                        value
-                            .parse::<u64>()
-                            .ok()
-                            .map(Duration::from_secs)
-                            .or_else(|| {
-                                chrono::DateTime::parse_from_rfc2822(value).ok().map(|at| {
-                                    Duration::from_secs(
-                                        (at.timestamp() - chrono::Utc::now().timestamp()).max(0)
-                                            as u64,
-                                    )
-                                })
-                            })
-                    })
-                    .unwrap_or_default();
-                let jitter = (chrono::Utc::now().timestamp_subsec_nanos() as u64)
-                    % ((250u64 << attempt) + 1);
-                let wait = Duration::from_millis(jitter).max(retry_after);
-                if tokio::time::Instant::now() + wait >= deadline {
-                    return Err(error);
-                }
-                tokio::time::sleep(wait).await;
-            }
-        }
-    }
-    unreachable!("bounded retry loop always returns")
 }
 
 pub struct S3ClientConfig<'a> {
@@ -278,54 +232,22 @@ const TRANSIENT_ERROR_CODES: &[&str] = &[
     "TooManyRequestsException",
 ];
 
-/// Whether a failure is one that passes on its own — a provider that is briefly
-/// unavailable or throttling, or a connection that dropped — rather than one
-/// the caller has to change something about: credentials, bucket, the request.
-///
-/// The HTTP status is the main signal: S3-compatible servers agree on 5xx and
-/// 429 for "not now" far more than they agree on error codes, and whatever sits
-/// in front of one — Cloudflare's edge, for R2 — answers with 52x statuses and
-/// no S3 error code at all. The code list covers the ones sent with some other
-/// status.
-pub fn is_transient_s3_error<E>(error: &SdkError<E, HttpResponse>) -> bool
-where
-    E: ProvideErrorMetadata,
-{
-    match error {
-        // Deliberately wider than the SDK's own classifier, which retries
-        // neither of these. A LIST is idempotent, so a truncated or unparseable
-        // response, and a connector error the transport declined to categorise,
-        // are both worth another try. Do not narrow this to match the SDK
-        // without checking the caller is still only ever listing.
-        SdkError::TimeoutError(_) | SdkError::ResponseError(_) => true,
-        // Anything but a user error is the network: a connection that timed
-        // out, was refused, or closed before the response was complete.
-        SdkError::DispatchFailure(failure) => !failure.is_user(),
-        SdkError::ServiceError(service_error) => {
-            let status = service_error.raw().status().as_u16();
-            // Any server-side failure except "not implemented", which a retry
-            // cannot change; 429 is the provider asking for a pause.
-            (status >= 500 && status != 501)
-                || status == 429
-                || service_error
-                    .err()
-                    .code()
-                    .is_some_and(|code| TRANSIENT_ERROR_CODES.contains(&code))
-        }
-        // The request could not even be built; building it again gives the same one.
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{create_s3_client, describe_s3_error, is_transient_s3_error, S3ClientConfig};
+    use super::{
+        create_s3_client, describe_s3_error, s3_error_class, S3ClientConfig, StorageErrorClass,
+    };
     use aws_sdk_s3::config::http::HttpResponse;
     use aws_sdk_s3::error::{ConnectorError, ErrorMetadata, SdkError};
     use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error;
     use aws_sdk_s3::primitives::SdkBody;
 
     type ListError = SdkError<ListObjectsV2Error, HttpResponse>;
+
+    /// What a replayable read (LIST/HEAD/GET) may wait out and retry.
+    fn is_transient(error: &ListError) -> bool {
+        s3_error_class(error, false) == StorageErrorClass::Transient
+    }
 
     #[test]
     fn clients_bound_sdk_retry_and_network_time() {
@@ -380,34 +302,34 @@ mod tests {
 
     #[test]
     fn a_5xx_is_transient_whatever_the_server_calls_it() {
-        assert!(is_transient_s3_error(&service_error(
+        assert!(is_transient(&service_error(
             503,
             "ServiceUnavailable",
             "The service is unavailable. Please retry."
         )));
-        assert!(is_transient_s3_error(&service_error(
+        assert!(is_transient(&service_error(
             503,
             "XMinioServerNotInitialized",
             "Server not initialized yet, please try again."
         )));
-        assert!(is_transient_s3_error(&service_error(
+        assert!(is_transient(&service_error(
             500,
             "InternalError",
             "We encountered an internal error. Please try again."
         )));
         // Cloudflare's edge in front of R2: "unknown error" and "origin timed out".
-        assert!(is_transient_s3_error(&bare_status(520)));
-        assert!(is_transient_s3_error(&bare_status(524)));
+        assert!(is_transient(&bare_status(520)));
+        assert!(is_transient(&bare_status(524)));
     }
 
     #[test]
     fn throttling_and_timeouts_are_transient_even_with_a_4xx_status() {
-        assert!(is_transient_s3_error(&service_error(
+        assert!(is_transient(&service_error(
             400,
             "RequestTimeout",
             "Your socket connection to the server was not read from or written to within the timeout period."
         )));
-        assert!(is_transient_s3_error(&service_error(
+        assert!(is_transient(&service_error(
             429,
             "TooManyRequests",
             "Too Many Requests"
@@ -416,42 +338,42 @@ mod tests {
 
     #[test]
     fn mistakes_in_the_request_are_not_transient() {
-        assert!(!is_transient_s3_error(&service_error(
+        assert!(!is_transient(&service_error(
             403,
             "AccessDenied",
             "Access Denied"
         )));
-        assert!(!is_transient_s3_error(&service_error(
+        assert!(!is_transient(&service_error(
             404,
             "NoSuchBucket",
             "The specified bucket does not exist"
         )));
-        assert!(!is_transient_s3_error(&service_error(
+        assert!(!is_transient(&service_error(
             501,
             "NotImplemented",
             "A header you provided implies functionality that is not implemented"
         )));
         let unbuildable: ListError = SdkError::construction_failure("no endpoint");
-        assert!(!is_transient_s3_error(&unbuildable));
+        assert!(!is_transient(&unbuildable));
     }
 
     #[test]
     fn network_failures_are_transient_unless_the_request_itself_is_wrong() {
         let timed_out: ListError = SdkError::timeout_error("connect took too long");
-        assert!(is_transient_s3_error(&timed_out));
+        assert!(is_transient(&timed_out));
 
         let reset: ListError =
             SdkError::dispatch_failure(ConnectorError::io("connection reset".into()));
-        assert!(is_transient_s3_error(&reset));
+        assert!(is_transient(&reset));
 
         let closed: ListError = SdkError::dispatch_failure(ConnectorError::other(
             "connection closed before message completed".into(),
             None,
         ));
-        assert!(is_transient_s3_error(&closed));
+        assert!(is_transient(&closed));
 
         let unsendable: ListError =
             SdkError::dispatch_failure(ConnectorError::user("body is not replayable".into()));
-        assert!(!is_transient_s3_error(&unsendable));
+        assert!(!is_transient(&unsendable));
     }
 }

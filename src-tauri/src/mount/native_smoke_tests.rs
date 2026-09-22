@@ -5,6 +5,10 @@ use crate::test_s3::{serve, Request, Response};
 use nfsserve::tcp::{NFSTcp, NFSTcpListener};
 use sha2::{Digest, Sha256};
 
+#[cfg(unix)]
+#[path = "vm_powercut_tests.rs"]
+mod vm_powercut_tests;
+
 #[derive(Clone)]
 struct Object {
     data: Vec<u8>,
@@ -486,7 +490,9 @@ async fn native_nfs_write_read_rename_unmount() {
                 Ok(drives) if explicit_test_drive(Some(&drive), drives).is_ok() => {}
                 result => {
                     unmounted = false;
-                    failure = Some(format!("Fixture drive {drive} remains assigned or cannot be verified after unmount: {result:?}"));
+                    failure = Some(format!(
+                        "Fixture drive {drive} remains assigned or cannot be verified after unmount: {result:?}"
+                    ));
                 }
             }
         }
@@ -503,7 +509,10 @@ async fn native_nfs_write_read_rename_unmount() {
     if unmounted && settled {
         let _ = tokio::fs::remove_dir_all(&root).await;
     } else {
-        eprintln!("Native fixture retained at {}; mount_confirmed={mounted}, unmount_confirmed={unmounted}, VFS_settled={settled}", root.display());
+        eprintln!(
+            "Native fixture retained at {}; mount_confirmed={mounted}, unmount_confirmed={unmounted}, VFS_settled={settled}",
+            root.display()
+        );
         if !settled {
             failure = Some(format!(
                 "Native fixture operations did not settle; data retained at {}",

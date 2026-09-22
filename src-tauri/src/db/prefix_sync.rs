@@ -9,6 +9,7 @@ pub fn get_table_sql() -> &'static str {
         last_synced_at INTEGER NOT NULL,
         file_count INTEGER NOT NULL DEFAULT 0,
         folder_count INTEGER NOT NULL DEFAULT 0,
+        generation INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (bucket, account_id, prefix)
     );
     CREATE INDEX IF NOT EXISTS idx_prefix_sync ON prefix_sync_times(bucket, account_id, prefix);
@@ -55,11 +56,16 @@ pub(crate) async fn replace_complete_prefix_on(
         }
         super::dir_tree::replace_prefix_children_on(conn, bucket, account_id, prefix, folders).await?;
         conn.execute(
-            "INSERT INTO prefix_sync_times (bucket, account_id, prefix, last_synced_at, file_count, folder_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT (bucket, account_id, prefix) DO UPDATE SET last_synced_at = ?4, file_count = ?5, folder_count = ?6",
+            "INSERT INTO prefix_sync_times (bucket, account_id, prefix, last_synced_at, file_count, folder_count, generation)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+             ON CONFLICT (bucket, account_id, prefix) DO UPDATE SET
+               last_synced_at = ?4,
+               file_count = ?5,
+               folder_count = ?6,
+               generation = prefix_sync_times.generation + 1",
             turso::params![bucket, account_id, prefix, now, files.len() as i64, folders.len() as i64],
         ).await?;
+        super::file_cache::bump_content_revision_on(conn, bucket, account_id).await?;
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     }.await;
     if let Err(error) = result {
@@ -84,7 +90,7 @@ pub async fn touch_prefix_sync_times_if_exists(
     invalidate_prefixes_on(&conn, bucket, account_id, prefixes).await
 }
 
-async fn invalidate_prefixes_on(
+pub(crate) async fn invalidate_prefixes_on(
     conn: &turso::Connection,
     bucket: &str,
     account_id: &str,
@@ -92,7 +98,9 @@ async fn invalidate_prefixes_on(
 ) -> DbResult<()> {
     for chunk in prefixes.chunks(500) {
         let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("UPDATE prefix_sync_times SET last_synced_at = 0 WHERE bucket = ? AND account_id = ? AND prefix IN ({placeholders})");
+        let sql = format!(
+            "UPDATE prefix_sync_times SET last_synced_at = 0, generation = generation + 1 WHERE bucket = ? AND account_id = ? AND prefix IN ({placeholders})"
+        );
         let mut params: Vec<turso::Value> =
             vec![bucket.to_string().into(), account_id.to_string().into()];
         params.extend(chunk.iter().map(|prefix| prefix.clone().into()));
@@ -123,7 +131,8 @@ mod tests {
         conn.execute_batch(get_table_sql()).await.unwrap();
         conn.execute_batch(
             "CREATE TABLE cached_files (bucket TEXT, account_id TEXT, key TEXT, parent_path TEXT, name TEXT, size INTEGER, last_modified TEXT, synced_at INTEGER, PRIMARY KEY(bucket, account_id, key));
-             CREATE TABLE directory_tree (bucket TEXT, account_id TEXT, path TEXT, parent_path TEXT, file_count INTEGER, total_file_count INTEGER, size INTEGER, total_size INTEGER, last_modified TEXT, last_updated INTEGER, PRIMARY KEY(bucket, account_id, path));",
+             CREATE TABLE directory_tree (bucket TEXT, account_id TEXT, path TEXT, parent_path TEXT, file_count INTEGER, total_file_count INTEGER, size INTEGER, total_size INTEGER, last_modified TEXT, last_updated INTEGER, PRIMARY KEY(bucket, account_id, path));
+             CREATE TABLE bucket_content_revisions (bucket TEXT, account_id TEXT, revision INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(bucket, account_id));",
         ).await.unwrap();
         (db, conn)
     }
@@ -293,11 +302,15 @@ mod tests {
         .unwrap();
         assert_eq!(count(&conn, "prefix_sync_times").await, 1);
         let mut rows = conn
-            .query("SELECT prefix, last_synced_at FROM prefix_sync_times", ())
+            .query(
+                "SELECT prefix, last_synced_at, generation FROM prefix_sync_times",
+                (),
+            )
             .await
             .unwrap();
         let row = rows.next().await.unwrap().unwrap();
         assert_eq!(row.get::<String>(0).unwrap(), "known/");
         assert_eq!(row.get::<i64>(1).unwrap(), 0);
+        assert_eq!(row.get::<i64>(2).unwrap(), 2);
     }
 }
