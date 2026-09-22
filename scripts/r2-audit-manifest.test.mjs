@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -10,6 +11,20 @@ import { productionSourceFingerprint } from './audit-source.mjs';
 import { classifyGate, createAcceptanceStatus, normalizeStatus } from './r2-audit-manifest.mjs';
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(scriptsDir, '..');
+
+// Load the committed manifest itself (not a re-declared inline gate) so these
+// tests fail if a gate's pointer or `equals`/`expect` value drifts, not just
+// if classifyGate()'s logic regresses.
+const committedManifest = JSON.parse(
+  readFileSync(join(repoRoot, 'docs/engineering/r2-audit/acceptance-manifest.json'), 'utf8')
+);
+
+function committedGate(id) {
+  const gate = committedManifest.gates.find((candidate) => candidate.id === id);
+  assert.ok(gate, `gate "${id}" not found in the committed acceptance-manifest.json`);
+  return gate;
+}
 
 test('normalizes status values and rejects unknown labels', () => {
   assert.equal(normalizeStatus('passed'), 'passed');
@@ -125,6 +140,66 @@ test('downgrades limited evidence that is missing required provenance instead of
     assert.equal(gate.status, 'historical_limited');
     assert.ok(gate.reason, 'expected an explicit note, not an empty one');
     assert.match(gate.reason, /missing production source fingerprint/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('committed power-loss-matrix gate treats a smoke-mode run as limited, never a full pass', async () => {
+  const gate = committedGate('power-loss-matrix');
+  const root = await mkdtemp(join(tmpdir(), 'r2-audit-power-loss-smoke-'));
+  try {
+    const auditDir = join(root, 'docs/engineering/r2-audit');
+    await mkdir(auditDir, { recursive: true });
+    const sourceFingerprint = { production_source_sha256: 'current-source' };
+    // A --case run: real VM execution, but a subset of the matrix, "recorded
+    // as smoke, never full matrix" per vm-powerloss-audit.py's own --case
+    // help text. This must never be indistinguishable from the full
+    // kernel_nfs_ack_vm_powercut_matrix run.
+    await writeFile(
+      join(auditDir, gate.evidence),
+      JSON.stringify({
+        passed: true,
+        mode: 'smoke',
+        build: {
+          production_source_sha256: sourceFingerprint.production_source_sha256,
+          binary_sha256: 'bin',
+        },
+      })
+    );
+    const classified = classifyGate(gate, root, null, sourceFingerprint);
+    assert.equal(classified.status, 'limited');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('committed cloudflare-r2-protocol gate treats a safely-refused condition as limited, never a full pass', async () => {
+  const gate = committedGate('cloudflare-r2-protocol');
+  const root = await mkdtemp(join(tmpdir(), 'r2-audit-r2-protocol-limited-'));
+  try {
+    const auditDir = join(root, 'docs/engineering/r2-audit');
+    await mkdir(auditDir, { recursive: true });
+    const git = { commit: 'current-commit', tree: 'current-tree' };
+    // R2 safely refusing a conditional operation it does not support is a
+    // capability boundary, not a successful enforced pass.
+    await writeFile(
+      join(auditDir, gate.evidence),
+      JSON.stringify({
+        status: 'observations_collected',
+        range: { exact_bytes: true },
+        multipart: { exact_bytes: true },
+        cleanup_complete: true,
+        conditions: {
+          get_match: { behavior: 'rejected_unsupported' },
+          put_absent: { behavior: 'enforced' },
+          copy_source_match: { behavior: 'enforced' },
+        },
+        git: { commit: git.commit, tree: git.tree },
+      })
+    );
+    const classified = classifyGate(gate, root, git, null);
+    assert.equal(classified.status, 'limited');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
