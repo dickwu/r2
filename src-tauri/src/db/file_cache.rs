@@ -1644,7 +1644,6 @@ pub(crate) async fn finish_sync_with_metadata_on(
     folder_keys: &[String],
     skipped_prefixes: &[String],
 ) -> DbResult<()> {
-    let now = chrono::Utc::now().timestamp();
     ensure_sync_run_on(conn, bucket, account_id, run_token).await?;
     let started_at = sync_started_at_on(conn, bucket, account_id).await?;
     let unresolved = replay_sync_journal_on(conn, bucket, account_id).await?;
@@ -1730,6 +1729,8 @@ pub(crate) async fn finish_sync_with_metadata_on(
 
     bump_content_revision_on(conn, bucket, account_id).await?;
 
+    // The index is only as fresh as its earliest listed object: date it from
+    // when the scan started, not from when a long scan finished.
     conn.execute(
         "INSERT INTO sync_meta (bucket, account_id, last_sync, file_count, generation)
          VALUES (?1, ?2, ?3, ?4, 1)
@@ -1737,7 +1738,7 @@ pub(crate) async fn finish_sync_with_metadata_on(
            last_sync = ?3,
            file_count = ?4,
            generation = sync_meta.generation + 1",
-        turso::params![bucket, account_id, now, file_count as i32],
+        turso::params![bucket, account_id, started_at, file_count as i32],
     )
     .await?;
 
@@ -2094,6 +2095,36 @@ mod tests {
         assert_eq!(
             live_folders(&conn, "").await,
             vec!["a/".to_string(), "b/".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn full_sync_freshness_dates_from_when_the_scan_started() {
+        let (_db, conn) = fixture().await;
+        let run = begin_sync_on(&conn, "bucket", "account").await.unwrap();
+        // A long scan: objects listed early may have changed since.
+        conn.execute(
+            "UPDATE app_state SET value = '1000' WHERE key = 'sync_started_at:account:bucket'",
+            (),
+        )
+        .await
+        .unwrap();
+        store_file_batch_on(&conn, "bucket", "account", &run, &[cached("a.txt", 1)])
+            .await
+            .unwrap();
+
+        publish(&conn, &run, 1).await.unwrap();
+
+        let mut rows = conn
+            .query(
+                "SELECT last_sync FROM sync_meta WHERE bucket = 'bucket' AND account_id = 'account'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1000
         );
     }
 
