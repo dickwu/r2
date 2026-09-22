@@ -171,6 +171,12 @@ pub struct Stage {
     /// mid-upload is noticed instead of being lost.
     pub dirty_gen: u64,
     applied_gen: u64,
+    /// Set just before a WAL append and cleared once that record is committed
+    /// and applied. While set, the WAL may hold a record the data file does
+    /// not reflect — a failed commit or apply, or a cancelled request — and
+    /// the next access replays it. Otherwise nothing is ever replayed outside
+    /// restore, so a write or read costs O(record), not a pass over the WAL.
+    needs_replay: bool,
     pub checkpoint_lsn: u64,
     pub next_lsn: u64,
     records_since_checkpoint: u64,
@@ -633,6 +639,7 @@ impl Stage {
             dirty: false,
             dirty_gen: 0,
             applied_gen: 0,
+            needs_replay: false,
             checkpoint_lsn: 0,
             next_lsn: 1,
             records_since_checkpoint: 0,
@@ -684,6 +691,8 @@ impl Stage {
             dirty: record.dirty,
             dirty_gen: record.generation,
             applied_gen: record.generation,
+            // Restore replays the whole folder before any stage is rebuilt.
+            needs_replay: false,
             checkpoint_lsn: record.checkpoint_lsn,
             next_lsn: record.checkpoint_lsn.saturating_add(1),
             records_since_checkpoint: 0,
@@ -743,7 +752,18 @@ impl Stage {
         .await
     }
 
+    /// Brings the data file level with the WAL after an interrupted change.
+    ///
+    /// O(1) unless `needs_replay` is set: restore already replayed the folder,
+    /// and a change that completed applied its own record.
     pub async fn replay_pending_write(&mut self) -> std::io::Result<()> {
+        if !self.needs_replay {
+            return Ok(());
+        }
+        // The interrupted apply may still have a write in flight on this
+        // handle. Let it land before the replay rewrites those bytes, then
+        // carry on with a fresh handle that holds no deferred error.
+        let _ = self.file.sync_all().await;
         let path = self.path.with_extension("write.json");
         if tokio::fs::try_exists(&path).await? {
             let record = replay_write(
@@ -795,6 +815,12 @@ impl Stage {
             self.last_write = Instant::now();
             self.refresh_wal_lease().await;
         }
+        self.file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.path)
+            .await?;
+        self.needs_replay = false;
         Ok(())
     }
 
@@ -855,6 +881,7 @@ impl Stage {
             None
         };
 
+        self.needs_replay = true;
         self.wal_tail_repaired = false;
         match stage_wal::append_record_unchecked(&wal_path, &record).await {
             Ok(assigned_lsn) => {
@@ -886,6 +913,7 @@ impl Stage {
             DurableChange::Resize { size } => self.file.set_len(size).await?,
         }
         self.file.flush().await?;
+        self.needs_replay = false;
         drop(data_growth);
         self.size = size;
         self.stage_lease.resize(size);
@@ -1398,16 +1426,17 @@ mod tests {
             stage.write_durable(0, &[index as u8], 1).await.unwrap();
             stage.persist().await.unwrap();
         }
-        let before = stage_wal::root_wal_scan_count();
+        let wal = root.join(".stage.wal");
+        let before = stage_wal::wal_read_count(&wal);
         let entries = recovery_entries(&root).await.unwrap();
-        let after_entries = stage_wal::root_wal_scan_count();
+        let after_entries = stage_wal::wal_read_count(&wal);
         assert_eq!(entries.len(), 100);
         assert_eq!(after_entries.saturating_sub(before), 1);
         for record in entries {
             let restored = Stage::restore(record).await.unwrap();
             drop(restored);
         }
-        assert_eq!(stage_wal::root_wal_scan_count(), after_entries);
+        assert_eq!(stage_wal::wal_read_count(&wal), after_entries);
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
@@ -1450,6 +1479,53 @@ mod tests {
         let mut restored = Stage::restore(record).await.unwrap();
         assert_eq!(restored.read_at(0, size).await.unwrap(), expected);
         assert_eq!(restored.dirty_gen, 64);
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sequential_writes_reads_and_uploads_never_rescan_the_shared_wal() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-no-wal-rescan-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let wal = stage_wal::wal_path(&path);
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        let chunk = 4096usize;
+        let writes = 200usize;
+        let first = vec![1u8; chunk];
+        stage.write_durable(0, &first, 1).await.unwrap();
+        let mut expected = first;
+        // Whatever the first write needed, every later write and read must be
+        // O(record): the WAL is shared by the whole folder and can be huge.
+        let reads_after_first_write = stage_wal::wal_read_count(&wal);
+        for index in 1..writes {
+            let offset = (index * chunk) as u64;
+            let payload = vec![(index % 251) as u8; chunk];
+            stage.write_durable(offset, &payload, 1).await.unwrap();
+            assert_eq!(stage.read_at(offset, chunk).await.unwrap(), payload);
+            expected.extend_from_slice(&payload);
+        }
+        assert_eq!(
+            stage.checkpoint_lsn, 0,
+            "stay below the checkpoint threshold"
+        );
+        assert_eq!(
+            stage_wal::wal_read_count(&wal),
+            reads_after_first_write,
+            "a write or read rescanned the WAL"
+        );
+        // An upload checkpoints once (one compaction pass) and replays nothing.
+        stage.upload_snapshot().await.unwrap();
+        assert!(stage_wal::wal_read_count(&wal) <= reads_after_first_write + 1);
+        drop(stage);
+
+        replay_write_intents(&root).await.unwrap();
+        let record = recovery_entries(&root).await.unwrap().remove(0);
+        let mut restored = Stage::restore(record).await.unwrap();
+        assert_eq!(restored.read_at(0, expected.len()).await.unwrap(), expected);
         drop(restored);
         tokio::fs::remove_dir_all(root).await.unwrap();
     }

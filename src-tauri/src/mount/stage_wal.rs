@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -28,12 +26,30 @@ const MAX_KEY_LEN: usize = 16 * 1024;
 const MAX_DATA_NAME_LEN: usize = 1024;
 const MAX_PAYLOAD_LEN: usize = 8 * 1024 * 1024;
 
+/// Whole-file reads per WAL path. Keyed by path so tests running in parallel
+/// on other staging folders cannot disturb a count.
 #[cfg(test)]
-static ROOT_WAL_SCANS: AtomicU64 = AtomicU64::new(0);
+static WAL_READS: OnceLock<std::sync::Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
 
 #[cfg(test)]
-pub fn root_wal_scan_count() -> u64 {
-    ROOT_WAL_SCANS.load(Ordering::Relaxed)
+fn note_wal_read(path: &Path) {
+    *WAL_READS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(path.to_path_buf())
+        .or_default() += 1;
+}
+
+#[cfg(test)]
+pub fn wal_read_count(path: &Path) -> u64 {
+    WAL_READS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get(path)
+        .copied()
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,6 +294,8 @@ pub async fn replay_file_after_generation(
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    #[cfg(test)]
+    note_wal_read(&path);
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
     let data_name = data_name(data_path)?;
@@ -303,14 +321,18 @@ pub async fn replay_file_after_generation(
 
 pub async fn repair_tail(path: &Path) -> std::io::Result<()> {
     let mut states = append_states().lock().await;
+    // Once one append in this process has seen or repaired the tail, every
+    // later append keeps it valid; rereading the WAL again is pure cost.
+    if states.get(path).is_some_and(|state| state.tail_valid) {
+        return Ok(());
+    }
     let next_lsn = repair_tail_and_next_lsn(path).await?;
-    states.insert(
-        path.to_path_buf(),
-        AppendState {
-            next_lsn,
-            tail_valid: true,
-        },
-    );
+    let state = states.entry(path.to_path_buf()).or_insert(AppendState {
+        next_lsn,
+        tail_valid: true,
+    });
+    state.next_lsn = state.next_lsn.max(next_lsn);
+    state.tail_valid = true;
     Ok(())
 }
 
@@ -321,6 +343,8 @@ async fn repair_tail_and_next_lsn(path: &Path) -> std::io::Result<u64> {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(highwater.unwrap_or(1)),
         Err(error) => return Err(error),
     };
+    #[cfg(test)]
+    note_wal_read(path);
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
     let decoded = decode_records(&bytes)?;
@@ -422,14 +446,14 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
 }
 
 async fn read_root_wal(root: &Path) -> std::io::Result<RootWal> {
-    #[cfg(test)]
-    ROOT_WAL_SCANS.fetch_add(1, Ordering::Relaxed);
     let path = root.join(".stage.wal");
     let mut file = match File::open(&path).await {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(RootWal::default()),
         Err(error) => return Err(error),
     };
+    #[cfg(test)]
+    note_wal_read(&path);
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
     let decoded = decode_records(&bytes)?;
@@ -512,6 +536,8 @@ pub async fn checkpoint(data_path: &Path, checkpoint_lsn: u64) -> std::io::Resul
         }
         Err(error) => return Err(error),
     };
+    #[cfg(test)]
+    note_wal_read(&path);
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
     let data_name = data_name(data_path)?;
