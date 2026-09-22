@@ -804,6 +804,41 @@ impl S3NfsFs {
         Err(nfsstat3::NFS3ERR_JUKEBOX)
     }
 
+    /// Exclusive fence on the key `name` gets inside `dirid`, built from the
+    /// directory's key as it stands once the fence is held — a directory
+    /// renamed during the wait must not have its old path published again.
+    /// Returns the directory key the child key was built from, and that key.
+    async fn fence_new_child(
+        &self,
+        dirid: fileid3,
+        name: &str,
+        is_dir: bool,
+    ) -> Result<(FenceGuard, String, String), nfsstat3> {
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let dir_key = normalize_dir_key(&self.dir_inode(dirid)?.key);
+            let key = child_key(&dir_key, name, is_dir);
+            let fence = self.fence_exact_key(&key).await;
+            if normalize_dir_key(&self.dir_inode(dirid)?.key) == dir_key {
+                return Ok((fence, dir_key, key));
+            }
+        }
+        Err(nfsstat3::NFS3ERR_JUKEBOX)
+    }
+
+    /// Shared fence on the key `id` has once the fence is held, with the inode
+    /// as read under it.
+    async fn fence_inode_shared(&self, id: fileid3) -> Result<(FenceGuard, Inode), nfsstat3> {
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let key = self.inode(id)?.key;
+            let fence = self.fence_exact_key_shared(&key).await;
+            let inode = self.inode(id)?;
+            if inode.key == key {
+                return Ok((fence, inode));
+            }
+        }
+        Err(nfsstat3::NFS3ERR_JUKEBOX)
+    }
+
     fn storage_endpoint(&self) -> &str {
         &self.inner.endpoint
     }
@@ -1947,7 +1982,11 @@ impl S3NfsFs {
             tokio::spawn(async move {
                 let _permit = permit;
                 let _fence = fs.fence_exact_key_shared(&key).await;
-                let _ = fs.chunk_bytes(id, &key, index, &identity).await;
+                // A rename that finished while this waited moved the file;
+                // its next read warms the new key instead.
+                if fs.inode(id).is_ok_and(|inode| inode.key == key) {
+                    let _ = fs.chunk_bytes(id, &key, index, &identity).await;
+                }
             });
         }
     }
@@ -3514,14 +3553,7 @@ impl S3NfsFs {
             let mount_id = mount_id.to_string();
             tokio::spawn(async move {
                 let _permit = permit;
-                let _namespace = fs.inner.namespace.read().await;
-                let _fence = fs.fence_exact_key_shared(&key).await;
-                let lifecycle = fs.lifecycle(&key);
-                let _access = lifecycle.access.read().await;
-                let _publication = lifecycle.publication.lock().await;
-                // DELETE may have unpublished this stage while the task was
-                // queued; resolve again only after taking the lifecycle fence.
-                if let Err(error) = fs.flush_one_locked(id, stage::UPLOAD_ATTEMPTS, false).await {
+                if let Err(error) = fs.flush_fenced(id, stage::UPLOAD_ATTEMPTS, false).await {
                     let _ = app.emit(
                         "mount-flush-error",
                         FlushErrorPayload {
@@ -3536,9 +3568,47 @@ impl S3NfsFs {
         }
     }
 
-    /// Caller holds namespace + key lifecycle + publication fences, or the
-    /// exclusive namespace fence used by rename. Stage data is locked only
-    /// while making its immutable snapshot and settling durable state.
+    /// Publishes the stage for `id` under the fence and lifecycle locks of the
+    /// key the stage has once they are held. A rename rekeys a stage only
+    /// inside its exclusive fence, so a key read before the wait can be stale
+    /// when it ends, and publishing under a stale key's locks would let a
+    /// DELETE or rename of the real key run alongside this upload.
+    async fn flush_fenced(
+        &self,
+        id: fileid3,
+        attempts: u32,
+        explicit: bool,
+    ) -> Result<(), UploadFailure> {
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let Some(key) = self.stage_guard(id).await.map(|guard| guard.key.clone()) else {
+                return Ok(());
+            };
+            let _namespace = self.inner.namespace.read().await;
+            let _fence = self.fence_exact_key_shared(&key).await;
+            let lifecycle = self.lifecycle(&key);
+            let _access = lifecycle.access.read().await;
+            let _publication = lifecycle.publication.lock().await;
+            // DELETE may have unpublished this stage, and a rename rekeyed it,
+            // while this task waited; resolve again under the locks.
+            match self.stage_guard(id).await.map(|guard| guard.key.clone()) {
+                None => return Ok(()),
+                Some(current) if current == key => {
+                    return self.flush_one_locked(id, attempts, explicit).await;
+                }
+                Some(_) => {}
+            }
+        }
+        Err(UploadFailure {
+            message: "Staged file kept moving; publication deferred".into(),
+            retryable: true,
+            uncertain: false,
+        })
+    }
+
+    /// Caller holds the shared fence, lifecycle and publication locks of the
+    /// stage's current key (see [`Self::flush_fenced`]), or the exclusive
+    /// fence of a rename covering it. Stage data is locked only while making
+    /// its immutable snapshot and settling durable state.
     async fn flush_one_locked(
         &self,
         id: fileid3,
@@ -3776,15 +3846,8 @@ impl S3NfsFs {
     /// Publishers own their lifecycle fences and resource permits through disk
     /// snapshotting, network publication and durable settlement.
     async fn flush_everything(&self, attempts: u32) -> usize {
-        let staged: Vec<_> = self
-            .inner
-            .stages
-            .lock()
-            .await
-            .iter()
-            .map(|(&id, handle)| (id, handle.clone()))
-            .collect();
-        let pending = stream::iter(staged.into_iter().map(|(id, handle)| async move {
+        let staged: Vec<_> = self.inner.stages.lock().await.keys().copied().collect();
+        let pending = stream::iter(staged.into_iter().map(|id| async move {
             let Ok(permit) = self.inner.flush_slots.clone().acquire_owned().await else {
                 return 1;
             };
@@ -3794,13 +3857,7 @@ impl S3NfsFs {
             // fence and permit until those operations actually settle.
             tokio::spawn(async move {
                 let _permit = permit;
-                let key = handle.lock().await.key.clone();
-                let _namespace = fs.inner.namespace.read().await;
-                let _fence = fs.fence_exact_key_shared(&key).await;
-                let lifecycle = fs.lifecycle(&key);
-                let _access = lifecycle.access.read().await;
-                let _publication = lifecycle.publication.lock().await;
-                usize::from(fs.flush_one_locked(id, attempts, true).await.is_err())
+                usize::from(fs.flush_fenced(id, attempts, true).await.is_err())
             })
             .await
             .unwrap_or(1)
@@ -3896,9 +3953,7 @@ impl NFSFileSystem for S3NfsFs {
     async fn setattr(&self, id: fileid3, setattr: sattr3) -> Result<fattr3, nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
-        let inode = self.inode(id)?;
-        let _fence = self.fence_exact_key_shared(&inode.key).await;
-        let inode = self.inode(id)?;
+        let (_fence, inode) = self.fence_inode_shared(id).await?;
         let lifecycle = self.lifecycle(&inode.key);
         let _access = lifecycle.access.read().await;
         self.ensure_writable()?;
@@ -4005,9 +4060,7 @@ impl NFSFileSystem for S3NfsFs {
         count: u32,
     ) -> Result<(Vec<u8>, bool), nfsstat3> {
         let _namespace = self.inner.namespace.read().await;
-        let inode = self.inode(id)?;
-        let _fence = self.fence_exact_key_shared(&inode.key).await;
-        let inode = self.inode(id)?;
+        let (_fence, inode) = self.fence_inode_shared(id).await?;
         self.ensure_rename_available(&inode.key)?;
         if inode.kind != EntryKind::File {
             return Err(nfsstat3::NFS3ERR_ISDIR);
@@ -4073,9 +4126,7 @@ impl NFSFileSystem for S3NfsFs {
     async fn write(&self, id: fileid3, offset: u64, data: &[u8]) -> Result<fattr3, nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
-        let inode = self.inode(id)?;
-        let _fence = self.fence_exact_key_shared(&inode.key).await;
-        let inode = self.inode(id)?;
+        let (_fence, inode) = self.fence_inode_shared(id).await?;
         let lifecycle = self.lifecycle(&inode.key);
         let _access = lifecycle.access.read().await;
         self.ensure_writable()?;
@@ -4144,11 +4195,9 @@ impl NFSFileSystem for S3NfsFs {
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
-        let dir = self.dir_inode(dirid)?;
+        self.dir_inode(dirid)?;
         let name = self.child_name(filename)?;
-        let dir_key = normalize_dir_key(&dir.key);
-        let key = child_key(&dir_key, &name, false);
-        let _fence = self.fence_exact_key(&key).await;
+        let (_fence, _, key) = self.fence_new_child(dirid, &name, false).await?;
         let lifecycle = self.lifecycle(&key);
         let _access = lifecycle.access.write().await;
         self.ensure_writable()?;
@@ -4192,11 +4241,9 @@ impl NFSFileSystem for S3NfsFs {
     ) -> Result<fileid3, nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
-        let dir = self.dir_inode(dirid)?;
+        self.dir_inode(dirid)?;
         let name = self.child_name(filename)?;
-        let dir_key = normalize_dir_key(&dir.key);
-        let key = child_key(&dir_key, &name, false);
-        let _fence = self.fence_exact_key(&key).await;
+        let (_fence, _, key) = self.fence_new_child(dirid, &name, false).await?;
         let lifecycle = self.lifecycle(&key);
         let _access = lifecycle.access.write().await;
         self.ensure_writable()?;
@@ -4222,20 +4269,17 @@ impl NFSFileSystem for S3NfsFs {
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
-        let dir = self.dir_inode(dirid)?;
+        self.dir_inode(dirid)?;
         let name = self.child_name(dirname)?;
-        let dir_key = normalize_dir_key(&dir.key);
-
-        let children = self.children_of(dirid, &dir_key).await?;
-        if children.iter().any(|child| child.name == name) {
-            return Err(nfsstat3::NFS3ERR_EXIST);
-        }
 
         // A zero-byte object whose key ends in `/` is the folder marker every
         // S3 tool understands, and is what makes an empty directory visible at
         // all — without it there is no prefix to list.
-        let key = child_key(&dir_key, &name, true);
-        let _fence = self.fence_exact_key(&key).await;
+        let (_fence, dir_key, key) = self.fence_new_child(dirid, &name, true).await?;
+        let children = self.children_of(dirid, &dir_key).await?;
+        if children.iter().any(|child| child.name == name) {
+            return Err(nfsstat3::NFS3ERR_EXIST);
+        }
         let lifecycle = self.lifecycle(&key);
         let _access = lifecycle.access.write().await;
         self.ensure_writable()?;
@@ -4302,62 +4346,16 @@ impl NFSFileSystem for S3NfsFs {
     ) -> Result<(), nfsstat3> {
         self.ensure_writable()?;
         self.ensure_writable()?;
-        let from_dir = self.dir_inode(from_dirid)?;
-        let to_dir = self.dir_inode(to_dirid)?;
+        self.dir_inode(from_dirid)?;
+        self.dir_inode(to_dirid)?;
         let from_name = self.child_name(from_filename)?;
         let to_name = self.child_name(to_filename)?;
 
-        let from_dir_key = normalize_dir_key(&from_dir.key);
-        let to_dir_key = normalize_dir_key(&to_dir.key);
-
-        let mut recovered_source = None;
-        for kind in [EntryKind::File, EntryKind::Dir] {
-            let from_key = child_key(&from_dir_key, &from_name, kind == EntryKind::Dir);
-            let to_key = child_key(&to_dir_key, &to_name, kind == EntryKind::Dir);
-            if let Ok(bytes) = tokio::fs::read(self.rename_journal_path(&from_key, &to_key)).await {
-                let journal: RenameJournal =
-                    serde_json::from_slice(&bytes).map_err(|_| nfsstat3::NFS3ERR_IO)?;
-                if journal.from != from_key || journal.to != to_key {
-                    return Err(nfsstat3::NFS3ERR_IO);
-                }
-                let size = if kind == EntryKind::Dir {
-                    DIR_SIZE
-                } else {
-                    journal.objects.first().map(|o| o.size).unwrap_or(0)
-                };
-                let id = self.intern_child(&from_key, from_dirid, kind, size, 0)?;
-                recovered_source = Some((id, self.inode(id)?));
-                break;
-            }
-        }
-        let (_id, source) = match recovered_source.clone() {
-            Some(source) => source,
-            None => {
-                self.resolve_child(from_dirid, &from_dir_key, &from_name)
-                    .await?
-            }
-        };
-        let is_dir = source.kind == EntryKind::Dir;
-        let target_key = child_key(&to_dir_key, &to_name, is_dir);
-        if target_key == source.key {
+        let Some((_fence, id, source, to_dir_key)) = self
+            .fence_rename(from_dirid, &from_name, to_dirid, &to_name)
+            .await?
+        else {
             return Ok(());
-        }
-        let _fence = self
-            .fence_paths(vec![
-                Self::fence_path_for_inode(&source),
-                if is_dir {
-                    FencePath::prefix(normalize_dir_key(&target_key))
-                } else {
-                    FencePath::exact(target_key.clone())
-                },
-            ])
-            .await;
-        let (id, source) = match recovered_source {
-            Some(source) => source,
-            None => {
-                self.resolve_child_fenced(from_dirid, &from_dir_key, &from_name)
-                    .await?
-            }
         };
         let is_dir = source.kind == EntryKind::Dir;
         let target_key = child_key(&to_dir_key, &to_name, is_dir);
@@ -4478,6 +4476,98 @@ impl NFSFileSystem for S3NfsFs {
 }
 
 impl S3NfsFs {
+    /// Exclusive fences on a rename's source and target, with both keys
+    /// derived from the directories' keys as they stand once the fences are
+    /// held: a rename of either directory, or of the source, that finished
+    /// during the wait would otherwise send this one to paths that no longer
+    /// name anything — or resurrect an old one. Returns the fence, the source
+    /// and the target directory's key; `None` when the source is already at
+    /// the target.
+    async fn fence_rename(
+        &self,
+        from_dirid: fileid3,
+        from_name: &str,
+        to_dirid: fileid3,
+        to_name: &str,
+    ) -> Result<Option<(FenceGuard, fileid3, Inode, String)>, nfsstat3> {
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let from_dir_key = normalize_dir_key(&self.dir_inode(from_dirid)?.key);
+            let to_dir_key = normalize_dir_key(&self.dir_inode(to_dirid)?.key);
+            let recovered = self
+                .recovered_rename_source(from_dirid, &from_dir_key, from_name, &to_dir_key, to_name)
+                .await?;
+            let (_, source) = match recovered.clone() {
+                Some(source) => source,
+                None => {
+                    self.resolve_child(from_dirid, &from_dir_key, from_name)
+                        .await?
+                }
+            };
+            let is_dir = source.kind == EntryKind::Dir;
+            let target_key = child_key(&to_dir_key, to_name, is_dir);
+            if target_key == source.key {
+                return Ok(None);
+            }
+            let fence = self
+                .fence_paths(vec![
+                    Self::fence_path_for_inode(&source),
+                    if is_dir {
+                        FencePath::prefix(normalize_dir_key(&target_key))
+                    } else {
+                        FencePath::exact(target_key)
+                    },
+                ])
+                .await;
+            if normalize_dir_key(&self.dir_inode(from_dirid)?.key) != from_dir_key
+                || normalize_dir_key(&self.dir_inode(to_dirid)?.key) != to_dir_key
+            {
+                continue;
+            }
+            let (id, current) = match recovered {
+                Some(source) => source,
+                None => {
+                    self.resolve_child_fenced(from_dirid, &from_dir_key, from_name)
+                        .await?
+                }
+            };
+            if current.key == source.key {
+                return Ok(Some((fence, id, current, to_dir_key)));
+            }
+        }
+        Err(nfsstat3::NFS3ERR_JUKEBOX)
+    }
+
+    /// The source of an interrupted rename whose journal is still on disk,
+    /// re-interned so that repeating the rename finishes it.
+    async fn recovered_rename_source(
+        &self,
+        from_dirid: fileid3,
+        from_dir_key: &str,
+        from_name: &str,
+        to_dir_key: &str,
+        to_name: &str,
+    ) -> Result<Option<(fileid3, Inode)>, nfsstat3> {
+        for kind in [EntryKind::File, EntryKind::Dir] {
+            let from_key = child_key(from_dir_key, from_name, kind == EntryKind::Dir);
+            let to_key = child_key(to_dir_key, to_name, kind == EntryKind::Dir);
+            if let Ok(bytes) = tokio::fs::read(self.rename_journal_path(&from_key, &to_key)).await {
+                let journal: RenameJournal =
+                    serde_json::from_slice(&bytes).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                if journal.from != from_key || journal.to != to_key {
+                    return Err(nfsstat3::NFS3ERR_IO);
+                }
+                let size = if kind == EntryKind::Dir {
+                    DIR_SIZE
+                } else {
+                    journal.objects.first().map(|o| o.size).unwrap_or(0)
+                };
+                let id = self.intern_child(&from_key, from_dirid, kind, size, 0)?;
+                return Ok(Some((id, self.inode(id)?)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Moves one object. The same copy-then-delete the app's own rename
     /// performs, issued on this mount's client so it completes inside the
     /// client's retransmission window with no session bookkeeping.

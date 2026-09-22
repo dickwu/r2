@@ -3087,3 +3087,259 @@ async fn remove_racing_a_rename_never_deletes_the_renamed_file() {
     assert_eq!(fs.inode(x).unwrap().key, "t/y");
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
 }
+
+/// A CREATE and a MKDIR inside A waited behind `mv A C` with keys built from
+/// A's old path. Publishing those keys once the rename finished would bring
+/// A back as a second directory next to C.
+#[tokio::test]
+async fn create_and_mkdir_inside_a_directory_being_renamed_land_in_its_new_path() {
+    let bucket = ModelBucket::with(&[("A/x", b"x")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture =
+        copy_gated_fixture(bucket.clone(), copy_entered.clone(), release_copy.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "create-in-renamed-directory");
+    let a = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+
+    let rename = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"A".as_slice().into(),
+                ROOT_ID,
+                &b"C".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let mut created = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.create(a, &b"late".as_slice().into(), sattr3::default())
+                .await
+        }
+    });
+    let mut made = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.mkdir(a, &b"sub".as_slice().into()).await }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut created)
+            .await
+            .is_err()
+    );
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut made)
+        .await
+        .is_err());
+    release_copy.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(3), rename)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let (created, _) = tokio::time::timeout(Duration::from_secs(3), created)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let (made, _) = tokio::time::timeout(Duration::from_secs(3), made)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        bucket.lock().unwrap().keys(),
+        ["C/late", "C/sub/", "C/x"],
+        "nothing may be published under the old path A/"
+    );
+    assert_eq!(fs.inode(created).unwrap().key, "C/late");
+    assert_eq!(fs.inode(made).unwrap().key, "C/sub/");
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// A WRITE that waited behind `mv A C` must hold its fence on the key it
+/// actually writes, C/f, so a rename or delete of C/f waits for it, and its
+/// bytes must be published there.
+#[tokio::test]
+async fn a_write_racing_a_directory_rename_is_fenced_on_the_renamed_key() {
+    let bucket = ModelBucket::with(&[("A/f", b"old!")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let read_entered = Arc::new(tokio::sync::Notify::new());
+    let release_read = Arc::new(tokio::sync::Semaphore::new(0));
+    let read_held = Arc::new(AtomicBool::new(false));
+    let fixture = serve({
+        let bucket = bucket.clone();
+        let copy_entered = copy_entered.clone();
+        let release_copy = release_copy.clone();
+        let read_entered = read_entered.clone();
+        let release_read = release_read.clone();
+        let read_held = read_held.clone();
+        move |request| {
+            let bucket = bucket.clone();
+            let copy_entered = copy_entered.clone();
+            let release_copy = release_copy.clone();
+            let read_entered = read_entered.clone();
+            let release_read = release_read.clone();
+            let read_held = read_held.clone();
+            async move {
+                if request.headers.contains_key("x-amz-copy-source") {
+                    copy_entered.notify_one();
+                    release_copy.acquire().await.unwrap().forget();
+                }
+                // The write primes its stage from the renamed object.
+                if request.method == "GET"
+                    && request.path.starts_with("/photos/C/f")
+                    && !read_held.swap(true, Ordering::SeqCst)
+                {
+                    read_entered.notify_one();
+                    release_read.acquire().await.unwrap().forget();
+                }
+                bucket.lock().unwrap().respond(&request)
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "write-racing-rename");
+    let a = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let f = fs.intern_child("A/f", a, EntryKind::File, 4, 0).unwrap();
+
+    let rename = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"A".as_slice().into(),
+                ROOT_ID,
+                &b"C".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let write = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.write(f, 0, b"new").await }
+    });
+    release_copy.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(3), rename)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), read_entered.notified())
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), fs.fence_exact_key("C/f"))
+            .await
+            .is_err(),
+        "the write must hold its fence on C/f, the key it is writing"
+    );
+    release_read.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(3), write)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(fs.drain(1, 1).await, 0);
+
+    {
+        let bucket = bucket.lock().unwrap();
+        assert_eq!(bucket.keys(), ["C/f"]);
+        assert_eq!(bucket.body("C/f"), Some(b"new!".as_slice()));
+    }
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// Renames that waited behind `mv A C` with A's old path in their source or
+/// target must follow A to C: the source is no longer at A/x, and a target
+/// under A/ would bring A back.
+#[tokio::test]
+async fn renames_waiting_behind_a_directory_rename_follow_it_to_its_new_path() {
+    let bucket = ModelBucket::with(&[("A/x", b"x-bytes"), ("D/f", b"f-bytes")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture =
+        copy_gated_fixture(bucket.clone(), copy_entered.clone(), release_copy.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "rename-behind-directory-rename");
+    let a = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let d = fs
+        .intern_child("D/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    // Cached listings resolve both sources before their fences are waited on.
+    let x = fs.readdir(a, 0, 100).await.unwrap().entries[0].fileid;
+    let f = fs.readdir(d, 0, 100).await.unwrap().entries[0].fileid;
+
+    let directory = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"A".as_slice().into(),
+                ROOT_ID,
+                &b"C".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let mut out_of_a = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(a, &b"x".as_slice().into(), d, &b"y".as_slice().into())
+                .await
+        }
+    });
+    let mut into_a = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(d, &b"f".as_slice().into(), a, &b"g".as_slice().into())
+                .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut out_of_a)
+            .await
+            .is_err()
+    );
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut into_a)
+        .await
+        .is_err());
+    // One copy for the directory's object, then one per file rename.
+    release_copy.add_permits(3);
+    let mut results = Vec::new();
+    for rename in [directory, out_of_a, into_a] {
+        results.push(
+            tokio::time::timeout(Duration::from_secs(3), rename)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+
+    assert_eq!(
+        bucket.lock().unwrap().keys(),
+        ["C/g", "D/y"],
+        "both files must have followed A to C"
+    );
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(fs.inode(x).unwrap().key, "D/y");
+    assert_eq!(fs.inode(f).unwrap().key, "C/g");
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
