@@ -31,7 +31,9 @@ use tauri::{AppHandle, Emitter};
 
 #[path = "relay_protocol.rs"]
 pub(crate) mod protocol;
-use protocol::{attempt_timeout, interruptible, Payload, RelayBudget, MAX_ATTEMPTS, MIB};
+use protocol::{
+    attempt_timeout, interruptible, operation_budget, Payload, RelayBudget, MAX_ATTEMPTS, MIB,
+};
 
 const MULTIPART_THRESHOLD: u64 = 100 * MIB;
 const GIB: u64 = 1024 * MIB;
@@ -181,7 +183,7 @@ async fn download_part(
         &endpoint,
         &scope,
         &identity,
-        tokio::time::Instant::now() + attempt_timeout(expected),
+        tokio::time::Instant::now() + operation_budget(expected),
         cancelled,
     )
     .with_pause(paused)
@@ -360,12 +362,13 @@ async fn transfer_part(
     let endpoint = dest_config.operation_endpoint();
     let dest_scope = scope(dest_config)?;
     let identity = format!("{}:{}:{}", upload_id, part, payload.len);
+    // The deadline covers every attempt; data_timeouts bounds each one.
     let context = OperationContext::new(
         OperationKind::UploadPart,
         &endpoint,
         &dest_scope,
         &identity,
-        tokio::time::Instant::now() + attempt_timeout(payload.len),
+        tokio::time::Instant::now() + operation_budget(payload.len),
         cancelled,
     )
     .with_pause(paused)
@@ -1757,6 +1760,114 @@ pub(crate) mod tests {
             1
         );
     }
+    #[tokio::test(start_paused = true)]
+    async fn a_read_stalled_past_one_attempt_timeout_still_gets_its_retry() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        const HEAD: &[u8] = b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-3/4\r\nContent-Length: 2\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n";
+        async fn read_request(socket: &mut tokio::net::TcpStream) {
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 2048];
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let size = socket.read(&mut chunk).await.unwrap();
+                assert!(size > 0, "connection closed before the request ended");
+                request.extend_from_slice(&chunk[..size]);
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = fixture_config(&format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            // Every gap of the first response is inside the idle timeout, but
+            // the whole response outlasts attempt_timeout(2) = 31 s.
+            let (mut stalled, _) = listener.accept().await.unwrap();
+            let trickle = tokio::spawn(async move {
+                read_request(&mut stalled).await;
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                let _ = stalled.write_all(HEAD).await;
+                let _ = stalled.write_all(b"c").await;
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                let _ = stalled.write_all(b"d").await;
+            });
+            let (mut retry, _) = listener.accept().await.unwrap();
+            read_request(&mut retry).await;
+            retry.write_all(HEAD).await.unwrap();
+            retry.write_all(b"cd").await.unwrap();
+            trickle.abort();
+        });
+        let config_client = config.client().await.unwrap();
+        let start = tokio::time::Instant::now();
+        let payload = download_part(
+            &RelayBudget::shared(),
+            &shared_http_client().unwrap(),
+            &config_client,
+            &config,
+            "object",
+            &SourceIdentity {
+                size: 4,
+                etag: "\"v1\"".into(),
+                version_id: None,
+            },
+            Some((2, 3)),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(payload.len, 2);
+        assert!(start.elapsed() >= attempt_timeout(2));
+        server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_upload_part_stalled_past_one_attempt_timeout_still_gets_its_retry() {
+        let _guard = test_db_guard().await;
+        use crate::test_s3::{serve, Response};
+        use std::sync::atomic::AtomicUsize;
+        let (session, journal) = journal_fixture("stalled-upload-part", 8).await;
+        let puts = Arc::new(AtomicUsize::new(0));
+        let fixture = serve({
+            let puts = puts.clone();
+            move |request| {
+                let puts = puts.clone();
+                async move {
+                    if request.method == "GET" {
+                        return Response::xml(206, "original")
+                            .header("etag", "\"source\"")
+                            .header("content-range", "bytes 0-7/8");
+                    }
+                    if puts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        // Answers after attempt_timeout(8) = 31 s has passed.
+                        tokio::time::sleep(Duration::from_secs(40)).await;
+                    }
+                    Response::empty(200).header("etag", "\"retried-part\"")
+                }
+            }
+        })
+        .await;
+        let config = fixture_config(&fixture.endpoint);
+        let plan = MultipartPlan::new(&config, 8, Some(5 * MIB)).unwrap();
+        let start = tokio::time::Instant::now();
+        let (_, etag, size) = transfer_part(
+            &RelayBudget::shared(),
+            &shared_http_client().unwrap(),
+            &fixture.client,
+            &fixture.client,
+            &config,
+            &config,
+            &session,
+            &journal.source,
+            "upload",
+            1,
+            plan,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!((etag.as_str(), size), ("\"retried-part\"", 8));
+        assert_eq!(puts.load(Ordering::SeqCst), 2);
+        assert!(start.elapsed() >= attempt_timeout(8));
+    }
+
     #[tokio::test]
     async fn parts_sharing_an_endpoint_take_relay_memory_before_a_request_slot() {
         let _guard = test_db_guard().await;

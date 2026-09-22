@@ -1,5 +1,6 @@
 //! The relay HTTP contract, resource reservations, and replayable payloads.
 //! A signed URL is only an address: each read still proves range and identity.
+use crate::providers::operation::Backoff;
 use crate::providers::resources::{ByteLease, DiskLease, ResourceKind};
 use aws_sdk_s3::primitives::{ByteStream, SdkBody};
 use futures_util::StreamExt;
@@ -70,6 +71,15 @@ pub(crate) async fn interruptible<T>(
 pub(crate) fn attempt_timeout(bytes: u64) -> Duration {
     // A progressing large part gets time proportional to size; idle bodies have a separate bound.
     Duration::from_secs(30 + bytes.div_ceil(128 * 1024))
+}
+
+/// Deadline for a replayable relay operation: every one of its MAX_ATTEMPTS
+/// attempts keeps a full attempt_timeout, plus the executor's backoff between
+/// them. One attempt's timeout would leave a stalled first attempt no retry.
+pub(crate) fn operation_budget(bytes: u64) -> Duration {
+    let attempts = MAX_ATTEMPTS as u32;
+    let backoff: Duration = (0..attempts - 1).map(|n| Backoff::DEFAULT.cap(n)).sum();
+    attempt_timeout(bytes) * attempts + backoff
 }
 
 pub(crate) fn validate_response(
