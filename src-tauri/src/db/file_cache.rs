@@ -155,6 +155,54 @@ fn sync_active_run_key(bucket: &str, account_id: &str) -> String {
     format!("sync_active_run:{account_id}:{bucket}")
 }
 
+/// Keys describing work in progress: a local cache write's read barrier and a
+/// full sync's run. Only the process doing that work may still hold them.
+const IN_PROGRESS_KEY_PREFIXES: [&str; 4] = [
+    "cache_mutation_in_progress:",
+    "sync_active_run:",
+    "sync_started_at:",
+    // Written by pre-release builds that fenced a sync on a base revision.
+    "sync_base_revision:",
+];
+
+async fn delete_app_state_prefix_on(conn: &turso::Connection, prefix: &str) -> DbResult<()> {
+    conn.execute(
+        "DELETE FROM app_state WHERE substr(key, 1, ?1) = ?2",
+        turso::params![prefix.chars().count() as i64, prefix],
+    )
+    .await?;
+    Ok(())
+}
+
+/// At startup no sync or local cache write is running. What a crash left
+/// would refuse reads for LOCAL_MUTATION_STALE_SECS or keep a dead run open.
+pub(crate) async fn clear_interrupted_work_on(conn: &turso::Connection) -> DbResult<()> {
+    for prefix in IN_PROGRESS_KEY_PREFIXES {
+        delete_app_state_prefix_on(conn, prefix).await?;
+    }
+    conn.execute("DELETE FROM cached_files_staging", ()).await?;
+    conn.execute("DELETE FROM sync_mutation_journal", ())
+        .await?;
+    Ok(())
+}
+
+/// An invalidated account has no write or sync in progress that may still
+/// hold its reads back or publish into its cache.
+pub(crate) async fn clear_account_work_on(
+    conn: &turso::Connection,
+    account_id: &str,
+) -> DbResult<()> {
+    for prefix in IN_PROGRESS_KEY_PREFIXES {
+        delete_app_state_prefix_on(conn, &format!("{prefix}{account_id}:")).await?;
+    }
+    conn.execute(
+        "DELETE FROM sync_mutation_journal WHERE account_id = ?1",
+        turso::params![account_id],
+    )
+    .await?;
+    Ok(())
+}
+
 fn next_sync_run_token() -> String {
     let id = LOCAL_MUTATION_TOKEN.fetch_add(1, Ordering::SeqCst);
     format!(

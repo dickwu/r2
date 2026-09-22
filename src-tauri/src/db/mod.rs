@@ -241,6 +241,7 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
     )
     .await?;
     cache_scope::initialize_on(&conn).await?;
+    file_cache::clear_interrupted_work_on(&conn).await?;
 
     if DB_CONNECTION.set(Mutex::new(conn)).is_err() {
         // Unit tests in several modules each initialize the process-wide

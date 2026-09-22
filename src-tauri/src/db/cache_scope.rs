@@ -340,6 +340,7 @@ pub async fn invalidate_account_on(conn: &Connection, account_id: &str) -> DbRes
     .await?;
     // A listing still in flight for this account must not publish as fresh.
     super::prefix_sync::advance_all_mutation_generations_on(conn, account_id, None).await?;
+    super::file_cache::clear_account_work_on(conn, account_id).await?;
     Ok(())
 }
 
@@ -787,6 +788,151 @@ mod tests {
         let stale_cursor =
             read_prefix_page_on(&conn, &scope, "bucket", "", Some(&old_cursor), 10).await;
         assert!(stale_cursor.is_err());
+    }
+
+    /// What a crash (or a credential edit) during a local cache write and a
+    /// full sync leaves behind for `account`.
+    async fn leave_interrupted_state(conn: &Connection, account: &str) {
+        let now = chrono::Utc::now().timestamp();
+        for (key, value) in [
+            (
+                format!("cache_mutation_in_progress:{account}:bucket"),
+                serde_json::json!([{"token": "crashed", "started_at": now}]).to_string(),
+            ),
+            (
+                format!("sync_active_run:{account}:bucket"),
+                "sync:1:1:1".into(),
+            ),
+            (format!("sync_started_at:{account}:bucket"), now.to_string()),
+            (format!("sync_base_revision:{account}:bucket"), "3".into()),
+        ] {
+            conn.execute(
+                "INSERT INTO app_state(key,value) VALUES (?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                turso::params![key, value],
+            )
+            .await
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO sync_mutation_journal(bucket,account_id,op,key) VALUES ('bucket',?1,'delete','x')",
+            turso::params![account],
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn app_state_keys(conn: &Connection) -> Vec<String> {
+        let mut rows = conn
+            .query(
+                "SELECT key FROM app_state WHERE key <> 'cache_scope_schema' ORDER BY key",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut keys = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            keys.push(row.get(0).unwrap());
+        }
+        keys
+    }
+
+    async fn journal_accounts(conn: &Connection) -> Vec<String> {
+        let mut rows = conn
+            .query(
+                "SELECT account_id FROM sync_mutation_journal ORDER BY account_id",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut accounts = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            accounts.push(row.get(0).unwrap());
+        }
+        accounts
+    }
+
+    #[tokio::test]
+    async fn account_invalidation_clears_that_accounts_interrupted_writes_and_runs() {
+        let (_db, conn) = fixture().await;
+        let scope = capture_on(&conn, &config("a.example")).await.unwrap();
+        conn.execute(
+            "INSERT INTO app_state(key,value) VALUES ('unrelated','kept')",
+            (),
+        )
+        .await
+        .unwrap();
+        leave_interrupted_state(&conn, "account").await;
+        leave_interrupted_state(&conn, "other").await;
+        // A fresh leftover barrier refuses reads until it is 300 s old.
+        assert!(read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
+            .await
+            .is_err());
+
+        invalidate_account_on(&conn, "account").await.unwrap();
+
+        read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            app_state_keys(&conn).await,
+            vec![
+                "cache_mutation_in_progress:other:bucket".to_string(),
+                "sync_active_run:other:bucket".into(),
+                "sync_base_revision:other:bucket".into(),
+                "sync_started_at:other:bucket".into(),
+                "unrelated".into(),
+            ]
+        );
+        assert_eq!(journal_accounts(&conn).await, vec!["other".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn startup_clears_every_interrupted_write_and_run() {
+        let (_db, conn) = fixture().await;
+        let scope = capture_on(&conn, &config("a.example")).await.unwrap();
+        conn.execute(
+            "INSERT INTO app_state(key,value) VALUES ('unrelated','kept'), ('skipped_prefixes:account:bucket','[]')",
+            (),
+        )
+        .await
+        .unwrap();
+        leave_interrupted_state(&conn, "account").await;
+        leave_interrupted_state(&conn, "other").await;
+        conn.execute(
+            "INSERT INTO cached_files_staging(bucket,account_id,key,parent_path,name,size,last_modified,synced_at)
+             VALUES ('bucket','account','x','','x',1,'',1)",
+            (),
+        )
+        .await
+        .unwrap();
+        assert!(read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
+            .await
+            .is_err());
+
+        super::super::file_cache::clear_interrupted_work_on(&conn)
+            .await
+            .unwrap();
+
+        read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            app_state_keys(&conn).await,
+            vec![
+                "skipped_prefixes:account:bucket".to_string(),
+                "unrelated".into()
+            ]
+        );
+        assert!(journal_accounts(&conn).await.is_empty());
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM cached_files_staging", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
