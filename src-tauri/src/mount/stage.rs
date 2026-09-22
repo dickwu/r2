@@ -177,6 +177,9 @@ pub struct Stage {
     /// the next access replays it. Otherwise nothing is ever replayed outside
     /// restore, so a write or read costs O(record), not a pass over the WAL.
     needs_replay: bool,
+    /// Whether the shared WAL may still hold records of this stage, at any
+    /// LSN. Cleared once a checkpoint or removal has compacted them away.
+    owns_wal_records: bool,
     pub checkpoint_lsn: u64,
     pub next_lsn: u64,
     records_since_checkpoint: u64,
@@ -511,6 +514,10 @@ pub async fn recovery_entries(root: &Path) -> Result<Vec<StageRecovery>, String>
             entries.push(record);
             continue;
         }
+        if wal_index.is_discarded(&record.path) {
+            // Deleted by the user; a crash interrupted removing its files.
+            continue;
+        }
         record.wal_bytes = Some(
             wal_index
                 .uncheckpointed_bytes_for_after(&record.path, record.checkpoint_lsn)
@@ -654,6 +661,45 @@ impl UploadSnapshot {
     }
 }
 
+/// Test hook: `remove_files` of the stage at a data path stops dead after
+/// that many of its steps, leaving the disk as a crash there would.
+#[cfg(test)]
+static REMOVE_CRASHES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, u32>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn crash_remove_after(path: &Path, steps: u32) {
+    REMOVE_CRASHES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), steps);
+}
+
+#[cfg(test)]
+fn remove_stops_after(path: &Path, step: u32) -> bool {
+    REMOVE_CRASHES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get(path)
+        == Some(&step)
+}
+
+#[cfg(not(test))]
+fn remove_stops_after(_path: &Path, _step: u32) -> bool {
+    false
+}
+
+/// Deletes `path`; true if it is gone afterwards, whether or not it existed.
+async fn remove_if_present(path: &Path) -> bool {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
 async fn copy_file_native_with_lease(
     source: PathBuf,
     destination: PathBuf,
@@ -705,6 +751,7 @@ impl Stage {
             dirty_gen: 0,
             applied_gen: 0,
             needs_replay: false,
+            owns_wal_records: false,
             checkpoint_lsn: 0,
             next_lsn: 1,
             records_since_checkpoint: 0,
@@ -757,6 +804,8 @@ impl Stage {
             // Restore replays the whole folder before any stage is rebuilt, and
             // recovery_entries hands over only stages with nothing left to apply.
             needs_replay: false,
+            // Replayed records stay in the WAL until the next checkpoint.
+            owns_wal_records: true,
             checkpoint_lsn: record.checkpoint_lsn,
             next_lsn: record.checkpoint_lsn.saturating_add(1),
             records_since_checkpoint: 0,
@@ -937,7 +986,9 @@ impl Stage {
         })?;
         let data_growth = match record.op {
             stage_wal::WalOp::Write => record.payload.len() as u64,
-            stage_wal::WalOp::Truncate => size.saturating_sub(self.size),
+            stage_wal::WalOp::Truncate | stage_wal::WalOp::Discard => {
+                size.saturating_sub(self.size)
+            }
         };
         let data_growth = if data_growth > 0 {
             Some(DiskLease::reserve(&self.path, data_growth, || {
@@ -948,6 +999,7 @@ impl Stage {
         };
 
         self.needs_replay = true;
+        self.owns_wal_records = true;
         self.wal_tail_repaired = false;
         match stage_wal::append_record_unchecked(&wal_path, &record).await {
             Ok(assigned_lsn) => {
@@ -1085,17 +1137,94 @@ impl Stage {
         Ok(snapshot)
     }
 
+    /// Deletes the stage for good: REMOVE, a truncating CREATE, a rename over
+    /// it, a failed prime, or eviction once uploaded.
+    ///
+    /// Ordered so that a crash at any point never brings the file back. A
+    /// stage with content the bucket may lack, or records in the WAL, first
+    /// gets a durable discard record: from then on recovery neither restores
+    /// it nor rebuilds its manifest from the WAL. The data file goes before the
+    /// manifest, so even without a discard a crash leaves nothing to replay
+    /// into. After a directory fsync the stage's WAL records, discard
+    /// included, are compacted away, so removed files stop growing the WAL.
     pub async fn remove_files(&mut self) {
-        let _ = tokio::fs::remove_file(self.path.with_extension("write.json")).await;
-        let _ = tokio::fs::remove_file(self.manifest_path()).await;
-        let _ = tokio::fs::remove_file(&self.path).await;
+        let discarded = if self.dirty || self.owns_wal_records || self.needs_replay {
+            match self.append_discard().await {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!(
+                        "mount: could not record the removal of \"{}\" in the staging WAL: {}",
+                        self.key,
+                        error
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if remove_stops_after(&self.path, 1) {
+            return;
+        }
+        let mut removed = remove_if_present(&self.path.with_extension("write.json")).await;
+        removed &= remove_if_present(&self.path).await;
+        if remove_stops_after(&self.path, 2) {
+            return;
+        }
         if let Some(snapshot) = &self.snapshot {
             snapshot.remove().await;
+        }
+        removed &= remove_if_present(&self.manifest_path()).await;
+        if remove_stops_after(&self.path, 3) {
+            return;
+        }
+        let synced = sync_parent(&self.path).await.is_ok();
+        if remove_stops_after(&self.path, 4) {
+            return;
+        }
+        // Without all three the discard must stay: it is what keeps a
+        // surviving manifest or data file from being recovered.
+        if discarded && removed && synced && stage_wal::forget(&self.path).await.is_ok() {
+            self.owns_wal_records = false;
+        }
+        if remove_stops_after(&self.path, 5) {
+            return;
         }
         self.stage_lease.resize(0);
         self.snapshot_lease.resize(0);
         self.wal_lease.resize(0);
-        let _ = sync_parent(&self.path).await;
+    }
+
+    /// Makes "this stage was deleted" durable in the WAL before any of its
+    /// files go.
+    async fn append_discard(&mut self) -> std::io::Result<()> {
+        let wal_path = stage_wal::wal_path(&self.path);
+        let admitted = stage_wal::begin_append(&wal_path).await?;
+        let record = stage_wal::WalRecord {
+            lsn: self.next_lsn,
+            generation: self.dirty_gen,
+            op: stage_wal::WalOp::Discard,
+            offset: 0,
+            resulting_size: 0,
+            mtime_secs: self.mtime_secs,
+            dirty_at_ms: 0,
+            data_name: stage_wal::data_name(&self.path)?,
+            key: self.key.clone(),
+            payload: Vec::new(),
+        };
+        let wal_parent = wal_path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("Missing WAL folder"))?;
+        let _growth = DiskLease::reserve(
+            wal_parent,
+            stage_wal::estimated_record_len(&record)?,
+            || super::available_space(wal_parent),
+        )?;
+        self.owns_wal_records = true;
+        stage_wal::append_record_unchecked(&wal_path, &record).await?;
+        stage_commit::commit(vec![wal_path.clone()]).await?;
+        drop(admitted);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1189,7 +1318,12 @@ impl Stage {
         stage_commit::record_file_sync_bytes(self.size);
         self.checkpoint_lsn = self.next_lsn.saturating_sub(1);
         self.persist().await?;
-        stage_wal::checkpoint(&self.path, self.checkpoint_lsn).await?;
+        // Compaction rewrites the whole shared WAL; skip it when nothing of
+        // this stage is left there (a re-checkpoint, an upload retry).
+        if self.owns_wal_records {
+            stage_wal::checkpoint(&self.path, self.checkpoint_lsn).await?;
+            self.owns_wal_records = false;
+        }
         self.records_since_checkpoint = 0;
         self.bytes_since_checkpoint = 0;
         self.wal_lease.resize(0);
@@ -1550,6 +1684,118 @@ mod tests {
         assert_eq!(restored.dirty_gen, 64);
         drop(restored);
         tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn removing_staged_files_returns_their_wal_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-remove-wal-growth-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let wal = root.join(".stage.wal");
+        let mut kept = Stage::create(root.join("kept.data"), "kept".into(), 1)
+            .await
+            .unwrap();
+        kept.write_durable(0, b"kept", 1).await.unwrap();
+        for index in 0..40usize {
+            let path = root.join(format!("{index}.data"));
+            let mut stage = Stage::create(path, format!("key/{index}"), 1)
+                .await
+                .unwrap();
+            for chunk in 0..3u64 {
+                stage
+                    .write_durable(chunk * 1024, &[index as u8; 1024], 1)
+                    .await
+                    .unwrap();
+            }
+            stage.remove_files().await;
+            assert_eq!(stage.wal_lease.bytes(), 0);
+        }
+        // Only the live stage's records are left, and the accounting agrees.
+        assert_eq!(
+            tokio::fs::metadata(&wal).await.unwrap().len(),
+            kept.wal_lease.bytes()
+        );
+        kept.remove_files().await;
+        assert_eq!(
+            tokio::fs::metadata(&wal).await.map_or(0, |m| m.len()),
+            0,
+            "a folder with nothing staged keeps no WAL"
+        );
+        drop(kept);
+        assert!(recovery_entries(&root).await.unwrap().is_empty());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn evicting_an_uploaded_stage_leaves_the_wal_alone() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-evict-no-wal-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let wal = stage_wal::wal_path(&path);
+        let mut other = Stage::create(root.join("other.data"), "other".into(), 1)
+            .await
+            .unwrap();
+        other.write_durable(0, b"other", 1).await.unwrap();
+        let mut stage = Stage::create(path, "key".into(), 1).await.unwrap();
+        stage.write_durable(0, b"uploaded", 1).await.unwrap();
+        stage.upload_snapshot().await.unwrap();
+        // What a settled upload leaves behind before evict_stage runs.
+        stage.dirty = false;
+        stage.snapshot = None;
+        let before = tokio::fs::read(&wal).await.unwrap();
+        let reads = stage_wal::wal_read_count(&wal);
+        stage.remove_files().await;
+        assert_eq!(stage_wal::wal_read_count(&wal), reads);
+        assert_eq!(tokio::fs::read(&wal).await.unwrap(), before);
+        drop(stage);
+        drop(other);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_crash_at_any_step_of_a_remove_never_brings_the_file_back() {
+        for crash_after in 1..=5u32 {
+            let root = std::env::temp_dir().join(format!(
+                "r2-remove-crash-{crash_after}-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap()
+            ));
+            let gone_path = root.join("gone.data");
+            let wal = stage_wal::wal_path(&gone_path);
+            let mut gone = Stage::create(gone_path.clone(), "gone".into(), 1)
+                .await
+                .unwrap();
+            let mut kept = Stage::create(root.join("kept.data"), "kept".into(), 1)
+                .await
+                .unwrap();
+            gone.write_durable(0, b"deleted by the user", 1)
+                .await
+                .unwrap();
+            kept.write_durable(0, b"still wanted", 1).await.unwrap();
+            crash_remove_after(&gone_path, crash_after);
+            gone.remove_files().await;
+            drop(gone);
+            drop(kept);
+            stage_wal::forget_append_state(&wal).await;
+
+            let errors = replay_write_intents(&root).await.unwrap();
+            assert!(errors.is_empty(), "step {crash_after}: {errors:?}");
+            let entries = recovery_entries(&root).await.unwrap();
+            assert!(
+                entries.iter().all(|entry| entry.key != "gone"),
+                "a crash after step {crash_after} brought the deleted file back"
+            );
+            let kept = entries.iter().find(|entry| entry.key == "kept").unwrap();
+            let mut restored = Stage::restore(kept.clone()).await.unwrap();
+            assert_eq!(restored.read_at(0, 64).await.unwrap(), b"still wanted");
+            drop(restored);
+            tokio::fs::remove_dir_all(root).await.unwrap();
+        }
     }
 
     #[tokio::test]

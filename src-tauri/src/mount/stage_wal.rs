@@ -76,6 +76,9 @@ pub fn wal_read_count(path: &Path) -> u64 {
 pub enum WalOp {
     Write,
     Truncate,
+    /// The stage was deleted: every earlier record of its data file is dead,
+    /// and recovery must neither restore it nor rebuild its manifest.
+    Discard,
 }
 
 impl WalOp {
@@ -83,6 +86,7 @@ impl WalOp {
         match self {
             Self::Write => 1,
             Self::Truncate => 2,
+            Self::Discard => 3,
         }
     }
 
@@ -90,6 +94,7 @@ impl WalOp {
         match value {
             1 => Ok(Self::Write),
             2 => Ok(Self::Truncate),
+            3 => Ok(Self::Discard),
             _ => Err(Error::new(ErrorKind::InvalidData, "unknown WAL operation")),
         }
     }
@@ -119,6 +124,7 @@ pub struct WalSummary {
 #[derive(Debug, Clone, Default)]
 pub struct WalRecoveryIndex {
     buckets: HashMap<String, WalBucket>,
+    discarded: HashMap<String, u64>,
     truncated_tail: bool,
     corruption: Option<String>,
 }
@@ -128,6 +134,12 @@ impl WalRecoveryIndex {
     /// folder can be trusted to be complete, so recovery quarantines it all.
     pub fn corruption(&self) -> Option<&str> {
         self.corruption.as_deref()
+    }
+
+    /// Whether the stage was deleted. Data file names are unique per stage
+    /// (`Stage::create` never reuses one), so a discard settles it for good.
+    pub fn is_discarded(&self, data_path: &Path) -> bool {
+        data_name(data_path).is_ok_and(|name| self.discarded.contains_key(&name))
     }
 
     pub fn summary_for_after(
@@ -193,9 +205,29 @@ struct WalBucket {
 
 #[derive(Debug, Clone, Default)]
 struct RootWal {
+    /// Live records only: discards and the records they cover are left out.
     buckets: HashMap<String, WalBucket>,
+    /// Data file name to the LSN of its newest discard record.
+    discarded: HashMap<String, u64>,
     truncated_tail: bool,
     corruption: Option<String>,
+}
+
+/// The newest discard LSN of every data file that has one.
+fn discards(records: &[WalRecord]) -> HashMap<String, u64> {
+    let mut discarded = HashMap::<String, u64>::new();
+    for record in records.iter().filter(|record| record.op == WalOp::Discard) {
+        let lsn = discarded.entry(record.data_name.clone()).or_default();
+        *lsn = (*lsn).max(record.lsn);
+    }
+    discarded
+}
+
+/// Whether a record belongs to a stage that was deleted after writing it.
+fn is_dead(record: &WalRecord, discarded: &HashMap<String, u64>) -> bool {
+    discarded
+        .get(&record.data_name)
+        .is_some_and(|&lsn| record.lsn < lsn)
 }
 
 pub fn wal_path(data_path: &Path) -> PathBuf {
@@ -455,6 +487,7 @@ pub async fn replay_file_after_generation(
     let mut last = None;
     for record in decoded.records.into_iter().filter(|record| {
         record.data_name == data_name
+            && record.op != WalOp::Discard
             && record.lsn > checkpoint_lsn
             && record.generation > generation_floor
     }) {
@@ -565,6 +598,7 @@ pub async fn recovery_index(root: &Path) -> Result<WalRecoveryIndex, String> {
     let wal = read_root_wal(root).await.map_err(|e| e.to_string())?;
     Ok(WalRecoveryIndex {
         buckets: wal.buckets,
+        discarded: wal.discarded,
         truncated_tail: wal.truncated_tail,
         corruption: wal.corruption,
     })
@@ -641,8 +675,12 @@ async fn read_root_wal(root: &Path) -> std::io::Result<RootWal> {
     let decoded = decode_records(&bytes);
     let corruption = decoded.damage();
     let truncated_tail = decoded.tail == WalTail::Torn;
+    let discarded = discards(&decoded.records);
     let mut buckets = HashMap::<String, WalBucket>::new();
     for record in decoded.records {
+        if record.op == WalOp::Discard || is_dead(&record, &discarded) {
+            continue;
+        }
         let len = estimated_record_len(&record)?;
         let bucket = buckets.entry(record.data_name.clone()).or_default();
         bucket.bytes = bucket.bytes.saturating_add(len);
@@ -653,6 +691,7 @@ async fn read_root_wal(root: &Path) -> std::io::Result<RootWal> {
     }
     Ok(RootWal {
         buckets,
+        discarded,
         truncated_tail,
         corruption,
     })
@@ -712,6 +751,29 @@ async fn read_manifest(path: &Path) -> std::io::Result<Option<StageRecovery>> {
 }
 
 pub async fn checkpoint(data_path: &Path, checkpoint_lsn: u64) -> std::io::Result<()> {
+    let name = data_name(data_path)?;
+    compact(
+        data_path,
+        |record| record.data_name == name && record.lsn <= checkpoint_lsn,
+        checkpoint_lsn.saturating_add(1),
+    )
+    .await
+}
+
+/// Drops every record of a deleted stage, its discard record included. Only
+/// for once its data file and manifest are gone for good.
+pub async fn forget(data_path: &Path) -> std::io::Result<()> {
+    let name = data_name(data_path)?;
+    compact(data_path, |record| record.data_name == name, 1).await
+}
+
+/// Rewrites the WAL without the records `removes` selects. Records a discard
+/// made dead go as well; the discard itself stays until its stage forgets it.
+async fn compact(
+    data_path: &Path,
+    removes: impl Fn(&WalRecord) -> bool,
+    next_lsn_floor: u64,
+) -> std::io::Result<()> {
     let path = wal_path(data_path);
     let mut states = append_states().lock().await;
     let mut file = match File::open(&path).await {
@@ -732,26 +794,29 @@ pub async fn checkpoint(data_path: &Path, checkpoint_lsn: u64) -> std::io::Resul
     note_wal_read(&path);
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
-    let data_name = data_name(data_path)?;
     let decoded = decode_records(&bytes);
     decoded.refuse_damage()?;
-    let retained: Vec<_> = decoded
+    let discarded = discards(&decoded.records);
+    // The highwater must stay past every LSN ever written, including the
+    // records about to be dropped, so no LSN is handed out twice.
+    let past_every_record = decoded
         .records
-        .into_iter()
-        .filter(|record| record.data_name != data_name || record.lsn > checkpoint_lsn)
-        .collect();
-    let retained_next_lsn = retained
         .iter()
         .map(|record| record.lsn)
         .max()
         .unwrap_or(0)
         .saturating_add(1);
+    let retained: Vec<_> = decoded
+        .records
+        .into_iter()
+        .filter(|record| !removes(record) && !is_dead(record, &discarded))
+        .collect();
     let next_lsn = states
         .get(&path)
         .map(|state| state.next_lsn)
         .unwrap_or(1)
-        .max(retained_next_lsn)
-        .max(checkpoint_lsn.saturating_add(1));
+        .max(past_every_record)
+        .max(next_lsn_floor);
     persist_highwater(&path, next_lsn).await?;
     if retained.is_empty() {
         drop(file);
@@ -883,6 +948,8 @@ async fn apply_record_to_open_file(file: &mut File, record: &WalRecord) -> std::
             file.set_len(record.resulting_size).await?;
         }
         WalOp::Truncate => file.set_len(record.resulting_size).await?,
+        // Never reaches a data file: replay skips discards and what they cover.
+        WalOp::Discard => {}
     }
     Ok(())
 }
@@ -903,10 +970,10 @@ fn encode_record(record: &WalRecord) -> std::io::Result<Vec<u8>> {
             "WAL payload is too large",
         ));
     }
-    if record.op == WalOp::Truncate && !record.payload.is_empty() {
+    if record.op != WalOp::Write && !record.payload.is_empty() {
         return Err(Error::new(
             ErrorKind::InvalidInput,
-            "truncate WAL record cannot have a payload",
+            "only a write WAL record can have a payload",
         ));
     }
     let data_name = record.data_name.as_bytes();
