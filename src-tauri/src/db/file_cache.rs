@@ -1,5 +1,6 @@
 use super::DbResult;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static LOCAL_MUTATION_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -100,6 +101,19 @@ pub fn get_table_sql() -> &'static str {
         PRIMARY KEY (bucket, account_id)
     );
 
+    -- Local cache writes made while a full sync is scanning, replayed onto
+    -- its staged snapshot before publish (op: put | delete | move).
+    CREATE TABLE IF NOT EXISTS sync_mutation_journal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bucket TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        op TEXT NOT NULL,
+        key TEXT NOT NULL,
+        source_key TEXT,
+        size INTEGER,
+        last_modified TEXT
+    );
+
     -- Index for fast folder listing (exact match on parent_path)
     CREATE INDEX IF NOT EXISTS idx_cached_files_parent ON cached_files(bucket, account_id, parent_path);
     CREATE INDEX IF NOT EXISTS idx_directory_tree_parent ON directory_tree(bucket, account_id, parent_path);
@@ -129,8 +143,8 @@ fn local_mutation_barrier_key(bucket: &str, account_id: &str) -> String {
     format!("cache_mutation_in_progress:{account_id}:{bucket}")
 }
 
-fn sync_base_revision_key(bucket: &str, account_id: &str) -> String {
-    format!("sync_base_revision:{account_id}:{bucket}")
+fn sync_started_at_key(bucket: &str, account_id: &str) -> String {
+    format!("sync_started_at:{account_id}:{bucket}")
 }
 
 fn sync_active_run_key(bucket: &str, account_id: &str) -> String {
@@ -296,6 +310,74 @@ pub(crate) async fn bump_content_revision_on(
     content_revision_on(conn, bucket, account_id).await
 }
 
+/// A local cache write in the form a full-sync publish replays it.
+enum SyncMutation<'a> {
+    Put {
+        key: &'a str,
+        size: i64,
+        last_modified: &'a str,
+    },
+    Delete {
+        key: &'a str,
+    },
+    /// A rename keeps the object's metadata: the scan's staged source row when
+    /// it saw one, else the live row the cache had (`known`), if any.
+    Move {
+        from: &'a str,
+        to: &'a str,
+        known: Option<(i64, &'a str)>,
+    },
+}
+
+/// A running full sync publishes a snapshot scanned before these writes may
+/// have reached the provider. Journal them while a run is active so publish
+/// replays them in order instead of overwriting them or discarding the scan.
+async fn record_sync_mutations_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    mutations: &[SyncMutation<'_>],
+) -> DbResult<()> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM app_state WHERE key = ?1",
+            turso::params![sync_active_run_key(bucket, account_id)],
+        )
+        .await?;
+    let sync_running = rows.next().await?.is_some();
+    drop(rows);
+    if !sync_running {
+        return Ok(());
+    }
+    for mutation in mutations {
+        let (op, key, source_key, known) = match mutation {
+            SyncMutation::Put {
+                key,
+                size,
+                last_modified,
+            } => ("put", *key, None, Some((*size, *last_modified))),
+            SyncMutation::Delete { key } => ("delete", *key, None, None),
+            SyncMutation::Move { from, to, known } => ("move", *to, Some(*from), *known),
+        };
+        conn.execute(
+            "INSERT INTO sync_mutation_journal
+             (bucket, account_id, op, key, source_key, size, last_modified)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            turso::params![
+                bucket,
+                account_id,
+                op,
+                key,
+                source_key,
+                known.map(|(size, _)| size),
+                known.map(|(_, last_modified)| last_modified)
+            ],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Get all cached files for a bucket
 pub async fn get_all_cached_files(bucket: &str, account_id: &str) -> DbResult<Vec<CachedFile>> {
     let conn = super::cache_scope::read_connection(account_id).await?;
@@ -363,6 +445,8 @@ pub(crate) async fn delete_cached_file_on(
     conn.execute("BEGIN TRANSACTION", ()).await?;
 
     let result = async {
+        // A running scan may have staged the key even when the cache never had it.
+        record_sync_mutations_on(conn, bucket, account_id, &[SyncMutation::Delete { key }]).await?;
         let mut rows = conn
             .query(
                 "SELECT size FROM cached_files WHERE bucket = ?1 AND account_id = ?2 AND key = ?3",
@@ -425,6 +509,11 @@ pub(crate) async fn delete_cached_files_batch_on(
 ) -> DbResult<std::collections::HashMap<String, i64>> {
     conn.execute("BEGIN TRANSACTION", ()).await?;
     let result = async {
+        let journal: Vec<SyncMutation> = keys
+            .iter()
+            .map(|key| SyncMutation::Delete { key })
+            .collect();
+        record_sync_mutations_on(conn, bucket, account_id, &journal).await?;
         let mut file_sizes: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
 
@@ -533,9 +622,25 @@ pub(crate) async fn move_cached_file_on(
             let last_modified: String = row.get(1)?;
             Some((size, last_modified))
         } else {
-            return Ok(None);
+            None
         };
         drop(rows);
+        record_sync_mutations_on(
+            conn,
+            bucket,
+            account_id,
+            &[SyncMutation::Move {
+                from: old_key,
+                to: new_key,
+                known: file_info
+                    .as_ref()
+                    .map(|(size, last_modified)| (*size, last_modified.as_str())),
+            }],
+        )
+        .await?;
+        if file_info.is_none() {
+            return Ok(None);
+        }
 
         // Compute new parent_path and name
         let (old_parent_path, _) = parse_key(old_key);
@@ -640,6 +745,17 @@ pub(crate) async fn update_cached_file_on(
             now
         ],
     ).await?;
+        record_sync_mutations_on(
+            conn,
+            bucket,
+            account_id,
+            &[SyncMutation::Put {
+                key,
+                size: new_size,
+                last_modified,
+            }],
+        )
+        .await?;
 
         super::prefix_sync::invalidate_prefixes_on(conn, bucket, account_id, &[parent_path])
             .await?;
@@ -1389,14 +1505,18 @@ pub(crate) async fn begin_sync_on(
         turso::params![bucket, account_id],
     )
     .await?;
+    conn.execute(
+        "DELETE FROM sync_mutation_journal WHERE bucket = ?1 AND account_id = ?2",
+        turso::params![bucket, account_id],
+    )
+    .await?;
 
-    let base_revision = content_revision_on(conn, bucket, account_id).await?;
     conn.execute(
         "INSERT INTO app_state (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         turso::params![
-            sync_base_revision_key(bucket, account_id),
-            base_revision.to_string()
+            sync_started_at_key(bucket, account_id),
+            chrono::Utc::now().timestamp().to_string()
         ],
     )
     .await?;
@@ -1497,9 +1617,10 @@ pub(crate) async fn store_file_batch_on(
 }
 
 /// Step 3: atomically swap staging data into the live table.
-/// In one transaction: delete old live data → copy staging → rebuild tree,
-/// publish skipped-prefix metadata, clear prefix markers, clean staging, and
-/// update the sync generation. If this fails, old data is still intact.
+/// In one transaction: replay local writes made during the scan onto staging →
+/// replace live data (except folders re-listed after the scan started) → rebuild
+/// tree, publish skipped-prefix metadata, clear older prefix markers, clean
+/// staging, and update the sync generation. If this fails, old data is intact.
 #[allow(dead_code)]
 pub async fn finish_sync(bucket: &str, account_id: &str, file_count: usize) -> DbResult<()> {
     let conn = super::cache_scope::write_connection(account_id).await?;
@@ -1551,43 +1672,55 @@ pub(crate) async fn finish_sync_with_metadata_on(
 ) -> DbResult<()> {
     let now = chrono::Utc::now().timestamp();
     ensure_sync_run_on(conn, bucket, account_id, run_token).await?;
-    let base_key = sync_base_revision_key(bucket, account_id);
-    let mut rows = conn
-        .query(
-            "SELECT value FROM app_state WHERE key = ?1",
-            turso::params![base_key.clone()],
-        )
-        .await?;
-    let Some(row) = rows.next().await? else {
-        return Err("Full sync base revision is missing".into());
-    };
-    let base_revision: i64 = row.get::<String>(0)?.parse()?;
-    let current_revision = content_revision_on(conn, bucket, account_id).await?;
-    if current_revision != base_revision {
-        return Err("Cache changed during full sync".into());
+    let started_at = sync_started_at_on(conn, bucket, account_id).await?;
+    let unresolved = replay_sync_journal_on(conn, bucket, account_id).await?;
+
+    // A folder listed from the network after this scan started holds rows at
+    // least as new as the scan's view of it. Publish keeps those rows and the
+    // child folders that listing saw instead of the staged snapshot.
+    let relisted = relisted_prefix_children_on(conn, bucket, account_id, started_at).await?;
+    const RELISTED_PREFIXES: &str = "SELECT prefix FROM prefix_sync_times
+         WHERE bucket = ?1 AND account_id = ?2 AND last_synced_at >= ?3";
+    conn.execute(
+        &format!(
+            "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2
+             AND parent_path NOT IN ({RELISTED_PREFIXES})"
+        ),
+        turso::params![bucket, account_id, started_at],
+    )
+    .await?;
+
+    conn.execute(
+        &format!(
+            "INSERT INTO cached_files SELECT * FROM cached_files_staging
+             WHERE bucket = ?1 AND account_id = ?2 AND parent_path NOT IN ({RELISTED_PREFIXES})"
+        ),
+        turso::params![bucket, account_id, started_at],
+    )
+    .await?;
+
+    let mut tree_folders = folder_keys.to_vec();
+    tree_folders.extend(relisted.values().flatten().cloned());
+    super::dir_tree::rebuild_directory_tree_on(conn, bucket, account_id, &tree_folders).await?;
+    for (prefix, children) in &relisted {
+        super::dir_tree::replace_prefix_children_on(conn, bucket, account_id, prefix, children)
+            .await?;
     }
-    drop(rows);
 
     conn.execute(
-        "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2",
-        turso::params![bucket, account_id],
+        "DELETE FROM prefix_sync_times WHERE bucket = ?1 AND account_id = ?2 AND last_synced_at < ?3",
+        turso::params![bucket, account_id, started_at],
     )
     .await?;
 
-    conn.execute(
-        "INSERT INTO cached_files SELECT * FROM cached_files_staging WHERE bucket = ?1 AND account_id = ?2",
-        turso::params![bucket, account_id],
-    )
-    .await?;
-
-    super::dir_tree::rebuild_directory_tree_on(conn, bucket, account_id, folder_keys).await?;
-
-    conn.execute(
-        "DELETE FROM prefix_sync_times WHERE bucket = ?1 AND account_id = ?2",
-        turso::params![bucket, account_id],
-    )
-    .await?;
-
+    // A folder whose moved-in object neither the scan nor the cache saw cannot
+    // be vouched for by this index; it is re-listed on open like a skipped one.
+    let mut skipped_prefixes = skipped_prefixes.to_vec();
+    for prefix in unresolved {
+        if !skipped_prefixes.contains(&prefix) {
+            skipped_prefixes.push(prefix);
+        }
+    }
     let skipped_key = format!("skipped_prefixes:{account_id}:{bucket}");
     if skipped_prefixes.is_empty() {
         conn.execute(
@@ -1596,7 +1729,7 @@ pub(crate) async fn finish_sync_with_metadata_on(
         )
         .await?;
     } else {
-        let skipped_json = serde_json::to_string(skipped_prefixes)?;
+        let skipped_json = serde_json::to_string(&skipped_prefixes)?;
         conn.execute(
             "INSERT INTO app_state (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1612,7 +1745,7 @@ pub(crate) async fn finish_sync_with_metadata_on(
     .await?;
     conn.execute(
         "DELETE FROM app_state WHERE key = ?1",
-        turso::params![sync_base_revision_key(bucket, account_id)],
+        turso::params![sync_started_at_key(bucket, account_id)],
     )
     .await?;
     conn.execute(
@@ -1634,6 +1767,194 @@ pub(crate) async fn finish_sync_with_metadata_on(
     )
     .await?;
 
+    Ok(())
+}
+
+async fn sync_started_at_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+) -> DbResult<i64> {
+    let mut rows = conn
+        .query(
+            "SELECT value FROM app_state WHERE key = ?1",
+            turso::params![sync_started_at_key(bucket, account_id)],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Err("Full sync start time is missing".into());
+    };
+    Ok(row.get::<String>(0)?.parse()?)
+}
+
+async fn relisted_prefix_children_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    since: i64,
+) -> DbResult<BTreeMap<String, Vec<String>>> {
+    let mut rows = conn
+        .query(
+            "SELECT prefix FROM prefix_sync_times
+             WHERE bucket = ?1 AND account_id = ?2 AND last_synced_at >= ?3",
+            turso::params![bucket, account_id, since],
+        )
+        .await?;
+    let mut relisted = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        relisted.insert(row.get::<String>(0)?, Vec::new());
+    }
+    drop(rows);
+    for (prefix, children) in relisted.iter_mut() {
+        let mut rows = conn
+            .query(
+                "SELECT path FROM directory_tree
+                 WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3 AND path <> ?3",
+                turso::params![bucket, account_id, prefix.as_str()],
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            children.push(row.get(0)?);
+        }
+    }
+    Ok(relisted)
+}
+
+/// Apply the journal to the staged snapshot in write order, then drop it.
+/// Returns the folders of moved-in objects whose metadata neither the scan
+/// nor the cache knew.
+async fn replay_sync_journal_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+) -> DbResult<BTreeSet<String>> {
+    let mut rows = conn
+        .query(
+            "SELECT op, key, source_key, size, last_modified FROM sync_mutation_journal
+             WHERE bucket = ?1 AND account_id = ?2 ORDER BY id",
+            turso::params![bucket, account_id],
+        )
+        .await?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let size: Option<i64> = row.get(3)?;
+        let last_modified: Option<String> = row.get(4)?;
+        entries.push((
+            row.get::<String>(0)?,
+            row.get::<String>(1)?,
+            row.get::<Option<String>>(2)?,
+            size.zip(last_modified),
+        ));
+    }
+    drop(rows);
+
+    let now = chrono::Utc::now().timestamp();
+    let mut unresolved = BTreeSet::new();
+    for (op, key, source_key, known) in entries {
+        match (op.as_str(), source_key) {
+            ("put", None) => {
+                let (size, last_modified) = known.ok_or("Sync journal put has no metadata")?;
+                stage_file_on(conn, bucket, account_id, &key, size, &last_modified, now).await?;
+            }
+            ("delete", None) => unstage_file_on(conn, bucket, account_id, &key).await?,
+            ("move", Some(source)) => {
+                let moved = staged_file_on(conn, bucket, account_id, &source).await?;
+                unstage_file_on(conn, bucket, account_id, &source).await?;
+                let metadata = match moved {
+                    Some(metadata) => Some(metadata),
+                    // The scan reached the destination after the rename.
+                    None if staged_file_on(conn, bucket, account_id, &key)
+                        .await?
+                        .is_some() =>
+                    {
+                        None
+                    }
+                    None => {
+                        if known.is_none() {
+                            unresolved.insert(parse_key(&key).0);
+                        }
+                        known
+                    }
+                };
+                if let Some((size, last_modified)) = metadata {
+                    stage_file_on(conn, bucket, account_id, &key, size, &last_modified, now)
+                        .await?;
+                }
+            }
+            _ => return Err("Unknown sync journal entry".into()),
+        }
+    }
+    conn.execute(
+        "DELETE FROM sync_mutation_journal WHERE bucket = ?1 AND account_id = ?2",
+        turso::params![bucket, account_id],
+    )
+    .await?;
+    Ok(unresolved)
+}
+
+async fn staged_file_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    key: &str,
+) -> DbResult<Option<(i64, String)>> {
+    let mut rows = conn
+        .query(
+            "SELECT size, last_modified FROM cached_files_staging
+             WHERE bucket = ?1 AND account_id = ?2 AND key = ?3",
+            turso::params![bucket, account_id, key],
+        )
+        .await?;
+    Ok(match rows.next().await? {
+        Some(row) => Some((row.get(0)?, row.get(1)?)),
+        None => None,
+    })
+}
+
+async fn stage_file_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    key: &str,
+    size: i64,
+    last_modified: &str,
+    synced_at: i64,
+) -> DbResult<()> {
+    let (parent_path, name) = parse_key(key);
+    conn.execute(
+        "INSERT INTO cached_files_staging
+         (bucket, account_id, key, parent_path, name, size, last_modified, synced_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT (bucket, account_id, key) DO UPDATE SET
+           size = excluded.size,
+           last_modified = excluded.last_modified,
+           synced_at = excluded.synced_at",
+        turso::params![
+            bucket,
+            account_id,
+            key,
+            parent_path,
+            name,
+            size,
+            last_modified,
+            synced_at
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn unstage_file_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    key: &str,
+) -> DbResult<()> {
+    conn.execute(
+        "DELETE FROM cached_files_staging WHERE bucket = ?1 AND account_id = ?2 AND key = ?3",
+        turso::params![bucket, account_id, key],
+    )
+    .await?;
     Ok(())
 }
 
@@ -1679,6 +2000,285 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    fn cached(key: &str, size: i64) -> CachedFile {
+        let (parent_path, name) = parse_key(key);
+        CachedFile {
+            bucket: "bucket".into(),
+            account_id: "account".into(),
+            key: key.into(),
+            parent_path,
+            name,
+            size,
+            last_modified: "2026-09-22T00:00:00Z".into(),
+            synced_at: 1,
+        }
+    }
+
+    async fn live_files(conn: &Connection, prefix: &str) -> Vec<(String, i64)> {
+        let mut rows = conn
+            .query(
+                "SELECT key, size FROM cached_files
+                 WHERE bucket = 'bucket' AND account_id = 'account' AND parent_path = ?1
+                 ORDER BY key",
+                turso::params![prefix],
+            )
+            .await
+            .unwrap();
+        let mut files = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            files.push((row.get(0).unwrap(), row.get(1).unwrap()));
+        }
+        files
+    }
+
+    async fn live_folders(conn: &Connection, prefix: &str) -> Vec<String> {
+        let mut rows = conn
+            .query(
+                "SELECT path FROM directory_tree
+                 WHERE bucket = 'bucket' AND account_id = 'account' AND parent_path = ?1
+                   AND path <> ?1
+                 ORDER BY path",
+                turso::params![prefix],
+            )
+            .await
+            .unwrap();
+        let mut folders = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            folders.push(row.get(0).unwrap());
+        }
+        folders
+    }
+
+    async fn publish(conn: &Connection, run: &str, file_count: usize) -> DbResult<()> {
+        conn.execute("BEGIN TRANSACTION", ()).await.unwrap();
+        let result =
+            finish_sync_with_metadata_on(conn, "bucket", "account", run, file_count, &[], &[])
+                .await;
+        let end = if result.is_ok() { "COMMIT" } else { "ROLLBACK" };
+        conn.execute(end, ()).await.unwrap();
+        result
+    }
+
+    async fn has_full_sync_marker(conn: &Connection) -> bool {
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM sync_meta WHERE bucket = 'bucket' AND account_id = 'account'",
+                (),
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().is_some()
+    }
+
+    #[tokio::test]
+    async fn full_sync_publishes_after_a_folder_listing_and_keeps_its_newer_rows() {
+        let (_db, conn) = fixture().await;
+        insert_file(&conn, "root.txt", 1).await;
+        insert_file(&conn, "a/old.txt", 1).await;
+        let run = begin_sync_on(&conn, "bucket", "account").await.unwrap();
+        // The scan read a/ before a/old.txt was replaced by a/new.txt.
+        store_file_batch_on(
+            &conn,
+            "bucket",
+            "account",
+            &run,
+            &[
+                cached("root.txt", 1),
+                cached("a/old.txt", 1),
+                cached("b/x.txt", 3),
+            ],
+        )
+        .await
+        .unwrap();
+        // Opening a/ re-lists it from the network while the scan is running.
+        super::super::prefix_sync::replace_complete_prefix_on(
+            &conn,
+            "bucket",
+            "account",
+            "a/",
+            &[cached("a/new.txt", 2)],
+            &["a/sub/".into()],
+        )
+        .await
+        .unwrap();
+
+        publish(&conn, &run, 3).await.unwrap();
+
+        assert!(has_full_sync_marker(&conn).await);
+        assert_eq!(live_files(&conn, "a/").await, vec![("a/new.txt".into(), 2)]);
+        assert_eq!(live_folders(&conn, "a/").await, vec!["a/sub/".to_string()]);
+        assert_eq!(live_files(&conn, "").await, vec![("root.txt".into(), 1)]);
+        assert_eq!(live_files(&conn, "b/").await, vec![("b/x.txt".into(), 3)]);
+        assert_eq!(
+            live_folders(&conn, "").await,
+            vec!["a/".to_string(), "b/".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn full_sync_replays_local_upload_and_delete_made_during_the_scan() {
+        let (_db, conn) = fixture().await;
+        insert_file(&conn, "keep.txt", 1).await;
+        insert_file(&conn, "gone.txt", 2).await;
+        let run = begin_sync_on(&conn, "bucket", "account").await.unwrap();
+        // The scan listed both files before the local delete reached the provider.
+        store_file_batch_on(
+            &conn,
+            "bucket",
+            "account",
+            &run,
+            &[cached("gone.txt", 2), cached("keep.txt", 1)],
+        )
+        .await
+        .unwrap();
+        delete_cached_file_on(&conn, "bucket", "account", "gone.txt")
+            .await
+            .unwrap();
+        update_cached_file_on(
+            &conn,
+            "bucket",
+            "account",
+            "new.txt",
+            7,
+            "2026-09-22T00:00:01Z",
+        )
+        .await
+        .unwrap();
+
+        publish(&conn, &run, 2).await.unwrap();
+
+        assert!(has_full_sync_marker(&conn).await);
+        assert_eq!(
+            live_files(&conn, "").await,
+            vec![("keep.txt".into(), 1), ("new.txt".into(), 7)]
+        );
+    }
+
+    #[tokio::test]
+    async fn full_sync_replays_local_moves_made_during_the_scan() {
+        let (_db, conn) = fixture().await;
+        insert_file(&conn, "src/known.txt", 4).await;
+        let run = begin_sync_on(&conn, "bucket", "account").await.unwrap();
+        // The scan saw both sources at their old keys. Only one of them was
+        // already in the live cache when the rename was applied locally.
+        store_file_batch_on(
+            &conn,
+            "bucket",
+            "account",
+            &run,
+            &[cached("src/known.txt", 4), cached("src/unlisted.txt", 5)],
+        )
+        .await
+        .unwrap();
+        move_cached_file_on(&conn, "bucket", "account", "src/known.txt", "dst/known.txt")
+            .await
+            .unwrap();
+        move_cached_file_on(
+            &conn,
+            "bucket",
+            "account",
+            "src/unlisted.txt",
+            "dst/unlisted.txt",
+        )
+        .await
+        .unwrap();
+
+        publish(&conn, &run, 2).await.unwrap();
+
+        assert!(live_files(&conn, "src/").await.is_empty());
+        assert_eq!(
+            live_files(&conn, "dst/").await,
+            vec![("dst/known.txt".into(), 4), ("dst/unlisted.txt".into(), 5)]
+        );
+        assert_eq!(live_folders(&conn, "").await, vec!["dst/".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn full_sync_never_vouches_for_a_moved_in_object_it_could_not_place() {
+        let (_db, conn) = fixture().await;
+        let run = begin_sync_on(&conn, "bucket", "account").await.unwrap();
+        // The scan passed "late/" after the rename landed there, but reached
+        // "a/" and "z/" only after their renames removed the sources.
+        store_file_batch_on(&conn, "bucket", "account", &run, &[cached("late/b.txt", 6)])
+            .await
+            .unwrap();
+        move_cached_file_on(&conn, "bucket", "account", "zz/b.txt", "late/b.txt")
+            .await
+            .unwrap();
+        move_cached_file_on(&conn, "bucket", "account", "zz/c.txt", "a/c.txt")
+            .await
+            .unwrap();
+
+        publish(&conn, &run, 1).await.unwrap();
+
+        assert_eq!(
+            live_files(&conn, "late/").await,
+            vec![("late/b.txt".into(), 6)]
+        );
+        assert!(live_files(&conn, "a/").await.is_empty());
+        let mut rows = conn
+            .query(
+                "SELECT value FROM app_state WHERE key = 'skipped_prefixes:account:bucket'",
+                (),
+            )
+            .await
+            .unwrap();
+        let skipped: Vec<String> = serde_json::from_str(
+            &rows
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(skipped, vec!["a/".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn full_sync_replaces_folders_listed_before_the_scan_and_drops_the_journal() {
+        let (_db, conn) = fixture().await;
+        insert_file(&conn, "c/stale.txt", 1).await;
+        conn.execute(
+            "INSERT INTO prefix_sync_times (bucket, account_id, prefix, last_synced_at, file_count, folder_count, generation)
+             VALUES ('bucket', 'account', 'c/', 1, 1, 0, 1)",
+            (),
+        )
+        .await
+        .unwrap();
+        let run = begin_sync_on(&conn, "bucket", "account").await.unwrap();
+        store_file_batch_on(
+            &conn,
+            "bucket",
+            "account",
+            &run,
+            &[cached("c/fresh.txt", 2)],
+        )
+        .await
+        .unwrap();
+        update_cached_file_on(&conn, "bucket", "account", "c/new.txt", 3, "later")
+            .await
+            .unwrap();
+
+        publish(&conn, &run, 1).await.unwrap();
+
+        assert_eq!(
+            live_files(&conn, "c/").await,
+            vec![("c/fresh.txt".into(), 2), ("c/new.txt".into(), 3)]
+        );
+        let mut rows = conn
+            .query(
+                "SELECT (SELECT COUNT(*) FROM prefix_sync_times), (SELECT COUNT(*) FROM sync_mutation_journal)",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 0);
+        assert_eq!(row.get::<i64>(1).unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1765,7 +2365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_sync_publish_aborts_when_local_revision_changes_during_scan() {
+    async fn full_sync_publish_of_a_superseded_run_leaves_the_live_cache_untouched() {
         let (_db, conn) = fixture().await;
         insert_file(&conn, "old.txt", 1).await;
         let run = begin_sync_on(&conn, "bucket", "account").await.unwrap();
@@ -1776,9 +2376,8 @@ mod tests {
         )
         .await
         .unwrap();
-        bump_content_revision_on(&conn, "bucket", "account")
-            .await
-            .unwrap();
+        // A restarted sync owns the bucket now; the old scan must not publish.
+        begin_sync_on(&conn, "bucket", "account").await.unwrap();
 
         conn.execute("BEGIN TRANSACTION", ()).await.unwrap();
         let publish =
@@ -1886,7 +2485,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_sync_publish_requires_current_run_and_base_revision() {
+    async fn full_sync_publish_requires_current_run_and_start_time() {
         let (_db, conn) = fixture().await;
         let old_run = begin_sync_on(&conn, "bucket", "account").await.unwrap();
         let current_run = begin_sync_on(&conn, "bucket", "account").await.unwrap();
@@ -1898,16 +2497,16 @@ mod tests {
             .unwrap();
 
         conn.execute(
-            "DELETE FROM app_state WHERE key = 'sync_base_revision:account:bucket'",
+            "DELETE FROM app_state WHERE key = 'sync_started_at:account:bucket'",
             (),
         )
         .await
         .unwrap();
         conn.execute("BEGIN TRANSACTION", ()).await.unwrap();
-        let missing_base =
+        let missing_start =
             finish_sync_with_metadata_on(&conn, "bucket", "account", &current_run, 0, &[], &[])
                 .await;
-        assert!(missing_base.is_err());
+        assert!(missing_start.is_err());
         conn.execute("ROLLBACK", ()).await.unwrap();
     }
 }
