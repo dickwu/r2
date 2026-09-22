@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_s3::{serve, Response};
+use crate::test_s3::{serve, Request, Response};
 
 fn filesystem(client: Client, label: &str) -> S3NfsFs {
     let fs = S3NfsFs::new(
@@ -2606,4 +2606,392 @@ async fn pending_rename_record_blocks_source_and_target_prefix_operations() {
         Err(nfsstat3::NFS3ERR_IO)
     ));
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// Objects behind a fixture, for tests that assert on the namespace a race
+/// leaves behind rather than on the requests it sent. Every condition the
+/// mount relies on is enforced the way S3 enforces it, at the moment the
+/// request is applied — after any delay a test adds in front of it.
+#[derive(Default)]
+struct ModelBucket {
+    objects: BTreeMap<String, ModelObject>,
+    versions: u64,
+}
+
+struct ModelObject {
+    body: Vec<u8>,
+    etag: String,
+    metadata: Vec<(String, String)>,
+}
+
+impl ModelBucket {
+    fn with(objects: &[(&str, &[u8])]) -> Arc<std::sync::Mutex<Self>> {
+        let mut bucket = Self::default();
+        for (key, body) in objects {
+            bucket.store(key, body.to_vec(), Vec::new());
+        }
+        Arc::new(std::sync::Mutex::new(bucket))
+    }
+
+    fn store(&mut self, key: &str, body: Vec<u8>, metadata: Vec<(String, String)>) -> String {
+        self.versions += 1;
+        let etag = format!("\"model-{}\"", self.versions);
+        self.objects.insert(
+            key.to_string(),
+            ModelObject {
+                body,
+                etag: etag.clone(),
+                metadata,
+            },
+        );
+        etag
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.objects.keys().cloned().collect()
+    }
+
+    fn body(&self, key: &str) -> Option<&[u8]> {
+        self.objects.get(key).map(|object| object.body.as_slice())
+    }
+
+    fn respond(&mut self, request: &Request) -> Response {
+        let url = reqwest::Url::parse(&format!("http://fixture{}", request.path)).unwrap();
+        let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        let key = urlencoding::decode(
+            url.path()
+                .trim_start_matches("/photos")
+                .trim_start_matches('/'),
+        )
+        .unwrap()
+        .into_owned();
+        let precondition_failed =
+            || Response::xml(412, "<Error><Code>PreconditionFailed</Code></Error>");
+        let current = self.objects.get(&key).map(|object| object.etag.clone());
+        match request.method.as_str() {
+            "GET" if query.contains_key("list-type") => self.list(&query),
+            "HEAD" | "GET" => {
+                let Some(object) = self.objects.get(&key) else {
+                    return if request.method == "HEAD" {
+                        Response::empty(404)
+                    } else {
+                        Response::xml(404, "<Error><Code>NoSuchKey</Code></Error>")
+                    };
+                };
+                if request
+                    .headers
+                    .get("if-match")
+                    .is_some_and(|expected| *expected != object.etag)
+                {
+                    return precondition_failed();
+                }
+                let total = object.body.len();
+                let range = request
+                    .headers
+                    .get("range")
+                    .and_then(|range| range.strip_prefix("bytes="))
+                    .and_then(|range| range.split_once('-'))
+                    .map(|(start, end)| {
+                        let start: usize = start.parse().unwrap();
+                        let end = end.parse::<usize>().unwrap().min(total.max(1) - 1);
+                        (start, end)
+                    });
+                let mut response = match (request.method.as_str(), range) {
+                    ("HEAD", _) => Response::empty(200).header("content-length", total),
+                    (_, Some((start, end))) => Response {
+                        status: 206,
+                        headers: Vec::new(),
+                        body: object.body[start..=end].to_vec(),
+                    }
+                    .header("content-range", format!("bytes {start}-{end}/{total}")),
+                    _ => Response {
+                        status: 200,
+                        headers: Vec::new(),
+                        body: object.body.clone(),
+                    },
+                }
+                .header("etag", &object.etag);
+                for (name, value) in &object.metadata {
+                    response = response.header(&format!("x-amz-meta-{name}"), value);
+                }
+                response
+            }
+            "PUT" if query.contains_key("uploadId") => Response::empty(400),
+            "PUT" => {
+                let copied = if let Some(source) = request.headers.get("x-amz-copy-source") {
+                    let source = urlencoding::decode(
+                        source.trim_start_matches('/').trim_start_matches("photos/"),
+                    )
+                    .unwrap()
+                    .into_owned();
+                    let Some(source) = self.objects.get(&source) else {
+                        return Response::xml(404, "<Error><Code>NoSuchKey</Code></Error>");
+                    };
+                    if request
+                        .headers
+                        .get("x-amz-copy-source-if-match")
+                        .is_some_and(|expected| *expected != source.etag)
+                    {
+                        return precondition_failed();
+                    }
+                    Some(source.body.clone())
+                } else {
+                    None
+                };
+                let exclusive = request
+                    .headers
+                    .get("if-none-match")
+                    .is_some_and(|value| value == "*");
+                if (exclusive && current.is_some())
+                    || request
+                        .headers
+                        .get("if-match")
+                        .is_some_and(|expected| current.as_ref() != Some(expected))
+                {
+                    return precondition_failed();
+                }
+                let is_copy = copied.is_some();
+                let metadata = request
+                    .headers
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        name.strip_prefix("x-amz-meta-")
+                            .map(|name| (name.to_string(), value.clone()))
+                    })
+                    .collect();
+                let etag = self.store(
+                    &key,
+                    copied.unwrap_or_else(|| aws_chunked_payload(request)),
+                    metadata,
+                );
+                if is_copy {
+                    Response::xml(
+                        200,
+                        &format!(
+                            "<CopyObjectResult><ETag>{}</ETag></CopyObjectResult>",
+                            etag.replace('"', "&quot;")
+                        ),
+                    )
+                } else {
+                    Response::empty(200).header("etag", etag)
+                }
+            }
+            "DELETE" => {
+                if request
+                    .headers
+                    .get("if-match")
+                    .is_some_and(|expected| current.as_ref() != Some(expected))
+                {
+                    return precondition_failed();
+                }
+                self.objects.remove(&key);
+                Response::empty(204)
+            }
+            _ => Response::empty(400),
+        }
+    }
+
+    fn list(&self, query: &HashMap<String, String>) -> Response {
+        let prefix = query.get("prefix").cloned().unwrap_or_default();
+        let delimiter = query.get("delimiter");
+        let max_keys = query
+            .get("max-keys")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1000usize);
+        let mut entries = BTreeMap::new();
+        for (key, object) in self
+            .objects
+            .range(prefix.clone()..)
+            .take_while(|(key, _)| key.starts_with(&prefix))
+        {
+            let common = delimiter.and_then(|delimiter| {
+                key[prefix.len()..]
+                    .find(delimiter.as_str())
+                    .map(|index| key[..prefix.len() + index + delimiter.len()].to_string())
+            });
+            match common {
+                Some(common) => entries.entry(common).or_insert(None),
+                None => entries.entry(key.clone()).or_insert(Some(object)),
+            };
+        }
+        let after = query.get("continuation-token");
+        let page: Vec<_> = entries
+            .iter()
+            .filter(|(key, _)| after.is_none_or(|after| key.as_str() > after.as_str()))
+            .take(max_keys + 1)
+            .collect();
+        let truncated = page.len() > max_keys;
+        let page = &page[..page.len().min(max_keys)];
+        let mut body = format!("<ListBucketResult><IsTruncated>{truncated}</IsTruncated>");
+        for (key, object) in page {
+            if let Some(object) = object {
+                body.push_str(&format!(
+                    "<Contents><Key>{key}</Key><Size>{}</Size><ETag>{}</ETag></Contents>",
+                    object.body.len(),
+                    object.etag.replace('"', "&quot;")
+                ));
+            }
+        }
+        for (key, object) in page {
+            if object.is_none() {
+                body.push_str(&format!(
+                    "<CommonPrefixes><Prefix>{key}</Prefix></CommonPrefixes>"
+                ));
+            }
+        }
+        if truncated {
+            if let Some((last, _)) = page.last() {
+                body.push_str(&format!(
+                    "<NextContinuationToken>{last}</NextContinuationToken>"
+                ));
+            }
+        }
+        body.push_str("</ListBucketResult>");
+        Response::xml(200, &body)
+    }
+}
+
+/// The bytes a PUT stores. The SDK may frame a streamed body with
+/// `aws-chunked` content encoding and a trailing checksum.
+fn aws_chunked_payload(request: &Request) -> Vec<u8> {
+    let framed = request
+        .headers
+        .get("content-encoding")
+        .is_some_and(|value| value.contains("aws-chunked"))
+        || request.headers.contains_key("x-amz-decoded-content-length");
+    if !framed {
+        return request.body.clone();
+    }
+    let mut payload = Vec::new();
+    let mut rest = request.body.as_slice();
+    while let Some(end) = rest.windows(2).position(|pair| pair == b"\r\n") {
+        let header = std::str::from_utf8(&rest[..end]).unwrap();
+        let size = usize::from_str_radix(header.split(';').next().unwrap().trim(), 16).unwrap();
+        rest = &rest[end + 2..];
+        if size == 0 {
+            break;
+        }
+        payload.extend_from_slice(&rest[..size]);
+        rest = &rest[(size + 2).min(rest.len())..];
+    }
+    payload
+}
+
+/// A staged upload that is still in flight when a rename of its key (or onto
+/// its key) is issued must settle before the rename copies or deletes
+/// anything: a late PUT landing after the rename's DELETE would bring the
+/// moved-away source back, and one landing after the copy would overwrite
+/// the renamed content with the replaced file's bytes.
+#[tokio::test]
+async fn a_late_staged_put_cannot_resurrect_a_rename_source_or_its_replaced_target() {
+    for replace_target in [false, true] {
+        let bucket = if replace_target {
+            ModelBucket::with(&[("src", b"renamed bytes")])
+        } else {
+            ModelBucket::with(&[])
+        };
+        let put_entered = Arc::new(tokio::sync::Notify::new());
+        let release_put = Arc::new(tokio::sync::Notify::new());
+        let held = Arc::new(AtomicBool::new(false));
+        let fixture = serve({
+            let bucket = bucket.clone();
+            let put_entered = put_entered.clone();
+            let release_put = release_put.clone();
+            let held = held.clone();
+            move |request| {
+                let bucket = bucket.clone();
+                let put_entered = put_entered.clone();
+                let release_put = release_put.clone();
+                let held = held.clone();
+                async move {
+                    // Only the publication of the staged bytes is delayed.
+                    if request.headers.contains_key("x-amz-meta-r2-stage-snapshot")
+                        && !held.swap(true, Ordering::SeqCst)
+                    {
+                        put_entered.notify_one();
+                        release_put.notified().await;
+                    }
+                    bucket.lock().unwrap().respond(&request)
+                }
+            }
+        })
+        .await;
+        let fs = filesystem(fixture.client.clone(), "late-put-rename");
+        let staged_key = if replace_target { "dst" } else { "src" };
+        let staged = intern(&fs, staged_key).await;
+        fs.write(staged, 0, b"late staged bytes").await.unwrap();
+        if replace_target {
+            let source = fs
+                .intern_child("src", ROOT_ID, EntryKind::File, 13, 0)
+                .unwrap();
+            fs.inner.dirs.write().unwrap().insert(
+                ROOT_ID,
+                DirListing::complete(Arc::new(vec![
+                    DirChild {
+                        fileid: staged,
+                        name: "dst".into(),
+                    },
+                    DirChild {
+                        fileid: source,
+                        name: "src".into(),
+                    },
+                ])),
+            );
+        }
+
+        let flush = tokio::spawn({
+            let fs = fs.clone();
+            async move { fs.drain(1, 1).await }
+        });
+        tokio::time::timeout(Duration::from_secs(3), put_entered.notified())
+            .await
+            .unwrap();
+        let mut rename = tokio::spawn({
+            let fs = fs.clone();
+            async move {
+                fs.rename(
+                    ROOT_ID,
+                    &b"src".as_slice().into(),
+                    ROOT_ID,
+                    &b"dst".as_slice().into(),
+                )
+                .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut rename)
+                .await
+                .is_err(),
+            "the rename must wait for the in-flight publication of {staged_key}"
+        );
+        assert!(!fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.headers.contains_key("x-amz-copy-source")));
+        release_put.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), flush)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), rename)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        {
+            let bucket = bucket.lock().unwrap();
+            assert_eq!(bucket.keys(), ["dst"], "nothing may come back at src");
+            let expected: &[u8] = if replace_target {
+                b"renamed bytes"
+            } else {
+                b"late staged bytes"
+            };
+            assert_eq!(bucket.body("dst"), Some(expected));
+        }
+        assert_eq!(fs.pending_upload_count().await, 0);
+        let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+    }
 }
