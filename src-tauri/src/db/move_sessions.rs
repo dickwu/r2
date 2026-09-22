@@ -261,19 +261,6 @@ pub async fn clear_move_task_retry(task_id: &str) -> DbResult<()> {
     Ok(())
 }
 
-async fn task_retry_next_on(conn: &turso::Connection, task_id: &str) -> DbResult<Option<i64>> {
-    let mut rows = conn
-        .query(
-            "SELECT next_attempt_at FROM move_task_retries WHERE task_id = ?1",
-            turso::params![task_id],
-        )
-        .await?;
-    match rows.next().await? {
-        Some(row) => Ok(row.get::<Option<i64>>(0)?),
-        None => Ok(None),
-    }
-}
-
 async fn get_journal_on(conn: &turso::Connection, task_id: &str) -> DbResult<Option<MoveJournal>> {
     let mut rows = conn
         .query(
@@ -786,6 +773,19 @@ pub async fn get_pending_moves_for_source(
     get_pending_moves_for_source_on(&conn, source_bucket, source_account_id, limit).await
 }
 
+/// Pending tasks of one source, with whichever retry records they have.
+const PENDING_RETRY_JOIN: &str = "FROM move_sessions s
+         LEFT JOIN move_task_retries r ON r.task_id = s.id
+         LEFT JOIN move_journal j ON j.task_id = s.id
+         WHERE s.source_bucket = ?1 AND s.source_account_id = ?2
+         AND s.status = 'pending'";
+/// When a pending task may run next: a preflight retry row wins over the
+/// journal's schedule, and neither means now. Evaluated in SQL so choosing
+/// work is one bounded statement, not two queries and a JSON parse per
+/// pending task under the global DB lock.
+const NEXT_RETRY_AT: &str =
+    "COALESCE(r.next_attempt_at, json_extract(j.data, '$.retry.next_attempt_at'))";
+
 async fn get_pending_moves_for_source_on(
     conn: &turso::Connection,
     source_bucket: &str,
@@ -794,21 +794,28 @@ async fn get_pending_moves_for_source_on(
 ) -> DbResult<Vec<MoveSession>> {
     let mut rows = conn
         .query(
-            "SELECT id, source_key, dest_key, source_bucket, source_account_id, source_provider,
-                dest_bucket, dest_account_id, dest_provider, delete_original, file_size, progress,
-                status, error, created_at, updated_at
-         FROM move_sessions
-         WHERE source_bucket = ?1 AND source_account_id = ?2
-         AND status = 'pending'
-         ORDER BY created_at ASC",
-            turso::params![source_bucket, source_account_id],
+            &format!(
+                "SELECT s.id, s.source_key, s.dest_key, s.source_bucket, s.source_account_id,
+                s.source_provider, s.dest_bucket, s.dest_account_id, s.dest_provider,
+                s.delete_original, s.file_size, s.progress, s.status, s.error, s.created_at,
+                s.updated_at
+         {PENDING_RETRY_JOIN}
+         AND COALESCE({NEXT_RETRY_AT}, ?3) <= ?3
+         ORDER BY s.created_at ASC
+         LIMIT ?4"
+            ),
+            turso::params![
+                source_bucket,
+                source_account_id,
+                chrono::Utc::now().timestamp(),
+                limit.max(0)
+            ],
         )
         .await?;
 
     let mut sessions = Vec::new();
-    let now = chrono::Utc::now().timestamp();
     while let Some(row) = rows.next().await? {
-        let session = MoveSession {
+        sessions.push(MoveSession {
             id: row.get(0)?,
             source_key: row.get(1)?,
             dest_key: row.get(2)?,
@@ -825,19 +832,7 @@ async fn get_pending_moves_for_source_on(
             error: row.get(13)?,
             created_at: row.get(14)?,
             updated_at: row.get(15)?,
-        };
-        let next_retry = task_retry_next_on(conn, &session.id)
-            .await?
-            .or(get_journal_on(conn, &session.id)
-                .await?
-                .and_then(|journal| journal.retry.next_attempt_at));
-        if next_retry.is_some_and(|next| next > now) {
-            continue;
-        }
-        sessions.push(session);
-        if sessions.len() >= limit as usize {
-            break;
-        }
+        });
     }
     Ok(sessions)
 }
@@ -938,26 +933,14 @@ async fn get_next_move_retry_attempt_for_source_on(
 ) -> DbResult<Option<i64>> {
     let mut rows = conn
         .query(
-            "SELECT id FROM move_sessions
-         WHERE source_bucket = ?1 AND source_account_id = ?2
-         AND status = 'pending'
-         ORDER BY created_at ASC",
+            &format!("SELECT MIN({NEXT_RETRY_AT}) {PENDING_RETRY_JOIN}"),
             turso::params![source_bucket, source_account_id],
         )
         .await?;
-    let mut next_attempt = None;
-    while let Some(row) = rows.next().await? {
-        let task_id = row.get::<String>(0)?;
-        let next = task_retry_next_on(conn, &task_id)
-            .await?
-            .or(get_journal_on(conn, &task_id)
-                .await?
-                .and_then(|journal| journal.retry.next_attempt_at));
-        if let Some(next) = next {
-            next_attempt = Some(next_attempt.map_or(next, |current: i64| current.min(next)));
-        }
+    match rows.next().await? {
+        Some(row) => Ok(row.get::<Option<i64>>(0)?),
+        None => Ok(None),
     }
-    Ok(next_attempt)
 }
 
 /// Pause all active moves
@@ -1376,6 +1359,148 @@ mod tests {
             ["ready"]
         );
     }
+    #[tokio::test]
+    async fn pending_selection_skips_deferred_tasks_in_creation_order_past_the_limit() {
+        let database = turso::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = database.connect().unwrap();
+        conn.execute_batch(get_table_sql()).await.unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let insert = |id: String, bucket: &'static str, status: &'static str, created_at: i64| {
+            let conn = conn.clone();
+            async move {
+                conn.execute("INSERT INTO move_sessions (id, source_key, dest_key, source_bucket, source_account_id, source_provider, dest_bucket, dest_account_id, dest_provider, delete_original, file_size, progress, created_at, updated_at, status) VALUES (?1, 'source', 'dest', ?2, 'account', 'minio', 'target', 'account', 'minio', 0, 8, 0, ?3, ?3, ?4)", turso::params![id, bucket, created_at, status]).await.unwrap();
+            }
+        };
+        let task_retry = |id: &'static str, next: Option<i64>| {
+            let conn = conn.clone();
+            async move {
+                conn.execute("INSERT INTO move_task_retries (task_id, next_attempt_at, attempt_count, last_error_class, phase) VALUES (?1, ?2, 1, 'transient', 'preflight')", turso::params![id, next]).await.unwrap();
+            }
+        };
+        let journal_retry = |id: &'static str, next: i64| {
+            let conn = conn.clone();
+            async move {
+                let journal = MoveJournal {
+                    task_id: id.into(),
+                    stage: "transferring".into(),
+                    source: SourceIdentity {
+                        size: 8,
+                        etag: "source".into(),
+                        version_id: None,
+                    },
+                    source_scope: "source".into(),
+                    dest_scope: "dest".into(),
+                    destination: None,
+                    retry: MoveRetrySchedule {
+                        next_attempt_at: Some(next),
+                        attempt_count: 1,
+                        last_error_class: Some("transient".into()),
+                        phase: Some("GET".into()),
+                    },
+                    metrics: Default::default(),
+                };
+                save_journal_on(&conn, &journal).await.unwrap();
+            }
+        };
+        // Deferred tasks come first in creation order, so a selection that
+        // honours the limit before filtering would return none of them.
+        for (created_at, id) in [
+            "deferred-task-retry",
+            "deferred-journal",
+            "exhausted-task-retry-deferred-journal",
+            "due-task-retry-over-deferred-journal",
+            "due-journal",
+            "plain-1",
+            "plain-2",
+            "plain-3",
+            "plain-4",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert(id.into(), "bucket", "pending", created_at as i64).await;
+        }
+        for filler in 0..40 {
+            insert(
+                format!("later-{filler:02}"),
+                "bucket",
+                "pending",
+                100 + filler,
+            )
+            .await;
+        }
+        insert("other-status".into(), "bucket", "paused", -2).await;
+        insert("other-source".into(), "elsewhere", "pending", -1).await;
+        task_retry("deferred-task-retry", Some(now + 60)).await;
+        journal_retry("deferred-journal", now + 120).await;
+        task_retry("exhausted-task-retry-deferred-journal", None).await;
+        journal_retry("exhausted-task-retry-deferred-journal", now + 30).await;
+        task_retry("due-task-retry-over-deferred-journal", Some(now - 10)).await;
+        journal_retry("due-task-retry-over-deferred-journal", now + 90).await;
+        journal_retry("due-journal", now - 5).await;
+        task_retry("other-status", Some(now - 100)).await;
+        task_retry("other-source", Some(now - 100)).await;
+
+        let ids = |sessions: Vec<MoveSession>| {
+            sessions
+                .into_iter()
+                .map(|session| session.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(
+                get_pending_moves_for_source_on(&conn, "bucket", "account", 4)
+                    .await
+                    .unwrap()
+            ),
+            [
+                "due-task-retry-over-deferred-journal",
+                "due-journal",
+                "plain-1",
+                "plain-2"
+            ]
+        );
+        let all = ids(
+            get_pending_moves_for_source_on(&conn, "bucket", "account", 1000)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(all.len(), 46);
+        assert_eq!(
+            all[..6],
+            [
+                "due-task-retry-over-deferred-journal",
+                "due-journal",
+                "plain-1",
+                "plain-2",
+                "plain-3",
+                "plain-4"
+            ]
+        );
+        assert_eq!(all[6], "later-00");
+        assert_eq!(all[45], "later-39");
+        // The earliest scheduled retry of any pending task on this source,
+        // due or not; other sources and statuses do not count.
+        assert_eq!(
+            get_next_move_retry_attempt_for_source_on(&conn, "bucket", "account")
+                .await
+                .unwrap(),
+            Some(now - 10)
+        );
+        assert_eq!(
+            get_next_move_retry_attempt_for_source_on(&conn, "elsewhere", "account")
+                .await
+                .unwrap(),
+            Some(now - 100)
+        );
+        assert_eq!(
+            get_next_move_retry_attempt_for_source_on(&conn, "nothing", "account")
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn copied_receipt_survives_session_pause_and_reopen() {
         let path = std::env::temp_dir().join(format!(
