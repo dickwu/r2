@@ -114,9 +114,13 @@ pub fn get_table_sql() -> &'static str {
         last_modified TEXT
     );
 
-    -- Index for fast folder listing (exact match on parent_path)
-    CREATE INDEX IF NOT EXISTS idx_cached_files_parent ON cached_files(bucket, account_id, parent_path);
-    CREATE INDEX IF NOT EXISTS idx_directory_tree_parent ON directory_tree(bucket, account_id, parent_path);
+    -- Folder listing and keyset pages: exact parent_path match, rows already
+    -- in key/path order, so a page reads only its own rows and never sorts.
+    CREATE INDEX IF NOT EXISTS idx_cached_files_parent_key ON cached_files(bucket, account_id, parent_path, key);
+    CREATE INDEX IF NOT EXISTS idx_directory_tree_parent_path ON directory_tree(bucket, account_id, parent_path, path);
+    -- Superseded by the two indexes above, which share their leading columns.
+    DROP INDEX IF EXISTS idx_cached_files_parent;
+    DROP INDEX IF EXISTS idx_directory_tree_parent;
     "
 }
 
@@ -1094,7 +1098,7 @@ struct CachePageCursor {
 #[serde(tag = "kind")]
 enum CachePageCursorPosition {
     Folder { path: String },
-    File { name: String, key: String },
+    File { key: String },
 }
 
 impl CachePageCursor {
@@ -1150,7 +1154,6 @@ impl CachePageCursor {
             prefix: prefix.to_string(),
             snapshot,
             pos: CachePageCursorPosition::File {
-                name: file.name.clone(),
                 key: file.key.clone(),
             },
         })?)
@@ -1236,39 +1239,48 @@ fn cached_file_from_row(row: &turso::Row) -> DbResult<CachedFile> {
     })
 }
 
-async fn has_cached_file_after(
+// Keyset page queries. Within one folder (bucket, account_id, parent_path
+// fixed) key and path order is name order, so every page is a range read on
+// the folder's own index entries with no sort. The index is named: for
+// full-row reads turso's planner otherwise walks the primary key, i.e. every
+// key in the bucket, filtering by folder.
+const FIRST_FOLDER_PAGE: &str = "SELECT path FROM directory_tree
+     INDEXED BY idx_directory_tree_parent_path
+     WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3
+     ORDER BY path
+     LIMIT ?4";
+const NEXT_FOLDER_PAGE: &str = "SELECT path FROM directory_tree
+     INDEXED BY idx_directory_tree_parent_path
+     WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3 AND path > ?4
+     ORDER BY path
+     LIMIT ?5";
+const FIRST_FILE_PAGE: &str =
+    "SELECT bucket, account_id, key, parent_path, name, size, last_modified, synced_at
+     FROM cached_files INDEXED BY idx_cached_files_parent_key
+     WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3
+     ORDER BY key
+     LIMIT ?4";
+const NEXT_FILE_PAGE: &str =
+    "SELECT bucket, account_id, key, parent_path, name, size, last_modified, synced_at
+     FROM cached_files INDEXED BY idx_cached_files_parent_key
+     WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3 AND key > ?4
+     ORDER BY key
+     LIMIT ?5";
+
+async fn folder_has_cached_files(
     conn: &turso::Connection,
     bucket: &str,
     account_id: &str,
     prefix: &str,
-    cursor: Option<&CachedFile>,
 ) -> DbResult<bool> {
-    let mut rows = if let Some(cursor) = cursor {
-        conn.query(
+    let mut rows = conn
+        .query(
             "SELECT 1 FROM cached_files
              WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3
-               AND (name > ?4 OR (name = ?4 AND key > ?5))
-             ORDER BY name, key
-             LIMIT 1",
-            turso::params![
-                bucket,
-                account_id,
-                prefix,
-                cursor.name.as_str(),
-                cursor.key.as_str()
-            ],
-        )
-        .await?
-    } else {
-        conn.query(
-            "SELECT 1 FROM cached_files
-             WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3
-             ORDER BY name, key
              LIMIT 1",
             turso::params![bucket, account_id, prefix],
         )
-        .await?
-    };
+        .await?;
     Ok(rows.next().await?.is_some())
 }
 
@@ -1305,19 +1317,13 @@ pub(crate) async fn cached_folder_page_on(
         };
         let mut rows = if let Some(path) = folder_after {
             conn.query(
-                "SELECT path FROM directory_tree
-                 WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3 AND path > ?4
-                 ORDER BY path
-                 LIMIT ?5",
+                NEXT_FOLDER_PAGE,
                 turso::params![bucket, account_id, prefix, path, limit as i64],
             )
             .await?
         } else {
             conn.query(
-                "SELECT path FROM directory_tree
-                 WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3
-                 ORDER BY path
-                 LIMIT ?4",
+                FIRST_FOLDER_PAGE,
                 turso::params![bucket, account_id, prefix, limit as i64],
             )
             .await?
@@ -1340,7 +1346,7 @@ pub(crate) async fn cached_folder_page_on(
             });
         }
         if folders.len() == page_size {
-            if has_cached_file_after(conn, bucket, account_id, prefix, None).await? {
+            if folder_has_cached_files(conn, bucket, account_id, prefix).await? {
                 next_cursor = folders
                     .last()
                     .map(|path| {
@@ -1366,36 +1372,20 @@ pub(crate) async fn cached_folder_page_on(
     }
     let file_after = match &cursor {
         Some(CachePageCursor {
-            pos: CachePageCursorPosition::File { name, key },
+            pos: CachePageCursorPosition::File { key },
             ..
-        }) => Some((name.as_str(), key.as_str())),
+        }) => Some(key.as_str()),
         _ => None,
     };
-    let mut rows = if let Some((name, key)) = file_after {
+    let mut rows = if let Some(key) = file_after {
         conn.query(
-            "SELECT bucket, account_id, key, parent_path, name, size, last_modified, synced_at
-             FROM cached_files
-             WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3
-               AND (name > ?4 OR (name = ?4 AND key > ?5))
-             ORDER BY name, key
-             LIMIT ?6",
-            turso::params![
-                bucket,
-                account_id,
-                prefix,
-                name,
-                key,
-                (remaining + 1) as i64
-            ],
+            NEXT_FILE_PAGE,
+            turso::params![bucket, account_id, prefix, key, (remaining + 1) as i64],
         )
         .await?
     } else {
         conn.query(
-            "SELECT bucket, account_id, key, parent_path, name, size, last_modified, synced_at
-             FROM cached_files
-             WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3
-             ORDER BY name, key
-             LIMIT ?4",
+            FIRST_FILE_PAGE,
             turso::params![bucket, account_id, prefix, (remaining + 1) as i64],
         )
         .await?
@@ -1403,24 +1393,14 @@ pub(crate) async fn cached_folder_page_on(
     while let Some(row) = rows.next().await? {
         files.push(cached_file_from_row(&row)?);
     }
+    // One row past the page proves there is another; fewer means the folder
+    // ended within this read.
     if files.len() > remaining {
         files.truncate(remaining);
         next_cursor = files
             .last()
             .map(|file| CachePageCursor::file(file, bucket, account_id, prefix, snapshot.clone()))
             .transpose()?;
-    } else if files.len() == remaining {
-        if let Some(last_file) = files.last() {
-            if has_cached_file_after(conn, bucket, account_id, prefix, Some(last_file)).await? {
-                next_cursor = Some(CachePageCursor::file(
-                    last_file,
-                    bucket,
-                    account_id,
-                    prefix,
-                    snapshot.clone(),
-                )?);
-            }
-        }
     }
     Ok(CachedFolderPage {
         files,
@@ -2279,6 +2259,47 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         assert_eq!(row.get::<i64>(0).unwrap(), 0);
         assert_eq!(row.get::<i64>(1).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn folder_pages_read_one_index_range_without_sorting() {
+        let (_db, conn) = fixture().await;
+        let params = |after: Option<&str>| {
+            let mut params: Vec<turso::Value> = ["bucket", "account", "dir/"]
+                .into_iter()
+                .chain(after)
+                .map(|value| turso::Value::Text(value.into()))
+                .collect();
+            params.push(turso::Value::Integer(1001));
+            params
+        };
+        for (sql, index, cursor) in [
+            (FIRST_FILE_PAGE, "idx_cached_files_parent_key", None),
+            (NEXT_FILE_PAGE, "idx_cached_files_parent_key", Some("dir/m")),
+            (FIRST_FOLDER_PAGE, "idx_directory_tree_parent_path", None),
+            (
+                NEXT_FOLDER_PAGE,
+                "idx_directory_tree_parent_path",
+                Some("dir/m"),
+            ),
+        ] {
+            let mut rows = conn
+                .query(&format!("EXPLAIN QUERY PLAN {sql}"), params(cursor))
+                .await
+                .unwrap();
+            let mut plan = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                plan.push(row.get::<String>(3).unwrap());
+            }
+            assert!(
+                plan.iter().any(|step| step.contains(index)),
+                "{sql}\n{plan:?}"
+            );
+            assert!(
+                !plan.iter().any(|step| step.contains("ORDER BY")),
+                "{sql}\n{plan:?}"
+            );
+        }
     }
 
     #[tokio::test]
