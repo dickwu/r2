@@ -299,9 +299,7 @@ async fn replay_write(root: &Path, intent_path: &Path) -> std::io::Result<StageR
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(std::io::Error::other("Invalid stage data file"));
     }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .read(true)
+    let mut file = OpenOptions::from(stage_commit::sync_open_options())
         .open(&intent.state.path)
         .await?;
     match intent.change {
@@ -341,6 +339,9 @@ pub async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io:
     sync_parent(path).await
 }
 
+/// Makes the directory entry for `path` durable. A no-op on Windows: NTFS
+/// journals directory changes itself, and std cannot open a directory
+/// handle there to flush it.
 pub async fn sync_parent(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
@@ -662,7 +663,9 @@ async fn copy_file_native_with_lease(
     tokio::task::spawn_blocking(move || {
         let result: std::io::Result<()> = (|| {
             std::fs::copy(&source, &destination)?;
-            std::fs::File::open(&destination)?.sync_all()?;
+            stage_commit::sync_open_options()
+                .open(&destination)?
+                .sync_all()?;
             Ok(())
         })();
         drop(lease);
@@ -719,9 +722,7 @@ impl Stage {
     }
 
     pub async fn restore(record: StageRecovery) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
+        let file = OpenOptions::from(stage_commit::sync_open_options())
             .open(&record.path)
             .await?;
         if file.metadata().await?.len() != record.size {
@@ -879,9 +880,7 @@ impl Stage {
         // An unacknowledged record may have been dropped as a torn tail or by
         // a rewrite, so recount what this stage really owns in the WAL.
         self.refresh_wal_lease().await;
-        self.file = OpenOptions::new()
-            .read(true)
-            .write(true)
+        self.file = OpenOptions::from(stage_commit::sync_open_options())
             .open(&self.path)
             .await?;
         self.needs_replay = false;

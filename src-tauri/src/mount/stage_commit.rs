@@ -81,6 +81,22 @@ pub async fn commit(paths: Vec<PathBuf>) -> std::io::Result<()> {
     coordinator().commit(paths).await
 }
 
+/// How every existing file that is about to be fsynced gets opened: the WAL,
+/// data files, upload snapshots, recovery exports.
+///
+/// `File::sync_all` is `FlushFileBuffers` on Windows, which fails with access
+/// denied on a handle without write access, so these files are opened
+/// read-write on every platform. Unix ignores the access mode for fsync, so
+/// behaviour there is unchanged. It never creates or truncates; files created
+/// for writing already hold a writable handle. Directories are not opened
+/// here: their fsync (`sync_parent`) is Unix-only and a no-op on Windows,
+/// where NTFS journals its own metadata and std cannot open a directory.
+pub fn sync_open_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    options
+}
+
 pub fn record_file_sync_bytes(bytes: u64) {
     SYNC_FILES.fetch_add(1, Ordering::Relaxed);
     SYNC_BYTES.fetch_add(bytes, Ordering::Relaxed);
@@ -213,13 +229,14 @@ fn sync_or_poison(path: &Path) -> std::io::Result<()> {
 
 fn sync_file_blocking(path: &Path) -> std::io::Result<()> {
     injected_sync_failure(path)?;
-    let file = std::fs::File::open(path)?;
+    let file = sync_open_options().open(path)?;
     let bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
     file.sync_all()?;
     record_file_sync_bytes(bytes);
     Ok(())
 }
 
+/// Directory fsync; a no-op on Windows (see `sync_open_options`).
 fn sync_parent_blocking(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
@@ -259,6 +276,31 @@ mod tests {
         }
         assert_eq!(coordinator.workers_started.load(Ordering::Relaxed), 1);
         tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[test]
+    fn files_opened_for_sync_carry_write_access_and_are_never_created() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-sync-handle-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("wal");
+        std::fs::write(&path, b"record").unwrap();
+        // FlushFileBuffers — sync_all on Windows — refuses a handle without
+        // write access. Changing the length needs that access on every OS,
+        // so a handle that can do it is one Windows will flush.
+        let file = sync_open_options().open(&path).unwrap();
+        file.set_len(6).unwrap();
+        file.sync_all().unwrap();
+        assert!(
+            std::fs::File::open(&path).unwrap().set_len(6).is_err(),
+            "a plain read-only open is the handle Windows cannot flush"
+        );
+        assert!(sync_open_options().open(root.join("missing")).is_err());
+        assert!(!root.join("missing").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

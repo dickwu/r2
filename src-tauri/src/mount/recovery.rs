@@ -184,7 +184,8 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), String> {
             copy_directory(&entry.path(), &target)?;
         } else if kind.is_file() {
             std::fs::copy(entry.path(), &target).map_err(|e| e.to_string())?;
-            std::fs::File::open(&target)
+            super::stage_commit::sync_open_options()
+                .open(&target)
                 .and_then(|file| file.sync_all())
                 .map_err(|e| e.to_string())?;
         } else {

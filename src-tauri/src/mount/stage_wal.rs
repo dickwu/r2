@@ -302,7 +302,10 @@ async fn rewrite_after_failed_sync(path: &Path) -> std::io::Result<()> {
         .collect();
     for name in names {
         let data = parent.join(name);
-        match OpenOptions::new().read(true).write(true).open(&data).await {
+        match OpenOptions::from(stage_commit::sync_open_options())
+            .open(&data)
+            .await
+        {
             Ok(file) => {
                 stage_commit::injected_sync_failure(&data)?;
                 file.sync_all().await?;
@@ -487,7 +490,10 @@ pub async fn repair_tail(path: &Path) -> std::io::Result<()> {
 
 async fn repair_tail_and_next_lsn(path: &Path) -> std::io::Result<u64> {
     let highwater = read_highwater(path).await?;
-    let mut file = match OpenOptions::new().read(true).write(true).open(path).await {
+    let mut file = match OpenOptions::from(stage_commit::sync_open_options())
+        .open(path)
+        .await
+    {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(highwater.unwrap_or(1)),
         Err(error) => return Err(error),
@@ -676,9 +682,7 @@ async fn replay_bucket(
     {
         return Err(Error::other("injected replay failure"));
     }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
+    let mut file = OpenOptions::from(stage_commit::sync_open_options())
         .open(data_path)
         .await?;
     for record in &records {
@@ -861,9 +865,7 @@ fn merge_summary(
 }
 
 async fn apply_record(data_path: &Path, record: &WalRecord) -> std::io::Result<()> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
+    let mut file = OpenOptions::from(stage_commit::sync_open_options())
         .open(data_path)
         .await?;
     apply_record_to_open_file(&mut file, record).await?;
