@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
 
 use crate::providers::resources::DiskLease;
 
@@ -223,6 +223,111 @@ fn append_states() -> &'static Mutex<HashMap<PathBuf, AppendState>> {
     APPEND_STATES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// One per WAL. An append holds the read side from before it writes until the
+/// commit that acknowledges it has returned; a rewrite holds the write side.
+static APPEND_GATES: OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<RwLock<()>>>>> =
+    OnceLock::new();
+
+/// Admission for one WAL append; drop it once the append's commit returned.
+pub struct WalAppendGuard {
+    _gate: OwnedRwLockReadGuard<()>,
+}
+
+/// Admits one append to the WAL at `path`.
+///
+/// After a failed fsync the commit worker refuses every acknowledgement of
+/// this WAL. The first append to arrive then rewrites it (see
+/// `rewrite_after_failed_sync`) while holding the gate exclusively, so no
+/// record written to the old file can be acknowledged by an fsync of the new
+/// one. Until a rewrite succeeds every append is refused with the error.
+pub async fn begin_append(path: &Path) -> std::io::Result<WalAppendGuard> {
+    let gate = APPEND_GATES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(path.to_path_buf())
+        .or_default()
+        .clone();
+    loop {
+        let admitted = gate.clone().read_owned().await;
+        let Some(failure) = stage_commit::poisoned(path) else {
+            return Ok(WalAppendGuard { _gate: admitted });
+        };
+        drop(admitted);
+        let _exclusive = gate.clone().write_owned().await;
+        if stage_commit::poisoned(path).is_some() {
+            rewrite_after_failed_sync(path).await.map_err(|error| {
+                Error::other(format!(
+                    "staging WAL fsync failed ({failure}) and rewriting it failed: {error}"
+                ))
+            })?;
+        }
+    }
+}
+
+/// Makes a WAL whose fsync failed trustworthy again: its valid records go to
+/// a new file, which is fsynced, renamed over the old one and made durable
+/// with a directory fsync; every data file with records in it is fsynced
+/// again. Only then does the commit worker acknowledge this WAL again.
+async fn rewrite_after_failed_sync(path: &Path) -> std::io::Result<()> {
+    let mut states = append_states().lock().await;
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    #[cfg(test)]
+    note_wal_read(path);
+    let decoded = decode_records(&bytes);
+    decoded.refuse_damage()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "WAL path has no parent"))?;
+    if !bytes.is_empty() {
+        let temporary = path.with_extension("wal.tmp");
+        let mut output = File::create(&temporary).await?;
+        output.write_all(&bytes[..decoded.valid_len]).await?;
+        output.flush().await?;
+        stage_commit::injected_sync_failure(&temporary)?;
+        output.sync_all().await?;
+        stage_commit::record_file_sync_bytes(decoded.valid_len as u64);
+        drop(output);
+        tokio::fs::rename(&temporary, path).await?;
+    }
+    sync_parent(path).await?;
+    let names: std::collections::BTreeSet<&str> = decoded
+        .records
+        .iter()
+        .map(|record| record.data_name.as_str())
+        .collect();
+    for name in names {
+        let data = parent.join(name);
+        match OpenOptions::new().read(true).write(true).open(&data).await {
+            Ok(file) => {
+                stage_commit::injected_sync_failure(&data)?;
+                file.sync_all().await?;
+                stage_commit::record_file_sync_bytes(file.metadata().await?.len());
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let next_lsn = decoded
+        .records
+        .iter()
+        .map(|record| record.lsn.saturating_add(1))
+        .max()
+        .unwrap_or(1);
+    let state = states.entry(path.to_path_buf()).or_insert(AppendState {
+        next_lsn,
+        tail_valid: true,
+    });
+    state.next_lsn = state.next_lsn.max(next_lsn);
+    state.tail_valid = true;
+    stage_commit::clear_poison(path);
+    Ok(())
+}
+
 /// What a process restart does to the in-memory append state; tests that
 /// damage a WAL on disk call it before the next append, as a restart would.
 #[cfg(test)]
@@ -397,9 +502,18 @@ async fn repair_tail_and_next_lsn(path: &Path) -> std::io::Result<u64> {
     decoded.refuse_damage()?;
     if decoded.tail == WalTail::Torn {
         file.set_len(decoded.valid_len as u64).await?;
-        file.sync_all().await?;
-        stage_commit::record_file_sync_bytes(decoded.valid_len as u64);
-        sync_parent(path).await?;
+        let synced = async {
+            file.sync_all().await?;
+            stage_commit::record_file_sync_bytes(decoded.valid_len as u64);
+            sync_parent(path).await
+        }
+        .await;
+        if let Err(error) = synced {
+            // The cut may not be durable: after power loss the dead tail could
+            // come back in front of records appended behind it.
+            stage_commit::poison(path, &error);
+            return Err(error);
+        }
     }
     Ok(highwater.unwrap_or(1).max(
         decoded
@@ -642,7 +756,7 @@ pub async fn checkpoint(data_path: &Path, checkpoint_lsn: u64) -> std::io::Resul
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        sync_parent(&path).await?;
+        sync_replaced_entry(&path).await?;
         states.insert(
             path,
             AppendState {
@@ -674,7 +788,7 @@ pub async fn checkpoint(data_path: &Path, checkpoint_lsn: u64) -> std::io::Resul
     drop(output);
     tokio::fs::rename(&temporary, &path).await?;
     drop(compaction_growth);
-    sync_parent(&path).await?;
+    sync_replaced_entry(&path).await?;
     states.insert(
         path,
         AppendState {
@@ -683,6 +797,17 @@ pub async fn checkpoint(data_path: &Path, checkpoint_lsn: u64) -> std::io::Resul
         },
     );
     Ok(())
+}
+
+/// Directory fsync after the WAL's name was pointed at a new file or removed.
+/// If it fails, appends to the new file could vanish with the entry after
+/// power loss, so the WAL refuses acknowledgements until it is rewritten.
+async fn sync_replaced_entry(path: &Path) -> std::io::Result<()> {
+    let result = sync_parent(path).await;
+    if let Err(error) = &result {
+        stage_commit::poison(path, error);
+    }
+    result
 }
 
 fn recovery_from_summary(path: PathBuf, summary: WalSummary) -> StageRecovery {

@@ -849,7 +849,6 @@ impl Stage {
             self.publication_guard = record.publication_guard;
             self.first_dirty_at = record.first_dirty_at;
             self.last_write = Instant::now();
-            self.refresh_wal_lease().await;
         }
         if let Some(summary) = stage_wal::replay_file_after_generation(
             &self.path,
@@ -876,8 +875,10 @@ impl Stage {
             self.first_dirty_at
                 .get_or_insert(summary.record.dirty_at_ms);
             self.last_write = Instant::now();
-            self.refresh_wal_lease().await;
         }
+        // An unacknowledged record may have been dropped as a torn tail or by
+        // a rewrite, so recount what this stage really owns in the WAL.
+        self.refresh_wal_lease().await;
         self.file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -906,6 +907,9 @@ impl Stage {
             DurableChange::Resize { .. } => (stage_wal::WalOp::Truncate, 0, Vec::new()),
         };
         let wal_path = stage_wal::wal_path(&self.path);
+        // Held until this record's commit returns; refused while an earlier
+        // fsync failure of the WAL has not been repaired by a rewrite.
+        let admitted = stage_wal::begin_append(&wal_path).await?;
         if !self.wal_tail_repaired {
             stage_wal::repair_tail(&wal_path).await?;
             self.wal_tail_repaired = true;
@@ -952,6 +956,7 @@ impl Stage {
                 self.wal_lease
                     .resize(self.wal_lease.bytes().saturating_add(wal_record_bytes));
                 stage_commit::commit(vec![wal_path.clone()]).await?;
+                drop(admitted);
                 drop(wal_growth);
                 self.next_lsn = assigned_lsn.saturating_add(1);
                 self.records_since_checkpoint = self.records_since_checkpoint.saturating_add(1);
@@ -1545,6 +1550,60 @@ mod tests {
         assert_eq!(restored.read_at(0, size).await.unwrap(), expected);
         assert_eq!(restored.dirty_gen, 64);
         drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_wal_fsync_refuses_every_ack_until_the_wal_is_rewritten() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-wal-fsync-poison-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let a_path = root.join("a.data");
+        let b_path = root.join("b.data");
+        let wal = stage_wal::wal_path(&a_path);
+        let mut a = Stage::create(a_path.clone(), "a".into(), 1).await.unwrap();
+        let mut b = Stage::create(b_path.clone(), "b".into(), 1).await.unwrap();
+        a.write_durable(0, b"one", 1).await.unwrap();
+        b.write_durable(0, b"bee", 1).await.unwrap();
+
+        stage_commit::fail_next_syncs(&wal, 1);
+        assert!(
+            a.write_durable(3, b"two", 2).await.is_err(),
+            "no reply without a durable fsync"
+        );
+        // A later fsync of the same file may succeed without the pages the
+        // failed one lost, so no stage in the folder is acknowledged until
+        // the WAL is rewritten. Make that rewrite fail once.
+        stage_commit::fail_next_syncs(&wal.with_extension("wal.tmp"), 1);
+        assert!(
+            b.write_durable(3, b"sting", 2).await.is_err(),
+            "a write was acknowledged on a poisoned WAL"
+        );
+        // The rewrite also re-fsyncs every data file with records in the WAL;
+        // until that works too, the poison stays.
+        stage_commit::fail_next_syncs(&a_path, 1);
+        assert!(b.write_durable(3, b"sting", 2).await.is_err());
+        // The rewrite succeeds on the next attempt and writes resume.
+        b.write_durable(3, b"sting", 2).await.unwrap();
+        a.write_durable(6, b"three", 3).await.unwrap();
+        let a_live = a.read_at(0, 64).await.unwrap();
+        let b_live = b.read_at(0, 64).await.unwrap();
+        assert_eq!(&a_live[..3], b"one");
+        assert_eq!(&a_live[6..], b"three");
+        assert_eq!(b_live, b"beesting");
+        drop(a);
+        drop(b);
+        stage_wal::forget_append_state(&wal).await;
+
+        assert!(replay_write_intents(&root).await.unwrap().is_empty());
+        let entries = recovery_entries(&root).await.unwrap();
+        for (key, live) in [("a", a_live), ("b", b_live)] {
+            let entry = entries.iter().find(|entry| entry.key == key).unwrap();
+            let mut restored = Stage::restore(entry.clone()).await.unwrap();
+            assert_eq!(restored.read_at(0, 64).await.unwrap(), live, "{key}");
+        }
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
