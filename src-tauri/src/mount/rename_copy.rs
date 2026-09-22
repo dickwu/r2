@@ -2,7 +2,7 @@
 use super::*;
 use crate::move_transfer::stream::{
     data_timeouts,
-    protocol::{attempt_timeout, fetch_payload, Payload, MAX_ATTEMPTS},
+    protocol::{attempt_timeout, Payload, RelayBudget, MAX_ATTEMPTS},
     shared_http_client, MultipartPlan,
 };
 use crate::providers::{
@@ -468,6 +468,19 @@ impl S3NfsFs {
         let http = shared_http_client().map_err(|_| nfsstat3::NFS3ERR_IO)?;
         let paused = AtomicBool::new(false);
         let length = end - start + 1;
+        // Relay memory before a request slot, as for Move parts (see RelayBudget).
+        let reservation = RelayBudget::shared()
+            .reserve(
+                Some((start, end)),
+                object.size,
+                &self.inner.shutdown,
+                &paused,
+            )
+            .await
+            .map_err(|error| {
+                self.io_failed(format!("GET: {}", error.message));
+                nfsstat3::NFS3ERR_IO
+            })?;
         let scope = self.storage_scope(&object.from);
         let identity = format!(
             "{}:{}:{}:{start}-{end}",
@@ -503,11 +516,9 @@ impl S3NfsFs {
                 })?;
             match tokio::time::timeout(
                 attempt_timeout(length),
-                fetch_payload(
+                reservation.fetch(
                     &http,
                     signed.uri(),
-                    Some((start, end)),
-                    object.size,
                     &object.source_etag,
                     &self.inner.shutdown,
                     &paused,
@@ -515,7 +526,7 @@ impl S3NfsFs {
             )
             .await
             {
-                Ok(Ok(payload)) => Ok(payload),
+                Ok(Ok(fetched)) => Ok(fetched),
                 Ok(Err(error)) if error.retryable => {
                     let mut attempt = AttemptError::transient(error.message);
                     if let Some(wait) = error.retry_after {
@@ -528,6 +539,7 @@ impl S3NfsFs {
             }
         })
         .await
+        .map(|fetched| reservation.into_payload(fetched))
         .map_err(|error| self.map_operation_error("GET", error))
     }
 }

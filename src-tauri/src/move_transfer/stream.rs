@@ -31,7 +31,7 @@ use tauri::{AppHandle, Emitter};
 
 #[path = "relay_protocol.rs"]
 pub(crate) mod protocol;
-use protocol::{attempt_timeout, fetch_payload, interruptible, Payload, MAX_ATTEMPTS, MIB};
+use protocol::{attempt_timeout, interruptible, Payload, RelayBudget, MAX_ATTEMPTS, MIB};
 
 const MULTIPART_THRESHOLD: u64 = 100 * MIB;
 const GIB: u64 = 1024 * MIB;
@@ -148,6 +148,7 @@ async fn record_destination(
 
 #[allow(clippy::too_many_arguments)]
 async fn download_part(
+    budget: &RelayBudget,
     http: &Client,
     source_client: &aws_sdk_s3::Client,
     source_config: &MoveConfig,
@@ -160,6 +161,12 @@ async fn download_part(
     let expected = range
         .map(|(start, end)| end - start + 1)
         .unwrap_or(source.size);
+    // Relay memory first, and only then a request slot (see RelayBudget). The
+    // reservation outlives failed attempts and becomes the payload's.
+    let reservation = budget
+        .reserve(range, source.size, cancelled, paused)
+        .await
+        .map_err(|error| error.message)?;
     let endpoint = source_config.operation_endpoint();
     let scope = format!("{}:{}", endpoint, source_config.bucket());
     let identity = format!(
@@ -179,7 +186,7 @@ async fn download_part(
     )
     .with_pause(paused)
     .with_max_attempts(MAX_ATTEMPTS as u32);
-    execute_operation(&context, || async {
+    let fetched = execute_operation(&context, || async {
         let request = source_client
             .get_object()
             .bucket(source_config.bucket())
@@ -199,19 +206,11 @@ async fn download_part(
         .map_err(|e| AttemptError::permanent(format!("Cannot sign source read: {e}")))?;
         match tokio::time::timeout(
             attempt_timeout(expected),
-            fetch_payload(
-                http,
-                signed.uri(),
-                range,
-                source.size,
-                &source.etag,
-                cancelled,
-                paused,
-            ),
+            reservation.fetch(http, signed.uri(), &source.etag, cancelled, paused),
         )
         .await
         {
-            Ok(Ok(payload)) => Ok(payload),
+            Ok(Ok(fetched)) => Ok(fetched),
             Ok(Err(error)) if error.retryable => {
                 let mut attempt = AttemptError::transient(error.message);
                 if let Some(wait) = error.retry_after {
@@ -226,7 +225,8 @@ async fn download_part(
         }
     })
     .await
-    .map_err(|error| super::planner::operation_error("source read", error))
+    .map_err(|error| super::planner::operation_error("source read", error))?;
+    Ok(reservation.into_payload(fetched))
 }
 
 /// The remote inventory is authoritative for an existing MPU, including parts
@@ -329,6 +329,7 @@ async fn reconcile_parts(
 
 #[allow(clippy::too_many_arguments)]
 async fn transfer_part(
+    budget: &RelayBudget,
     http: &Client,
     source_client: &aws_sdk_s3::Client,
     dest_client: &aws_sdk_s3::Client,
@@ -343,6 +344,7 @@ async fn transfer_part(
     paused: &AtomicBool,
 ) -> Result<(i32, String, u64), String> {
     let payload = download_part(
+        budget,
         http,
         source_client,
         source_config,
@@ -353,6 +355,8 @@ async fn transfer_part(
         paused,
     )
     .await?;
+    // The payload holds relay memory while UploadPart waits for a request slot;
+    // no read waits for memory while holding one, so that wait always ends.
     let endpoint = dest_config.operation_endpoint();
     let dest_scope = scope(dest_config)?;
     let identity = format!("{}:{}:{}", upload_id, part, payload.len);
@@ -714,15 +718,18 @@ async fn stream_multipart(
         .map_err(|e| format!("Cannot persist move metrics: {e}"))?;
     let stopped = AtomicBool::new(false);
     let source = journal.source.clone();
+    let budget = RelayBudget::shared();
     let jobs = stream::iter(pending.into_iter().map(|part| {
         let stopped = &stopped;
         let upload_id = &upload_id;
         let source = &source;
+        let budget = &budget;
         async move {
             if stopped.load(Ordering::SeqCst) {
                 return Ok(None);
             }
             let result = transfer_part(
+                budget,
                 http,
                 source_client,
                 dest_client,
@@ -890,6 +897,7 @@ async fn stream_single_put(
     paused: &AtomicBool,
 ) -> Result<u64, String> {
     let payload = download_part(
+        &RelayBudget::shared(),
         http,
         source_client,
         source_config,
@@ -1268,6 +1276,7 @@ pub(crate) mod tests {
             version_id: Some("version-one".into()),
         };
         let payload = download_part(
+            &RelayBudget::shared(),
             &shared_http_client().unwrap(),
             &config.client().await.unwrap(),
             &config,
@@ -1522,6 +1531,7 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(upload_id, "replacement-upload");
         let (number, etag, size) = transfer_part(
+            &RelayBudget::shared(),
             &shared_http_client().unwrap(),
             &fixture.client,
             &fixture.client,
@@ -1717,6 +1727,7 @@ pub(crate) mod tests {
         let result = tokio::time::timeout(
             Duration::from_secs(36),
             transfer_part(
+                &RelayBudget::shared(),
                 &shared_http_client().unwrap(),
                 &fixture.client,
                 &fixture.client,
@@ -1746,6 +1757,84 @@ pub(crate) mod tests {
             1
         );
     }
+    #[tokio::test]
+    async fn parts_sharing_an_endpoint_take_relay_memory_before_a_request_slot() {
+        let _guard = test_db_guard().await;
+        use crate::test_s3::{serve, Response};
+        const PARTS: i32 = 12;
+        let part_size = 5 * MIB;
+        let total = PARTS as u64 * part_size;
+        let (session, journal) = journal_fixture("shared-endpoint-budget", total).await;
+        let fixture = serve(move |request| async move {
+            if request.method == "PUT" {
+                return Response::empty(200).header("etag", "\"relay-part\"");
+            }
+            let (start, end) = request.headers["range"]
+                .strip_prefix("bytes=")
+                .and_then(|range| range.split_once('-'))
+                .unwrap();
+            let (start, end): (u64, u64) = (start.parse().unwrap(), end.parse().unwrap());
+            Response {
+                status: 206,
+                headers: vec![
+                    ("etag".into(), "\"source\"".into()),
+                    (
+                        "content-range".into(),
+                        format!("bytes {start}-{end}/{total}"),
+                    ),
+                ],
+                body: vec![b'x'; (end - start + 1) as usize],
+            }
+        })
+        .await;
+        // One endpoint serves every GET and UploadPart (eight data slots),
+        // twelve parts are in flight, and relay memory holds only four.
+        let config = fixture_config(&fixture.endpoint);
+        let plan = MultipartPlan::new(&config, total, Some(part_size)).unwrap();
+        let budget = RelayBudget::with_capacity(20, 2);
+        let http = shared_http_client().unwrap();
+        let (cancelled, paused) = (AtomicBool::new(false), AtomicBool::new(false));
+        let transfers = (1..=PARTS).map(|part| {
+            transfer_part(
+                &budget,
+                &http,
+                &fixture.client,
+                &fixture.client,
+                &config,
+                &config,
+                &session,
+                &journal.source,
+                "upload",
+                part,
+                plan,
+                &cancelled,
+                &paused,
+            )
+        });
+        // Each read may take attempt_timeout(5 MiB) = 70 s. Reads that wait
+        // for memory while holding the slots the loaded parts need to upload
+        // stall until that deadline and then fail.
+        let results = tokio::time::timeout(
+            Duration::from_secs(20),
+            futures_util::future::join_all(transfers),
+        )
+        .await
+        .expect("relay parts stalled holding request slots while waiting for relay memory");
+        for (part, result) in (1..=PARTS).zip(results) {
+            assert_eq!(result.unwrap(), (part, "\"relay-part\"".into(), part_size));
+        }
+        let requests = fixture.requests.lock().unwrap();
+        for method in ["GET", "PUT"] {
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.method == method)
+                    .count(),
+                PARTS as usize
+            );
+        }
+    }
+
     #[tokio::test]
     async fn unknown_upload_with_a_destination_receipt_never_restarts_after_disappearance() {
         let _guard = test_db_guard().await;
