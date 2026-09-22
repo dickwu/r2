@@ -471,7 +471,7 @@ async fn relay_rename_upload_part_retries_transient_upload_and_honors_cancel_bef
     assert_eq!(puts.load(Ordering::SeqCst), 2);
 
     let cancelled = filesystem(fixture.client.clone(), "relay-upload-part-cancel");
-    cancelled.stop_accepting_writes();
+    cancelled.abort_storage_operations();
     assert!(cancelled
         .copy_rename_part(&object, "upload", "", false, 1, &plan)
         .await
@@ -3341,5 +3341,78 @@ async fn renames_waiting_behind_a_directory_rename_follow_it_to_its_new_path() {
     assert!(results.iter().all(Result::is_ok), "{results:?}");
     assert_eq!(fs.inode(x).unwrap().key, "D/y");
     assert_eq!(fs.inode(f).unwrap().key, "C/g");
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// Unmount refuses new writes before its final drain, and that drain must
+/// still publish what was acknowledged: a staged file past the single-PUT
+/// limit needs ListParts and UploadPart, which a cancelled request executor
+/// refuses outright, leaving the file staged.
+#[tokio::test]
+async fn a_drain_after_writes_stop_still_publishes_a_multipart_stage() {
+    const SIZE: u64 = stage::MULTIPART_THRESHOLD + 1;
+    let fixture = serve(|request| async move {
+        if request.method == "GET" && request.path.contains("uploadId=resumed") {
+            // Five full parts reached the provider before the unmount began;
+            // the one-byte tail did not.
+            let mut body = String::from("<ListPartsResult><IsTruncated>false</IsTruncated>");
+            for number in 1..=5 {
+                body.push_str(&format!(
+                    "<Part><PartNumber>{number}</PartNumber><ETag>&quot;part-{number}&quot;</ETag><Size>{}</Size></Part>",
+                    stage::PART_SIZE
+                ));
+            }
+            body.push_str("</ListPartsResult>");
+            return Response::xml(200, &body);
+        }
+        if request.method == "PUT" && request.path.contains("partNumber=6") {
+            return Response::empty(200).header("etag", "\"part-6\"");
+        }
+        if request.method == "POST" && request.path.contains("uploadId=resumed") {
+            return Response::xml(
+                200,
+                "<CompleteMultipartUploadResult><ETag>&quot;large&quot;</ETag></CompleteMultipartUploadResult>",
+            );
+        }
+        Response::empty(404)
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "drain-after-stop");
+    let id = intern(&fs, "large").await;
+    fs.setattr(
+        id,
+        sattr3 {
+            size: set_size3::size(SIZE),
+            ..sattr3::default()
+        },
+    )
+    .await
+    .unwrap();
+    let snapshot = fs
+        .stage_guard(id)
+        .await
+        .unwrap()
+        .upload_snapshot()
+        .await
+        .unwrap();
+    let mut journal = snapshot.journal().await.unwrap();
+    journal.upload_id = Some("resumed".into());
+    snapshot.save_journal(&journal).await.unwrap();
+
+    fs.stop_accepting_writes();
+    assert!(
+        matches!(fs.write(id, 0, b"late").await, Err(nfsstat3::NFS3ERR_IO)),
+        "writes stop being accepted"
+    );
+    assert_eq!(fs.drain(1, 1).await, 0, "the staged file must be published");
+    {
+        let requests = fixture.requests.lock().unwrap();
+        assert!(requests
+            .iter()
+            .any(|r| r.method == "PUT" && r.path.contains("partNumber=6")));
+        assert!(requests
+            .iter()
+            .any(|r| r.method == "POST" && r.path.contains("uploadId=resumed")));
+    }
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
 }

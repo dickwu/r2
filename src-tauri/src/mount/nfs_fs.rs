@@ -590,6 +590,9 @@ pub struct FsInner {
     namespace: AsyncRwLock<()>,
     key_lifecycles: std::sync::Mutex<HashMap<String, Weak<KeyLifecycle>>>,
     accepting_writes: AtomicBool,
+    /// Cancel flag of every storage request this mount makes. Set only by a
+    /// forced abort: the unmount drain still has to publish staged files after
+    /// `accepting_writes` is cleared.
     shutdown: AtomicBool,
     directory_generation: AtomicU64,
     directory_cookies: RwLock<HashMap<(fileid3, fileid3), DirectoryCookie>>,
@@ -877,8 +880,17 @@ impl S3NfsFs {
         )
     }
 
+    /// Refuses every new mutation. Storage requests keep running: in-flight
+    /// operations settle and the unmount drain publishes what is staged,
+    /// multipart uploads included.
     pub fn stop_accepting_writes(&self) {
         self.inner.accepting_writes.store(false, Ordering::SeqCst);
+    }
+
+    /// Forced teardown: cancels this mount's in-flight and queued storage
+    /// requests at their next check. Nothing is lost — unpublished content
+    /// stays staged for the next session — but no drain can publish after it.
+    pub fn abort_storage_operations(&self) {
         self.inner.shutdown.store(true, Ordering::SeqCst);
     }
 
@@ -4345,7 +4357,6 @@ impl NFSFileSystem for S3NfsFs {
         to_filename: &filename3,
     ) -> Result<(), nfsstat3> {
         self.ensure_writable()?;
-        self.ensure_writable()?;
         self.dir_inode(from_dirid)?;
         self.dir_inode(to_dirid)?;
         let from_name = self.child_name(from_filename)?;
@@ -4357,6 +4368,10 @@ impl NFSFileSystem for S3NfsFs {
         else {
             return Ok(());
         };
+        // Storage requests outlive `stop_accepting_writes` so the unmount
+        // drain can publish; a rename that waited out its fence past that
+        // point must not start copying.
+        self.ensure_writable()?;
         let is_dir = source.kind == EntryKind::Dir;
         let target_key = child_key(&to_dir_key, &to_name, is_dir);
         let journal_path = self.rename_journal_path(&source.key, &target_key);
