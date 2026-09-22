@@ -41,6 +41,25 @@ fn note_wal_read(path: &Path) {
         .or_default() += 1;
 }
 
+/// Data files whose restore replay fails, so tests can prove a stage that
+/// could not be replayed is quarantined rather than restored with old bytes.
+#[cfg(test)]
+static FAILING_REPLAYS: OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+pub fn fail_replay_of(data_path: &Path, fail: bool) {
+    let mut failing = FAILING_REPLAYS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap();
+    if fail {
+        failing.insert(data_path.to_path_buf());
+    } else {
+        failing.remove(data_path);
+    }
+}
+
 #[cfg(test)]
 pub fn wal_read_count(path: &Path) -> u64 {
     WAL_READS
@@ -134,6 +153,17 @@ impl WalRecoveryIndex {
             record,
             truncated_tail: self.truncated_tail,
         }))
+    }
+
+    /// Every data file with records in the WAL, with the key its newest
+    /// record carries.
+    pub fn stages(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.buckets.iter().filter_map(|(name, bucket)| {
+            bucket
+                .records
+                .last()
+                .map(|record| (name.as_str(), record.key.as_str()))
+        })
     }
 
     pub fn uncheckpointed_bytes_for_after(
@@ -431,10 +461,11 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     for (name, bucket) in wal.buckets {
         let data_path = root.join(&name);
         let manifest_path = data_path.with_extension("stage.json");
+        let error_key = replay_error_key(&data_path);
         let existing = match read_manifest(&manifest_path).await {
             Ok(record) => record,
             Err(error) => {
-                errors.push((manifest_path, error.to_string()));
+                errors.push((error_key, error.to_string()));
                 continue;
             }
         };
@@ -453,19 +484,27 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
                 let recovery = match merge_summary(data_path.clone(), existing, summary) {
                     Ok(recovery) => recovery,
                     Err(error) => {
-                        errors.push((manifest_path, error.to_string()));
+                        errors.push((error_key, error.to_string()));
                         continue;
                     }
                 };
                 if let Err(error) = write_json_atomic(&manifest_path, &recovery).await {
-                    errors.push((manifest_path, error.to_string()));
+                    errors.push((error_key, error.to_string()));
                 }
             }
             Ok(None) => {}
-            Err(error) => errors.push((manifest_path, error.to_string())),
+            Err(error) => errors.push((error_key, error.to_string())),
         }
     }
     Ok(errors)
+}
+
+/// Where a stage's replay error is reported. `restore_stages` looks the error
+/// of every `replay_pending` record up under `<data>.write.json` — the name a
+/// legacy JSON intent for the same data file has — so a WAL replay failure is
+/// reported the same way instead of being dropped.
+pub fn replay_error_key(data_path: &Path) -> PathBuf {
+    data_path.with_extension("write.json")
 }
 
 async fn read_root_wal(root: &Path) -> std::io::Result<RootWal> {
@@ -513,6 +552,15 @@ async fn replay_bucket(
         .collect();
     if records.is_empty() {
         return Ok(None);
+    }
+    #[cfg(test)]
+    if FAILING_REPLAYS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .contains(data_path)
+    {
+        return Err(Error::other("injected replay failure"));
     }
     let mut file = OpenOptions::new()
         .read(true)

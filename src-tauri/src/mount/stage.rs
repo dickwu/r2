@@ -364,7 +364,16 @@ pub async fn replay_write_intents(root: &Path) -> Result<Vec<(PathBuf, String)>,
     while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
         if entry.file_name().to_string_lossy().ends_with(".write.json") {
             if let Err(error) = replay_write(root, &entry.path()).await {
-                errors.push((entry.path(), error.to_string()));
+                let path = entry.path();
+                // A WAL replay error for the same data file uses this key
+                // too; restore keeps one message per key, so keep both.
+                match errors.iter_mut().find(|(existing, _)| *existing == path) {
+                    Some((_, message)) => {
+                        message.push_str("; ");
+                        message.push_str(&error.to_string());
+                    }
+                    None => errors.push((path, error.to_string())),
+                }
             }
         }
     }
@@ -386,6 +395,17 @@ pub fn unreadable_record(path: PathBuf, key: String, error: String) -> StageReco
         checkpoint_lsn: 0,
         first_dirty_at: None,
         wal_bytes: None,
+    }
+}
+
+/// A stage known only from its WAL records, which were not applied. Nothing
+/// about it is claimed beyond its key; restore quarantines it.
+fn pending_replay_record(path: PathBuf, key: String) -> StageRecovery {
+    StageRecovery {
+        dirty: true,
+        state: "replay_pending".into(),
+        error: None,
+        ..unreadable_record(path, key, String::new())
     }
 }
 
@@ -499,25 +519,23 @@ pub async fn recovery_entries(root: &Path) -> Result<Vec<StageRecovery>, String>
             .summary_for_after(&record.path, record.checkpoint_lsn, record.generation)
             .map_err(|e| e.to_string())?
         {
-            if summary.record.generation > record.generation {
-                if record.key != summary.record.key {
-                    entries.push(unreadable_record(
-                        path.clone(),
-                        record.key,
-                        "WAL key does not match durable stage manifest".into(),
-                    ));
-                    continue;
-                }
-                record.size = summary.record.resulting_size;
-                record.mtime_secs = summary.record.mtime_secs;
-                record.generation = summary.record.generation;
-                record.dirty = true;
-                record.checkpoint_lsn = summary.record.lsn;
-                record.wal_bytes = Some(0);
-                if record.first_dirty_at.is_none() {
-                    record.first_dirty_at = Some(summary.record.dirty_at_ms);
-                }
+            if record.key != summary.record.key {
+                entries.push(unreadable_record(
+                    path.clone(),
+                    record.key,
+                    "WAL key does not match durable stage manifest".into(),
+                ));
+                continue;
             }
+            // The WAL holds acknowledged records the data file may not have:
+            // replay folds them into the manifest, so any still here were not
+            // applied. Report the manifest as it is — advancing it would pass
+            // old bytes off as the acknowledged content — and let restore
+            // quarantine it with the replay error.
+            record.state = "replay_pending".into();
+            record.dirty = true;
+            entries.push(record);
+            continue;
         }
         if !record.dirty {
             continue;
@@ -547,6 +565,18 @@ pub async fn recovery_entries(root: &Path) -> Result<Vec<StageRecovery>, String>
                     ));
                 }
             }
+        }
+    }
+    // Acknowledged records whose data file survived without a manifest: a
+    // successful replay would have rebuilt the manifest, so they still wait.
+    let listed: std::collections::HashSet<&PathBuf> = paths.iter().collect();
+    for (name, key) in wal_index.stages() {
+        let data_path = root.join(name);
+        if listed.contains(&data_path)
+            && !listed.contains(&data_path.with_extension("stage.json"))
+            && !listed.contains(&data_path.with_extension("write.json"))
+        {
+            entries.push(pending_replay_record(data_path, key.to_string()));
         }
     }
     entries.extend(pending.into_values());
@@ -723,7 +753,8 @@ impl Stage {
             dirty: record.dirty,
             dirty_gen: record.generation,
             applied_gen: record.generation,
-            // Restore replays the whole folder before any stage is rebuilt.
+            // Restore replays the whole folder before any stage is rebuilt, and
+            // recovery_entries hands over only stages with nothing left to apply.
             needs_replay: false,
             checkpoint_lsn: record.checkpoint_lsn,
             next_lsn: record.checkpoint_lsn.saturating_add(1),
@@ -1245,6 +1276,8 @@ mod tests {
         stage.write_durable(0, b"content", 1).await.unwrap();
         stage.truncate_durable(2, 2).await.unwrap();
         drop(stage);
+        // Restore order, as restore_stages does it: replay, then inventory.
+        replay_write_intents(&root).await.unwrap();
         let records = recovery_entries(&root).await.unwrap();
         let mut restored = Stage::restore(records.into_iter().next().unwrap())
             .await
@@ -1512,6 +1545,177 @@ mod tests {
         assert_eq!(restored.read_at(0, size).await.unwrap(), expected);
         assert_eq!(restored.dirty_gen, 64);
         drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_v0_3_5_folder_with_a_pending_json_intent_upgrades_and_keeps_writing() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-v035-upgrade-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let path = root.join("legacy.data");
+        tokio::fs::write(&path, b"abc").await.unwrap();
+        // v0.3.5 on-disk shapes: no checkpoint_lsn / first_dirty_at, no WAL,
+        // and a crash between the JSON intent and its manifest.
+        let state = |size: u64, generation: u64| {
+            serde_json::json!({
+                "key": "legacy/key", "size": size, "mtime_secs": 1,
+                "generation": generation, "dirty": true, "state": "waiting",
+                "error": null, "path": path, "snapshot": null,
+                "publication_guard": null
+            })
+        };
+        write_json_atomic(&path.with_extension("stage.json"), &state(3, 1))
+            .await
+            .unwrap();
+        write_json_atomic(
+            &path.with_extension("write.json"),
+            &serde_json::json!({
+                "state": state(6, 2),
+                "change": { "Write": { "offset": 3, "data": [100, 101, 102] } }
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            recovery_entries(&root).await.unwrap()[0].state,
+            "replay_pending"
+        );
+        assert!(replay_write_intents(&root).await.unwrap().is_empty());
+        let record = recovery_entries(&root).await.unwrap().remove(0);
+        assert_eq!(record.generation, 2);
+        let mut restored = Stage::restore(record).await.unwrap();
+        assert_eq!(restored.read_at(0, 16).await.unwrap(), b"abcdef");
+        // Post-upgrade writes go to the WAL and stack on the legacy generation.
+        restored.write_durable(6, b"ghi", 2).await.unwrap();
+        assert_eq!(restored.dirty_gen, 3);
+        drop(restored);
+        stage_wal::forget_append_state(&stage_wal::wal_path(&path)).await;
+
+        assert!(replay_write_intents(&root).await.unwrap().is_empty());
+        let record = recovery_entries(&root).await.unwrap().remove(0);
+        assert_eq!(record.generation, 3);
+        let mut restored = Stage::restore(record).await.unwrap();
+        assert_eq!(restored.read_at(0, 16).await.unwrap(), b"abcdefghi");
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stage_whose_replay_fails_is_quarantined_under_its_restore_key() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-replay-failure-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let a_path = root.join("a.data");
+        let b_path = root.join("b.data");
+        let mut a = Stage::create(a_path.clone(), "a".into(), 1).await.unwrap();
+        let mut b = Stage::create(b_path.clone(), "b".into(), 1).await.unwrap();
+        a.write_durable(0, b"old!", 1).await.unwrap();
+        a.checkpoint_durable().await.unwrap();
+        a.write_durable(0, b"new!", 2).await.unwrap();
+        b.write_durable(0, b"bbbb", 1).await.unwrap();
+        drop(a);
+        drop(b);
+        // Crash before the acknowledged overwrite reached a's data file. The
+        // size is unchanged, so no length check can notice the old bytes.
+        tokio::fs::write(&a_path, b"old!").await.unwrap();
+        stage_wal::fail_replay_of(&a_path, true);
+
+        // restore_stages: replay, then quarantine every replay_pending record
+        // with the error found under `<data>.write.json`.
+        let errors: std::collections::HashMap<_, _> = replay_write_intents(&root)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+        let entries = recovery_entries(&root).await.unwrap();
+        let a_entry = entries.iter().find(|entry| entry.key == "a").unwrap();
+        assert_eq!(
+            a_entry.state, "replay_pending",
+            "a stage with unapplied acknowledged records must not be restorable"
+        );
+        assert_eq!(
+            a_entry.generation, 1,
+            "never advanced past unapplied records"
+        );
+        assert_eq!(a_entry.checkpoint_lsn, 1);
+        let keyed = errors.get(&a_entry.path.with_extension("write.json"));
+        assert!(
+            keyed.is_some_and(|error| error.contains("injected replay failure")),
+            "restore_stages must find the replay error: {errors:?}"
+        );
+        let b_entry = entries.iter().find(|entry| entry.key == "b").unwrap();
+        assert!(!["replay_pending", "unreadable"].contains(&b_entry.state.as_str()));
+        let mut b_restored = Stage::restore(b_entry.clone()).await.unwrap();
+        assert_eq!(b_restored.read_at(0, 8).await.unwrap(), b"bbbb");
+        drop(b_restored);
+        assert_eq!(tokio::fs::read(&a_path).await.unwrap(), b"old!");
+
+        // Nothing was checkpointed away: once replay works the write is back.
+        stage_wal::fail_replay_of(&a_path, false);
+        assert!(replay_write_intents(&root).await.unwrap().is_empty());
+        let a_entry = recovery_entries(&root)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.key == "a")
+            .unwrap();
+        let mut a_restored = Stage::restore(a_entry).await.unwrap();
+        assert_eq!(a_restored.read_at(0, 8).await.unwrap(), b"new!");
+        drop(a_restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_manifestless_stage_whose_replay_fails_is_reported_not_dropped() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-manifestless-replay-failure-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        drop(Stage::create(path.clone(), "key".into(), 1).await.unwrap());
+        let wal = stage_wal::wal_path(&path);
+        stage_wal::append_record(
+            &wal,
+            &stage_wal::WalRecord {
+                lsn: 1,
+                generation: 1,
+                op: stage_wal::WalOp::Write,
+                offset: 0,
+                resulting_size: 3,
+                mtime_secs: 1,
+                dirty_at_ms: 1,
+                data_name: stage_wal::data_name(&path).unwrap(),
+                key: "key".into(),
+                payload: b"abc".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+        stage_commit::commit(vec![wal]).await.unwrap();
+        stage_wal::fail_replay_of(&path, true);
+
+        let errors: std::collections::HashMap<_, _> = replay_write_intents(&root)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert!(errors.contains_key(&path.with_extension("write.json")));
+        let entries = recovery_entries(&root).await.unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .expect("acknowledged records without a manifest must be listed");
+        assert_eq!(entry.state, "replay_pending");
+        assert_eq!(entry.key, "key");
+        stage_wal::fail_replay_of(&path, false);
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
