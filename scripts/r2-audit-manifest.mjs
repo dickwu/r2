@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { arch, platform } from 'node:os';
-import { productionSourceFingerprint } from './audit-source.mjs';
+import { isMainModule, productionSourceFingerprint } from './audit-source.mjs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,6 +20,7 @@ const STATUSES = new Set([
   'passed',
   'historical_pass',
   'limited',
+  'historical_limited',
   'prepared_not_executed',
   'not_executed',
   'not_implemented',
@@ -178,10 +179,16 @@ export function classifyGate(gate, root, git = null, sourceFingerprint = null) {
     const mapped = gate.map_status?.[raw] ?? raw;
     status = normalizeStatus(mapped);
   }
+  // A 'limited' result is still real execution evidence, so it is held to
+  // the same current-source/binary provenance requirements as 'passed' — a
+  // stale limited artifact must not silently keep reporting 'limited' with
+  // no explanation of why it is stale.
   const staleReason =
-    status === 'passed' ? provenanceReason(gate, evidence, git, sourceFingerprint) : null;
+    status === 'passed' || status === 'limited'
+      ? provenanceReason(gate, evidence, git, sourceFingerprint)
+      : null;
   if (staleReason) {
-    status = 'historical_pass';
+    status = status === 'limited' ? 'historical_limited' : 'historical_pass';
     reason = staleReason;
   }
   return {
@@ -315,7 +322,8 @@ ${rows}
 
 - passed: requested runtime behavior executed and evidence is bound to the current git tree, production-source fingerprint and app binary hash when required.
 - historical_pass: older evidence passed, but it is not bound to the current git tree/build.
-- limited: real execution happened, but the evidence records a compatibility or safety-retention limit.
+- limited: real execution happened, but the evidence records a compatibility or safety-retention limit, and (when the gate requires it) is bound to the current git tree/build.
+- historical_limited: older evidence recorded a compatibility or safety-retention limit, but it is not bound to the current git tree/build.
 - prepared_not_executed: a harness exists but isolated external inputs were not supplied.
 - not_executed: a defined non-provider runtime gate has no execution evidence yet.
 - not_implemented: no runnable harness is present for the gate.
@@ -351,7 +359,7 @@ async function main() {
   }
 }
 
-if (process.argv[1] === scriptPath) {
+if (isMainModule(process.argv[1], scriptPath)) {
   main().catch((error) => {
     console.error(error?.stack ?? error);
     process.exitCode = 1;

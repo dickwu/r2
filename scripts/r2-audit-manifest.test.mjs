@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { productionSourceFingerprint } from './audit-source.mjs';
 import { classifyGate, createAcceptanceStatus, normalizeStatus } from './r2-audit-manifest.mjs';
+
+const scriptsDir = dirname(fileURLToPath(import.meta.url));
 
 test('normalizes status values and rejects unknown labels', () => {
   assert.equal(normalizeStatus('passed'), 'passed');
@@ -82,6 +85,46 @@ test('downgrades passing evidence that is not bound to the current git tree', as
     );
     assert.equal(gate.status, 'historical_pass');
     assert.match(gate.reason, /not bound to current git/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('downgrades limited evidence that is missing required provenance instead of leaving it unexplained', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'r2-audit-stale-limited-'));
+  try {
+    const auditDir = join(root, 'docs/engineering/r2-audit');
+    await mkdir(auditDir, { recursive: true });
+    await writeFile(
+      join(auditDir, 'real-minio.json'),
+      JSON.stringify({
+        moves: [{ status: 'needs_action' }, { status: 'success' }],
+        nfs: { write_read_unmount: 'passed' },
+      })
+    );
+    const gate = classifyGate(
+      {
+        id: 'minio-native',
+        evidence: 'real-minio.json',
+        required_checks: [
+          { pointer: '/moves/0/status', expect: ['success', 'needs_action'] },
+          { pointer: '/moves/1/status', expect: 'success' },
+          { pointer: '/nfs/write_read_unmount', expect: 'passed' },
+        ],
+        limited_when: [{ pointer: '/moves/0/status', equals: 'needs_action' }],
+        require_current_source: true,
+        source_fingerprint_from: '/source_fingerprint_before/production_source_sha256',
+      },
+      root,
+      { commit: 'current', tree: 'tree' },
+      { production_source_sha256: 'current-source' }
+    );
+    // Before the fix this evidence would classify as 'limited' with reason
+    // left undefined (an empty note); provenance must be checked for
+    // limited results too, and the note must explain why.
+    assert.equal(gate.status, 'historical_limited');
+    assert.ok(gate.reason, 'expected an explicit note, not an empty one');
+    assert.match(gate.reason, /missing production source fingerprint/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -314,5 +357,46 @@ test('passing app gate requires current source fingerprint and binary hash', asy
     assert.equal(classified.status, 'passed');
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('r2-audit-manifest.mjs still runs its CLI entrypoint when invoked through a symlink', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'r2-audit-manifest-symlink-'));
+  try {
+    const symlinkPath = join(tempDir, 'entrypoint.mjs');
+    await symlink(join(scriptsDir, 'r2-audit-manifest.mjs'), symlinkPath);
+    // Before the realpathSync fix, process.argv[1] (the symlink path) never
+    // strictly equals the resolved import.meta.url path, so the "is main"
+    // guard silently no-ops: this prints nothing instead of the status JSON.
+    const output = execFileSync(process.execPath, [symlinkPath, '--json'], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    const parsed = JSON.parse(output);
+    assert.equal(parsed.schema_version, 1);
+    assert.ok(Array.isArray(parsed.gates) && parsed.gates.length > 0);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('audit-source.mjs still runs its CLI entrypoint when invoked through a symlink', async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), 'r2-audit-source-symlink-root-'));
+  const tempDir = await mkdtemp(join(tmpdir(), 'r2-audit-source-symlink-'));
+  try {
+    await mkdir(join(fixtureRoot, 'src/app'), { recursive: true });
+    await writeFile(join(fixtureRoot, 'package.json'), '{"name":"audit-fixture"}\n');
+    await writeFile(join(fixtureRoot, 'src/app/page.tsx'), 'export const value = 1;\n');
+    const symlinkPath = join(tempDir, 'entrypoint.mjs');
+    await symlink(join(scriptsDir, 'audit-source.mjs'), symlinkPath);
+    const output = execFileSync(process.execPath, [symlinkPath, '--json', '--root', fixtureRoot], {
+      encoding: 'utf8',
+    });
+    const parsed = JSON.parse(output);
+    assert.match(parsed.production_source_sha256, /^[a-f0-9]{64}$/);
+    assert.ok(parsed.files.includes('src/app/page.tsx'));
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+    await rm(tempDir, { recursive: true, force: true });
   }
 });
