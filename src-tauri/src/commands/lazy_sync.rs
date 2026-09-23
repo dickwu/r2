@@ -1801,6 +1801,30 @@ mod tests {
     }
 
     #[test]
+    fn a_skipped_folder_and_everything_under_it_bypasses_the_cache() {
+        let skipped = vec!["insurance-check/status/".to_string()];
+
+        assert!(is_under_skipped_prefix("insurance-check/status/", &skipped));
+        assert!(is_under_skipped_prefix(
+            "insurance-check/status/2026/",
+            &skipped
+        ));
+        // The parent listed fine and legitimately knows about the folder.
+        assert!(!is_under_skipped_prefix("insurance-check/", &skipped));
+        // A sibling sharing the name stem must not be diverted. This holds only
+        // because a recorded prefix keeps the trailing slash that
+        // `common_prefixes()` returns — do not normalise it away.
+        assert!(!is_under_skipped_prefix(
+            "insurance-check/status-archive/",
+            &skipped
+        ));
+        assert!(!is_under_skipped_prefix("", &skipped));
+        assert!(!is_under_skipped_prefix("documents/", &skipped));
+        // A sync that skipped nothing never diverts anything.
+        assert!(!is_under_skipped_prefix("insurance-check/status/", &[]));
+    }
+
+    #[test]
     fn endpoint_scope_normalizes_to_physical_endpoint_without_bucket_identity() {
         let mut input = LazyListInput {
             account_id: "ACCOUNT".into(),
