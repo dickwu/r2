@@ -3676,3 +3676,77 @@ async fn finding_the_stages_under_a_prefix_skips_busy_stages_elsewhere() {
     drop(busy);
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
 }
+
+/// With no listing cached, REMOVE and RENAME find their source by an exact
+/// lookup that itself waits behind `mv A C` and then looks under A/. A miss
+/// there says nothing about the directory's new path: both must follow A to
+/// C, as they did when 0.3.5 serialised them with the rename.
+#[tokio::test]
+async fn a_remove_and_a_rename_resolved_during_a_directory_rename_follow_it() {
+    let bucket = ModelBucket::with(&[("A/x", b"x"), ("A/z", b"z")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture =
+        copy_gated_fixture(bucket.clone(), copy_entered.clone(), release_copy.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "resolve-during-directory-rename");
+    let a = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let d = fs
+        .intern_child("D/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+
+    let directory = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"A".as_slice().into(),
+                ROOT_ID,
+                &b"C".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let mut removal = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.remove(a, &b"x".as_slice().into()).await }
+    });
+    let mut moved = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(a, &b"z".as_slice().into(), d, &b"w".as_slice().into())
+                .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut removal)
+            .await
+            .is_err()
+    );
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut moved)
+        .await
+        .is_err());
+    // Two copies for the directory's objects, then one for the file rename.
+    release_copy.add_permits(3);
+    let mut results = Vec::new();
+    for task in [directory, removal, moved] {
+        results.push(
+            tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+
+    assert_eq!(
+        bucket.lock().unwrap().keys(),
+        ["D/w"],
+        "C/x must be removed and C/z moved"
+    );
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}

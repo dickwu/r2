@@ -797,7 +797,9 @@ impl S3NfsFs {
     ) -> Result<(FenceGuard, fileid3, Inode), nfsstat3> {
         for _ in 0..FENCED_KEY_ATTEMPTS {
             let dir_key = normalize_dir_key(&self.dir_inode(dirid)?.key);
-            let (id, target) = self.resolve_child(dirid, &dir_key, name).await?;
+            let Some((id, target)) = self.resolve_child_in(dirid, &dir_key, name).await? else {
+                continue;
+            };
             let fence = self
                 .fence_paths(vec![Self::fence_path_for_inode(&target)])
                 .await;
@@ -810,6 +812,26 @@ impl S3NfsFs {
             }
         }
         Err(nfsstat3::NFS3ERR_JUKEBOX)
+    }
+
+    /// `name` inside `dirid`, resolved without a fence of the caller's, or
+    /// `None` when the directory was renamed during the lookup: the lookup
+    /// may itself wait behind that rename and then look under the old path,
+    /// so its miss says nothing about the new one and the caller retries.
+    async fn resolve_child_in(
+        &self,
+        dirid: fileid3,
+        dir_key: &str,
+        name: &str,
+    ) -> Result<Option<(fileid3, Inode)>, nfsstat3> {
+        match self.resolve_child(dirid, dir_key, name).await {
+            Err(nfsstat3::NFS3ERR_NOENT)
+                if normalize_dir_key(&self.dir_inode(dirid)?.key) != dir_key =>
+            {
+                Ok(None)
+            }
+            result => result.map(Some),
+        }
     }
 
     /// Exclusive fence on the key `name` gets inside `dirid`, built from the
@@ -4544,12 +4566,15 @@ impl S3NfsFs {
             let recovered = self
                 .recovered_rename_source(from_dirid, &from_dir_key, from_name, &to_dir_key, to_name)
                 .await?;
-            let (_, source) = match recovered.clone() {
-                Some(source) => source,
+            let source = match recovered.clone() {
+                Some(source) => Some(source),
                 None => {
-                    self.resolve_child(from_dirid, &from_dir_key, from_name)
+                    self.resolve_child_in(from_dirid, &from_dir_key, from_name)
                         .await?
                 }
+            };
+            let Some((_, source)) = source else {
+                continue;
             };
             let is_dir = source.kind == EntryKind::Dir;
             let target_key = child_key(&to_dir_key, to_name, is_dir);
