@@ -698,6 +698,38 @@ test('gitProvenance records the commit and tree and treats only audit outputs as
   }
 });
 
+test('gitProvenance treats an uncommitted edit to verification.md as dirty but a new evidence file as exempt', async () => {
+  const { gitProvenance } = await import('./audit-source.mjs');
+  const repo = await committedFixtureRepo();
+  try {
+    await writeFile(join(repo, 'docs/engineering/r2-audit/verification.md'), '# Verification\n');
+    git(repo, ['add', '-A']);
+    git(repo, ['commit', '-q', '-m', 'add verification.md']);
+    const clean = gitProvenance(repo);
+    assert.equal(clean.dirty, false);
+    assert.deepEqual(clean.dirty_paths, []);
+
+    // verification.md is a hand-written acceptance document, not a generated
+    // output: an uncommitted edit to it must make the worktree dirty.
+    await writeFile(
+      join(repo, 'docs/engineering/r2-audit/verification.md'),
+      '# Verification\n\nAppended line.\n'
+    );
+    const verificationEdit = gitProvenance(repo);
+    assert.equal(verificationEdit.dirty, true);
+    assert.deepEqual(verificationEdit.dirty_paths, ['docs/engineering/r2-audit/verification.md']);
+    git(repo, ['checkout', '--', 'docs/engineering/r2-audit/verification.md']);
+
+    // An uncommitted evidence file alongside it remains exempt.
+    await writeFile(join(repo, 'docs/engineering/r2-audit/real-rustfs-protocol.json'), '{}\n');
+    const evidenceOnly = gitProvenance(repo);
+    assert.equal(evidenceOnly.dirty, false);
+    assert.deepEqual(evidenceOnly.dirty_paths, []);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
 test('required checks and limited_when compare typed values, never their string forms', async () => {
   const root = await auditRoot('r2-audit-typed-');
   try {
