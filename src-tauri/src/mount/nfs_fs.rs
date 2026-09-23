@@ -2938,6 +2938,34 @@ impl S3NfsFs {
         self.unpublish(id, &mut guard).await;
     }
 
+    /// `discard_stage` for a REMOVE or a truncating CREATE: the client may be
+    /// told the old content is gone only once that is durable, so a stage
+    /// whose removal cannot be recorded stays published and whole, and the
+    /// call fails.
+    async fn discard_stage_durably(&self, id: fileid3) -> Result<(), nfsstat3> {
+        let Some(mut guard) = self.stage_guard(id).await else {
+            return Ok(());
+        };
+        let mut stages = self.inner.stages.lock().await;
+        if let Err(error) = guard.try_remove_files().await {
+            log::error!(
+                "mount: could not durably delete the staged copy of \"{}\": {}",
+                guard.key,
+                error
+            );
+            return Err(nfsstat3::NFS3ERR_IO);
+        }
+        guard.evicted = true;
+        stages.remove(&id);
+        self.remove_stage_health(id);
+        self.inner.quota.lock().await.release(id);
+        drop(stages);
+        if let Some(progress) = self.progress() {
+            progress.removed(id, &guard.key);
+        }
+        Ok(())
+    }
+
     /// Drops a stage whose content is safely in the bucket, so later reads go
     /// back to S3. All four providers are read-after-write consistent, so the
     /// object is readable the moment the upload returns.
@@ -4338,7 +4366,7 @@ impl NFSFileSystem for S3NfsFs {
 
         let id = self.intern_child(&key, dirid, EntryKind::File, 0, now_secs())?;
         // Whatever was staged or cached belonged to the content just replaced.
-        self.discard_stage(id).await;
+        self.discard_stage_durably(id).await?;
         self.inner.read_cache.forget_file(id);
         self.invalidate_dir(dirid);
 
@@ -4426,7 +4454,7 @@ impl NFSFileSystem for S3NfsFs {
                 self.delete_object(&target.key).await?;
                 // Deleting the file is an explicit instruction to throw the
                 // unuploaded content away, cached reads included.
-                self.discard_stage(id).await;
+                self.discard_stage_durably(id).await?;
                 self.inner.read_cache.forget_file(id);
             }
             EntryKind::Dir => {
