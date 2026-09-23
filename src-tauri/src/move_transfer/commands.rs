@@ -327,15 +327,23 @@ pub async fn pause_all_moves(
     Ok(paused_count)
 }
 
-/// Resume all paused moves (set to pending)
-#[tauri::command]
-pub async fn resume_all_moves(
-    app: AppHandle,
-    source_bucket: String,
-    source_account_id: String,
-) -> Result<i64, String> {
+/// A user's resume starts the automatic retries over: the budget a task
+/// spent before it paused or failed does not count against its next run.
+async fn reset_retry_budget(task_id: &str) -> Result<(), String> {
+    db::move_sessions::clear_move_retry(task_id)
+        .await
+        .map_err(|e| format!("Failed to reset the move's retry budget: {}", e))?;
+    db::move_sessions::clear_move_task_retry(task_id)
+        .await
+        .map_err(|e| format!("Failed to reset the move's retry budget: {}", e))
+}
+
+/// The persisted side of resuming every paused move of a source: its retry
+/// budgets, flags and statuses. The queue run and the events are the
+/// command's.
+async fn resume_paused_moves(source_bucket: &str, source_account_id: &str) -> Result<i64, String> {
     // Get paused task IDs before resuming
-    let paused_sessions = db::get_move_sessions_for_source(&source_bucket, &source_account_id)
+    let paused_sessions = db::get_move_sessions_for_source(source_bucket, source_account_id)
         .await
         .map_err(|e| format!("Failed to get sessions: {}", e))?;
 
@@ -354,6 +362,10 @@ pub async fn resume_all_moves(
         }
     }
 
+    for task_id in &paused_ids {
+        reset_retry_budget(task_id).await?;
+    }
+
     // Clear pause flags for tasks that will be resumed
     {
         let registry = MOVE_PAUSE_REGISTRY.lock().unwrap();
@@ -364,9 +376,19 @@ pub async fn resume_all_moves(
         }
     }
 
-    let resumed_count = db::resume_all_moves(&source_bucket, &source_account_id)
+    db::resume_all_moves(source_bucket, source_account_id)
         .await
-        .map_err(|e| format!("Failed to resume moves: {}", e))?;
+        .map_err(|e| format!("Failed to resume moves: {}", e))
+}
+
+/// Resume all paused moves (set to pending)
+#[tauri::command]
+pub async fn resume_all_moves(
+    app: AppHandle,
+    source_bucket: String,
+    source_account_id: String,
+) -> Result<i64, String> {
+    let resumed_count = resume_paused_moves(&source_bucket, &source_account_id).await?;
     let started_count = request_queue_run(&app, &source_bucket, &source_account_id).await;
     info!(
         "resume_all_moves: resumed {} for {}/{} started={}",
@@ -414,18 +436,18 @@ pub async fn pause_move(app: AppHandle, task_id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Resume a paused move (set status to pending)
-#[tauri::command]
-pub async fn resume_move(
-    app: AppHandle,
-    task_id: String,
+/// The persisted side of resuming one move: its scope check, any credentials
+/// handed along, its retry budget, flags and status. The queue run and the
+/// event are the command's.
+async fn resume_move_task(
+    task_id: &str,
     source_config: Option<MoveConfigInput>,
     dest_config: Option<MoveConfigInput>,
-) -> Result<(), String> {
-    if MOVE_CANCEL_REGISTRY.lock().unwrap().contains_key(&task_id) {
+) -> Result<MoveSession, String> {
+    if MOVE_CANCEL_REGISTRY.lock().unwrap().contains_key(task_id) {
         return Err("Move is still stopping; resume after its current request settles".into());
     }
-    let session = db::move_sessions::get_move_session(&task_id)
+    let session = db::move_sessions::get_move_session(task_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or("Move task does not exist")?;
@@ -453,12 +475,25 @@ pub async fn resume_move(
         (None, None) => {}
         _ => return Err("Both source and destination credentials are required to resume".into()),
     }
-    MOVE_PAUSE_REGISTRY.lock().unwrap().remove(&task_id);
-    MOVE_CANCEL_REGISTRY.lock().unwrap().remove(&task_id);
-    db::update_move_status(&task_id, "pending", None)
+    reset_retry_budget(task_id).await?;
+    MOVE_PAUSE_REGISTRY.lock().unwrap().remove(task_id);
+    MOVE_CANCEL_REGISTRY.lock().unwrap().remove(task_id);
+    db::update_move_status(task_id, "pending", None)
         .await
         .map_err(|e| format!("Failed to resume move: {}", e))?;
     info!("resume_move: task {}", task_id);
+    Ok(session)
+}
+
+/// Resume a paused move (set status to pending)
+#[tauri::command]
+pub async fn resume_move(
+    app: AppHandle,
+    task_id: String,
+    source_config: Option<MoveConfigInput>,
+    dest_config: Option<MoveConfigInput>,
+) -> Result<(), String> {
+    let session = resume_move_task(&task_id, source_config, dest_config).await?;
 
     let _ = app.emit(
         "move-status-changed",
@@ -628,4 +663,169 @@ pub async fn clear_all_moves(
     );
 
     Ok(deleted_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::move_sessions::{
+        get_move_journal, get_move_session, save_move_journal, schedule_move_retry,
+        schedule_move_task_retry, MAX_PERSISTED_RETRIES,
+    };
+    use crate::move_transfer::stream::tests::{journal_fixture, test_db_guard};
+
+    /// Spends a journaled task's automatic retry budget the way repeated
+    /// transient failures do, up to the refusal that lands it in `error`.
+    async fn exhaust_journal_retries(task_id: &str) {
+        for _ in 0..MAX_PERSISTED_RETRIES {
+            assert!(schedule_move_retry(task_id, "GET", "transient")
+                .await
+                .unwrap()
+                .is_some());
+        }
+        assert!(schedule_move_retry(task_id, "GET", "transient")
+            .await
+            .unwrap()
+            .is_none());
+        db::update_move_status(task_id, "error", Some("transient: GET: try again"))
+            .await
+            .unwrap();
+    }
+
+    /// The same for a task that failed before it had a journal.
+    async fn exhaust_preflight_retries(task_id: &str) {
+        for _ in 0..MAX_PERSISTED_RETRIES {
+            assert!(schedule_move_task_retry(task_id, "preflight", "transient")
+                .await
+                .unwrap()
+                .is_some());
+        }
+        assert!(schedule_move_task_retry(task_id, "preflight", "transient")
+            .await
+            .unwrap()
+            .is_none());
+        db::update_move_status(task_id, "error", Some("transient: HEAD: try again"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn resuming_a_move_starts_its_retry_budget_over() {
+        let _guard = test_db_guard().await;
+        let (session, mut journal) = journal_fixture("resume-budget", 8).await;
+        journal.stage = "transferring".into();
+        save_move_journal(&journal).await.unwrap();
+        exhaust_journal_retries(&session.id).await;
+
+        let resumed = resume_move_task(&session.id, None, None).await.unwrap();
+        assert_eq!(resumed.id, session.id);
+        assert_eq!(
+            get_move_session(&session.id).await.unwrap().unwrap().status,
+            "pending"
+        );
+        let journal = get_move_journal(&session.id)
+            .await
+            .unwrap()
+            .expect("the recovery journal is kept across a resume");
+        assert_eq!(journal.stage, "transferring");
+        assert_eq!(journal.retry, Default::default());
+        // The next transient failure is scheduled again, from the first delay.
+        assert!(schedule_move_retry(&session.id, "GET", "transient")
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            get_move_journal(&session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .retry
+                .attempt_count,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_a_move_without_a_journal_starts_its_preflight_budget_over() {
+        let _guard = test_db_guard().await;
+        // journal_fixture opens the shared test database; the task under test
+        // never got past preflight, so it has no journal.
+        let (template, _) = journal_fixture("resume-preflight-budget", 8).await;
+        let session = MoveSession {
+            id: format!("{}-fresh", template.id),
+            status: "pending".into(),
+            ..template
+        };
+        db::move_sessions::create_move_session(&session)
+            .await
+            .unwrap();
+        exhaust_preflight_retries(&session.id).await;
+
+        resume_move_task(&session.id, None, None).await.unwrap();
+        assert_eq!(
+            get_move_session(&session.id).await.unwrap().unwrap().status,
+            "pending"
+        );
+        assert!(get_move_journal(&session.id).await.unwrap().is_none());
+        assert!(
+            schedule_move_task_retry(&session.id, "preflight", "transient")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_every_paused_move_starts_each_retry_budget_over() {
+        let _guard = test_db_guard().await;
+        let (template, mut journal) = journal_fixture("resume-all-budget", 8).await;
+        // A source of its own, so no other test's paused tasks are resumed.
+        let source_bucket = "resume-all-bucket";
+        let paused = |suffix: &str| MoveSession {
+            id: format!("{}-{suffix}", template.id),
+            source_bucket: source_bucket.into(),
+            status: "paused".into(),
+            ..template.clone()
+        };
+        let journaled = paused("journaled");
+        let preflight = paused("preflight");
+        for session in [&journaled, &preflight] {
+            db::move_sessions::create_move_session(session)
+                .await
+                .unwrap();
+        }
+        journal.task_id = journaled.id.clone();
+        journal.stage = "transferring".into();
+        save_move_journal(&journal).await.unwrap();
+        exhaust_journal_retries(&journaled.id).await;
+        exhaust_preflight_retries(&preflight.id).await;
+        for session in [&journaled, &preflight] {
+            db::update_move_status(&session.id, "paused", None)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            resume_paused_moves(source_bucket, &template.source_account_id)
+                .await
+                .unwrap(),
+            2
+        );
+        for session in [&journaled, &preflight] {
+            assert_eq!(
+                get_move_session(&session.id).await.unwrap().unwrap().status,
+                "pending"
+            );
+        }
+        assert!(schedule_move_retry(&journaled.id, "GET", "transient")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(
+            schedule_move_task_retry(&preflight.id, "preflight", "transient")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
 }
