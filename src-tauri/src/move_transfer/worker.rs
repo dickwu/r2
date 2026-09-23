@@ -1,6 +1,7 @@
 //! Move transfer worker - download to temp, upload to destination, optional delete
 
 use crate::db::{self, MoveSession};
+use crate::providers::conditional::Condition;
 use log::{debug, error, info, warn};
 use reqwest::Client;
 use std::collections::HashMap;
@@ -98,6 +99,30 @@ fn check_control(cancelled: &AtomicBool, paused: &AtomicBool) -> Result<(), Stri
     Ok(())
 }
 
+/// Only a positive capability answer may take a Move off the relay. A probe
+/// that fails (network, a 403 on the probe prefix, anything) keeps the relay
+/// that 0.3.5 used and is logged; it never fails the Move.
+async fn capability_confirmed(
+    task_id: &str,
+    config: &MoveConfig,
+    conditions: &[Condition],
+) -> bool {
+    for &condition in conditions {
+        match config.supports_condition(condition).await {
+            Ok(true) => {}
+            Ok(false) => return false,
+            Err(error) => {
+                warn!(
+                    "move_capability_probe_failed: {} condition={:?} error={}; relaying",
+                    task_id, condition, error
+                );
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Older builds downgraded a missing completion to transferring. A saved
 /// MPU and our marker identify a candidate only; bytes still must be verified.
 #[allow(clippy::too_many_arguments)]
@@ -144,7 +169,7 @@ async fn move_file_internal(
     session: &MoveSession,
     source_config: &MoveConfig,
     dest_config: &MoveConfig,
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     cancelled: &Arc<AtomicBool>,
     paused: &Arc<AtomicBool>,
 ) -> Result<Option<MoveUploadResult>, String> {
@@ -331,33 +356,27 @@ async fn move_file_internal(
     if plan == TransferPlan::SingleCopy
         && !super::planner::native_aws(dest_config)
         && !matches!(dest_config, MoveConfig::R2(_))
+        && !capability_confirmed(
+            &session.id,
+            dest_config,
+            &[Condition::CopyCreate, Condition::CopySource],
+        )
+        .await
     {
-        use crate::providers::conditional::Condition;
-        if !dest_config
-            .supports_condition(Condition::CopyCreate)
-            .await?
-            || !dest_config
-                .supports_condition(Condition::CopySource)
-                .await?
-        {
-            plan = TransferPlan::Relay;
-        }
+        plan = TransferPlan::Relay;
     }
     if plan == TransferPlan::Relay
         && journal.source.size > super::planner::SINGLE_COPY_LIMIT
         && super::planner::compatible_multipart_copy_candidate(source_config, dest_config)
         && source_scope == dest_scope
+        && capability_confirmed(
+            &session.id,
+            dest_config,
+            &[Condition::PartCopySource, Condition::CompleteCreate],
+        )
+        .await
     {
-        use crate::providers::conditional::Condition;
-        if dest_config
-            .supports_condition(Condition::PartCopySource)
-            .await?
-            && dest_config
-                .supports_condition(Condition::CompleteCreate)
-                .await?
-        {
-            plan = TransferPlan::MultipartCopy;
-        }
+        plan = TransferPlan::MultipartCopy;
     }
     let uploaded_size = match plan {
         TransferPlan::SingleCopy | TransferPlan::MultipartCopy => {
@@ -367,7 +386,7 @@ async fn move_file_internal(
                 dest_config,
                 &source_head,
                 &mut journal,
-                Some(app),
+                app,
                 cancelled,
                 paused,
             )
@@ -641,7 +660,7 @@ pub(crate) async fn spawn_move_task(
         &session,
         &source_config,
         &dest_config,
-        &app,
+        Some(&app),
         &cancelled,
         &paused,
     )
@@ -1065,5 +1084,127 @@ mod recovery_tests {
                 .iter()
                 .all(|request| matches!(request.method.as_str(), "GET" | "HEAD")));
         }
+    }
+
+    #[test]
+    fn a_failed_copy_capability_probe_relays_the_move_instead_of_failing_it() {
+        // Polling a whole unoptimised relay Move, SDK calls included, takes a
+        // little more than a test thread's 2 MiB of stack (the relay code at
+        // e0a6051 needs the same), so it runs on a thread with the 8 MiB a
+        // main thread gets.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(copy_probe_denied_move_relays())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn copy_probe_denied_move_relays() {
+        use super::*;
+        use crate::move_transfer::stream::tests::{fixture_config, journal_fixture, test_db_guard};
+        use crate::test_s3::{serve, Response};
+        let _guard = test_db_guard().await;
+        // journal_fixture also opens the shared test database; the Move under
+        // test is a fresh one without a journal.
+        let (template, _) = journal_fixture("copy-probe-denied", 8).await;
+        let session = MoveSession {
+            id: format!("{}-fresh", template.id),
+            progress: 0,
+            status: "pending".into(),
+            ..template
+        };
+        db::move_sessions::create_move_session(&session)
+            .await
+            .unwrap();
+        let written = Arc::new(AtomicBool::new(false));
+        let fixture = serve({
+            let written = written.clone();
+            let marker = session.id.clone();
+            move |request| {
+                let written = written.clone();
+                let marker = marker.clone();
+                async move {
+                    let path = request.path.split('?').next().unwrap().to_string();
+                    if path.contains("/.r2-operation-checks/") {
+                        // The deployment denies CopyObject on the probe prefix;
+                        // every other probe step behaves like S3.
+                        if request.headers.contains_key("x-amz-copy-source") {
+                            return Response::xml(
+                                403,
+                                "<Error><Code>AccessDenied</Code><Message>Copy denied</Message></Error>",
+                            );
+                        }
+                        return match request.method.as_str() {
+                            "PUT" if request.headers.contains_key("if-none-match") => {
+                                Response::xml(
+                                    412,
+                                    "<Error><Code>PreconditionFailed</Code><Message>exists</Message></Error>",
+                                )
+                            }
+                            "PUT" => Response::empty(200).header("etag", "\"probe\""),
+                            "HEAD" => Response::empty(200)
+                                .header("etag", "\"probe\"")
+                                .header("content-length", 8),
+                            _ => Response::empty(204),
+                        };
+                    }
+                    if path.ends_with("/source") {
+                        return Response::xml(200, "original").header("etag", "\"source\"");
+                    }
+                    if request.method == "PUT" {
+                        written.store(true, Ordering::SeqCst);
+                        return Response::empty(200).header("etag", "\"destination\"");
+                    }
+                    if written.load(Ordering::SeqCst) {
+                        Response::empty(200)
+                            .header("etag", "\"destination\"")
+                            .header("content-length", 8)
+                            .header("x-amz-meta-r2-move-task", marker)
+                    } else {
+                        Response::empty(404)
+                    }
+                }
+            }
+        })
+        .await;
+        let config = fixture_config(&fixture.endpoint);
+        let moved = move_file_internal(
+            &shared_http_client().unwrap(),
+            &session,
+            &config,
+            &config,
+            None,
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap()
+        .expect("the move copies its source");
+        assert_eq!(moved.uploaded_size, 8);
+        let journal = get_move_journal(&session.id).await.unwrap().unwrap();
+        assert_eq!(journal.stage, "copied");
+        assert_eq!(journal.destination.unwrap().etag, "\"destination\"");
+        let requests = fixture.requests.lock().unwrap();
+        let relayed: Vec<_> = requests
+            .iter()
+            .filter(|request| request.method == "PUT" && request.path.contains("/destination"))
+            .collect();
+        assert_eq!(relayed.len(), 1);
+        assert_eq!(relayed[0].body, b"original");
+        assert_eq!(
+            relayed[0].headers.get("if-none-match").map(String::as_str),
+            Some("*")
+        );
+        assert!(!requests.iter().any(|request| {
+            request.headers.contains_key("x-amz-copy-source")
+                && !request.path.contains("/.r2-operation-checks/")
+        }));
     }
 }

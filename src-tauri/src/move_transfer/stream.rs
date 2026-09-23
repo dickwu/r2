@@ -633,7 +633,7 @@ async fn stream_multipart(
     source_head: &HeadObjectOutput,
     session: &MoveSession,
     journal: &mut MoveJournal,
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     cancelled: &AtomicBool,
     paused: &AtomicBool,
 ) -> Result<u64, String> {
@@ -769,17 +769,19 @@ async fn stream_multipart(
                 );
                 uploaded += size;
                 let percent = ((uploaded as f64 / total as f64) * 100.0).floor().min(99.0) as u32;
-                let _ = app.emit(
-                    "move-progress",
-                    MoveProgress {
-                        task_id: session.id.clone(),
-                        phase: "uploading".into(),
-                        percent,
-                        transferred_bytes: uploaded,
-                        total_bytes: total,
-                        speed: speed.sample(uploaded),
-                    },
-                );
+                if let Some(app) = app {
+                    let _ = app.emit(
+                        "move-progress",
+                        MoveProgress {
+                            task_id: session.id.clone(),
+                            phase: "uploading".into(),
+                            percent,
+                            transferred_bytes: uploaded,
+                            total_bytes: total,
+                            speed: speed.sample(uploaded),
+                        },
+                    );
+                }
                 let _ = db::update_move_progress(&session.id, percent as i64).await;
             }
             Ok(None) => {}
@@ -967,7 +969,7 @@ pub(crate) async fn stream_transfer_without_temp(
     session: &MoveSession,
     source_config: &MoveConfig,
     dest_config: &MoveConfig,
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     cancelled: &Arc<AtomicBool>,
     paused: &Arc<AtomicBool>,
 ) -> Result<u64, String> {
@@ -1001,7 +1003,9 @@ pub(crate) async fn stream_transfer_without_temp(
     if !interruptible(cancelled, paused, dest_config.supports_condition(condition)).await?? {
         return Err("needs_action: This endpoint did not enforce conditional destination creation; the source and destination were retained".into());
     }
-    update_move_status(app, &session.id, "uploading", None).await;
+    if let Some(app) = app {
+        update_move_status(app, &session.id, "uploading", None).await;
+    }
     journal
         .metrics
         .copy_started_at_ms
