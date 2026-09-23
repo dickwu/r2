@@ -15,9 +15,13 @@ use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
-const DATA_LIMIT: usize = 8;
+pub(crate) const DATA_LIMIT: usize = 8;
 const CONTROL_LIMIT: usize = 4;
 const CONTROL_POLL: Duration = Duration::from_millis(10);
+/// Longest wait between attempts spent inside an operation (as in v0.3.5).
+/// A longer Retry-After is handed to the durable task scheduler instead of
+/// holding the worker and whatever it has reserved.
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug)]
 pub enum OperationKind {
@@ -441,17 +445,15 @@ where
                 let jitter = u64::from(chrono::Utc::now().timestamp_subsec_nanos())
                     % cap_ms.saturating_add(1);
                 let wait = error.retry_after.max(Duration::from_millis(jitter));
-                let backoff = PhaseTimer::new(&BACKOFF_US, None);
-                if wait >= context.deadline.saturating_duration_since(Instant::now()) {
-                    let result = bounded(context, std::future::pending::<()>()).await;
-                    return match result {
-                        Err(OperationError::Deadline { .. }) => {
-                            Err(OperationError::Deadline { last: Some(error) })
-                        }
-                        Err(other) => Err(other),
-                        Ok(()) => unreachable!("pending future cannot resolve"),
-                    };
+                // A wait past the deadline cannot end in another attempt, and
+                // a long one must not hold the worker. Hand both back now:
+                // long waits belong to the durable task scheduler.
+                if wait > MAX_RETRY_WAIT
+                    || wait >= context.deadline.saturating_duration_since(Instant::now())
+                {
+                    return Err(OperationError::Deadline { last: Some(error) });
                 }
+                let backoff = PhaseTimer::new(&BACKOFF_US, None);
                 bounded(context, tokio::time::sleep(wait)).await?;
                 drop(backoff);
                 context.check()?;
@@ -606,6 +608,68 @@ mod tests {
         .await;
         assert!(matches!(result, Err(OperationError::Deadline { .. })));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_wait_beyond_the_deadline_returns_at_once_with_the_last_error() {
+        let cancelled = AtomicBool::new(false);
+        let ctx = context("retry-after-past-deadline", &cancelled);
+        let calls = AtomicUsize::new(0);
+        let start = Instant::now();
+        let result = execute::<(), _, _>(&ctx, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(AttemptError::transient("SlowDown").with_retry_after(Duration::from_secs(60)))
+        })
+        .await;
+        // The durable task scheduler owns a wait this long; the worker must
+        // not be held until the 30 s deadline first.
+        assert!(start.elapsed() < Duration::from_secs(1));
+        match result {
+            Err(OperationError::Deadline { last: Some(error) }) => {
+                assert_eq!(error.message, "SlowDown");
+                assert_eq!(error.retry_after, Duration::from_secs(60));
+            }
+            other => panic!("expected a deadline carrying the last attempt, got {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_waits_over_thirty_seconds_go_to_the_task_scheduler() {
+        let cancelled = AtomicBool::new(false);
+        let mut ctx = context("retry-after-cap", &cancelled);
+        ctx.deadline = Instant::now() + Duration::from_secs(300);
+        let calls = AtomicUsize::new(0);
+        let start = Instant::now();
+        let result = execute::<(), _, _>(&ctx, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(AttemptError::transient("SlowDown").with_retry_after(Duration::from_secs(60)))
+        })
+        .await;
+        // v0.3.5 refused any wait over 30 s: a hidden long sleep would hold
+        // the worker and its relay memory; the durable retry does not.
+        assert!(start.elapsed() < Duration::from_secs(1));
+        match result {
+            Err(OperationError::Deadline { last: Some(error) }) => {
+                assert_eq!(error.retry_after, Duration::from_secs(60));
+            }
+            other => panic!("expected a deadline carrying the last attempt, got {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let calls = AtomicUsize::new(0);
+        let start = Instant::now();
+        execute(&ctx, || async {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(AttemptError::transient("SlowDown").with_retry_after(Duration::from_secs(5)))
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(5));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test(start_paused = true)]
