@@ -98,21 +98,44 @@ jobs:
         id: rust
         shell: pwsh
         run: |
-          # The test binaries load the choco ffmpeg/sqlite DLLs they link
-          # against through PATH. The SDK step pins Path through GITHUB_ENV
-          # from a snapshot taken before choco ran, which shadows the
-          # GITHUB_PATH entries of the install step, so older same-named DLLs
-          # on the image win and the loader stops with 0xc0000139. Put the
-          # linked copies first here, where the tests run.
-          $env:Path = "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin;C:\ProgramData\chocolatey\lib\SQLite\tools;$env:Path"
           cargo test --manifest-path src-tauri/Cargo.toml --workspace --no-run 2>&1 | Tee-Object -FilePath windows-rust-build.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # Name the DLLs the test binary needs and the copies PATH resolves,
-          # so a loader failure identifies its culprit.
-          Get-ChildItem "$env:CARGO_TARGET_DIR\debug\deps\r2_lib-*.exe" | ForEach-Object { dumpbin /nologo /dependents $_.FullName }
-          foreach ($dll in 'sqlite3.dll', 'avcodec-*.dll', 'avformat-*.dll', 'avutil-*.dll', 'swscale-*.dll', 'swresample-*.dll', 'avfilter-*.dll', 'avdevice-*.dll') {
-            "where $dll"; where.exe $dll
+          # A test binary that cannot load stops with 0xc0000139 before any
+          # test runs. Name the culprit: for every DLL it imports from, the
+          # copy the loader picks (System32 before PATH) and the imported
+          # functions that copy does not export.
+          function Show-MissingImports([string] $exe) {
+            $imports = @{}
+            $dll = $null
+            foreach ($line in (dumpbin /nologo /imports $exe)) {
+              if ($line -match '^\s{4}(\S+\.dll)\s*$') { $dll = $Matches[1].ToLowerInvariant(); if (-not $imports.ContainsKey($dll)) { $imports[$dll] = @() }; continue }
+              if ($dll -and $line -match '^\s+[0-9A-Fa-f]+\s+(\S+)\s*$') { $imports[$dll] += $Matches[1] }
+            }
+            foreach ($dll in ($imports.Keys | Sort-Object)) {
+              if ($dll -like 'api-ms-win-*') { continue }
+              $candidates = @("$env:SystemRoot\System32\$dll") + @(($env:Path -split ';') | Where-Object { $_ } | ForEach-Object { Join-Path $_ $dll })
+              $file = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+              if (-not $file) { "  $dll -> NOT FOUND"; continue }
+              $exports = @{}
+              foreach ($line in (dumpbin /nologo /exports $file)) {
+                if ($line -match '^\s+\d+\s+[0-9A-Fa-f]+\s+(?:[0-9A-Fa-f]{8}\s+)?(\S+)') { $exports[$Matches[1]] = $true }
+              }
+              $missing = @($imports[$dll] | Where-Object { -not $exports.ContainsKey($_) })
+              "  $dll -> $file ($((Get-Item -LiteralPath $file).VersionInfo.FileVersion)): $($imports[$dll].Count) imported, $($missing.Count) missing"
+              $missing | Select-Object -First 15 | ForEach-Object { "    missing: $_" }
+            }
           }
+          $binary = Get-ChildItem "$env:CARGO_TARGET_DIR\debug\deps\r2_lib-*.exe" | Select-Object -First 1
+          "Imports of $($binary.Name) before any runtime update:"
+          Show-MissingImports $binary.FullName
+          # Diagnostic attempt: the binary is linked by MSVC 14.44; install the
+          # current VC++ runtime in case the image's System32 copy is older.
+          $redist = Join-Path $env:RUNNER_TEMP 'vc_redist.x64.exe'
+          Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $redist
+          $install = Start-Process -FilePath $redist -ArgumentList '/install', '/quiet', '/norestart' -Wait -PassThru
+          "vc_redist exit code: $($install.ExitCode)"
+          "Imports of $($binary.Name) after the runtime update:"
+          Show-MissingImports $binary.FullName
           cargo test --manifest-path src-tauri/Cargo.toml --workspace 2>&1 | Tee-Object -FilePath windows-rust-tests.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
