@@ -64,11 +64,14 @@ pub fn available_space(path: &Path) -> std::io::Result<u64> {
             free: *mut u64,
         ) -> i32;
     }
-    let probe = if path.exists() {
-        path
-    } else {
-        path.parent().unwrap_or(path)
-    };
+    // GetDiskFreeSpaceExW takes a directory and fails with ERROR_DIRECTORY
+    // (267) for a file, while callers pass files too — a stage reserves its
+    // growth against its own data file — as statvfs allows on Unix. Ask for
+    // the nearest existing directory: the path itself or its closest ancestor.
+    let probe = path
+        .ancestors()
+        .find(|candidate| candidate.is_dir())
+        .unwrap_or(path);
     let path: Vec<u16> = probe.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut available = 0;
     // SAFETY: the path is NUL terminated, available is writable, and Windows
@@ -117,5 +120,21 @@ mod tests {
         assert!(!quota.reserve(2, 1));
         quota.release(1);
         assert!(quota.reserve(2, 10));
+    }
+    #[test]
+    fn available_space_accepts_a_file_as_well_as_its_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-available-space-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("record.data");
+        std::fs::write(&file, b"staged").unwrap();
+        let from_folder = available_space(&root).unwrap();
+        let from_file = available_space(&file).unwrap();
+        assert!(from_folder > 0);
+        assert!(from_file > 0);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
