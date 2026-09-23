@@ -3750,3 +3750,56 @@ async fn a_remove_and_a_rename_resolved_during_a_directory_rename_follow_it() {
     assert!(results.iter().all(Result::is_ok), "{results:?}");
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
 }
+
+/// LOOKUP with no listing cached probes the exact name under a shared fence,
+/// so behind `mv A C` it waits — and must then look in C/, where the file
+/// now is, rather than answer NOENT from A/.
+#[tokio::test]
+async fn a_lookup_during_a_directory_rename_finds_the_file_at_its_new_path() {
+    let bucket = ModelBucket::with(&[("A/x", b"x")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture =
+        copy_gated_fixture(bucket.clone(), copy_entered.clone(), release_copy.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "lookup-during-directory-rename");
+    let a = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+
+    let directory = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"A".as_slice().into(),
+                ROOT_ID,
+                &b"C".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let mut lookup = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.lookup(a, &b"x".as_slice().into()).await }
+    });
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut lookup)
+        .await
+        .is_err());
+    release_copy.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(3), directory)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let found = tokio::time::timeout(Duration::from_secs(3), lookup)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let id = found.expect("x moved with its directory; it did not disappear");
+    assert_eq!(fs.inode(id).unwrap().key, "C/x");
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}

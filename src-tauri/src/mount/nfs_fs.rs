@@ -3999,11 +3999,13 @@ impl NFSFileSystem for S3NfsFs {
             return Ok(dir.parent);
         }
 
-        let dir_key = normalize_dir_key(&dir.key);
-        self.lookup_child(dirid, &dir_key, name)
-            .await?
-            .map(|(id, _)| id)
-            .ok_or(nfsstat3::NFS3ERR_NOENT)
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let dir_key = normalize_dir_key(&self.dir_inode(dirid)?.key);
+            if let Some((id, _)) = self.resolve_child_in(dirid, &dir_key, name).await? {
+                return Ok(id);
+            }
+        }
+        Err(nfsstat3::NFS3ERR_JUKEBOX)
     }
 
     async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
