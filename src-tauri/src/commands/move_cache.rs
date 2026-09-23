@@ -1,24 +1,26 @@
 use crate::commands::cache_events::{
     get_unique_parent_paths, CacheUpdatedEvent, PathsCreatedEvent, PathsRemovedEvent,
 };
+use crate::commands::upload_cache::CacheEventSink;
 use crate::db;
 use std::collections::HashSet;
-use tauri::{AppHandle, Emitter};
 
 /// Update cache after a single file move/rename.
 /// Handles file cache, directory tree updates, and emits appropriate events.
 pub(crate) async fn update_cache_after_move(
-    app: &AppHandle,
+    app: &impl CacheEventSink,
     bucket: &str,
     account_id: &str,
     old_key: &str,
     new_key: &str,
 ) -> Result<(), String> {
     if db::cache_scope::current_scope().is_none() {
-        db::cache_scope::invalidate_unscoped(account_id)
+        // No scope was captured before this write (e.g. a Move finishing in
+        // the background): its rows cannot be attributed to this namespace.
+        db::file_cache::relist_unscoped_writes(bucket, account_id, &[old_key, new_key])
             .await
             .map_err(|e| e.to_string())?;
-        let _ = app.emit(
+        app.emit_cache_event(
             "cache-updated",
             CacheUpdatedEvent {
                 action: "move".into(),
@@ -78,7 +80,7 @@ pub(crate) async fn update_cache_after_move(
 
     if let Some(move_result) = move_result {
         if !move_result.removed_paths.is_empty() {
-            let _ = app.emit(
+            app.emit_cache_event(
                 "paths-removed",
                 PathsRemovedEvent {
                     removed_paths: move_result.removed_paths,
@@ -86,7 +88,7 @@ pub(crate) async fn update_cache_after_move(
             );
         }
         if !move_result.created_paths.is_empty() {
-            let _ = app.emit(
+            app.emit_cache_event(
                 "paths-created",
                 PathsCreatedEvent {
                     created_paths: move_result.created_paths,
@@ -95,7 +97,7 @@ pub(crate) async fn update_cache_after_move(
         }
     }
 
-    let _ = app.emit(
+    app.emit_cache_event(
         "cache-updated",
         CacheUpdatedEvent {
             action: "move".to_string(),
@@ -109,16 +111,22 @@ pub(crate) async fn update_cache_after_move(
 /// Update cache after batch move/rename operations.
 /// Handles file cache, directory tree updates, and emits appropriate events.
 pub(crate) async fn update_cache_after_batch_move(
-    app: &AppHandle,
+    app: &impl CacheEventSink,
     bucket: &str,
     account_id: &str,
     operations: &[(String, String)],
 ) -> Result<(), String> {
     if db::cache_scope::current_scope().is_none() {
-        db::cache_scope::invalidate_unscoped(account_id)
+        // No scope was captured before this write (e.g. a Move finishing in
+        // the background): its rows cannot be attributed to this namespace.
+        let keys: Vec<&str> = operations
+            .iter()
+            .flat_map(|(old_key, new_key)| [old_key.as_str(), new_key.as_str()])
+            .collect();
+        db::file_cache::relist_unscoped_writes(bucket, account_id, &keys)
             .await
             .map_err(|e| e.to_string())?;
-        let _ = app.emit(
+        app.emit_cache_event(
             "cache-updated",
             CacheUpdatedEvent {
                 action: "move".into(),
@@ -193,7 +201,7 @@ pub(crate) async fn update_cache_after_batch_move(
     if !removed_paths.is_empty() {
         let mut removed: Vec<String> = removed_paths.into_iter().collect();
         removed.sort();
-        let _ = app.emit(
+        app.emit_cache_event(
             "paths-removed",
             PathsRemovedEvent {
                 removed_paths: removed,
@@ -203,7 +211,7 @@ pub(crate) async fn update_cache_after_batch_move(
     if !created_paths.is_empty() {
         let mut created: Vec<String> = created_paths.into_iter().collect();
         created.sort();
-        let _ = app.emit(
+        app.emit_cache_event(
             "paths-created",
             PathsCreatedEvent {
                 created_paths: created,
@@ -211,7 +219,7 @@ pub(crate) async fn update_cache_after_batch_move(
         );
     }
     if !affected_keys.is_empty() {
-        let _ = app.emit(
+        app.emit_cache_event(
             "cache-updated",
             CacheUpdatedEvent {
                 action: "move".to_string(),

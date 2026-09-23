@@ -204,8 +204,14 @@ export function createFolderUpdatePublisher(
   return { publish, flush, abort };
 }
 
+/**
+ * Merge a refresh's partial pages onto the rows already on screen. The base may
+ * itself be partial (a stored overlay from a failed refresh, or cache pages read
+ * before the cache cursor was invalidated): the larger view stays until a
+ * complete listing is allowed to replace it.
+ */
 function createWarmOverlay(base: FolderSnapshot | null | undefined) {
-  if (!base?.complete) return (update: FolderSnapshot) => update;
+  if (!base) return (update: FolderSnapshot) => update;
   let items = base.items;
   const indexes = new Map(items.map((item, index) => [item.key, index]));
   return (update: FolderSnapshot): FolderSnapshot => {
@@ -369,12 +375,16 @@ export async function loadFolderItems<Config>({
   signal?.throwIfAborted();
   const publisher = createFolderUpdatePublisher(onUpdate, { signal, scheduleFrame, cancelFrame });
   const cacheOverlay = createWarmOverlay(fallbackSnapshot);
+  const cachePages: { last: FolderSnapshot | null } = { last: null };
   // A cache read failure should not prevent the live provider request.
   const cached = forceRefresh
     ? null
     : await readCachedFolder(config, prefix, {
         signal,
-        onUpdate: (snapshot) => publisher.publish(cacheOverlay(snapshot)),
+        onUpdate: (snapshot) => {
+          cachePages.last = cacheOverlay(snapshot);
+          publisher.publish(cachePages.last);
+        },
       }).catch(() => null);
   signal?.throwIfAborted();
   if (cached) {
@@ -382,7 +392,7 @@ export async function loadFolderItems<Config>({
     publisher.publish(cachedSnapshot);
     if (cached.complete && cached.freshness === 'fresh') return cachedSnapshot;
   }
-  const liveOverlay = createWarmOverlay(cached ?? fallbackSnapshot);
+  const liveOverlay = createWarmOverlay(cached ?? cachePages.last ?? fallbackSnapshot);
   try {
     const result = await readPrefixFolder(config, prefix, {
       signal,

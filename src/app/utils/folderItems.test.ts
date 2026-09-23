@@ -5,6 +5,7 @@ import {
   createFolderUpdatePublisher,
   buildFileItems,
   loadFolderItems,
+  type FileItem,
   type FolderSnapshot,
   type FolderPage,
   type FolderRequestScope,
@@ -377,6 +378,158 @@ describe('folder stale while revalidate', () => {
     ]);
     expect(updates[1].complete).toBe(false);
     expect(updates[1].freshness).toBe('partial');
+  });
+
+  const row = (key: string, size = 1): FileItem => ({ key, name: key, isFolder: false, size });
+  const staleRows: FolderSnapshot = {
+    items: ['a.txt', 'b.txt', 'c.txt', 'd.txt'].map((key) => row(key)),
+    complete: true,
+    fromCache: true,
+    freshness: 'stale',
+  };
+
+  async function failedWarmRefresh(): Promise<FolderSnapshot> {
+    let stored: FolderSnapshot | undefined;
+    await assert.rejects(
+      loadFolderItems({
+        config: {},
+        prefix: '',
+        readCachedFolder: async () => staleRows,
+        readPrefixFolder: async (_config, _prefix, options) => {
+          options.onUpdate({
+            items: [row('a.txt', 2)],
+            complete: false,
+            fromCache: false,
+            freshness: 'partial',
+          });
+          throw new Error('offline');
+        },
+        onUpdate: (snapshot) => {
+          stored = snapshot;
+        },
+      }),
+      /offline/
+    );
+    expect(stored?.complete).toBe(false);
+    expect(stored?.items).toHaveLength(staleRows.items.length);
+    return stored!;
+  }
+
+  test('retry after a failed warm refresh never shows fewer rows than the stale snapshot', async () => {
+    const stored = await failedWarmRefresh();
+    const final: FolderSnapshot = {
+      items: [row('a.txt', 3)],
+      complete: true,
+      fromCache: false,
+      freshness: 'fresh',
+    };
+    const published: FolderSnapshot[] = [];
+    const result = await loadFolderItems({
+      config: {},
+      prefix: '',
+      fallbackSnapshot: stored,
+      readCachedFolder: async (_config, _prefix, options) => {
+        options.onUpdate({
+          items: staleRows.items.slice(0, 1),
+          complete: false,
+          fromCache: true,
+          freshness: 'partial',
+        });
+        return staleRows;
+      },
+      readPrefixFolder: async (_config, _prefix, options) => {
+        options.onUpdate({
+          items: [row('a.txt', 3)],
+          complete: false,
+          fromCache: false,
+          freshness: 'partial',
+        });
+        options.onUpdate(final);
+        return final;
+      },
+      onUpdate: (snapshot) => published.push(snapshot),
+    });
+    expect(result).toBe(final);
+    expect(published[published.length - 1]).toBe(final);
+    for (const snapshot of published.slice(0, -1)) {
+      expect(snapshot.items.length).not.toBeLessThan(staleRows.items.length);
+    }
+  });
+
+  test('retry without a complete cache keeps the stored partial overlay until the listing completes', async () => {
+    const stored = await failedWarmRefresh();
+    const published: FolderSnapshot[] = [];
+    await assert.rejects(
+      loadFolderItems({
+        config: {},
+        prefix: '',
+        fallbackSnapshot: stored,
+        readCachedFolder: async () => null,
+        readPrefixFolder: async (_config, _prefix, options) => {
+          options.onUpdate({
+            items: [row('a.txt', 4)],
+            complete: false,
+            fromCache: false,
+            freshness: 'partial',
+          });
+          throw new Error('offline again');
+        },
+        onUpdate: (snapshot) => published.push(snapshot),
+      }),
+      /offline again/
+    );
+    expect(published).toHaveLength(1);
+    expect(published[0].complete).toBe(false);
+    expect(published[0].items.map((item) => [item.key, item.size])).toEqual([
+      ['a.txt', 4],
+      ['b.txt', 1],
+      ['c.txt', 1],
+      ['d.txt', 1],
+    ]);
+  });
+
+  test('live listing overlays the last partial cache snapshot when the cache read fails midway', async () => {
+    const published: FolderSnapshot[] = [];
+    await assert.rejects(
+      loadFolderItems({
+        config: {},
+        prefix: '',
+        readCachedFolder: async (_config, _prefix, options) => {
+          options.onUpdate({
+            items: staleRows.items.slice(0, 2),
+            complete: false,
+            fromCache: true,
+            freshness: 'partial',
+          });
+          options.onUpdate({
+            items: staleRows.items,
+            complete: false,
+            fromCache: true,
+            freshness: 'partial',
+          });
+          throw new Error('Cache page cursor no longer matches this cache snapshot');
+        },
+        readPrefixFolder: async (_config, _prefix, options) => {
+          options.onUpdate({
+            items: [row('a.txt', 9)],
+            complete: false,
+            fromCache: false,
+            freshness: 'partial',
+          });
+          throw new Error('offline');
+        },
+        onUpdate: (snapshot) => published.push(snapshot),
+      }),
+      /offline/
+    );
+    const last = published[published.length - 1];
+    expect(last.complete).toBe(false);
+    expect(last.items.map((item) => [item.key, item.size])).toEqual([
+      ['a.txt', 9],
+      ['b.txt', 1],
+      ['c.txt', 1],
+      ['d.txt', 1],
+    ]);
   });
 
   test('final warm refresh page can remove cached rows after full confirmation', async () => {

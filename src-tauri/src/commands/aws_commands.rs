@@ -4,7 +4,7 @@ use crate::commands::batch_move::{
 };
 use crate::commands::delete_cache::{update_cache_after_batch_delete, update_cache_after_delete};
 use crate::commands::move_cache::{update_cache_after_batch_move, update_cache_after_move};
-use crate::commands::upload_cache::update_cache_after_upload;
+use crate::commands::upload_cache::{update_cache_after_upload, update_cache_after_write};
 use crate::db::{self, CachedFile};
 use crate::providers::aws;
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,21 @@ pub struct AwsConfigInput {
     pub endpoint_scheme: Option<String>,
     pub endpoint_host: Option<String>,
     pub force_path_style: bool,
+}
+
+impl AwsConfigInput {
+    fn cache_config(&self) -> db::cache_scope::CacheConfig {
+        db::cache_scope::CacheConfig {
+            provider: "aws".into(),
+            account_id: self.account_id.clone(),
+            access_key_id: self.access_key_id.clone(),
+            secret_access_key: self.secret_access_key.clone(),
+            region: Some(self.region.clone()),
+            endpoint_scheme: self.endpoint_scheme.clone(),
+            endpoint_host: self.endpoint_host.clone(),
+            force_path_style: self.force_path_style,
+        }
+    }
 }
 
 impl From<AwsConfigInput> for aws::AwsConfig {
@@ -124,17 +139,7 @@ pub async fn sync_aws_bucket(
     config: AwsConfigInput,
     app: tauri::AppHandle,
 ) -> Result<SyncResult, String> {
-    let cache_config = db::cache_scope::CacheConfig {
-        provider: "aws".into(),
-        account_id: config.account_id.clone(),
-        access_key_id: config.access_key_id.clone(),
-        secret_access_key: config.secret_access_key.clone(),
-        region: Some(config.region.clone()),
-        endpoint_scheme: config.endpoint_scheme.clone(),
-        endpoint_host: config.endpoint_host.clone(),
-        force_path_style: config.force_path_style,
-    };
-    let scope = db::cache_scope::CacheScope::capture(&cache_config)
+    let scope = db::cache_scope::CacheScope::capture(&config.cache_config())
         .await
         .map_err(|e| e.to_string())?;
     db::cache_scope::in_scope(scope, sync_aws_bucket_scoped(config, app)).await
@@ -302,6 +307,8 @@ pub async fn delete_aws_object(
 ) -> Result<(), String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope([config.cache_config()]).await;
     let aws_config: aws::AwsConfig = config.into();
 
     aws::delete_object(&aws_config, &key)
@@ -309,7 +316,8 @@ pub async fn delete_aws_object(
         .map_err(|e| format!("Failed to delete object: {}", e))?;
 
     // Update cache and emit events (including paths-removed if any folders became empty)
-    update_cache_after_delete(&app, &bucket, &account_id, &key).await?;
+    let update = update_cache_after_delete(&app, &bucket, &account_id, &key);
+    update_cache_after_write(scope, update).await;
 
     Ok(())
 }
@@ -329,6 +337,8 @@ pub async fn batch_delete_aws_objects(
 ) -> Result<BatchDeleteResult, String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope([config.cache_config()]).await;
     let aws_config: aws::AwsConfig = config.into();
     let total = keys.len();
 
@@ -340,7 +350,7 @@ pub async fn batch_delete_aws_objects(
         });
     }
 
-    let mut outcome = run_batch_delete(&app, keys, |batch| {
+    let outcome = run_batch_delete(&app, keys, |batch| {
         let cfg = aws_config.clone();
         async move {
             aws::delete_objects(&cfg, batch)
@@ -353,11 +363,9 @@ pub async fn batch_delete_aws_objects(
 
     // Update cache and emit events (including paths-removed if any folders became empty)
     if !outcome.deleted_keys.is_empty() {
-        if let Err(e) =
-            update_cache_after_batch_delete(&app, &bucket, &account_id, &outcome.deleted_keys).await
-        {
-            outcome.errors.push(e);
-        }
+        let update =
+            update_cache_after_batch_delete(&app, &bucket, &account_id, &outcome.deleted_keys);
+        update_cache_after_write(scope, update).await;
     }
 
     Ok(BatchDeleteResult {
@@ -376,6 +384,8 @@ pub async fn rename_aws_object(
 ) -> Result<(), String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope([config.cache_config()]).await;
     let aws_config: aws::AwsConfig = config.into();
 
     aws::rename_object(&aws_config, &old_key, &new_key)
@@ -383,7 +393,8 @@ pub async fn rename_aws_object(
         .map_err(|e| format!("Failed to rename object: {}", e))?;
 
     // Update cache and emit events (including paths-created/removed)
-    update_cache_after_move(&app, &bucket, &account_id, &old_key, &new_key).await?;
+    let update = update_cache_after_move(&app, &bucket, &account_id, &old_key, &new_key);
+    update_cache_after_write(scope, update).await;
 
     Ok(())
 }
@@ -397,6 +408,8 @@ pub async fn batch_move_aws_objects(
 ) -> Result<BatchMoveResult, String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope([config.cache_config()]).await;
     let aws_config: aws::AwsConfig = config.into();
     let batch_id = batch_id.unwrap_or_else(fallback_batch_id);
 
@@ -411,13 +424,10 @@ pub async fn batch_move_aws_objects(
 
     let outcome = run_batch_move(&app, batch_id, operations, rename).await;
 
-    let mut errors = outcome.errors;
+    let errors = outcome.errors;
     if !outcome.successful.is_empty() {
-        if let Err(e) =
-            update_cache_after_batch_move(&app, &bucket, &account_id, &outcome.successful).await
-        {
-            errors.push(e);
-        }
+        let update = update_cache_after_batch_move(&app, &bucket, &account_id, &outcome.successful);
+        update_cache_after_write(scope, update).await;
     }
 
     Ok(BatchMoveResult {
@@ -451,6 +461,8 @@ pub async fn upload_aws_content(
 ) -> Result<String, String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope([config.cache_config()]).await;
     let aws_config: aws::AwsConfig = config.into();
 
     let content_bytes = content.into_bytes();
@@ -462,15 +474,15 @@ pub async fn upload_aws_content(
 
     let last_modified = chrono::Utc::now().to_rfc3339();
 
-    crate::commands::upload_cache::update_cache_after_upload(
+    let update = crate::commands::upload_cache::update_cache_after_upload(
         &app,
         &bucket,
         &account_id,
         &key,
         new_size,
         &last_modified,
-    )
-    .await?;
+    );
+    update_cache_after_write(scope, update).await;
 
     Ok(etag)
 }
@@ -508,7 +520,8 @@ pub async fn upload_aws_file(
     endpoint_host: Option<String>,
     force_path_style: bool,
 ) -> Result<UploadResult, String> {
-    let config = aws::AwsConfig {
+    let input = AwsConfigInput {
+        account_id,
         bucket,
         access_key_id,
         secret_access_key,
@@ -517,6 +530,10 @@ pub async fn upload_aws_file(
         endpoint_host,
         force_path_style,
     };
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope([input.cache_config()]).await;
+    let account_id = input.account_id.clone();
+    let config: aws::AwsConfig = input.into();
 
     let path = PathBuf::from(&file_path);
     if !path.exists() {
@@ -575,18 +592,15 @@ pub async fn upload_aws_file(
             );
 
             let last_modified = chrono::Utc::now().to_rfc3339();
-            if let Err(err) = update_cache_after_upload(
+            let update = update_cache_after_upload(
                 &app,
                 &config.bucket,
                 &account_id,
                 &key,
                 file_size as i64,
                 &last_modified,
-            )
-            .await
-            {
-                log::warn!("Failed to update cache after upload: {}", err);
-            }
+            );
+            update_cache_after_write(scope, update).await;
 
             Ok(UploadResult {
                 task_id,

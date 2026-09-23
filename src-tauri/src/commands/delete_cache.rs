@@ -1,17 +1,23 @@
 use crate::commands::cache_events::{
     get_unique_parent_paths, CacheUpdatedEvent, PathsRemovedEvent,
 };
+use crate::commands::upload_cache::CacheEventSink;
 use crate::db;
+use crate::db::cache_scope::CacheScope;
 use log::{error, info};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
+/// Deletes waiting to be applied, grouped by bucket, account and the cache
+/// scope each was reported in (None when the caller had none).
+type PendingDeletes = HashMap<(String, String, Option<CacheScope>), HashSet<String>>;
+
 struct DeleteCacheQueueState {
-    pending: HashMap<(String, String), HashSet<String>>,
+    pending: PendingDeletes,
     scheduled: bool,
 }
 
@@ -29,16 +35,18 @@ fn delete_cache_queue() -> &'static Mutex<DeleteCacheQueueState> {
 /// Update cache after a single file deletion.
 /// Handles file cache, directory tree updates, and emits appropriate events.
 pub(crate) async fn update_cache_after_delete(
-    app: &AppHandle,
+    app: &impl CacheEventSink,
     bucket: &str,
     account_id: &str,
     key: &str,
 ) -> Result<(), String> {
     if db::cache_scope::current_scope().is_none() {
-        db::cache_scope::invalidate_unscoped(account_id)
+        // No scope was captured before this write (e.g. a Move finishing in
+        // the background): its rows cannot be attributed to this namespace.
+        db::file_cache::relist_unscoped_writes(bucket, account_id, &[key])
             .await
             .map_err(|e| e.to_string())?;
-        let _ = app.emit(
+        app.emit_cache_event(
             "cache-updated",
             CacheUpdatedEvent {
                 action: "delete".into(),
@@ -84,10 +92,10 @@ pub(crate) async fn update_cache_after_delete(
     };
 
     if !removed_paths.is_empty() {
-        let _ = app.emit("paths-removed", PathsRemovedEvent { removed_paths });
+        app.emit_cache_event("paths-removed", PathsRemovedEvent { removed_paths });
     }
 
-    let _ = app.emit(
+    app.emit_cache_event(
         "cache-updated",
         CacheUpdatedEvent {
             action: "delete".to_string(),
@@ -101,16 +109,19 @@ pub(crate) async fn update_cache_after_delete(
 /// Update cache after batch file deletion.
 /// Handles file cache, directory tree updates, and emits appropriate events.
 pub(crate) async fn update_cache_after_batch_delete(
-    app: &AppHandle,
+    app: &impl CacheEventSink,
     bucket: &str,
     account_id: &str,
     deleted_keys: &[String],
 ) -> Result<(), String> {
     if db::cache_scope::current_scope().is_none() {
-        db::cache_scope::invalidate_unscoped(account_id)
+        // No scope was captured before this write (e.g. a Move finishing in
+        // the background): its rows cannot be attributed to this namespace.
+        let keys: Vec<&str> = deleted_keys.iter().map(String::as_str).collect();
+        db::file_cache::relist_unscoped_writes(bucket, account_id, &keys)
             .await
             .map_err(|e| e.to_string())?;
-        let _ = app.emit(
+        app.emit_cache_event(
             "cache-updated",
             CacheUpdatedEvent {
                 action: "delete".into(),
@@ -167,7 +178,7 @@ pub(crate) async fn update_cache_after_batch_delete(
     };
 
     if !all_removed_paths.is_empty() {
-        let _ = app.emit(
+        app.emit_cache_event(
             "paths-removed",
             PathsRemovedEvent {
                 removed_paths: all_removed_paths,
@@ -175,7 +186,7 @@ pub(crate) async fn update_cache_after_batch_delete(
         );
     }
 
-    let _ = app.emit(
+    app.emit_cache_event(
         "cache-updated",
         CacheUpdatedEvent {
             action: "delete".to_string(),
@@ -193,12 +204,14 @@ pub(crate) async fn queue_cache_after_delete(
     account_id: String,
     key: String,
 ) {
+    // The flush runs on another task: carry the caller's scope over to it.
+    let scope = db::cache_scope::current_scope();
     let should_schedule = {
         let queue = delete_cache_queue();
         let mut state = queue.lock().await;
         state
             .pending
-            .entry((bucket.clone(), account_id.clone()))
+            .entry((bucket.clone(), account_id.clone(), scope))
             .or_insert_with(HashSet::new)
             .insert(key);
         if state.scheduled {
@@ -222,7 +235,7 @@ pub(crate) async fn queue_cache_after_delete(
             std::mem::take(&mut state.pending)
         };
 
-        for ((bucket, account_id), keys) in batch {
+        for ((bucket, account_id, scope), keys) in batch {
             let key_list: Vec<String> = keys.into_iter().collect();
             info!(
                 "delete_cache_batch: flushing {} keys for {}/{}",
@@ -230,9 +243,8 @@ pub(crate) async fn queue_cache_after_delete(
                 account_id,
                 bucket
             );
-            if let Err(e) =
-                update_cache_after_batch_delete(&app, &bucket, &account_id, &key_list).await
-            {
+            let update = update_cache_after_batch_delete(&app, &bucket, &account_id, &key_list);
+            if let Err(e) = db::cache_scope::in_optional_scope(scope, update).await {
                 error!(
                     "delete_cache_batch: failed for {}/{}: {}",
                     account_id, bucket, e

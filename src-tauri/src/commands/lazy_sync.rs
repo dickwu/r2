@@ -307,8 +307,7 @@ pub async fn get_prefix_cache_page(input: LazyListInput) -> Result<Option<Folder
     if !cache_complete {
         return Ok(None);
     }
-    let freshness_time = snapshot.prefix_time.or(snapshot.full_time);
-    let fresh = freshness_time.is_some_and(|time| {
+    let fresh = snapshot.freshness_time.is_some_and(|time| {
         let age = chrono::Utc::now().timestamp() - time;
         (0..DIRECTORY_TTL_SECS).contains(&age)
     });
@@ -380,8 +379,7 @@ async fn read_prefix_cache_scoped(
         return Ok(None);
     }
     let complete = page.next_cursor.is_none();
-    let freshness_time = prefix_time.or(snapshot.full_time);
-    let fresh = freshness_time.is_some_and(|time| {
+    let fresh = snapshot.freshness_time.is_some_and(|time| {
         let age = chrono::Utc::now().timestamp() - time;
         (0..DIRECTORY_TTL_SECS).contains(&age)
     });
@@ -444,8 +442,7 @@ async fn emit_fresh_cached_prefix_stream(
                 .as_ref()
                 .is_some_and(|skipped| !is_under_skipped_prefix(&input.prefix, skipped));
         let cache_complete = snapshot.prefix_time.is_some() || complete_index;
-        let freshness_time = snapshot.prefix_time.or(snapshot.full_time);
-        let fresh = freshness_time.is_some_and(|time| {
+        let fresh = snapshot.freshness_time.is_some_and(|time| {
             let age = chrono::Utc::now().timestamp() - time;
             (0..DIRECTORY_TTL_SECS).contains(&age)
         });
@@ -639,13 +636,31 @@ fn prefix_flight_key(input: &LazyListInput) -> String {
     hex::encode(hash.finalize())
 }
 
-fn join_prefix_flight(input: LazyListInput, cache_scope: CacheScope) -> FlightLease {
+async fn join_prefix_flight(
+    input: LazyListInput,
+    cache_scope: CacheScope,
+) -> Result<FlightLease, String> {
+    // Captured before the first request: a local write to the folder advances
+    // it, so a listing that may predate the write publishes stale and a request
+    // made after the write starts its own listing instead of sharing this one.
+    let generation =
+        cache_scope::capture_prefix_generation(&cache_scope, &input.bucket, &input.prefix)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
     // An account edited away and back must not join the obsolete revision's
     // in-flight result even when its credentials happen to match again.
-    let key = format!("{}:{}", prefix_flight_key(&input), cache_scope.revision);
-    join_prefix_flight_with(input, key, move |input, owner| async move {
-        cache_scope::in_scope(cache_scope, fetch_prefix(input, &owner)).await
-    })
+    let key = format!(
+        "{}:{}:{generation}",
+        prefix_flight_key(&input),
+        cache_scope.revision
+    );
+    Ok(join_prefix_flight_with(
+        input,
+        key,
+        move |input, owner| async move {
+            cache_scope::in_scope(cache_scope, fetch_prefix(input, &owner, generation)).await
+        },
+    ))
 }
 
 fn join_prefix_flight_with<F, Fut>(input: LazyListInput, key: String, fetch: F) -> FlightLease
@@ -732,7 +747,7 @@ async fn list_prefix_internal(
     if !cancellation.active() {
         return Err("S3 list cancelled".into());
     }
-    let lease = join_prefix_flight(input, cache_scope);
+    let lease = join_prefix_flight(input, cache_scope).await?;
     let mut changed = lease.0.changed.subscribe();
     let mut delivered = 0;
     let mut emit_ms = 0.0;
@@ -889,11 +904,13 @@ fn next_page_cursor(
 async fn fetch_prefix(
     input: LazyListInput,
     flight: &PrefixFlight,
+    listed_generation: i64,
 ) -> Result<LazyListResult, String> {
     let client = create_client_for_input(&input).await?;
     let endpoint = endpoint_scope(&input);
     let scheduler = endpoint_scheduler(&endpoint);
     let now = chrono::Utc::now().timestamp();
+    let mut freshness = "fresh";
     let mut files = Vec::new();
     let mut folders = Vec::new();
     let mut continuation_token: Option<String> = None;
@@ -982,15 +999,21 @@ async fn fetch_prefix(
         }
         if page.complete {
             let _measure = MeasureInterval::new(&flight.measurements.db_ns);
-            db::prefix_sync::replace_complete_prefix(
+            let published_fresh = db::prefix_sync::replace_complete_prefix(
                 &input.bucket,
                 &input.account_id,
                 &input.prefix,
                 &files,
                 &folders,
+                listed_generation,
             )
             .await
             .map_err(|e| format!("Failed to cache complete listing: {e}"))?;
+            if !published_fresh {
+                // The folder changed locally while it was being listed.
+                freshness = "stale";
+                page.freshness = freshness;
+            }
         }
         flight.publish(page);
         if next_cursor.is_none() {
@@ -1006,7 +1029,7 @@ async fn fetch_prefix(
         folders,
         complete: true,
         from_cache: false,
-        freshness: "fresh",
+        freshness,
     })
 }
 
@@ -2083,7 +2106,7 @@ mod tests {
         let fixture_flight = |input: LazyListInput| {
             let key = prefix_flight_key(&input);
             join_prefix_flight_with(input, key, |input, owner| async move {
-                fetch_prefix(input, &owner).await
+                fetch_prefix(input, &owner, 0).await
             })
         };
         let first = fixture_flight(input.clone());
@@ -2287,6 +2310,188 @@ mod tests {
         assert_eq!(page["page_ready_ms"], 15.0);
         assert!(page.get("emit_ms").is_none());
     }
+
+    fn list_page_xml(keys: &[&str], next: Option<&str>) -> String {
+        let contents: String = keys
+            .iter()
+            .map(|key| format!("<Contents><Key>{key}</Key><Size>1</Size></Contents>"))
+            .collect();
+        let truncation = match next {
+            Some(token) => format!(
+                "<IsTruncated>true</IsTruncated><NextContinuationToken>{token}</NextContinuationToken>"
+            ),
+            None => "<IsTruncated>false</IsTruncated>".into(),
+        };
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>fence</Name>{truncation}{contents}</ListBucketResult>"#
+        )
+    }
+
+    async fn flight_result(flight: &PrefixFlight) -> Result<Arc<LazyListResult>, String> {
+        let started = Instant::now();
+        loop {
+            let result = flight.state.lock().unwrap().result.clone();
+            if let Some(result) = result {
+                return result;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "listing hung");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn listing_overlapping_a_local_delete_is_neither_published_nor_shared_as_fresh() {
+        use crate::test_s3::{serve, Response};
+        const ACCOUNT: &str = "listing-fence-account";
+        const BUCKET: &str = "fence";
+        let deleted = Arc::new(AtomicBool::new(false));
+        let second_page = Arc::new(tokio::sync::Semaphore::new(0));
+        let fixture = {
+            let deleted = deleted.clone();
+            let second_page = second_page.clone();
+            serve(move |request| {
+                let deleted = deleted.clone();
+                let second_page = second_page.clone();
+                async move {
+                    if request.method == "DELETE" {
+                        deleted.store(true, Ordering::SeqCst);
+                        return Response::empty(204);
+                    }
+                    if request.path.contains("continuation-token=") {
+                        second_page.acquire().await.unwrap().forget();
+                        return Response::xml(200, &list_page_xml(&["z.txt"], None));
+                    }
+                    let keys: &[&str] = if deleted.load(Ordering::SeqCst) {
+                        &["a.txt"]
+                    } else {
+                        &["a.txt", "k.txt"]
+                    };
+                    Response::xml(200, &list_page_xml(keys, Some("page-2")))
+                }
+            })
+            .await
+        };
+        let host = fixture
+            .endpoint
+            .strip_prefix("http://")
+            .unwrap()
+            .to_string();
+        crate::db::init_test_db().await;
+        crate::db::get_connection()
+            .unwrap()
+            .lock()
+            .await
+            .execute(
+                "INSERT INTO minio_accounts (id, access_key_id, secret_access_key, endpoint_scheme, endpoint_host, force_path_style, created_at, updated_at)
+                 VALUES (?1, 'fixture', 'fixture-secret', 'http', ?2, 1, 0, 0)",
+                turso::params![ACCOUNT, host.clone()],
+            )
+            .await
+            .unwrap();
+        let input = LazyListInput {
+            account_id: ACCOUNT.into(),
+            bucket: BUCKET.into(),
+            access_key_id: "fixture".into(),
+            secret_access_key: "fixture-secret".into(),
+            prefix: String::new(),
+            provider: Some("minio".into()),
+            endpoint_scheme: Some("http".into()),
+            endpoint_host: Some(host.clone()),
+            force_path_style: Some(true),
+            region: None,
+            force_refresh: Some(true),
+            request_id: None,
+            generation: None,
+            cache_cursor: None,
+            page_index: None,
+            run_id: None,
+        };
+        let scope = CacheScope::capture(&cache_config(&input)).await.unwrap();
+
+        let first = join_prefix_flight(input.clone(), scope.clone())
+            .await
+            .unwrap();
+        let started = Instant::now();
+        while first.0.state.lock().unwrap().pages.is_empty() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "first page hung"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(first.0.state.lock().unwrap().pages[0]
+            .files
+            .iter()
+            .any(|file| file.key == "k.txt"));
+        // The user deletes k.txt after page one was listed: the delete command
+        // removes it on the provider and from the cache while page two is
+        // still in flight.
+        crate::commands::delete_minio_object_with(
+            crate::commands::MinioConfigInput {
+                account_id: ACCOUNT.into(),
+                bucket: BUCKET.into(),
+                access_key_id: "fixture".into(),
+                secret_access_key: "fixture-secret".into(),
+                endpoint_scheme: "http".into(),
+                endpoint_host: host,
+                force_path_style: true,
+            },
+            "k.txt".into(),
+            &crate::commands::upload_cache::RecordedCacheEvents::default(),
+        )
+        .await
+        .unwrap();
+        assert!(deleted.load(Ordering::SeqCst));
+        second_page.add_permits(16);
+        let overlapped = flight_result(&first.0).await.unwrap();
+        assert_eq!(overlapped.freshness, "stale");
+
+        // Its rows are written without a fresh marker: nothing vouches for them
+        // (there is no full index here either), so the next open re-lists.
+        // Other tests share this connection: keep the lock until the statement
+        // is dropped, or its step and reset race theirs ("concurrent use").
+        let marker = {
+            let conn = crate::db::get_connection().unwrap().lock().await;
+            let mut rows = conn
+                .query(
+                    "SELECT last_synced_at, listed_at, file_count FROM prefix_sync_times
+                     WHERE bucket = ?1 AND account_id = ?2 AND prefix = ''",
+                    turso::params![BUCKET, ACCOUNT],
+                )
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().unwrap();
+            (
+                row.get::<i64>(0).unwrap(),
+                row.get::<i64>(1).unwrap(),
+                row.get::<i64>(2).unwrap(),
+            )
+        };
+        assert_eq!(marker, (0, 0, 3));
+        let cached = read_prefix_cache_scoped(&input, ListScope::new(&input), &scope)
+            .await
+            .unwrap();
+        assert!(
+            cached.is_none(),
+            "a listing that overlapped a local delete was served from cache"
+        );
+
+        // A request made after the delete must list again, not share the
+        // pre-delete flight, and its listing is then fresh without the file.
+        let later = join_prefix_flight(input.clone(), scope.clone())
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first.0, &later.0));
+        let relisted = flight_result(&later.0).await.unwrap();
+        assert!(!relisted.files.iter().any(|file| file.key == "k.txt"));
+        let cached = read_prefix_cache_scoped(&input, ListScope::new(&input), &scope)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cached.freshness, "fresh");
+        assert!(!cached.files.iter().any(|file| file.key == "k.txt"));
+    }
+
     #[test]
     fn cache_scope_uses_the_same_path_style_defaults_as_listing_clients() {
         let input = |provider: &str, path_style: Option<bool>| {

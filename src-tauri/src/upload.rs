@@ -1,4 +1,4 @@
-use crate::commands::upload_cache::update_cache_after_upload;
+use crate::commands::upload_cache::{update_cache_after_upload, update_cache_after_write};
 use crate::db::{self, UploadSession};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
@@ -670,6 +670,15 @@ pub async fn upload_file(
         let mut registry = CANCEL_REGISTRY.lock().await;
         registry.insert(task_id.clone(), cancelled.clone());
     }
+    // Captured before the upload, as a sync captures its scope before listing.
+    // It may wait for the database, so only after a cancel can be heard: both
+    // upload paths check the flag before sending anything.
+    let scope = db::cache_scope::capture_write_scope([db::cache_scope::CacheConfig::r2(
+        &config.account_id,
+        &config.access_key_id,
+        &config.secret_access_key,
+    )])
+    .await;
 
     let client = Client::builder()
         .build()
@@ -710,18 +719,15 @@ pub async fn upload_file(
     match result {
         Ok(()) => {
             let last_modified = chrono::Utc::now().to_rfc3339();
-            if let Err(err) = update_cache_after_upload(
+            let update = update_cache_after_upload(
                 &app,
                 &config.bucket,
                 &config.account_id,
                 &key,
                 file_size as i64,
                 &last_modified,
-            )
-            .await
-            {
-                log::warn!("Failed to update cache after upload: {}", err);
-            }
+            );
+            update_cache_after_write(scope, update).await;
 
             Ok(UploadResult {
                 task_id,

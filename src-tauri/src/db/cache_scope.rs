@@ -20,6 +20,20 @@ pub struct CacheConfig {
 }
 
 impl CacheConfig {
+    /// An R2 account's namespace: its account id and the token's S3 keys.
+    pub fn r2(account_id: &str, access_key_id: &str, secret_access_key: &str) -> Self {
+        Self {
+            provider: "r2".into(),
+            account_id: account_id.into(),
+            access_key_id: access_key_id.into(),
+            secret_access_key: secret_access_key.into(),
+            region: None,
+            endpoint_scheme: None,
+            endpoint_host: None,
+            force_path_style: true,
+        }
+    }
+
     pub fn from_current(config: &super::tokens::CurrentConfig) -> Self {
         let provider = match config.provider {
             super::tokens::StorageProvider::R2 => "r2",
@@ -99,7 +113,7 @@ fn normalize_endpoint(scheme: &str, host: &str) -> DbResult<String> {
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheScope {
     pub provider: String,
     pub account_id: String,
@@ -121,6 +135,30 @@ impl CacheScope {
     pub async fn capture(config: &CacheConfig) -> DbResult<Self> {
         let conn = get_connection()?.lock().await;
         capture_on(&conn, config).await
+    }
+}
+
+/// Capture the scope a local write (upload, delete, rename) reports into,
+/// before the write is sent -- as a sync captures its scope before listing.
+/// Candidates are tried in order. None when no candidate matches the saved
+/// account: the write still runs, and its cache update then only withdraws
+/// the cache's claims about the folders it touched.
+pub async fn capture_write_scope(
+    candidates: impl IntoIterator<Item = CacheConfig>,
+) -> Option<CacheScope> {
+    for config in candidates {
+        if let Ok(scope) = CacheScope::capture(&config).await {
+            return Some(scope);
+        }
+    }
+    None
+}
+
+/// Run `future` in `scope`, or with no scope when there is none.
+pub async fn in_optional_scope<F: Future>(scope: Option<CacheScope>, future: F) -> F::Output {
+    match scope {
+        Some(scope) => in_scope(scope, future).await,
+        None => future.await,
     }
 }
 
@@ -286,7 +324,7 @@ async fn capture_on(conn: &Connection, config: &CacheConfig) -> DbResult<CacheSc
     }
     conn.execute("BEGIN TRANSACTION", ()).await?;
     let result = async {
-        invalidate_account_on(conn, &config.account_id).await?;
+        reset_account_on(conn, &config.account_id).await?;
         conn.execute("INSERT INTO cache_scopes(account_id,provider,fingerprint,revision) VALUES (?1,?2,?3,1)
             ON CONFLICT(account_id) DO UPDATE SET provider=excluded.provider,fingerprint=excluded.fingerprint,revision=cache_scopes.revision+1",
             turso::params![config.account_id.as_str(), config.provider.as_str(), fingerprint.as_str()]).await?;
@@ -311,17 +349,34 @@ pub async fn account_updated_on(
             return Ok(());
         }
     }
-    invalidate_account_on(conn, account_id).await?;
+    reset_account_on(conn, account_id).await?;
     conn.execute("INSERT INTO cache_scopes(account_id,provider,fingerprint,revision) VALUES (?1,?2,'',1)
         ON CONFLICT(account_id) DO UPDATE SET provider=excluded.provider,fingerprint='',revision=cache_scopes.revision+1",
         turso::params![account_id, provider]).await?;
     Ok(())
 }
 
-pub async fn invalidate_account_on(conn: &Connection, account_id: &str) -> DbResult<()> {
+/// Start an account's cache over because its storage namespace changed
+/// (credential or endpoint edit, token switch). Its rows and claims go, and so
+/// does work begun under the old namespace: a sync's staging and run, the
+/// replay journal and write barriers. None of it may publish into the new
+/// namespace, and none of it may hold reads back.
+pub async fn reset_account_on(conn: &Connection, account_id: &str) -> DbResult<()> {
+    withdraw_account_cache_on(conn, account_id).await?;
+    conn.execute(
+        "DELETE FROM cached_files_staging WHERE account_id=?1",
+        turso::params![account_id],
+    )
+    .await?;
+    super::file_cache::clear_account_work_on(conn, account_id).await
+}
+
+/// Withdraw an account's cached rows and completeness claims. A running sync
+/// is left alone: its scope is still valid, so its staged snapshot is the
+/// account's current contents and it may publish.
+async fn withdraw_account_cache_on(conn: &Connection, account_id: &str) -> DbResult<()> {
     for table in [
         "cached_files",
-        "cached_files_staging",
         "directory_tree",
         "prefix_sync_times",
         "sync_meta",
@@ -338,18 +393,14 @@ pub async fn invalidate_account_on(conn: &Connection, account_id: &str) -> DbRes
         turso::params![prefix.len() as i64, prefix],
     )
     .await?;
-    Ok(())
+    // A listing still in flight for this account must not publish as fresh.
+    super::prefix_sync::advance_all_mutation_generations_on(conn, account_id, None).await
 }
 
 async fn invalidate_unscoped_on(conn: &Connection, account_id: &str) -> DbResult<()> {
     conn.execute("BEGIN TRANSACTION", ()).await?;
-    let result = invalidate_account_on(conn, account_id).await;
+    let result = withdraw_account_cache_on(conn, account_id).await;
     finish_transaction(conn, result).await
-}
-
-pub async fn invalidate_unscoped(account_id: &str) -> DbResult<()> {
-    let conn = get_connection()?.lock().await;
-    invalidate_unscoped_on(&conn, account_id).await
 }
 
 pub async fn validate_on(conn: &Connection, scope: &CacheScope) -> DbResult<()> {
@@ -423,10 +474,25 @@ pub struct PrefixSnapshot {
 pub struct PrefixPageSnapshot {
     pub prefix_time: Option<i64>,
     pub full_time: Option<i64>,
+    /// When the rows were last known current. None once the folder changed
+    /// after it was listed: neither its marker nor the full index vouch then.
+    pub freshness_time: Option<i64>,
     pub full_sync: bool,
     pub snapshot_token: Option<String>,
     pub skipped_prefixes: Option<Vec<String>>,
     pub page: super::file_cache::CachedFolderPage,
+}
+
+/// Capture the folder's mutation generation before a listing's first request.
+pub async fn capture_prefix_generation(
+    scope: &CacheScope,
+    bucket: &str,
+    prefix: &str,
+) -> DbResult<i64> {
+    let conn = get_connection()?.lock().await;
+    validate_on(&conn, scope).await?;
+    super::prefix_sync::capture_mutation_generation_on(&conn, bucket, &scope.account_id, prefix)
+        .await
 }
 
 #[allow(dead_code)]
@@ -509,11 +575,14 @@ async fn read_prefix_page_on(
     validate_on(conn, scope).await?;
     super::file_cache::ensure_no_local_cache_mutation_on(conn, bucket, &scope.account_id).await?;
     let mut rows = conn.query("SELECT last_synced_at,generation FROM prefix_sync_times WHERE bucket=?1 AND account_id=?2 AND prefix=?3", turso::params![bucket, scope.account_id.as_str(), prefix]).await?;
-    let prefix_marker = match rows.next().await? {
+    let prefix_row = match rows.next().await? {
         Some(row) => Some((row.get::<i64>(0)?, row.get::<i64>(1)?)),
         None => None,
-    }
-    .filter(|(time, _)| *time > 0);
+    };
+    let prefix_marker = prefix_row.filter(|(time, _)| *time > 0);
+    // A kept zero marker: the folder changed locally after it was listed, or
+    // its last listing overlapped such a change.
+    let prefix_changed = prefix_row.is_some() && prefix_marker.is_none();
     let prefix_time = prefix_marker.map(|(time, _)| time);
     let mut rows = conn
         .query(
@@ -526,6 +595,11 @@ async fn read_prefix_page_on(
         None => None,
     };
     let full_time = full_marker.map(|(time, _)| time);
+    let freshness_time = if prefix_changed {
+        None
+    } else {
+        prefix_time.or(full_time)
+    };
     let full_sync = full_marker.is_some();
     let content_revision =
         super::file_cache::content_revision_on(conn, bucket, &scope.account_id).await?;
@@ -558,6 +632,7 @@ async fn read_prefix_page_on(
     Ok(PrefixPageSnapshot {
         prefix_time,
         full_time,
+        freshness_time,
         full_sync,
         snapshot_token,
         skipped_prefixes,
@@ -622,18 +697,29 @@ mod tests {
         }
     }
 
+    /// Publish a complete root listing whose generation was captured first.
+    async fn list_root(conn: &Connection, files: &[super::super::CachedFile]) -> DbResult<()> {
+        let generation = super::super::prefix_sync::capture_mutation_generation_on(
+            conn, "bucket", "account", "",
+        )
+        .await?;
+        super::super::prefix_sync::replace_complete_prefix_on(
+            conn,
+            "bucket",
+            "account",
+            "",
+            files,
+            &[],
+            generation,
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn publish_on(conn: &Connection, scope: CacheScope, key: &str) -> DbResult<()> {
         in_scope(scope, async {
             check_context_on(conn, "account", true).await?;
-            super::super::prefix_sync::replace_complete_prefix_on(
-                conn,
-                "bucket",
-                "account",
-                "",
-                &[file(key)],
-                &[],
-            )
-            .await
+            list_root(conn, &[file(key)]).await
         })
         .await
     }
@@ -673,15 +759,7 @@ mod tests {
         let (_db, conn) = fixture().await;
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
         in_scope(scope.clone(), async {
-            super::super::prefix_sync::replace_complete_prefix_on(
-                &conn,
-                "bucket",
-                "account",
-                "",
-                &[file("a.txt"), file("b.txt")],
-                &[],
-            )
-            .await
+            list_root(&conn, &[file("a.txt"), file("b.txt")]).await
         })
         .await
         .unwrap();
@@ -693,15 +771,7 @@ mod tests {
         assert_eq!(first.snapshot_token.as_deref(), Some("prefix:123:1:1"));
 
         in_scope(scope.clone(), async {
-            super::super::prefix_sync::replace_complete_prefix_on(
-                &conn,
-                "bucket",
-                "account",
-                "",
-                &[file("c.txt"), file("d.txt")],
-                &[],
-            )
-            .await
+            list_root(&conn, &[file("c.txt"), file("d.txt")]).await
         })
         .await
         .unwrap();
@@ -715,15 +785,7 @@ mod tests {
         let (_db, conn) = fixture().await;
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
         in_scope(scope.clone(), async {
-            super::super::prefix_sync::replace_complete_prefix_on(
-                &conn,
-                "bucket",
-                "account",
-                "",
-                &[file("a.txt"), file("b.txt")],
-                &[],
-            )
-            .await
+            list_root(&conn, &[file("a.txt"), file("b.txt")]).await
         })
         .await
         .unwrap();
@@ -776,20 +838,203 @@ mod tests {
         assert!(stale_cursor.is_err());
     }
 
+    /// What a crash (or a credential edit) during a local cache write and a
+    /// full sync leaves behind for `account`.
+    async fn leave_interrupted_state(conn: &Connection, account: &str) {
+        let now = chrono::Utc::now().timestamp();
+        for (key, value) in [
+            (
+                format!("cache_mutation_in_progress:{account}:bucket"),
+                serde_json::json!([{"token": "crashed", "started_at": now}]).to_string(),
+            ),
+            (
+                format!("sync_active_run:{account}:bucket"),
+                "sync:1:1:1".into(),
+            ),
+            (format!("sync_started_at:{account}:bucket"), now.to_string()),
+            (format!("sync_base_revision:{account}:bucket"), "3".into()),
+        ] {
+            conn.execute(
+                "INSERT INTO app_state(key,value) VALUES (?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                turso::params![key, value],
+            )
+            .await
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO sync_mutation_journal(bucket,account_id,op,key) VALUES ('bucket',?1,'delete','x')",
+            turso::params![account],
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn app_state_keys(conn: &Connection) -> Vec<String> {
+        let mut rows = conn
+            .query(
+                "SELECT key FROM app_state WHERE key <> 'cache_scope_schema' ORDER BY key",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut keys = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            keys.push(row.get(0).unwrap());
+        }
+        keys
+    }
+
+    async fn journal_accounts(conn: &Connection) -> Vec<String> {
+        let mut rows = conn
+            .query(
+                "SELECT account_id FROM sync_mutation_journal ORDER BY account_id",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut accounts = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            accounts.push(row.get(0).unwrap());
+        }
+        accounts
+    }
+
+    #[tokio::test]
+    async fn account_reset_clears_that_accounts_interrupted_writes_and_runs() {
+        let (_db, conn) = fixture().await;
+        let scope = capture_on(&conn, &config("a.example")).await.unwrap();
+        conn.execute(
+            "INSERT INTO app_state(key,value) VALUES ('unrelated','kept')",
+            (),
+        )
+        .await
+        .unwrap();
+        leave_interrupted_state(&conn, "account").await;
+        leave_interrupted_state(&conn, "other").await;
+        // A fresh leftover barrier refuses reads until it is 300 s old.
+        assert!(read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
+            .await
+            .is_err());
+
+        reset_account_on(&conn, "account").await.unwrap();
+
+        read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            app_state_keys(&conn).await,
+            vec![
+                "cache_mutation_in_progress:other:bucket".to_string(),
+                "sync_active_run:other:bucket".into(),
+                "sync_base_revision:other:bucket".into(),
+                "sync_started_at:other:bucket".into(),
+                "unrelated".into(),
+            ]
+        );
+        assert_eq!(journal_accounts(&conn).await, vec!["other".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn unscoped_cache_write_withdraws_rows_but_never_cancels_a_sync() {
+        let (_db, conn) = fixture().await;
+        let scope = capture_on(&conn, &config("a.example")).await.unwrap();
+        in_scope(scope, async { list_root(&conn, &[file("a.txt")]).await })
+            .await
+            .unwrap();
+        let run = super::super::file_cache::begin_sync_on(&conn, "bucket", "account")
+            .await
+            .unwrap();
+        conn.execute(
+            "INSERT INTO cached_files_staging(bucket,account_id,key,parent_path,name,size,last_modified,synced_at)
+             VALUES ('bucket','account','x','','x',1,'',1)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_mutation_journal(bucket,account_id,op,key) VALUES ('bucket','account','delete','y')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        // A write with no scope cannot be attributed to this namespace.
+        assert!(check_context_on(&conn, "account", true).await.is_err());
+
+        let mut rows = conn
+            .query(
+                "SELECT (SELECT COUNT(*) FROM cached_files),
+                        (SELECT COUNT(*) FROM cached_files_staging),
+                        (SELECT COUNT(*) FROM sync_mutation_journal)",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 0, "live rows are withdrawn");
+        assert_eq!(row.get::<i64>(1).unwrap(), 1, "the scan's staging is kept");
+        assert_eq!(row.get::<i64>(2).unwrap(), 1, "the run's journal is kept");
+        drop(rows);
+        super::super::file_cache::ensure_sync_run_on(&conn, "bucket", "account", &run)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_clears_every_interrupted_write_and_run() {
+        let (_db, conn) = fixture().await;
+        let scope = capture_on(&conn, &config("a.example")).await.unwrap();
+        conn.execute(
+            "INSERT INTO app_state(key,value) VALUES ('unrelated','kept'), ('skipped_prefixes:account:bucket','[]')",
+            (),
+        )
+        .await
+        .unwrap();
+        leave_interrupted_state(&conn, "account").await;
+        leave_interrupted_state(&conn, "other").await;
+        conn.execute(
+            "INSERT INTO cached_files_staging(bucket,account_id,key,parent_path,name,size,last_modified,synced_at)
+             VALUES ('bucket','account','x','','x',1,'',1)",
+            (),
+        )
+        .await
+        .unwrap();
+        assert!(read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
+            .await
+            .is_err());
+
+        super::super::file_cache::clear_interrupted_work_on(&conn)
+            .await
+            .unwrap();
+
+        read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            app_state_keys(&conn).await,
+            vec![
+                "skipped_prefixes:account:bucket".to_string(),
+                "unrelated".into()
+            ]
+        );
+        assert!(journal_accounts(&conn).await.is_empty());
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM cached_files_staging", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
+    }
+
     #[tokio::test]
     async fn stale_local_mutation_barrier_invalidates_markers_and_recovers_reads() {
         let (_db, conn) = fixture().await;
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
         in_scope(scope.clone(), async {
-            super::super::prefix_sync::replace_complete_prefix_on(
-                &conn,
-                "bucket",
-                "account",
-                "",
-                &[file("a.txt")],
-                &[],
-            )
-            .await
+            list_root(&conn, &[file("a.txt")]).await
         })
         .await
         .unwrap();
@@ -838,15 +1083,7 @@ mod tests {
         let (_db, conn) = fixture().await;
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
         in_scope(scope.clone(), async {
-            super::super::prefix_sync::replace_complete_prefix_on(
-                &conn,
-                "bucket",
-                "account",
-                "",
-                &[file("a.txt"), file("b.txt")],
-                &[],
-            )
-            .await
+            list_root(&conn, &[file("a.txt"), file("b.txt")]).await
         })
         .await
         .unwrap();
@@ -1142,16 +1379,7 @@ mod tests {
         conn.execute("DELETE FROM app_state WHERE key='cache_scope_schema'", ())
             .await
             .unwrap();
-        super::super::prefix_sync::replace_complete_prefix_on(
-            &conn,
-            "bucket",
-            "account",
-            "",
-            &[file("unproven")],
-            &[],
-        )
-        .await
-        .unwrap();
+        list_root(&conn, &[file("unproven")]).await.unwrap();
         conn.execute("INSERT INTO sync_meta(bucket,account_id,last_sync,file_count) VALUES ('bucket','account',1,1)", ()).await.unwrap();
         initialize_on(&conn).await.unwrap();
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
