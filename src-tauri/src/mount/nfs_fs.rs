@@ -1617,7 +1617,12 @@ impl S3NfsFs {
                 return Ok(Some((fileid, inode)));
             }
         }
-        if self.negative_lookup_hit(dirid, name, generation) {
+        // A listing's generation is fixed before its pages arrive, so a miss
+        // recorded under it can predate the page that returned the name.
+        // Once any page has, only a fresh probe may say the name is gone.
+        if !self.cached_listing_mentions(dirid, dir_key, name)
+            && self.negative_lookup_hit(dirid, name, generation)
+        {
             return Ok(None);
         }
 

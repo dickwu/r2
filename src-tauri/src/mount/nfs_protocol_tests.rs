@@ -3803,3 +3803,142 @@ async fn a_lookup_during_a_directory_rename_finds_the_file_at_its_new_path() {
     assert_eq!(fs.inode(id).unwrap().key, "C/x");
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
 }
+
+/// A root listed over pages whose second page reaches `x` only once
+/// `created` is set, as the last name (the lookahead) when `x_last`.
+async fn later_page_child_fixture(
+    created: Arc<AtomicBool>,
+    x_last: bool,
+) -> crate::test_s3::Fixture {
+    serve(move |request| {
+        let created = created.clone();
+        async move {
+            if request.method == "GET" && request.path.contains("list-type") {
+                if request.path.contains("prefix=x%2F") {
+                    return directory_response(&[], &[], None);
+                }
+                if request.path.contains("continuation-token=p2") {
+                    let page: &[&str] = match (created.load(Ordering::SeqCst), x_last) {
+                        (true, true) => &["c", "x"],
+                        (true, false) => &["c", "x", "z"],
+                        (false, _) => &["c", "z"],
+                    };
+                    return directory_response(page, &[], Some("p3"));
+                }
+                return directory_response(&["a", "b"], &[], Some("p2"));
+            }
+            if request.method == "HEAD"
+                && request.path.starts_with("/photos/x")
+                && created.load(Ordering::SeqCst)
+            {
+                return Response::empty(200)
+                    .header("content-length", 1)
+                    .header("etag", "\"x\"");
+            }
+            Response::empty(404)
+        }
+    })
+    .await
+}
+
+/// A listing's generation is fixed before its pages arrive. A LOOKUP that
+/// probed `x` while the listing had not reached it recorded its miss under
+/// that generation; once `x` is created and a later page of the same listing
+/// shows it, that older miss must not answer for it.
+#[tokio::test]
+async fn a_miss_probed_before_a_later_page_does_not_hide_the_name_it_shows() {
+    let created = Arc::new(AtomicBool::new(false));
+    let fixture = later_page_child_fixture(created.clone(), false).await;
+    let fs = filesystem(fixture.client.clone(), "miss-before-later-page");
+
+    // The lookup starts with no listing and parks on the fence on `x`.
+    let held = fs.fence_exact_key("x").await;
+    let mut parked = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.lookup_child(ROOT_ID, "", "x").await }
+    });
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut parked)
+        .await
+        .is_err());
+    let first = tokio::time::timeout(Duration::from_secs(3), fs.readdir(ROOT_ID, 0, 100))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(directory_names(&first), ["a"]);
+    drop(held);
+    // It probes under the listing's generation; `x` does not exist yet.
+    let missed = tokio::time::timeout(Duration::from_secs(3), parked)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(missed.is_none());
+
+    created.store(true, Ordering::SeqCst);
+    let second = tokio::time::timeout(
+        Duration::from_secs(3),
+        fs.readdir(ROOT_ID, first.entries[0].fileid, 100),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(directory_names(&second), ["b", "c", "x"]);
+    assert!(!second.end);
+    let found = tokio::time::timeout(Duration::from_secs(3), fs.lookup_child(ROOT_ID, "", "x"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        found.is_some(),
+        "the page that shows `x` is newer than the miss"
+    );
+}
+
+/// The same holds while `x` is still the held-back last name of the page
+/// that returned it: a lookup that began before the listing and resumes
+/// now must not answer from the older miss either.
+#[tokio::test]
+async fn a_miss_probed_before_a_later_page_does_not_hide_a_held_back_name() {
+    let created = Arc::new(AtomicBool::new(false));
+    let fixture = later_page_child_fixture(created.clone(), true).await;
+    let fs = filesystem(fixture.client.clone(), "miss-before-held-back-name");
+    let before_listing = fs.inner.directory_generation.load(Ordering::SeqCst);
+
+    let first = tokio::time::timeout(Duration::from_secs(3), fs.readdir(ROOT_ID, 0, 100))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(directory_names(&first), ["a"]);
+    // A lookup that read its generation before the listing existed, resumed
+    // while the listing had not reached `x`: `x` does not exist yet.
+    let missed = tokio::time::timeout(
+        Duration::from_secs(3),
+        fs.lookup_exact_child(ROOT_ID, "", "x", before_listing, true, true),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(missed.is_none());
+
+    created.store(true, Ordering::SeqCst);
+    let second = tokio::time::timeout(
+        Duration::from_secs(3),
+        fs.readdir(ROOT_ID, first.entries[0].fileid, 100),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // `x` came back last, so the listing holds it until the next page.
+    assert_eq!(directory_names(&second), ["b", "c"]);
+    let found = tokio::time::timeout(
+        Duration::from_secs(3),
+        fs.lookup_exact_child(ROOT_ID, "", "x", before_listing, true, true),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        found.is_some(),
+        "the page that returned `x` is newer than the miss"
+    );
+}

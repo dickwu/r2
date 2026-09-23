@@ -88,6 +88,12 @@ impl DirListing {
             .ok()
             .and_then(|index| self.children.get(index).cloned())
     }
+
+    /// Whether any page received so far returned `name`, emitted or still
+    /// held back until the next page settles its order.
+    fn mentions(&self, name: &str) -> bool {
+        self.child_named(name).is_some() || self.pending.contains_key(name)
+    }
 }
 
 /// A future common prefix can sort before an already received file when its
@@ -313,6 +319,26 @@ impl S3NfsFs {
                     listing.generation,
                 )
             }))
+    }
+
+    /// Whether the cached listing of `dirid` has seen `name` in any page so
+    /// far. A listing's generation is fixed before its pages arrive, so a
+    /// cached miss recorded under it may be older than the page that later
+    /// returned the name; such a name is never answered from that cache.
+    pub(super) fn cached_listing_mentions(
+        &self,
+        dirid: fileid3,
+        dir_key: &str,
+        name: &str,
+    ) -> bool {
+        // An unreadable registry cannot rule the name out.
+        self.inner.dirs.read().map_or(true, |dirs| {
+            dirs.get(&dirid).is_some_and(|listing| {
+                listing.key == dir_key
+                    && listing.fetched_at.elapsed() < DIR_CACHE_TTL
+                    && listing.mentions(name)
+            })
+        })
     }
 
     async fn advance_directory_page(
