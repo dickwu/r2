@@ -11,6 +11,9 @@ pub fn get_table_sql() -> &'static str {
         file_count INTEGER NOT NULL DEFAULT 0,
         folder_count INTEGER NOT NULL DEFAULT 0,
         generation INTEGER NOT NULL DEFAULT 0,
+        -- When a listing last published this folder fresh; 0 after a stale
+        -- publish. Unlike last_synced_at, local writes never reset it.
+        listed_at INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (bucket, account_id, prefix)
     );
     CREATE INDEX IF NOT EXISTS idx_prefix_sync ON prefix_sync_times(bucket, account_id, prefix);
@@ -34,7 +37,9 @@ pub fn get_table_sql() -> &'static str {
 /// `listed_generation` is the folder's mutation generation captured before the
 /// listing's first request. If a local write advanced it since, the pages may
 /// predate that write: the rows are still written, but without a fresh marker
-/// so the next open re-lists. Returns whether the listing was published fresh.
+/// so the next open re-lists, and without `listed_at`, so a running full sync
+/// publishes its own (journal-replayed) rows for the folder instead of these.
+/// Returns whether the listing was published fresh.
 pub async fn replace_complete_prefix(
     bucket: &str,
     account_id: &str,
@@ -86,10 +91,11 @@ pub(crate) async fn replace_complete_prefix_on(
         }
         super::dir_tree::replace_prefix_children_on(conn, bucket, account_id, prefix, folders).await?;
         conn.execute(
-            "INSERT INTO prefix_sync_times (bucket, account_id, prefix, last_synced_at, file_count, folder_count, generation)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+            "INSERT INTO prefix_sync_times (bucket, account_id, prefix, last_synced_at, listed_at, file_count, folder_count, generation)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, 1)
              ON CONFLICT (bucket, account_id, prefix) DO UPDATE SET
                last_synced_at = ?4,
+               listed_at = ?4,
                file_count = ?5,
                folder_count = ?6,
                generation = prefix_sync_times.generation + 1",

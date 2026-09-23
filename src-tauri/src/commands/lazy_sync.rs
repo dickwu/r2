@@ -2453,7 +2453,7 @@ mod tests {
             .lock()
             .await
             .query(
-                "SELECT last_synced_at, file_count FROM prefix_sync_times
+                "SELECT last_synced_at, listed_at, file_count FROM prefix_sync_times
                  WHERE bucket = ?1 AND account_id = ?2 AND prefix = ''",
                 turso::params![BUCKET, ACCOUNT],
             )
@@ -2461,8 +2461,12 @@ mod tests {
             .unwrap();
         let row = rows.next().await.unwrap().unwrap();
         assert_eq!(
-            (row.get::<i64>(0).unwrap(), row.get::<i64>(1).unwrap()),
-            (0, 3)
+            (
+                row.get::<i64>(0).unwrap(),
+                row.get::<i64>(1).unwrap(),
+                row.get::<i64>(2).unwrap()
+            ),
+            (0, 0, 3)
         );
         drop(rows);
         let cached = read_prefix_cache_scoped(&input, ListScope::new(&input), &scope)

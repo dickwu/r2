@@ -1730,12 +1730,15 @@ pub(crate) async fn finish_sync_with_metadata_on(
     let started_at = sync_started_at_on(conn, bucket, account_id).await?;
     let unvouched = replay_sync_journal_on(conn, bucket, account_id).await?;
 
-    // A folder listed from the network after this scan started holds rows at
-    // least as new as the scan's view of it. Publish keeps those rows and the
-    // child folders that listing saw instead of the staged snapshot.
+    // A folder listed fresh from the network after this scan started holds
+    // rows at least as new as the scan's view of it, plus every later local
+    // write applied to them. Publish keeps those rows and the child folders
+    // that listing saw instead of the staged snapshot. A local write does not
+    // end this (it resets the freshness marker, not listed_at); a stale
+    // listing does, because its rows may predate a journaled write.
     let relisted = relisted_prefix_children_on(conn, bucket, account_id, started_at).await?;
     const RELISTED_PREFIXES: &str = "SELECT prefix FROM prefix_sync_times
-         WHERE bucket = ?1 AND account_id = ?2 AND last_synced_at >= ?3";
+         WHERE bucket = ?1 AND account_id = ?2 AND listed_at >= ?3";
     conn.execute(
         &format!(
             "DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2
@@ -1762,8 +1765,10 @@ pub(crate) async fn finish_sync_with_metadata_on(
             .await?;
     }
 
+    // This index is newer than every other folder listing; re-listed
+    // folders keep their markers, fresh or already expired by a write.
     conn.execute(
-        "DELETE FROM prefix_sync_times WHERE bucket = ?1 AND account_id = ?2 AND last_synced_at < ?3",
+        "DELETE FROM prefix_sync_times WHERE bucket = ?1 AND account_id = ?2 AND listed_at < ?3",
         turso::params![bucket, account_id, started_at],
     )
     .await?;
@@ -1849,7 +1854,7 @@ async fn relisted_prefix_children_on(
     let mut rows = conn
         .query(
             "SELECT prefix FROM prefix_sync_times
-             WHERE bucket = ?1 AND account_id = ?2 AND last_synced_at >= ?3",
+             WHERE bucket = ?1 AND account_id = ?2 AND listed_at >= ?3",
             turso::params![bucket, account_id, since],
         )
         .await?;
@@ -2192,6 +2197,95 @@ mod tests {
         assert_eq!(
             live_folders(&conn, "").await,
             vec!["a/".to_string(), "b/".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn relisting_the_root_during_a_scan_keeps_the_bucket_totals_node() {
+        let (_db, conn) = fixture().await;
+        let run = begin_sync_on(&conn, "bucket", "account").await.unwrap();
+        store_file_batch_on(
+            &conn,
+            "bucket",
+            "account",
+            &run,
+            &[cached("root.txt", 4), cached("a/x.txt", 6)],
+        )
+        .await
+        .unwrap();
+        let listed = super::super::prefix_sync::capture_mutation_generation_on(
+            &conn, "bucket", "account", "",
+        )
+        .await
+        .unwrap();
+        super::super::prefix_sync::replace_complete_prefix_on(
+            &conn,
+            "bucket",
+            "account",
+            "",
+            &[cached("root.txt", 4)],
+            &["a/".into()],
+            listed,
+        )
+        .await
+        .unwrap();
+
+        publish(&conn, &run, 2).await.unwrap();
+
+        let mut rows = conn
+            .query(
+                "SELECT total_file_count, total_size FROM directory_tree
+                 WHERE bucket = 'bucket' AND account_id = 'account' AND path = ''",
+                (),
+            )
+            .await
+            .unwrap();
+        let root = rows.next().await.unwrap().expect("root directory node");
+        assert_eq!(root.get::<i64>(0).unwrap(), 2);
+        assert_eq!(root.get::<i64>(1).unwrap(), 10);
+    }
+
+    #[tokio::test]
+    async fn a_local_write_after_a_relisting_does_not_bring_back_the_older_scan() {
+        let (_db, conn) = fixture().await;
+        let run = begin_sync_on(&conn, "bucket", "account").await.unwrap();
+        // The scan staged a/ = {p, q}; then q was deleted on the provider.
+        store_file_batch_on(
+            &conn,
+            "bucket",
+            "account",
+            &run,
+            &[cached("a/p", 1), cached("a/q", 2)],
+        )
+        .await
+        .unwrap();
+        // Opening a/ re-lists it: {p}, published fresh.
+        let listed = super::super::prefix_sync::capture_mutation_generation_on(
+            &conn, "bucket", "account", "a/",
+        )
+        .await
+        .unwrap();
+        assert!(super::super::prefix_sync::replace_complete_prefix_on(
+            &conn,
+            "bucket",
+            "account",
+            "a/",
+            &[cached("a/p", 1)],
+            &[],
+            listed,
+        )
+        .await
+        .unwrap());
+        // Then an upload lands in a/, expiring the folder's freshness marker.
+        update_cached_file_on(&conn, "bucket", "account", "a/r", 3, "later")
+            .await
+            .unwrap();
+
+        publish(&conn, &run, 2).await.unwrap();
+
+        assert_eq!(
+            live_files(&conn, "a/").await,
+            vec![("a/p".into(), 1), ("a/r".into(), 3)]
         );
     }
 

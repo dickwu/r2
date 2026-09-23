@@ -221,6 +221,12 @@ async fn migrate_on(conn: &Connection) -> DbResult<()> {
         "generation INTEGER NOT NULL DEFAULT 0",
     )
     .await?;
+    add_column_on(
+        conn,
+        "prefix_sync_times",
+        "listed_at INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?;
     cache_scope::initialize_on(conn).await?;
     file_cache::clear_interrupted_work_on(conn).await?;
     Ok(())
@@ -435,8 +441,8 @@ mod tests {
             vec!["Integer(0)".to_string()]
         );
         assert_eq!(
-            rows(&conn, "SELECT generation FROM prefix_sync_times").await,
-            vec!["Integer(0)".to_string()]
+            rows(&conn, "SELECT generation, listed_at FROM prefix_sync_times").await,
+            vec!["Integer(0)|Integer(0)".to_string()]
         );
         let names = rows(
             &conn,

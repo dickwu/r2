@@ -1154,7 +1154,8 @@ pub(super) async fn replace_prefix_children_on(
         }
         conn.execute(&format!("INSERT INTO directory_tree (bucket, account_id, path, parent_path, file_count, total_file_count, size, total_size, last_modified, last_updated) VALUES {values} ON CONFLICT (bucket, account_id, path) DO NOTHING"), params).await?;
     }
-    conn.execute("DELETE FROM directory_tree WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3 AND path NOT IN (SELECT path FROM lazy_directory_paths)", turso::params![bucket, account_id, prefix]).await?;
+    // The root is its own parent (''); a listing never removes its own node.
+    conn.execute("DELETE FROM directory_tree WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3 AND path <> ?3 AND path NOT IN (SELECT path FROM lazy_directory_paths)", turso::params![bucket, account_id, prefix]).await?;
     conn.execute("DELETE FROM lazy_directory_paths", ()).await?;
     Ok(())
 }
