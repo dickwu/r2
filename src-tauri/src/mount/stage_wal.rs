@@ -972,9 +972,10 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
 /// Marks every stage the damage may affect as unreadable in its manifest —
 /// creating one for a stage known only from the WAL whose data file is still
 /// there — so the quarantine outlives the WAL, which this restore sets aside
-/// once every other stage has replayed. The reason names no set-aside copy:
-/// none exists yet, and while a failed replay keeps the WAL in place none
-/// will (`name_set_aside_copy`). Returns their data file names.
+/// once every other stage that still has a data file has replayed. The
+/// reason names no set-aside copy: none exists yet, and while a failed
+/// replay keeps the WAL in place none will (`name_set_aside_copy`). Returns
+/// their data file names.
 async fn quarantine_affected(
     root: &Path,
     index: &WalRecoveryIndex,

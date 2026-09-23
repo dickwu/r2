@@ -456,7 +456,8 @@ struct FlushJob {
 
 #[derive(Default)]
 struct KeyLifecycle {
-    // Lock order: namespace -> lifecycle -> publication -> stage -> registry.
+    // Lock order: namespace -> fence -> lifecycle -> publication -> stage
+    // -> registry.
     // Writes share the lifecycle permit with uploads, but use the stage mutex
     // only while changing data. Destructive operations wait for publication.
     access: AsyncRwLock<()>,
@@ -610,7 +611,7 @@ pub struct FsInner {
     /// Cancel flag of every storage request this mount makes. Set only by a
     /// forced abort: the unmount drain still has to publish staged files after
     /// `accepting_writes` is cleared.
-    shutdown: AtomicBool,
+    aborted: AtomicBool,
     directory_generation: AtomicU64,
     directory_cookies: RwLock<HashMap<(fileid3, fileid3), DirectoryCookie>>,
     directory_flights: AsyncMutex<DirectoryFlights>,
@@ -670,7 +671,7 @@ impl S3NfsFs {
                 namespace: AsyncRwLock::new(()),
                 key_lifecycles: std::sync::Mutex::new(HashMap::new()),
                 accepting_writes: AtomicBool::new(true),
-                shutdown: AtomicBool::new(false),
+                aborted: AtomicBool::new(false),
                 directory_generation: AtomicU64::new(1),
                 directory_cookies: RwLock::new(HashMap::new()),
                 directory_flights: AsyncMutex::new(HashMap::new()),
@@ -919,7 +920,7 @@ impl S3NfsFs {
             scope,
             identity,
             tokio::time::Instant::now() + budget,
-            &self.inner.shutdown,
+            &self.inner.aborted,
         )
     }
 
@@ -934,7 +935,7 @@ impl S3NfsFs {
     /// requests at their next check. Nothing is lost — unpublished content
     /// stays staged for the next session — but no drain can publish after it.
     pub fn abort_storage_operations(&self) {
-        self.inner.shutdown.store(true, Ordering::SeqCst);
+        self.inner.aborted.store(true, Ordering::SeqCst);
     }
 
     pub async fn wait_for_mutations(&self) {
@@ -2356,7 +2357,7 @@ impl S3NfsFs {
                             endpoint: self.storage_endpoint().to_string(),
                             scope: self.storage_scope(&object.to),
                         },
-                        &self.inner.shutdown,
+                        &self.inner.aborted,
                         &paused,
                     )
                     .await
@@ -3068,7 +3069,7 @@ impl S3NfsFs {
             if journal.precondition.is_none() {
                 match self.object_head(key).await.map_err(|e| UploadFailure {
                     message: format!("Unable to establish publication identity: {e:?}"),
-                    retryable: matches!(e, nfsstat3::NFS3ERR_IO | nfsstat3::NFS3ERR_JUKEBOX),
+                    retryable: matches!(e, nfsstat3::NFS3ERR_IO),
                     uncertain: false,
                 })? {
                     None => journal.precondition = Some(PublicationGuard::Absent),

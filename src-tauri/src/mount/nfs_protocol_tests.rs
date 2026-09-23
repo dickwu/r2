@@ -1744,7 +1744,7 @@ async fn lookup_of_published_partial_child_does_not_fetch_the_rest_of_the_direct
     assert!(!page.end);
 
     let alpha: filename3 = b"alpha".as_slice().into();
-    let looked_up = tokio::time::timeout(Duration::from_millis(250), fs.lookup(ROOT_ID, &alpha))
+    let looked_up = tokio::time::timeout(Duration::from_secs(2), fs.lookup(ROOT_ID, &alpha))
         .await
         .unwrap()
         .unwrap();

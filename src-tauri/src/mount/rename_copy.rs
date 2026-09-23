@@ -476,7 +476,7 @@ impl S3NfsFs {
             .reserve(
                 Some((start, end)),
                 object.size,
-                &self.inner.shutdown,
+                &self.inner.aborted,
                 &paused,
             )
             .await
@@ -524,7 +524,7 @@ impl S3NfsFs {
                     &http,
                     signed.uri(),
                     &object.source_etag,
-                    &self.inner.shutdown,
+                    &self.inner.aborted,
                     &paused,
                 ),
             )
