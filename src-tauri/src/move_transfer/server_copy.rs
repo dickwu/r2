@@ -1,8 +1,6 @@
 //! Conditional server-side copy with part-level recovery for verified S3 endpoints.
 use super::config::MoveConfig;
-use super::planner::{
-    encoded_copy_source, native_aws, storage_error, TransferPlan, TRANSFER_MARKER,
-};
+use super::planner::{encoded_copy_source, storage_error, TransferPlan, TRANSFER_MARKER};
 use crate::db::{
     self,
     move_sessions::{save_move_journal, MoveJournal, SourceIdentity},
@@ -529,6 +527,63 @@ mod tests {
         });
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
+
+    #[tokio::test]
+    async fn a_confirmed_single_copy_is_not_failed_by_a_repeated_capability_probe() {
+        let _guard = test_db_guard().await;
+        let (session, mut journal) = journal_fixture("single-copy-probe-denied", 8).await;
+        // The worker confirmed the conditions before choosing SingleCopy; a
+        // probe repeated now (after the capability cache expired) is denied.
+        let fixture = serve(|request| async move {
+            if request.path.contains("/.r2-operation-checks/") {
+                return Response::xml(
+                    403,
+                    "<Error><Code>AccessDenied</Code><Message>probe denied</Message></Error>",
+                );
+            }
+            assert_eq!(request.method, "PUT");
+            assert_eq!(
+                request.headers.get("if-none-match").map(String::as_str),
+                Some("*")
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("x-amz-copy-source-if-match")
+                    .map(String::as_str),
+                Some("\"source\"")
+            );
+            Response::xml(
+                200,
+                "<CopyObjectResult><ETag>\"destination\"</ETag></CopyObjectResult>",
+            )
+        })
+        .await;
+        let config = crate::move_transfer::stream::tests::fixture_config(&fixture.endpoint);
+
+        let copied = copy(
+            TransferPlan::SingleCopy,
+            &session,
+            &config,
+            &HeadObjectOutput::builder().build(),
+            &mut journal,
+            None,
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(copied, 8);
+        let saved = db::move_sessions::get_move_journal(&session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.destination.unwrap().etag, "\"destination\"");
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].path.contains("/destination"));
+    }
 }
 
 async fn save(journal: &MoveJournal) -> Result<(), String> {
@@ -537,6 +592,10 @@ async fn save(journal: &MoveJournal) -> Result<(), String> {
         .map_err(|e| format!("Cannot persist move recovery state: {e}"))
 }
 
+/// A SingleCopy plan for an endpoint that is neither native AWS nor R2 must
+/// come from the worker's execution plan, which only chooses it once
+/// CopyCreate and CopySource are confirmed. Nothing is probed again here, so a
+/// failing probe cannot fail a copy that was already confirmed.
 #[allow(deprecated)] // AWS SDK has not exposed a string setter for outgoing Expires.
 #[allow(clippy::too_many_arguments)] // Preserve explicit mutation, journal, and cancellation ownership at call sites.
 pub(crate) async fn copy(
@@ -562,17 +621,6 @@ pub(crate) async fn copy(
     let mut metadata = source_head.metadata().cloned().unwrap_or_default();
     metadata.insert(TRANSFER_MARKER.into(), session.id.clone());
     if plan == TransferPlan::SingleCopy {
-        if !native_aws(dest)
-            && !matches!(dest, MoveConfig::R2(_))
-            && (!dest
-                .supports_condition(crate::providers::conditional::Condition::CopyCreate)
-                .await?
-                || !dest
-                    .supports_condition(crate::providers::conditional::Condition::CopySource)
-                    .await?)
-        {
-            return Err("needs_action: Conditional destination copy has not been verified for this endpoint; destination and source retained".into());
-        }
         journal.stage = "outcome_unknown".into();
         save(journal).await?;
         let request = client
