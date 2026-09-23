@@ -3253,7 +3253,12 @@ async fn a_write_racing_a_directory_rename_is_fenced_on_the_renamed_key() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(fs.drain(1, 1).await, 0);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), fs.drain(1, 1))
+            .await
+            .unwrap(),
+        0
+    );
 
     {
         let bucket = bucket.lock().unwrap();
@@ -3404,7 +3409,13 @@ async fn a_drain_after_writes_stop_still_publishes_a_multipart_stage() {
         matches!(fs.write(id, 0, b"late").await, Err(nfsstat3::NFS3ERR_IO)),
         "writes stop being accepted"
     );
-    assert_eq!(fs.drain(1, 1).await, 0, "the staged file must be published");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), fs.drain(1, 1))
+            .await
+            .unwrap(),
+        0,
+        "the staged file must be published"
+    );
     {
         let requests = fixture.requests.lock().unwrap();
         assert!(requests
@@ -3415,4 +3426,75 @@ async fn a_drain_after_writes_stop_still_publishes_a_multipart_stage() {
             .any(|r| r.method == "POST" && r.path.contains("uploadId=resumed")));
     }
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// Retiring a handle whose object changed re-interns its key under `inodes`
+/// and then invalidates the parent listing under `dirs`; a directory page
+/// takes `dirs` and then `inodes`. Holding `inodes` while waiting for `dirs`
+/// deadlocks the two on std locks, blocking runtime workers until the whole
+/// mount stops answering.
+///
+/// A worker blocked on a std lock can also leave the runtime's timers
+/// undriven, so everything that must happen while `dirs` is held runs on a
+/// plain thread with its own deadline, and `dirs` is always released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retiring_a_changed_handle_never_holds_inodes_while_waiting_for_dirs() {
+    const BOUND: Duration = Duration::from_secs(10);
+    let fixture = serve(|_| async {
+        Response::empty(200)
+            .header("content-length", 4)
+            .header("etag", "\"new\"")
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "inode-directory-lock-order");
+    let old = fs
+        .intern_child("note", ROOT_ID, EntryKind::File, 4, 0)
+        .unwrap();
+    fs.inner.read_identities.lock().await.insert(
+        old,
+        ReadIdentity {
+            etag: "\"old\"".into(),
+            version_id: None,
+            size: 4,
+            observed_at: Instant::now() - DIR_CACHE_TTL,
+        },
+    );
+    let generation = fs.inner.directory_generation.load(Ordering::SeqCst);
+
+    // Holds `dirs` the way a directory page does before it takes `inodes`,
+    // and checks `inodes` once the retire is waiting for `dirs`.
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn({
+        let fs = fs.clone();
+        move || {
+            let dirs = fs.inner.dirs.write().unwrap();
+            held_tx.send(()).unwrap();
+            // `invalidate_dir` bumps the generation just before it waits
+            // for `dirs`.
+            let deadline = std::time::Instant::now() + BOUND;
+            while fs.inner.directory_generation.load(Ordering::SeqCst) == generation
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let reached = fs.inner.directory_generation.load(Ordering::SeqCst) != generation;
+            let inodes_free = fs.inner.inodes.try_write().is_ok();
+            drop(dirs);
+            (reached, inodes_free)
+        }
+    });
+    held_rx.recv_timeout(BOUND).unwrap();
+    let retire = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.read_identity(old, "note").await }
+    });
+    // Blocks this (non-worker) thread for at most the holder's deadline.
+    let (reached, inodes_free) = holder.join().unwrap();
+
+    assert!(reached, "the handle was never retired");
+    assert!(inodes_free, "`inodes` was held while waiting for `dirs`");
+    assert!(matches!(
+        tokio::time::timeout(BOUND, retire).await.unwrap().unwrap(),
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
 }

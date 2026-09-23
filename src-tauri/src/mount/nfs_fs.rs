@@ -577,6 +577,10 @@ pub struct FsInner {
     read_only: bool,
     /// Directory holding this mount's staging files.
     staging_root: PathBuf,
+    // Lock order for the std locks below: `dirs` before `inodes` and before
+    // `directory_cookies` (a directory page interns its children while it
+    // holds `dirs`). `inodes` is never held while any of them is taken, and
+    // none of them is held across an `.await`.
     inodes: RwLock<InodeTable>,
     dirs: RwLock<HashMap<fileid3, DirListing>>,
     /// Files with content that is not in the bucket yet.
@@ -1798,26 +1802,31 @@ impl S3NfsFs {
             if stages.contains_key(&id) {
                 return Err(nfsstat3::NFS3ERR_IO);
             }
-            let mut inodes = self
-                .inner
-                .inodes
-                .write()
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-            let old = inodes
-                .get(id)
-                .filter(|inode| inode.key == key)
-                .cloned()
-                .ok_or(nfsstat3::NFS3ERR_STALE)?;
-            inodes.remove(id);
-            let new_id = inodes.intern(
-                key,
-                old.parent,
-                old.kind,
-                identity.size,
-                head.last_modified()
-                    .map(|value| value.secs().max(0) as u32)
-                    .unwrap_or(old.mtime_secs),
-            );
+            // `inodes` is released before `invalidate_dir` takes `dirs`; see
+            // the lock order on `FsInner`.
+            let (old, new_id) = {
+                let mut inodes = self
+                    .inner
+                    .inodes
+                    .write()
+                    .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                let old = inodes
+                    .get(id)
+                    .filter(|inode| inode.key == key)
+                    .cloned()
+                    .ok_or(nfsstat3::NFS3ERR_STALE)?;
+                inodes.remove(id);
+                let new_id = inodes.intern(
+                    key,
+                    old.parent,
+                    old.kind,
+                    identity.size,
+                    head.last_modified()
+                        .map(|value| value.secs().max(0) as u32)
+                        .unwrap_or(old.mtime_secs),
+                );
+                (old, new_id)
+            };
             identities.remove(&id);
             identities.insert(new_id, identity);
             self.inner.read_cache.forget_file(id);
