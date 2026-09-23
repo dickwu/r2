@@ -4,7 +4,7 @@ use crate::commands::batch_move::{
 };
 use crate::commands::delete_cache::{update_cache_after_batch_delete, update_cache_after_delete};
 use crate::commands::move_cache::{update_cache_after_batch_move, update_cache_after_move};
-use crate::commands::upload_cache::update_cache_after_upload;
+use crate::commands::upload_cache::{update_cache_after_upload, update_cache_after_write};
 use crate::db::{self, CachedFile};
 use crate::providers::aws;
 use serde::{Deserialize, Serialize};
@@ -317,7 +317,7 @@ pub async fn delete_aws_object(
 
     // Update cache and emit events (including paths-removed if any folders became empty)
     let update = update_cache_after_delete(&app, &bucket, &account_id, &key);
-    db::cache_scope::in_optional_scope(scope, update).await?;
+    update_cache_after_write(scope, update).await;
 
     Ok(())
 }
@@ -350,7 +350,7 @@ pub async fn batch_delete_aws_objects(
         });
     }
 
-    let mut outcome = run_batch_delete(&app, keys, |batch| {
+    let outcome = run_batch_delete(&app, keys, |batch| {
         let cfg = aws_config.clone();
         async move {
             aws::delete_objects(&cfg, batch)
@@ -365,9 +365,7 @@ pub async fn batch_delete_aws_objects(
     if !outcome.deleted_keys.is_empty() {
         let update =
             update_cache_after_batch_delete(&app, &bucket, &account_id, &outcome.deleted_keys);
-        if let Err(e) = db::cache_scope::in_optional_scope(scope, update).await {
-            outcome.errors.push(e);
-        }
+        update_cache_after_write(scope, update).await;
     }
 
     Ok(BatchDeleteResult {
@@ -396,7 +394,7 @@ pub async fn rename_aws_object(
 
     // Update cache and emit events (including paths-created/removed)
     let update = update_cache_after_move(&app, &bucket, &account_id, &old_key, &new_key);
-    db::cache_scope::in_optional_scope(scope, update).await?;
+    update_cache_after_write(scope, update).await;
 
     Ok(())
 }
@@ -426,12 +424,10 @@ pub async fn batch_move_aws_objects(
 
     let outcome = run_batch_move(&app, batch_id, operations, rename).await;
 
-    let mut errors = outcome.errors;
+    let errors = outcome.errors;
     if !outcome.successful.is_empty() {
         let update = update_cache_after_batch_move(&app, &bucket, &account_id, &outcome.successful);
-        if let Err(e) = db::cache_scope::in_optional_scope(scope, update).await {
-            errors.push(e);
-        }
+        update_cache_after_write(scope, update).await;
     }
 
     Ok(BatchMoveResult {
@@ -486,7 +482,7 @@ pub async fn upload_aws_content(
         new_size,
         &last_modified,
     );
-    db::cache_scope::in_optional_scope(scope, update).await?;
+    update_cache_after_write(scope, update).await;
 
     Ok(etag)
 }
@@ -604,9 +600,7 @@ pub async fn upload_aws_file(
                 file_size as i64,
                 &last_modified,
             );
-            if let Err(err) = db::cache_scope::in_optional_scope(scope, update).await {
-                log::warn!("Failed to update cache after upload: {}", err);
-            }
+            update_cache_after_write(scope, update).await;
 
             Ok(UploadResult {
                 task_id,

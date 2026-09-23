@@ -4,7 +4,9 @@ use crate::commands::batch_move::{
 };
 use crate::commands::delete_cache::{update_cache_after_batch_delete, update_cache_after_delete};
 use crate::commands::move_cache::{update_cache_after_batch_move, update_cache_after_move};
-use crate::commands::upload_cache::{update_cache_after_upload, CacheEventSink};
+use crate::commands::upload_cache::{
+    update_cache_after_upload, update_cache_after_write, CacheEventSink,
+};
 use crate::db::{self, CachedFile};
 use crate::providers::minio;
 use serde::{Deserialize, Serialize};
@@ -336,7 +338,7 @@ pub(crate) async fn delete_minio_object_with(
 
     // Update cache and emit events (including paths-removed if any folders became empty)
     let update = update_cache_after_delete(app, &bucket, &account_id, &key);
-    db::cache_scope::in_optional_scope(scope, update).await?;
+    update_cache_after_write(scope, update).await;
 
     Ok(())
 }
@@ -369,7 +371,7 @@ pub async fn batch_delete_minio_objects(
         });
     }
 
-    let mut outcome = run_batch_delete(&app, keys, |batch| {
+    let outcome = run_batch_delete(&app, keys, |batch| {
         let cfg = minio_config.clone();
         async move {
             minio::delete_objects(&cfg, batch)
@@ -384,9 +386,7 @@ pub async fn batch_delete_minio_objects(
     if !outcome.deleted_keys.is_empty() {
         let update =
             update_cache_after_batch_delete(&app, &bucket, &account_id, &outcome.deleted_keys);
-        if let Err(e) = db::cache_scope::in_optional_scope(scope, update).await {
-            outcome.errors.push(e);
-        }
+        update_cache_after_write(scope, update).await;
     }
 
     Ok(BatchDeleteResult {
@@ -415,7 +415,7 @@ pub async fn rename_minio_object(
 
     // Update cache and emit events (including paths-created/removed)
     let update = update_cache_after_move(&app, &bucket, &account_id, &old_key, &new_key);
-    db::cache_scope::in_optional_scope(scope, update).await?;
+    update_cache_after_write(scope, update).await;
 
     Ok(())
 }
@@ -445,12 +445,10 @@ pub async fn batch_move_minio_objects(
 
     let outcome = run_batch_move(&app, batch_id, operations, rename).await;
 
-    let mut errors = outcome.errors;
+    let errors = outcome.errors;
     if !outcome.successful.is_empty() {
         let update = update_cache_after_batch_move(&app, &bucket, &account_id, &outcome.successful);
-        if let Err(e) = db::cache_scope::in_optional_scope(scope, update).await {
-            errors.push(e);
-        }
+        update_cache_after_write(scope, update).await;
     }
 
     let final_completed = outcome.moved;
@@ -513,7 +511,7 @@ pub(crate) async fn upload_minio_content_with(
 
     let update =
         update_cache_after_upload(app, &bucket, &account_id, &key, new_size, &last_modified);
-    db::cache_scope::in_optional_scope(scope, update).await?;
+    update_cache_after_write(scope, update).await;
 
     Ok(etag)
 }
@@ -629,9 +627,7 @@ pub async fn upload_minio_file(
                 file_size as i64,
                 &last_modified,
             );
-            if let Err(err) = db::cache_scope::in_optional_scope(scope, update).await {
-                log::warn!("Failed to update cache after upload: {}", err);
-            }
+            update_cache_after_write(scope, update).await;
 
             Ok(UploadResult {
                 task_id,
@@ -840,5 +836,71 @@ mod tests {
         // write changed, may be served as fresh: both re-list on open.
         assert_eq!(root.freshness_time, None);
         assert_eq!(folder(&scope, "moved/").await.freshness_time, None);
+    }
+
+    #[tokio::test]
+    async fn a_completed_delete_is_reported_even_if_its_cache_scope_goes_stale() {
+        const ACCOUNT: &str = "stale-write-scope-account";
+        crate::db::init_test_db().await;
+        let host = std::sync::Arc::new(std::sync::OnceLock::<String>::new());
+        let fixture = {
+            let host = host.clone();
+            serve(move |request| {
+                let host = host.clone();
+                async move {
+                    if request.method != "DELETE" {
+                        return Response::empty(404);
+                    }
+                    // The user rotates the account's secret while the delete is
+                    // in flight: the cache scope captured before it is now stale.
+                    crate::db::minio_accounts::update_minio_account(
+                        ACCOUNT,
+                        None,
+                        "fixture",
+                        "rotated-secret",
+                        "http",
+                        host.get().unwrap(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                    Response::empty(204)
+                }
+            })
+            .await
+        };
+        let endpoint_host = fixture
+            .endpoint
+            .strip_prefix("http://")
+            .unwrap()
+            .to_string();
+        host.set(endpoint_host.clone()).unwrap();
+        crate::db::get_connection()
+            .unwrap()
+            .lock()
+            .await
+            .execute(
+                "INSERT INTO minio_accounts (id, access_key_id, secret_access_key, endpoint_scheme, endpoint_host, force_path_style, created_at, updated_at)
+                 VALUES (?1, 'fixture', 'fixture-secret', 'http', ?2, 1, 0, 0)",
+                turso::params![ACCOUNT, endpoint_host.clone()],
+            )
+            .await
+            .unwrap();
+        let input = MinioConfigInput {
+            account_id: ACCOUNT.into(),
+            bucket: "journal".into(),
+            access_key_id: "fixture".into(),
+            secret_access_key: "fixture-secret".into(),
+            endpoint_scheme: "http".into(),
+            endpoint_host,
+            force_path_style: true,
+        };
+
+        // The object is gone on the provider; a retry would now fail, so the
+        // command must report the delete, not the cache update it could not do.
+        delete_minio_object_with(input, "gone.txt".into(), &RecordedCacheEvents::default())
+            .await
+            .unwrap();
+        assert_eq!(fixture.requests.lock().unwrap().len(), 1);
     }
 }

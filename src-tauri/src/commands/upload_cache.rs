@@ -15,6 +15,20 @@ impl CacheEventSink for AppHandle {
     }
 }
 
+/// Run the cache update of a provider write that already succeeded, in the
+/// scope captured before the write. Its failure (e.g. the account was edited
+/// meanwhile, which already reset its cache) must not turn the completed write
+/// into an error -- a retried delete or rename would then fail -- so it is
+/// logged instead.
+pub(crate) async fn update_cache_after_write(
+    scope: Option<db::cache_scope::CacheScope>,
+    update: impl std::future::Future<Output = Result<(), String>>,
+) {
+    if let Err(error) = db::cache_scope::in_optional_scope(scope, update).await {
+        log::warn!("Cache update after a completed write failed: {error}");
+    }
+}
+
 /// Records the events a cache update reports, as (event, payload) pairs.
 #[cfg(test)]
 #[derive(Default)]
