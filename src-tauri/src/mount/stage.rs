@@ -177,6 +177,21 @@ pub struct Stage {
     /// the next access replays it. Otherwise nothing is ever replayed outside
     /// restore, so a write or read costs O(record), not a pass over the WAL.
     needs_replay: bool,
+    /// Set when an fsync of the data file failed. Linux can mark the pages a
+    /// failed write-back dropped as clean, so a later fsync of the same file
+    /// may succeed without them: until the WAL above the last manifest has
+    /// been re-applied through a fresh handle, nothing is acknowledged, no
+    /// manifest is written and no read is served from this file.
+    data_unsynced: bool,
+    /// Generation and checkpoint LSN of the last manifest written — the last
+    /// state an fsync proved. Recovery replays the WAL above them, and so does
+    /// clearing `data_unsynced`.
+    manifest_gen: u64,
+    manifest_checkpoint: u64,
+    /// False while content written outside the WAL (the pre-edit download of
+    /// a read-modify-write) has not yet been proven durable by a manifest.
+    /// The WAL cannot rebuild that content, so a failed fsync then is final.
+    base_proven: bool,
     /// Whether the shared WAL may still hold records of this stage, at any
     /// LSN. Cleared once a checkpoint or removal has compacted them away.
     owns_wal_records: bool,
@@ -692,6 +707,30 @@ fn remove_stops_after(_path: &Path, _step: u32) -> bool {
     false
 }
 
+/// Test hook: the next durable change of the stage at a data path fails after
+/// its WAL record is committed and before it reaches the data file.
+#[cfg(test)]
+static FAILING_APPLIES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn fail_next_apply(path: &Path) {
+    FAILING_APPLIES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf());
+}
+
+#[cfg(test)]
+fn apply_fails(path: &Path) -> bool {
+    FAILING_APPLIES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(path)
+}
+
 /// Deletes `path`; true if it is gone afterwards, whether or not it existed.
 async fn remove_if_present(path: &Path) -> bool {
     match tokio::fs::remove_file(path).await {
@@ -751,6 +790,10 @@ impl Stage {
             dirty_gen: 0,
             applied_gen: 0,
             needs_replay: false,
+            data_unsynced: false,
+            manifest_gen: 0,
+            manifest_checkpoint: 0,
+            base_proven: true,
             owns_wal_records: false,
             checkpoint_lsn: 0,
             next_lsn: 1,
@@ -804,6 +847,10 @@ impl Stage {
             // Restore replays the whole folder before any stage is rebuilt, and
             // recovery_entries hands over only stages with nothing left to apply.
             needs_replay: false,
+            data_unsynced: false,
+            manifest_gen: record.generation,
+            manifest_checkpoint: record.checkpoint_lsn,
+            base_proven: true,
             // Replayed records stay in the WAL until the next checkpoint.
             owns_wal_records: true,
             checkpoint_lsn: record.checkpoint_lsn,
@@ -834,10 +881,33 @@ impl Stage {
         self.path.with_extension("stage.json")
     }
 
+    /// Fsyncs the data file through the handle every write went through. A
+    /// failure is never dropped: it marks the file unsynced (see
+    /// `data_unsynced`) as well as being returned.
+    async fn sync_data(&mut self) -> std::io::Result<()> {
+        let result = async {
+            stage_commit::injected_sync_failure(&self.path)?;
+            self.file.sync_all().await
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                stage_commit::record_file_sync_bytes(self.size);
+                Ok(())
+            }
+            Err(error) => {
+                self.data_unsynced = true;
+                Err(error)
+            }
+        }
+    }
+
     pub async fn persist(&mut self) -> std::io::Result<()> {
+        // The manifest must never claim a record the data file lacks: bring
+        // the file level with the WAL first, then prove it with an fsync.
+        self.replay_pending_write().await?;
         self.file.flush().await?;
-        self.file.sync_all().await?;
-        stage_commit::record_file_sync_bytes(self.size);
+        self.sync_data().await?;
         let state = match self.state {
             FlushState::Uploading => "uploading",
             FlushState::Paused => "paused",
@@ -862,21 +932,33 @@ impl Stage {
                 wal_bytes: None,
             },
         )
-        .await
+        .await?;
+        self.manifest_gen = self.dirty_gen;
+        self.manifest_checkpoint = self.checkpoint_lsn;
+        self.base_proven = true;
+        Ok(())
     }
 
-    /// Brings the data file level with the WAL after an interrupted change.
+    /// Brings the data file level with the WAL after an interrupted change or
+    /// a failed data-file fsync.
     ///
-    /// O(1) unless `needs_replay` is set: restore already replayed the folder,
+    /// O(1) unless one of those happened: restore already replayed the folder,
     /// and a change that completed applied its own record.
     pub async fn replay_pending_write(&mut self) -> std::io::Result<()> {
-        if !self.needs_replay {
+        if !self.needs_replay && !self.data_unsynced {
             return Ok(());
         }
         // The interrupted apply may still have a write in flight on this
-        // handle. Let it land before the replay rewrites those bytes, then
-        // carry on with a fresh handle that holds no deferred error.
-        let _ = self.file.sync_all().await;
+        // handle: let it land, and learn whether a write-back through this
+        // handle failed before it is swapped for a fresh one below.
+        if !self.data_unsynced {
+            let _ = self.sync_data().await;
+        }
+        if self.data_unsynced && !self.base_proven {
+            return Err(std::io::Error::other(
+                "Staged content that is not in the WAL could not be made durable",
+            ));
+        }
         let path = self.path.with_extension("write.json");
         if tokio::fs::try_exists(&path).await? {
             let record = replay_write(
@@ -899,13 +981,19 @@ impl Stage {
             self.publication_guard = record.publication_guard;
             self.first_dirty_at = record.first_dirty_at;
             self.last_write = Instant::now();
+            self.manifest_gen = record.generation;
+            self.manifest_checkpoint = record.checkpoint_lsn;
         }
-        if let Some(summary) = stage_wal::replay_file_after_generation(
-            &self.path,
-            self.checkpoint_lsn,
-            self.applied_gen,
-        )
-        .await?
+        let (checkpoint_floor, generation_floor) = if self.data_unsynced {
+            // Pages written since the last proven manifest may be gone: apply
+            // every record above it again, as crash recovery would.
+            (self.manifest_checkpoint, self.manifest_gen)
+        } else {
+            (self.checkpoint_lsn, self.applied_gen)
+        };
+        if let Some(summary) =
+            stage_wal::replay_file_after_generation(&self.path, checkpoint_floor, generation_floor)
+                .await?
         {
             if self.key != summary.record.key {
                 return Err(std::io::Error::other(
@@ -933,6 +1021,10 @@ impl Stage {
             .open(&self.path)
             .await?;
         self.needs_replay = false;
+        // Everything up to the manifest was proven by its fsync, and every
+        // record above it has just been written and fsynced through handles
+        // that never saw the failure.
+        self.data_unsynced = false;
         Ok(())
     }
 
@@ -1023,6 +1115,10 @@ impl Stage {
         self.dirty_gen = generation;
         self.first_dirty_at.get_or_insert(dirty_at_ms);
         self.last_write = Instant::now();
+        #[cfg(test)]
+        if apply_fails(&self.path) {
+            return Err(std::io::Error::other("injected apply failure"));
+        }
         match change {
             DurableChange::Write { offset, data } => {
                 self.file.seek(SeekFrom::Start(offset)).await?;
@@ -1070,9 +1166,8 @@ impl Stage {
         .await
     }
 
-    async fn write_recovery_manifest(&self) -> std::io::Result<()> {
-        self.file.sync_all().await?;
-        stage_commit::record_file_sync_bytes(self.size);
+    async fn write_recovery_manifest(&mut self) -> std::io::Result<()> {
+        self.sync_data().await?;
         let state = match self.state {
             FlushState::Uploading => "uploading",
             FlushState::Paused => "paused",
@@ -1097,7 +1192,11 @@ impl Stage {
                 wal_bytes: None,
             },
         )
-        .await
+        .await?;
+        self.manifest_gen = self.dirty_gen;
+        self.manifest_checkpoint = self.checkpoint_lsn;
+        self.base_proven = true;
+        Ok(())
     }
 
     pub async fn truncate_durable(&mut self, size: u64, mtime: u32) -> std::io::Result<()> {
@@ -1237,6 +1336,8 @@ impl Stage {
     /// The flush is not optional: the uploader opens the same path through a
     /// separate handle, so buffered bytes it cannot see would upload as a hole.
     pub async fn write_at(&mut self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+        // Not in the WAL: only a manifest written after an fsync proves it.
+        self.base_proven = false;
         self.file.seek(SeekFrom::Start(offset)).await?;
         self.file.write_all(data).await?;
         self.file.flush().await?;
@@ -1313,11 +1414,14 @@ impl Stage {
 
     async fn checkpoint_durable(&mut self) -> std::io::Result<()> {
         self.replay_pending_write().await?;
-        self.file.flush().await?;
-        self.file.sync_all().await?;
-        stage_commit::record_file_sync_bytes(self.size);
+        let previous = self.checkpoint_lsn;
         self.checkpoint_lsn = self.next_lsn.saturating_sub(1);
-        self.persist().await?;
+        // persist proves the data file with an fsync before the manifest
+        // records the new checkpoint; nothing is compacted unless it did.
+        if let Err(error) = self.persist().await {
+            self.checkpoint_lsn = previous;
+            return Err(error);
+        }
         // Compaction rewrites the whole shared WAL; skip it when nothing of
         // this stage is left there (a re-checkpoint, an upload retry).
         if self.owns_wal_records {
@@ -1682,6 +1786,173 @@ mod tests {
         let mut restored = Stage::restore(record).await.unwrap();
         assert_eq!(restored.read_at(0, size).await.unwrap(), expected);
         assert_eq!(restored.dirty_gen, 64);
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    /// Puts bytes into a data file behind the stage's back — how the page
+    /// cache reads after Linux dropped the pages of a failed write-back.
+    async fn overwrite(path: &Path, offset: u64, bytes: &[u8]) {
+        let mut file = OpenOptions::new().write(true).open(path).await.unwrap();
+        file.seek(SeekFrom::Start(offset)).await.unwrap();
+        file.write_all(bytes).await.unwrap();
+        file.sync_all().await.unwrap();
+    }
+
+    async fn recover_single(root: &Path) -> Stage {
+        stage_wal::forget_append_state(&root.join(".stage.wal")).await;
+        let errors = replay_write_intents(root).await.unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        let record = recovery_entries(root).await.unwrap().remove(0);
+        assert_ne!(record.state, "unreadable", "{:?}", record.error);
+        Stage::restore(record).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_failed_data_fsync_is_never_followed_by_a_trusting_checkpoint() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-data-fsync-checkpoint-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        stage.write_durable(0, b"aaaa", 1).await.unwrap();
+        stage.checkpoint_durable().await.unwrap();
+        stage.write_durable(0, b"bbbb", 2).await.unwrap();
+
+        stage_commit::fail_next_syncs(&path, 1);
+        assert!(stage.checkpoint_durable().await.is_err());
+        // The failed write-back dropped the acknowledged pages.
+        overwrite(&path, 0, b"aaaa").await;
+        // A later fsync that happens to succeed proves nothing on its own.
+        stage.checkpoint_durable().await.unwrap();
+        drop(stage);
+
+        let mut restored = recover_single(&root).await;
+        assert_eq!(
+            restored.read_at(0, 16).await.unwrap(),
+            b"bbbb",
+            "acknowledged bytes were checkpointed away"
+        );
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_write_is_acknowledged_while_the_data_file_is_unproven() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-data-fsync-refuse-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        stage.write_durable(0, b"aaaa", 1).await.unwrap();
+        stage.checkpoint_durable().await.unwrap();
+        stage.write_durable(0, b"bbbb", 2).await.unwrap();
+        stage_commit::fail_next_syncs(&path, 1);
+        assert!(stage.checkpoint_durable().await.is_err());
+        overwrite(&path, 0, b"aaaa").await;
+
+        // The WAL must be re-applied through a handle that saw no failure
+        // before anything else is acknowledged; here that fails too.
+        stage_commit::fail_next_syncs(&path, 1);
+        assert!(
+            stage.write_durable(4, b"cccc", 3).await.is_err(),
+            "a write was acknowledged on top of unproven data"
+        );
+        stage.write_durable(4, b"cccc", 3).await.unwrap();
+        assert_eq!(stage.read_at(0, 16).await.unwrap(), b"bbbbcccc");
+        drop(stage);
+        let mut restored = recover_single(&root).await;
+        assert_eq!(restored.read_at(0, 16).await.unwrap(), b"bbbbcccc");
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_data_fsync_before_a_replay_is_never_shrugged_off() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-data-fsync-replay-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        stage.write_durable(0, b"aaaa", 1).await.unwrap();
+        stage.checkpoint_durable().await.unwrap();
+        stage.write_durable(0, b"bbbb", 2).await.unwrap();
+        // The next change is committed but never reaches the data file...
+        fail_next_apply(&path);
+        assert!(stage.write_durable(4, b"cccc", 3).await.is_err());
+        // ...and the write-back of the acknowledged one failed as well.
+        stage_commit::fail_next_syncs(&path, 1);
+        overwrite(&path, 0, b"aaaa").await;
+
+        assert_eq!(stage.read_at(0, 16).await.unwrap(), b"bbbbcccc");
+        drop(stage);
+        let mut restored = recover_single(&root).await;
+        assert_eq!(restored.read_at(0, 16).await.unwrap(), b"bbbbcccc");
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn downloaded_content_that_never_proved_durable_is_never_built_on() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-primed-fsync-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        // The read-modify-write download lands outside the WAL.
+        stage.write_at(0, b"downloaded").await.unwrap();
+        stage_commit::fail_next_syncs(&path, 1);
+        assert!(stage.write_durable(0, b"D", 2).await.is_err());
+        // The WAL cannot rebuild that content, so no later fsync may vouch
+        // for it: every write on top of it is refused.
+        assert!(stage.write_durable(0, b"D", 2).await.is_err());
+        assert!(stage.read_at(0, 16).await.is_err());
+        assert!(!tokio::fs::try_exists(path.with_extension("stage.json"))
+            .await
+            .unwrap());
+        drop(stage);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persist_never_claims_a_record_the_data_file_lacks() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-persist-unapplied-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        stage.write_durable(0, b"aaaa", 1).await.unwrap();
+        fail_next_apply(&path);
+        assert!(stage.write_durable(0, b"bbbb", 2).await.is_err());
+        stage.persist().await.unwrap();
+        drop(stage);
+
+        let manifest: StageRecovery = serde_json::from_slice(
+            &tokio::fs::read(path.with_extension("stage.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let data = tokio::fs::read(&path).await.unwrap();
+        assert!(
+            manifest.generation < 2 || data == b"bbbb",
+            "manifest claims generation {} over {:?}",
+            manifest.generation,
+            String::from_utf8_lossy(&data)
+        );
+        let mut restored = recover_single(&root).await;
+        let recovered = restored.read_at(0, 8).await.unwrap();
+        assert_eq!(recovered, data, "recovery disagrees with the manifest");
         drop(restored);
         tokio::fs::remove_dir_all(root).await.unwrap();
     }

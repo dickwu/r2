@@ -935,6 +935,7 @@ async fn apply_record(data_path: &Path, record: &WalRecord) -> std::io::Result<(
         .await?;
     apply_record_to_open_file(&mut file, record).await?;
     file.flush().await?;
+    stage_commit::injected_sync_failure(data_path)?;
     file.sync_all().await?;
     stage_commit::record_file_sync_bytes(record.resulting_size);
     Ok(())
