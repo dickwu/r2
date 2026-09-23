@@ -77,6 +77,14 @@ const RENAME_COPY_CONCURRENCY: usize = 8;
 /// flush is left for a later pass.
 const FENCED_KEY_ATTEMPTS: usize = 16;
 
+/// The answer once every fenced-key attempt found `what` moved again.
+fn fenced_key_kept_moving(what: std::fmt::Arguments<'_>) -> nfsstat3 {
+    log::warn!(
+        "mount: {what} kept moving across {FENCED_KEY_ATTEMPTS} fence waits; the client is asked to retry"
+    );
+    nfsstat3::NFS3ERR_JUKEBOX
+}
+
 // ============ Key helpers (pure) ============
 
 /// Normalizes a directory key to the form used as a `ListObjectsV2` prefix:
@@ -815,7 +823,9 @@ impl S3NfsFs {
                 return Ok((fence, id, current));
             }
         }
-        Err(nfsstat3::NFS3ERR_JUKEBOX)
+        Err(fenced_key_kept_moving(format_args!(
+            "\"{name}\" in directory {dirid}"
+        )))
     }
 
     /// `name` inside `dirid`, resolved without a fence of the caller's, or
@@ -856,7 +866,9 @@ impl S3NfsFs {
                 return Ok((fence, dir_key, key));
             }
         }
-        Err(nfsstat3::NFS3ERR_JUKEBOX)
+        Err(fenced_key_kept_moving(format_args!(
+            "the path for new \"{name}\" in directory {dirid}"
+        )))
     }
 
     /// Shared fence on the key `id` has once the fence is held, with the inode
@@ -870,7 +882,7 @@ impl S3NfsFs {
                 return Ok((fence, inode));
             }
         }
-        Err(nfsstat3::NFS3ERR_JUKEBOX)
+        Err(fenced_key_kept_moving(format_args!("file {id}")))
     }
 
     fn storage_endpoint(&self) -> &str {
@@ -3664,6 +3676,9 @@ impl S3NfsFs {
                 Some(_) => {}
             }
         }
+        log::warn!(
+            "mount: staged file {id} kept moving across {FENCED_KEY_ATTEMPTS} fence waits; its upload waits for a later pass"
+        );
         Err(UploadFailure {
             message: "Staged file kept moving; publication deferred".into(),
             retryable: true,
@@ -4034,7 +4049,9 @@ impl NFSFileSystem for S3NfsFs {
                 return Ok(id);
             }
         }
-        Err(nfsstat3::NFS3ERR_JUKEBOX)
+        Err(fenced_key_kept_moving(format_args!(
+            "directory {dirid} (looking up \"{name}\")"
+        )))
     }
 
     async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
@@ -4638,7 +4655,9 @@ impl S3NfsFs {
                 return Ok(Some((fence, id, current, to_dir_key)));
             }
         }
-        Err(nfsstat3::NFS3ERR_JUKEBOX)
+        Err(fenced_key_kept_moving(format_args!(
+            "the source or target of renaming \"{from_name}\" in directory {from_dirid} to \"{to_name}\" in directory {to_dirid}"
+        )))
     }
 
     /// The source of an interrupted rename whose journal is still on disk,
