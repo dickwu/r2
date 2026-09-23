@@ -808,7 +808,7 @@ async fn get_pending_moves_for_source_on(
                 source_bucket,
                 source_account_id,
                 chrono::Utc::now().timestamp(),
-                limit.max(0)
+                limit
             ],
         )
         .await?;
@@ -1359,6 +1359,7 @@ mod tests {
             ["ready"]
         );
     }
+
     #[tokio::test]
     async fn pending_selection_skips_deferred_tasks_in_creation_order_past_the_limit() {
         let database = turso::Builder::new_local(":memory:").build().await.unwrap();

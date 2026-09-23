@@ -1764,6 +1764,7 @@ pub(crate) mod tests {
             1
         );
     }
+
     #[tokio::test(start_paused = true)]
     async fn a_read_stalled_past_one_attempt_timeout_still_gets_its_retry() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1926,9 +1927,9 @@ pub(crate) mod tests {
                 &paused,
             )
         });
-        // Each read may take attempt_timeout(5 MiB) = 70 s. Reads that wait
-        // for memory while holding the slots the loaded parts need to upload
-        // stall until that deadline and then fail.
+        // Reads that wait for memory while holding the slots the loaded parts
+        // need to upload stall for a whole attempt_timeout(5 MiB) = 70 s
+        // before any of them gives up; taking memory first ends in seconds.
         let results = tokio::time::timeout(
             Duration::from_secs(20),
             futures_util::future::join_all(transfers),
