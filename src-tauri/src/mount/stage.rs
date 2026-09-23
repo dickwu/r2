@@ -317,6 +317,17 @@ async fn replay_write(root: &Path, intent_path: &Path) -> std::io::Result<StageR
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(std::io::Error::other("Invalid stage data file"));
     }
+    // Rewriting the manifest from the intent would lift a quarantine.
+    let manifest_path = intent.state.path.with_extension("stage.json");
+    if let Ok(bytes) = tokio::fs::read(&manifest_path).await {
+        if serde_json::from_slice::<StageRecovery>(&bytes)
+            .is_ok_and(|manifest| manifest.state == "unreadable")
+        {
+            return Err(std::io::Error::other(
+                "This file is quarantined for review; its interrupted write is kept",
+            ));
+        }
+    }
     let mut file = OpenOptions::from(stage_commit::sync_open_options())
         .open(&intent.state.path)
         .await?;
@@ -373,12 +384,6 @@ pub async fn sync_parent(path: &Path) -> std::io::Result<()> {
 
 pub async fn replay_write_intents(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     let mut errors = stage_wal::replay_all(root).await?;
-    let wal = stage_wal::root_wal_path(root);
-    if errors.iter().any(|(path, _)| *path == wal) {
-        // A damaged WAL leaves the whole folder for review: legacy intents
-        // are not applied either (recovery_entries quarantines them all).
-        return Ok(errors);
-    }
     let mut dir = tokio::fs::read_dir(root).await.map_err(|e| e.to_string())?;
     while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
         if entry.file_name().to_string_lossy().ends_with(".write.json") {
@@ -478,8 +483,27 @@ pub async fn recovery_entries(root: &Path) -> Result<Vec<StageRecovery>, String>
         paths.push(entry.path());
     }
     let wal_index = stage_wal::recovery_index(root).await?;
-    if let Some(damage) = wal_index.corruption() {
-        return Ok(quarantine_folder(root, &paths, damage).await);
+    let damage = wal_index.damage();
+    if let Some(damage) = &damage {
+        // Restore sets it aside; until then it is listed like the copies
+        // below, so the folder is kept and the damage is visible.
+        entries.push(unreadable_record(
+            stage_wal::root_wal_path(root),
+            String::new(),
+            damage.clone(),
+        ));
+    }
+    for path in paths.iter().filter(|path| {
+        path.file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .starts_with(stage_wal::DAMAGED_WAL_PREFIX)
+        })
+    }) {
+        entries.push(unreadable_record(
+            path.clone(),
+            String::new(),
+            "Damaged staging WAL kept for export and review".into(),
+        ));
     }
     for path in paths
         .iter()
@@ -532,6 +556,18 @@ pub async fn recovery_entries(root: &Path) -> Result<Vec<StageRecovery>, String>
         if wal_index.is_discarded(&record.path) {
             // Deleted by the user; a crash interrupted removing its files.
             continue;
+        }
+        if record.state == "unreadable" {
+            // Quarantined by an earlier recovery (a damaged WAL was set aside).
+            record.dirty = true;
+            entries.push(record);
+            continue;
+        }
+        if let Some(damage) = &damage {
+            if wal_index.is_affected(&record.path, record.checkpoint_lsn, record.generation) {
+                entries.push(unreadable_record(path.clone(), record.key, damage.clone()));
+                continue;
+            }
         }
         record.wal_bytes = Some(
             wal_index
@@ -599,7 +635,12 @@ pub async fn recovery_entries(root: &Path) -> Result<Vec<StageRecovery>, String>
             && !listed.contains(&data_path.with_extension("stage.json"))
             && !listed.contains(&data_path.with_extension("write.json"))
         {
-            entries.push(pending_replay_record(data_path, key.to_string()));
+            match &damage {
+                Some(damage) if wal_index.is_affected(&data_path, 0, 0) => entries.push(
+                    unreadable_record(data_path, key.to_string(), damage.clone()),
+                ),
+                _ => entries.push(pending_replay_record(data_path, key.to_string())),
+            }
         }
     }
     entries.extend(pending.into_values());
@@ -609,30 +650,6 @@ pub async fn recovery_entries(root: &Path) -> Result<Vec<StageRecovery>, String>
             .map(|(path, error)| unreadable_record(path, String::new(), error)),
     );
     Ok(entries)
-}
-
-/// Every stage and intent in a folder whose WAL is damaged, each reported with
-/// that damage, plus the WAL itself so the folder never looks empty. Clean
-/// stages are included: a record lost in the damage may have dirtied them.
-async fn quarantine_folder(root: &Path, paths: &[PathBuf], damage: &str) -> Vec<StageRecovery> {
-    let mut entries = vec![unreadable_record(
-        stage_wal::root_wal_path(root),
-        String::new(),
-        damage.to_string(),
-    )];
-    for path in paths {
-        let name = path.to_string_lossy();
-        let write = name.ends_with(".write.json");
-        if !write && !name.ends_with(".stage.json") {
-            continue;
-        }
-        let key = read_recovery_record(root, path, write)
-            .await
-            .map(|record| record.key)
-            .unwrap_or_default();
-        entries.push(unreadable_record(path.clone(), key, damage.to_string()));
-    }
-    entries
 }
 
 async fn validate_data_file(path: &Path, expected_size: u64) -> std::io::Result<()> {
@@ -1099,6 +1116,7 @@ impl Stage {
                 self.wal_lease
                     .resize(self.wal_lease.bytes().saturating_add(wal_record_bytes));
                 stage_commit::commit(vec![wal_path.clone()]).await?;
+                stage_wal::note_committed(&wal_path, assigned_lsn).await;
                 drop(admitted);
                 drop(wal_growth);
                 self.next_lsn = assigned_lsn.saturating_add(1);
@@ -1320,8 +1338,9 @@ impl Stage {
             || super::available_space(wal_parent),
         )?;
         self.owns_wal_records = true;
-        stage_wal::append_record_unchecked(&wal_path, &record).await?;
+        let lsn = stage_wal::append_record_unchecked(&wal_path, &record).await?;
         stage_commit::commit(vec![wal_path.clone()]).await?;
+        stage_wal::note_committed(&wal_path, lsn).await;
         drop(admitted);
         Ok(())
     }
@@ -2343,53 +2362,166 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mid_file_wal_damage_quarantines_the_folder_and_keeps_every_byte() {
+    async fn a_power_loss_hole_before_unacknowledged_records_is_cut_and_writes_continue() {
         let root = std::env::temp_dir().join(format!(
-            "r2-mid-file-damage-{}-{}",
+            "r2-power-loss-hole-{}-{}",
             std::process::id(),
             chrono::Utc::now().timestamp_nanos_opt().unwrap()
         ));
-        let first_path = root.join("first.data");
-        let second_path = root.join("second.data");
-        let wal = stage_wal::wal_path(&first_path);
-        let mut first = Stage::create(first_path.clone(), "first".into(), 1)
+        let path = root.join("record.data");
+        let wal = stage_wal::wal_path(&path);
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        stage.write_durable(0, b"acked", 1).await.unwrap();
+        drop(stage);
+        let acked_len = tokio::fs::metadata(&wal).await.unwrap().len() as usize;
+        // A batch whose commit never returned: its unsynced bytes reached the
+        // disk out of order, the first as zeros, the second intact.
+        let name = stage_wal::data_name(&path).unwrap();
+        let unacked = |generation: u64, offset: u64, payload: &[u8]| stage_wal::WalRecord {
+            lsn: 0,
+            generation,
+            op: stage_wal::WalOp::Write,
+            offset,
+            resulting_size: offset + payload.len() as u64,
+            mtime_secs: 2,
+            dirty_at_ms: 1,
+            data_name: name.clone(),
+            key: "key".into(),
+            payload: payload.to_vec(),
+        };
+        let lost = unacked(2, 5, b"-one");
+        stage_wal::append_record(&wal, &lost).await.unwrap();
+        stage_wal::append_record(&wal, &unacked(3, 9, b"-two"))
             .await
             .unwrap();
-        let mut second = Stage::create(second_path.clone(), "second".into(), 1)
-            .await
-            .unwrap();
-        first.write_durable(0, &[1u8; 4096], 1).await.unwrap();
-        second.write_durable(0, &[2u8; 4096], 1).await.unwrap();
-        first.write_durable(4096, &[3u8; 4096], 2).await.unwrap();
-        drop(first);
-        drop(second);
-        // Damage the first record's payload; valid records follow it.
+        let lost_len = stage_wal::estimated_record_len(&lost).unwrap() as usize;
+        let mut bytes = tokio::fs::read(&wal).await.unwrap();
+        bytes[acked_len..acked_len + lost_len].fill(0);
+        tokio::fs::write(&wal, &bytes).await.unwrap();
+
+        let mut restored = recover_single(&root).await;
+        assert_eq!(restored.read_at(0, 64).await.unwrap(), b"acked");
+        restored.write_durable(5, b"!", 2).await.unwrap();
+        drop(restored);
+        let mut restored = recover_single(&root).await;
+        assert_eq!(restored.read_at(0, 64).await.unwrap(), b"acked!");
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    async fn damaged_wal_copies(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut dir = tokio::fs::read_dir(root).await.unwrap();
+        while let Some(entry) = dir.next_entry().await.unwrap() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".stage.wal.damaged")
+            {
+                found.push(entry.path());
+            }
+        }
+        found
+    }
+
+    #[tokio::test]
+    async fn a_damaged_acknowledged_record_quarantines_only_its_stage_and_sets_the_wal_aside() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-acked-damage-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let a_path = root.join("a.data");
+        let b_path = root.join("b.data");
+        let wal = stage_wal::wal_path(&a_path);
+        let mut a = Stage::create(a_path.clone(), "a".into(), 1).await.unwrap();
+        let mut b = Stage::create(b_path.clone(), "b".into(), 1).await.unwrap();
+        a.write_durable(0, &[1u8; 4096], 1).await.unwrap();
+        b.write_durable(0, &[2u8; 4096], 1).await.unwrap();
+        a.write_durable(4096, &[3u8; 4096], 2).await.unwrap();
+        drop(a);
+        drop(b);
+        // Media damage inside a's first record, long after it was acknowledged.
         let mut bytes = tokio::fs::read(&wal).await.unwrap();
         bytes[1024] ^= 0xff;
         tokio::fs::write(&wal, &bytes).await.unwrap();
         stage_wal::forget_append_state(&wal).await;
-        let first_before = tokio::fs::read(&first_path).await.unwrap();
-        let second_before = tokio::fs::read(&second_path).await.unwrap();
 
-        let errors = replay_write_intents(&root)
+        replay_write_intents(&root)
             .await
-            .expect("damage is reported per folder, not a failed restore");
-        assert!(errors.iter().any(|(path, _)| path == &wal));
+            .expect("damage never fails the restore");
+        let set_aside = damaged_wal_copies(&root).await;
+        assert_eq!(set_aside.len(), 1, "the damaged WAL is kept for export");
+        assert_eq!(tokio::fs::read(&set_aside[0]).await.unwrap(), bytes);
         let entries = recovery_entries(&root).await.unwrap();
-        for key in ["first", "second"] {
-            let entry = entries
+        let a_entry = entries.iter().find(|entry| entry.key == "a").unwrap();
+        assert_eq!(a_entry.state, "unreadable");
+        assert!(a_entry.error.as_deref().unwrap().contains("damaged"));
+        assert!(
+            entries
                 .iter()
-                .find(|entry| entry.key == key)
-                .unwrap_or_else(|| panic!("{key} must be listed, not dropped"));
-            assert_eq!(entry.state, "unreadable", "{key}");
-            assert!(entry.error.as_deref().unwrap().contains("damaged"));
-        }
-        assert!(entries
-            .iter()
-            .any(|entry| entry.path == wal && entry.state == "unreadable"));
-        assert_eq!(tokio::fs::read(&wal).await.unwrap(), bytes);
-        assert_eq!(tokio::fs::read(&first_path).await.unwrap(), first_before);
-        assert_eq!(tokio::fs::read(&second_path).await.unwrap(), second_before);
+                .any(|entry| entry.path == set_aside[0] && entry.state == "unreadable"),
+            "the set-aside WAL is listed for export"
+        );
+        let b_entry = entries.iter().find(|entry| entry.key == "b").unwrap();
+        assert!(!["unreadable", "replay_pending"].contains(&b_entry.state.as_str()));
+        let mut b = Stage::restore(b_entry.clone()).await.unwrap();
+        assert_eq!(b.read_at(0, 8192).await.unwrap(), vec![2u8; 4096]);
+
+        // The mount stays writable: a fresh WAL takes the next writes.
+        b.write_durable(4096, b"more", 2).await.unwrap();
+        let mut c = Stage::create(root.join("c.data"), "c".into(), 1)
+            .await
+            .unwrap();
+        c.write_durable(0, b"new file", 1).await.unwrap();
+        drop(b);
+        drop(c);
+        stage_wal::forget_append_state(&wal).await;
+        assert!(replay_write_intents(&root).await.unwrap().is_empty());
+        let entries = recovery_entries(&root).await.unwrap();
+        let content = |key: &str| {
+            let entry = entries.iter().find(|entry| entry.key == key).unwrap();
+            assert_ne!(entry.state, "unreadable", "{key}");
+            entry.clone()
+        };
+        let mut b = Stage::restore(content("b")).await.unwrap();
+        let mut expected = vec![2u8; 4096];
+        expected.extend_from_slice(b"more");
+        assert_eq!(b.read_at(0, 8192).await.unwrap(), expected);
+        let mut c = Stage::restore(content("c")).await.unwrap();
+        assert_eq!(c.read_at(0, 64).await.unwrap(), b"new file");
+        let a_entry = entries.iter().find(|entry| entry.key == "a").unwrap();
+        assert_eq!(a_entry.state, "unreadable", "a stays quarantined");
+        drop(b);
+        drop(c);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proven_damage_found_while_mounted_never_blocks_writes() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-live-damage-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let wal = stage_wal::wal_path(&path);
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        stage.write_durable(0, &[1u8; 4096], 1).await.unwrap();
+        stage.write_durable(4096, &[2u8; 4096], 2).await.unwrap();
+        let mut bytes = tokio::fs::read(&wal).await.unwrap();
+        bytes[1024] ^= 0xff;
+        tokio::fs::write(&wal, &bytes).await.unwrap();
+        // The next append has to look at the tail and finds the damage.
+        stage_wal::forget_append_state(&wal).await;
+        stage.write_durable(8192, b"more", 3).await.unwrap();
+        let after = tokio::fs::read(&wal).await.unwrap();
+        assert_eq!(
+            &after[..bytes.len()],
+            bytes.as_slice(),
+            "damage is never cut"
+        );
+        drop(stage);
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 

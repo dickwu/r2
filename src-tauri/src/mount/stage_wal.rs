@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Error, ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -20,8 +20,9 @@ use super::{
 };
 
 const MAGIC: &[u8; 4] = b"R2WL";
-const VERSION: u16 = 2;
-const HEADER_LEN: usize = 104;
+/// 3 added the watermark; nothing older ever shipped.
+const VERSION: u16 = 3;
+const HEADER_LEN: usize = 112;
 const MAX_KEY_LEN: usize = 16 * 1024;
 const MAX_DATA_NAME_LEN: usize = 1024;
 const MAX_PAYLOAD_LEN: usize = 8 * 1024 * 1024;
@@ -121,19 +122,70 @@ pub struct WalSummary {
     pub truncated_tail: bool,
 }
 
+/// A folder's WAL as recovery sees it.
 #[derive(Debug, Clone, Default)]
 pub struct WalRecoveryIndex {
+    /// Live records before the torn tail: discards and the records they
+    /// cover are left out.
     buckets: HashMap<String, WalBucket>,
+    /// Data file name to the LSN of its newest discard record.
     discarded: HashMap<String, u64>,
     truncated_tail: bool,
-    corruption: Option<String>,
+    damage: Vec<Damage>,
+    max_lsn: u64,
 }
 
 impl WalRecoveryIndex {
-    /// Set when damage sits in front of intact records: nothing in the
-    /// folder can be trusted to be complete, so recovery quarantines it all.
-    pub fn corruption(&self) -> Option<&str> {
-        self.corruption.as_deref()
+    /// Set when acknowledged records were damaged (see `DecodedWal`).
+    /// Recovery sets the WAL aside and quarantines only the files the damage
+    /// may affect (`is_affected`); everything else recovers normally.
+    pub fn damage(&self) -> Option<String> {
+        self.damage.first().map(|damage| {
+            format!(
+                "Staging WAL is damaged at byte {} inside acknowledged records; recovery keeps it for export and quarantines the files it may affect",
+                damage.offset
+            )
+        })
+    }
+
+    /// Whether acknowledged changes of the stage at `data_path`, beyond its
+    /// manifest's checkpoint and generation, may have been in damaged bytes.
+    ///
+    /// A stage is unaffected when, for every damaged stretch, its checkpoint
+    /// covers every LSN the stretch could hold, or its own intact records
+    /// continue past the stretch with no generation missing: each durable
+    /// change takes the next generation, so a lost record leaves a gap.
+    pub fn is_affected(&self, data_path: &Path, checkpoint_lsn: u64, generation: u64) -> bool {
+        if self.damage.is_empty() {
+            return false;
+        }
+        let Ok(name) = data_name(data_path) else {
+            return true;
+        };
+        if self.discarded.contains_key(&name) {
+            return false;
+        }
+        let chain: Vec<&WalRecord> = self
+            .buckets
+            .get(&name)
+            .map(|bucket| {
+                bucket
+                    .records
+                    .iter()
+                    .filter(|record| record.lsn > checkpoint_lsn && record.generation > generation)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !generations_unbroken(&chain, generation) {
+            return true;
+        }
+        let last = chain.last().map(|record| record.lsn);
+        self.damage.iter().any(|damage| match damage.lsn_after {
+            Some(after) => {
+                checkpoint_lsn.saturating_add(1) < after && last.is_none_or(|lsn| lsn < after)
+            }
+            None => true,
+        })
     }
 
     /// Whether the stage was deleted. Data file names are unique per stage
@@ -203,14 +255,18 @@ struct WalBucket {
     bytes: u64,
 }
 
-#[derive(Debug, Clone, Default)]
-struct RootWal {
-    /// Live records only: discards and the records they cover are left out.
-    buckets: HashMap<String, WalBucket>,
-    /// Data file name to the LSN of its newest discard record.
-    discarded: HashMap<String, u64>,
-    truncated_tail: bool,
-    corruption: Option<String>,
+/// Whether a stage's records above its manifest — in LSN order — take every
+/// generation after `generation` without skipping one. Retries of a failed
+/// commit may repeat a generation; only a skipped one means a lost record.
+fn generations_unbroken(chain: &[&WalRecord], generation: u64) -> bool {
+    let mut expected = generation.saturating_add(1);
+    for record in chain {
+        if record.generation > expected {
+            return false;
+        }
+        expected = expected.max(record.generation.saturating_add(1));
+    }
+    true
 }
 
 /// The newest discard LSN of every data file that has one.
@@ -243,10 +299,56 @@ fn highwater_path(path: &Path) -> PathBuf {
     path.with_extension("wal.highwater")
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct AppendState {
     next_lsn: u64,
     tail_valid: bool,
+    /// Length of the WAL as this process last wrote or checked it.
+    file_len: u64,
+    /// Prefix an fsync has proven: every record appended carries it as its
+    /// watermark (see `DecodedWal`).
+    durable_len: u64,
+    /// LSN and end offset of each appended record whose commit has not
+    /// returned yet, in file order.
+    pending: VecDeque<(u64, u64)>,
+}
+
+impl AppendState {
+    fn new(next_lsn: u64) -> Self {
+        Self {
+            next_lsn,
+            tail_valid: false,
+            file_len: 0,
+            durable_len: 0,
+            pending: VecDeque::new(),
+        }
+    }
+
+    /// The WAL was just cut, rewritten or checked, and `durable_len` of its
+    /// `len` bytes are proven.
+    fn relaid(&mut self, next_lsn: u64, len: u64, durable_len: u64) {
+        self.next_lsn = self.next_lsn.max(next_lsn);
+        self.tail_valid = true;
+        self.file_len = len;
+        self.durable_len = durable_len.min(len);
+        self.pending.clear();
+    }
+}
+
+/// Raises the watermark once the commit of `lsn` has returned: its fsync
+/// proved every byte up to the end of that record.
+pub async fn note_committed(path: &Path, lsn: u64) {
+    let mut states = append_states().lock().await;
+    let Some(state) = states.get_mut(path) else {
+        return;
+    };
+    while let Some(&(pending_lsn, end)) = state.pending.front() {
+        if pending_lsn > lsn {
+            break;
+        }
+        state.durable_len = state.durable_len.max(end);
+        state.pending.pop_front();
+    }
 }
 
 static APPEND_STATES: OnceLock<Mutex<HashMap<PathBuf, AppendState>>> = OnceLock::new();
@@ -311,18 +413,24 @@ async fn rewrite_after_failed_sync(path: &Path) -> std::io::Result<()> {
     #[cfg(test)]
     note_wal_read(path);
     let decoded = decode_records(&bytes);
-    decoded.refuse_damage()?;
+    // The unacknowledged tail goes; proven damage stays byte for byte, and so
+    // does everything after it (a later record may be its only evidence).
+    let keep = if decoded.damage.is_empty() {
+        decoded.cut
+    } else {
+        decoded.len
+    };
     let parent = path
         .parent()
         .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "WAL path has no parent"))?;
     if !bytes.is_empty() {
         let temporary = path.with_extension("wal.tmp");
         let mut output = File::create(&temporary).await?;
-        output.write_all(&bytes[..decoded.valid_len]).await?;
+        output.write_all(&bytes[..keep]).await?;
         output.flush().await?;
         stage_commit::injected_sync_failure(&temporary)?;
         output.sync_all().await?;
-        stage_commit::record_file_sync_bytes(decoded.valid_len as u64);
+        stage_commit::record_file_sync_bytes(keep as u64);
         drop(output);
         tokio::fs::rename(&temporary, path).await?;
     }
@@ -347,18 +455,11 @@ async fn rewrite_after_failed_sync(path: &Path) -> std::io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    let next_lsn = decoded
-        .records
-        .iter()
-        .map(|record| record.lsn.saturating_add(1))
-        .max()
-        .unwrap_or(1);
-    let state = states.entry(path.to_path_buf()).or_insert(AppendState {
-        next_lsn,
-        tail_valid: true,
-    });
-    state.next_lsn = state.next_lsn.max(next_lsn);
-    state.tail_valid = true;
+    let next_lsn = decoded.max_lsn.saturating_add(1);
+    states
+        .entry(path.to_path_buf())
+        .or_insert_with(|| AppendState::new(next_lsn))
+        .relaid(next_lsn, keep as u64, keep as u64);
     stage_commit::clear_poison(path);
     Ok(())
 }
@@ -403,14 +504,12 @@ pub async fn append_record(path: &Path, record: &WalRecord) -> std::io::Result<u
 
 pub async fn append_record_unchecked(path: &Path, record: &WalRecord) -> std::io::Result<u64> {
     let mut states = append_states().lock().await;
-    let state = states.entry(path.to_path_buf()).or_insert(AppendState {
-        next_lsn: 1,
-        tail_valid: false,
-    });
+    let state = states
+        .entry(path.to_path_buf())
+        .or_insert_with(|| AppendState::new(1));
     if !state.tail_valid {
-        let next_lsn = repair_tail_and_next_lsn(path).await?;
-        state.next_lsn = state.next_lsn.max(next_lsn);
-        state.tail_valid = true;
+        let repaired = repair_tail_and_next_lsn(path).await?;
+        state.relaid(repaired.next_lsn, repaired.len, repaired.durable_len);
     }
 
     let assigned_lsn = state.next_lsn.max(record.lsn);
@@ -419,7 +518,7 @@ pub async fn append_record_unchecked(path: &Path, record: &WalRecord) -> std::io
 
     let mut assigned = record.clone();
     assigned.lsn = assigned_lsn;
-    let bytes = encode_record(&assigned)?;
+    let bytes = encode_stamped(&assigned, state.durable_len)?;
     let result = async {
         let mut file = OpenOptions::new()
             .create(true)
@@ -433,6 +532,8 @@ pub async fn append_record_unchecked(path: &Path, record: &WalRecord) -> std::io
     match result {
         Ok(()) => {
             state.tail_valid = true;
+            state.file_len = state.file_len.saturating_add(bytes.len() as u64);
+            state.pending.push_back((assigned_lsn, state.file_len));
             Ok(assigned_lsn)
         }
         Err(error) => Err(error),
@@ -482,15 +583,27 @@ pub async fn replay_file_after_generation(
     file.read_to_end(&mut bytes).await?;
     let data_name = data_name(data_path)?;
     let decoded = decode_records(&bytes);
-    decoded.refuse_damage()?;
-    let truncated_tail = decoded.tail == WalTail::Torn;
+    let truncated_tail = decoded.torn();
+    let records: Vec<WalRecord> = decoded
+        .records
+        .into_iter()
+        .filter(|record| {
+            record.data_name == data_name
+                && record.op != WalOp::Discard
+                && record.lsn > checkpoint_lsn
+                && record.generation > generation_floor
+        })
+        .collect();
+    if !decoded.damage.is_empty()
+        && !generations_unbroken(&records.iter().collect::<Vec<_>>(), generation_floor)
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "A record of this file is in a damaged part of the staging WAL",
+        ));
+    }
     let mut last = None;
-    for record in decoded.records.into_iter().filter(|record| {
-        record.data_name == data_name
-            && record.op != WalOp::Discard
-            && record.lsn > checkpoint_lsn
-            && record.generation > generation_floor
-    }) {
+    for record in records {
         apply_record(data_path, &record).await?;
         last = Some(record);
     }
@@ -511,24 +624,34 @@ pub async fn repair_tail(path: &Path) -> std::io::Result<()> {
     if states.get(path).is_some_and(|state| state.tail_valid) {
         return Ok(());
     }
-    let next_lsn = repair_tail_and_next_lsn(path).await?;
-    let state = states.entry(path.to_path_buf()).or_insert(AppendState {
-        next_lsn,
-        tail_valid: true,
-    });
-    state.next_lsn = state.next_lsn.max(next_lsn);
-    state.tail_valid = true;
+    let repaired = repair_tail_and_next_lsn(path).await?;
+    states
+        .entry(path.to_path_buf())
+        .or_insert_with(|| AppendState::new(repaired.next_lsn))
+        .relaid(repaired.next_lsn, repaired.len, repaired.durable_len);
     Ok(())
 }
 
-async fn repair_tail_and_next_lsn(path: &Path) -> std::io::Result<u64> {
+struct Repaired {
+    next_lsn: u64,
+    len: u64,
+    durable_len: u64,
+}
+
+async fn repair_tail_and_next_lsn(path: &Path) -> std::io::Result<Repaired> {
     let highwater = read_highwater(path).await?;
     let mut file = match OpenOptions::from(stage_commit::sync_open_options())
         .open(path)
         .await
     {
         Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(highwater.unwrap_or(1)),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(Repaired {
+                next_lsn: highwater.unwrap_or(1),
+                len: 0,
+                durable_len: 0,
+            })
+        }
         Err(error) => return Err(error),
     };
     #[cfg(test)]
@@ -536,14 +659,17 @@ async fn repair_tail_and_next_lsn(path: &Path) -> std::io::Result<u64> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
     let decoded = decode_records(&bytes);
-    // Damage in front of intact records is never cut: those records may have
-    // been acknowledged. Appending behind it would only bury more of them.
-    decoded.refuse_damage()?;
-    if decoded.tail == WalTail::Torn {
-        file.set_len(decoded.valid_len as u64).await?;
+    // Not even a record that was cut may have its LSN handed out again.
+    let next_lsn = highwater
+        .unwrap_or(1)
+        .max(decoded.max_lsn.saturating_add(1));
+    // Proven damage is never cut, nor is anything after it: a later record
+    // may be the only evidence of it. New records simply follow.
+    if decoded.torn() && decoded.damage.is_empty() {
+        file.set_len(decoded.cut as u64).await?;
         let synced = async {
             file.sync_all().await?;
-            stage_commit::record_file_sync_bytes(decoded.valid_len as u64);
+            stage_commit::record_file_sync_bytes(decoded.cut as u64);
             sync_parent(path).await
         }
         .await;
@@ -553,16 +679,17 @@ async fn repair_tail_and_next_lsn(path: &Path) -> std::io::Result<u64> {
             stage_commit::poison(path, &error);
             return Err(error);
         }
+        return Ok(Repaired {
+            next_lsn,
+            len: decoded.cut as u64,
+            durable_len: decoded.cut as u64,
+        });
     }
-    Ok(highwater.unwrap_or(1).max(
-        decoded
-            .records
-            .iter()
-            .map(|record| record.lsn)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1),
-    ))
+    Ok(Repaired {
+        next_lsn,
+        len: decoded.len as u64,
+        durable_len: decoded.proven_len as u64,
+    })
 }
 
 async fn read_highwater(path: &Path) -> std::io::Result<Option<u64>> {
@@ -595,24 +722,37 @@ async fn persist_highwater(path: &Path, next_lsn: u64) -> std::io::Result<()> {
 }
 
 pub async fn recovery_index(root: &Path) -> Result<WalRecoveryIndex, String> {
-    let wal = read_root_wal(root).await.map_err(|e| e.to_string())?;
-    Ok(WalRecoveryIndex {
-        buckets: wal.buckets,
-        discarded: wal.discarded,
-        truncated_tail: wal.truncated_tail,
-        corruption: wal.corruption,
-    })
+    read_root_wal(root).await.map_err(|e| e.to_string())
 }
 
+/// Prefix of the name a damaged WAL is kept under once recovery set it aside.
+pub const DAMAGED_WAL_PREFIX: &str = ".stage.wal.damaged-";
+
+/// Restore-time replay of the whole folder.
+///
+/// Damaged acknowledged records never block the folder: the stages the
+/// damage may affect are quarantined in their manifests, every other stage
+/// is replayed as usual, and the WAL is renamed aside (kept for export) so
+/// new writes start a fresh one.
 pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     let mut errors = Vec::new();
-    let wal = read_root_wal(root).await.map_err(|e| e.to_string())?;
-    if let Some(damage) = wal.corruption {
-        // Nothing is applied from a WAL that may be missing acknowledged
-        // records; recovery_entries quarantines the whole folder instead.
-        return Ok(vec![(root_wal_path(root), damage)]);
-    }
-    for (name, bucket) in wal.buckets {
+    let index = read_root_wal(root).await.map_err(|e| e.to_string())?;
+    let set_aside = (!index.damage.is_empty()).then(|| {
+        root.join(format!(
+            "{DAMAGED_WAL_PREFIX}{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ))
+    });
+    let affected = match &set_aside {
+        Some(target) => quarantine_affected(root, &index, target).await?,
+        None => std::collections::HashSet::new(),
+    };
+    let truncated_tail = index.truncated_tail;
+    let max_lsn = index.max_lsn;
+    for (name, bucket) in index.buckets {
+        if affected.contains(&name) {
+            continue;
+        }
         let data_path = root.join(&name);
         let manifest_path = data_path.with_extension("stage.json");
         let error_key = replay_error_key(&data_path);
@@ -630,7 +770,7 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
             bucket,
             checkpoint_lsn,
             generation_floor,
-            wal.truncated_tail,
+            truncated_tail,
         )
         .await
         {
@@ -650,7 +790,127 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
             Err(error) => errors.push((error_key, error.to_string())),
         }
     }
+    if let Some(target) = set_aside {
+        set_aside_wal(root, &target, max_lsn)
+            .await
+            .map_err(|e| e.to_string())?;
+        errors.push((
+            target,
+            "Damaged staging WAL kept for export and review".into(),
+        ));
+    }
     Ok(errors)
+}
+
+/// Marks every stage the damage may affect as unreadable in its manifest —
+/// creating one for a stage known only from the WAL whose data file is still
+/// there — so the quarantine outlives the WAL, which is about to be set
+/// aside. Returns their data file names.
+async fn quarantine_affected(
+    root: &Path,
+    index: &WalRecoveryIndex,
+    set_aside: &Path,
+) -> Result<std::collections::HashSet<String>, String> {
+    let reason = format!(
+        "Acknowledged changes to this file may be in a damaged part of the staging WAL, kept as {} for export and review",
+        set_aside
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+    );
+    let mut names: std::collections::BTreeSet<String> = index.buckets.keys().cloned().collect();
+    let mut dir = tokio::fs::read_dir(root).await.map_err(|e| e.to_string())?;
+    while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
+        if !entry.file_name().to_string_lossy().ends_with(".stage.json") {
+            continue;
+        }
+        if let Ok(Some(manifest)) = read_manifest(&entry.path()).await {
+            if let Some(name) = manifest.path.file_name() {
+                names.insert(name.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let mut affected = std::collections::HashSet::new();
+    for name in names {
+        let data_path = root.join(&name);
+        let manifest_path = data_path.with_extension("stage.json");
+        let manifest = read_manifest(&manifest_path).await.ok().flatten();
+        let (checkpoint_lsn, generation) = manifest
+            .as_ref()
+            .map_or((0, 0), |record| (record.checkpoint_lsn, record.generation));
+        if !index.is_affected(&data_path, checkpoint_lsn, generation) {
+            continue;
+        }
+        affected.insert(name.clone());
+        let quarantined = match manifest {
+            Some(record) => Some(StageRecovery {
+                dirty: true,
+                state: "unreadable".into(),
+                error: Some(reason.clone()),
+                ..record
+            }),
+            None => match tokio::fs::metadata(&data_path).await {
+                Ok(metadata) => {
+                    let last = index
+                        .buckets
+                        .get(&name)
+                        .and_then(|bucket| bucket.records.last());
+                    Some(StageRecovery {
+                        key: last.map(|record| record.key.clone()).unwrap_or_default(),
+                        size: metadata.len(),
+                        mtime_secs: last.map_or(0, |record| record.mtime_secs),
+                        dirty: true,
+                        state: "unreadable".into(),
+                        error: Some(reason.clone()),
+                        first_dirty_at: last.map(|record| record.dirty_at_ms),
+                        ..recovery_placeholder(&data_path)
+                    })
+                }
+                Err(_) => None,
+            },
+        };
+        if let Some(record) = quarantined {
+            write_json_atomic(&manifest_path, &record)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(affected)
+}
+
+fn recovery_placeholder(path: &Path) -> StageRecovery {
+    StageRecovery {
+        key: String::new(),
+        size: 0,
+        mtime_secs: 0,
+        generation: 0,
+        dirty: false,
+        state: String::new(),
+        error: None,
+        path: path.to_path_buf(),
+        snapshot: None,
+        publication_guard: None,
+        checkpoint_lsn: 0,
+        first_dirty_at: None,
+        wal_bytes: None,
+    }
+}
+
+/// Renames the damaged WAL aside and lets the next append start a fresh one,
+/// its LSNs above every LSN the damaged copy holds.
+async fn set_aside_wal(root: &Path, target: &Path, max_lsn: u64) -> std::io::Result<()> {
+    let wal = root_wal_path(root);
+    let mut states = append_states().lock().await;
+    let next_lsn = read_highwater(&wal)
+        .await?
+        .unwrap_or(1)
+        .max(max_lsn.saturating_add(1));
+    persist_highwater(&wal, next_lsn).await?;
+    tokio::fs::rename(&wal, target).await?;
+    sync_parent(&wal).await?;
+    states.remove(&wal);
+    stage_commit::clear_poison(&wal);
+    Ok(())
 }
 
 /// Where a stage's replay error is reported. `restore_stages` looks the error
@@ -661,11 +921,11 @@ pub fn replay_error_key(data_path: &Path) -> PathBuf {
     data_path.with_extension("write.json")
 }
 
-async fn read_root_wal(root: &Path) -> std::io::Result<RootWal> {
+async fn read_root_wal(root: &Path) -> std::io::Result<WalRecoveryIndex> {
     let path = root_wal_path(root);
     let mut file = match File::open(&path).await {
         Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(RootWal::default()),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(WalRecoveryIndex::default()),
         Err(error) => return Err(error),
     };
     #[cfg(test)]
@@ -673,8 +933,7 @@ async fn read_root_wal(root: &Path) -> std::io::Result<RootWal> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
     let decoded = decode_records(&bytes);
-    let corruption = decoded.damage();
-    let truncated_tail = decoded.tail == WalTail::Torn;
+    let truncated_tail = decoded.torn();
     let discarded = discards(&decoded.records);
     let mut buckets = HashMap::<String, WalBucket>::new();
     for record in decoded.records {
@@ -689,11 +948,12 @@ async fn read_root_wal(root: &Path) -> std::io::Result<RootWal> {
     for bucket in buckets.values_mut() {
         bucket.records.sort_by_key(|record| record.lsn);
     }
-    Ok(RootWal {
+    Ok(WalRecoveryIndex {
         buckets,
         discarded,
         truncated_tail,
-        corruption,
+        damage: decoded.damage,
+        max_lsn: decoded.max_lsn,
     })
 }
 
@@ -779,13 +1039,11 @@ async fn compact(
     let mut file = match File::open(&path).await {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            states.insert(
-                path,
-                AppendState {
-                    next_lsn: 1,
-                    tail_valid: true,
-                },
-            );
+            let next_lsn = read_highwater(&path).await?.unwrap_or(1);
+            states
+                .entry(path)
+                .or_insert_with(|| AppendState::new(next_lsn))
+                .relaid(next_lsn, 0, 0);
             return Ok(());
         }
         Err(error) => return Err(error),
@@ -795,17 +1053,15 @@ async fn compact(
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
     let decoded = decode_records(&bytes);
-    decoded.refuse_damage()?;
+    // Proven damage stays byte for byte until recovery sets the WAL aside:
+    // dropping records around it could drop the only evidence of it.
+    if !decoded.damage.is_empty() {
+        return Ok(());
+    }
     let discarded = discards(&decoded.records);
     // The highwater must stay past every LSN ever written, including the
     // records about to be dropped, so no LSN is handed out twice.
-    let past_every_record = decoded
-        .records
-        .iter()
-        .map(|record| record.lsn)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
+    let past_every_record = decoded.max_lsn.saturating_add(1);
     let retained: Vec<_> = decoded
         .records
         .into_iter()
@@ -826,13 +1082,10 @@ async fn compact(
             Err(error) => return Err(error),
         }
         sync_replaced_entry(&path).await?;
-        states.insert(
-            path,
-            AppendState {
-                next_lsn,
-                tail_valid: true,
-            },
-        );
+        states
+            .entry(path)
+            .or_insert_with(|| AppendState::new(next_lsn))
+            .relaid(next_lsn, 0, 0);
         return Ok(());
     }
     let retained_bytes: u64 = retained
@@ -850,7 +1103,11 @@ async fn compact(
     let temporary = path.with_extension("wal.tmp");
     let mut output = File::create(&temporary).await?;
     for record in retained {
-        output.write_all(&encode_record(&record)?).await?;
+        // The whole new file is fsynced before it replaces the WAL, so each
+        // record may vouch for all of it.
+        output
+            .write_all(&encode_stamped(&record, retained_bytes)?)
+            .await?;
     }
     output.sync_all().await?;
     stage_commit::record_file_sync_bytes(retained_bytes);
@@ -858,13 +1115,10 @@ async fn compact(
     tokio::fs::rename(&temporary, &path).await?;
     drop(compaction_growth);
     sync_replaced_entry(&path).await?;
-    states.insert(
-        path,
-        AppendState {
-            next_lsn,
-            tail_valid: true,
-        },
-    );
+    states
+        .entry(path)
+        .or_insert_with(|| AppendState::new(next_lsn))
+        .relaid(next_lsn, retained_bytes, retained_bytes);
     Ok(())
 }
 
@@ -955,7 +1209,38 @@ async fn apply_record_to_open_file(file: &mut File, record: &WalRecord) -> std::
     Ok(())
 }
 
+/// A record that claims no durable prefix, as tests build them.
+#[cfg(test)]
 fn encode_record(record: &WalRecord) -> std::io::Result<Vec<u8>> {
+    encode_stamped(record, 0)
+}
+
+/// Encodes a record carrying `watermark`: the length of the WAL prefix an
+/// fsync had proven when it was written (see `decode_records`).
+fn encode_stamped(record: &WalRecord, watermark: u64) -> std::io::Result<Vec<u8>> {
+    if record.op != WalOp::Write && !record.payload.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "only a write WAL record can have a payload",
+        ));
+    }
+    encode_raw(record, record.op.as_u8(), watermark)
+}
+
+/// A valid record with an operation byte this build does not define, as a
+/// newer build would write one.
+#[cfg(test)]
+fn encode_with_op(record: &WalRecord, op: u8) -> Vec<u8> {
+    encode_raw(record, op, 0).unwrap()
+}
+
+/// Record layout, format 3, little endian: 0..4 magic, 4..6 version, 6 op,
+/// 7 reserved, 8..16 LSN, 16..24 generation, 24..32 offset, 32..40 resulting
+/// size, 40..44 mtime, 44..48 key length, 48..56 payload length, 56..60 data
+/// name length, 60..92 SHA-256, 92..100 dirty-since ms, 100..108 watermark,
+/// 108..112 reserved; then data name, key and payload. The checksum covers
+/// the whole record with its own field zeroed.
+fn encode_raw(record: &WalRecord, op: u8, watermark: u64) -> std::io::Result<Vec<u8>> {
     if record.data_name.len() > MAX_DATA_NAME_LEN {
         return Err(Error::new(
             ErrorKind::InvalidInput,
@@ -971,35 +1256,13 @@ fn encode_record(record: &WalRecord) -> std::io::Result<Vec<u8>> {
             "WAL payload is too large",
         ));
     }
-    if record.op != WalOp::Write && !record.payload.is_empty() {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "only a write WAL record can have a payload",
-        ));
-    }
     let data_name = record.data_name.as_bytes();
     let key = record.key.as_bytes();
-    let mut checksum_input = Vec::with_capacity(key.len() + record.payload.len() + 49);
-    checksum_input.extend_from_slice(&record.lsn.to_le_bytes());
-    checksum_input.extend_from_slice(&record.generation.to_le_bytes());
-    checksum_input.push(record.op.as_u8());
-    checksum_input.extend_from_slice(&record.offset.to_le_bytes());
-    checksum_input.extend_from_slice(&record.resulting_size.to_le_bytes());
-    checksum_input.extend_from_slice(&record.mtime_secs.to_le_bytes());
-    checksum_input.extend_from_slice(&record.dirty_at_ms.to_le_bytes());
-    checksum_input.extend_from_slice(&(data_name.len() as u32).to_le_bytes());
-    checksum_input.extend_from_slice(&(key.len() as u32).to_le_bytes());
-    checksum_input.extend_from_slice(&(record.payload.len() as u64).to_le_bytes());
-    checksum_input.extend_from_slice(data_name);
-    checksum_input.extend_from_slice(key);
-    checksum_input.extend_from_slice(&record.payload);
-    let checksum = Sha256::digest(&checksum_input);
-
     let mut bytes =
         Vec::with_capacity(HEADER_LEN + data_name.len() + key.len() + record.payload.len());
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&VERSION.to_le_bytes());
-    bytes.push(record.op.as_u8());
+    bytes.push(op);
     bytes.push(0);
     bytes.extend_from_slice(&record.lsn.to_le_bytes());
     bytes.extend_from_slice(&record.generation.to_le_bytes());
@@ -1009,131 +1272,173 @@ fn encode_record(record: &WalRecord) -> std::io::Result<Vec<u8>> {
     bytes.extend_from_slice(&(key.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&(record.payload.len() as u64).to_le_bytes());
     bytes.extend_from_slice(&(data_name.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(checksum.as_slice());
+    bytes.extend_from_slice(&[0u8; 32]);
     bytes.extend_from_slice(&record.dirty_at_ms.to_le_bytes());
+    bytes.extend_from_slice(&watermark.to_le_bytes());
     bytes.resize(HEADER_LEN, 0);
     bytes.extend_from_slice(data_name);
     bytes.extend_from_slice(key);
     bytes.extend_from_slice(&record.payload);
+    let checksum = record_checksum(&bytes[..HEADER_LEN], &bytes[HEADER_LEN..]);
+    bytes[60..92].copy_from_slice(&checksum);
     Ok(bytes)
 }
 
-/// What follows the last record that decoded cleanly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WalTail {
-    /// Every byte belongs to a valid record.
-    Clean,
-    /// Invalid bytes run to the end of the file. Group commit fsyncs the WAL
-    /// in file order, so no record at or behind the first invalid byte was
-    /// ever acknowledged: it is cut back to the last valid record.
-    Torn,
-    /// Invalid bytes are followed by an intact newer record, or the first bad
-    /// record is one this build cannot read. What lies behind the damage may
-    /// have been acknowledged, so nothing is cut, replayed or rewritten.
-    Damaged,
+fn record_checksum(header: &[u8], body: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(&header[..60]);
+    hasher.update([0u8; 32]);
+    hasher.update(&header[92..HEADER_LEN]);
+    hasher.update(body);
+    hasher.finalize().into()
 }
 
+/// Bytes that are not an intact record but were proven durable when an
+/// intact record was written, or an intact record this build cannot read.
+/// Neither is ever cut. Whatever records these bytes held had LSNs below
+/// `lsn_after`, the first intact record after them (if there is one).
+#[derive(Debug, Clone)]
+pub struct Damage {
+    offset: usize,
+    lsn_after: Option<u64>,
+}
+
+/// A WAL as read back from disk.
+///
+/// Every record carries a watermark: the prefix an fsync had proven when it
+/// was appended. Group commit fsyncs in file order, but an unsynced batch can
+/// reach the disk out of order after a power cut — a hole, then intact
+/// records. Invalid bytes that a watermark covers were durable before they
+/// went bad: real damage, kept, reported and never cut. Invalid bytes no
+/// watermark covers are treated as the torn tail and cut at `cut`, together
+/// with every record after them: a power cut cannot lose bytes an fsync had
+/// covered, so if anything after them had been acknowledged, the bytes
+/// themselves were durable too and damaged later. The one case that looks
+/// identical is exactly that — media damage inside the final group commit
+/// before the crash, with no record appended after that commit returned to
+/// carry its watermark — and it is cut as a torn tail.
 struct DecodedWal {
+    /// Intact records before `cut`, in file order.
     records: Vec<WalRecord>,
-    tail: WalTail,
-    /// Length of the prefix made of valid records.
-    valid_len: usize,
+    /// Where the unacknowledged tail starts; the file length if it has none.
+    cut: usize,
+    len: usize,
+    damage: Vec<Damage>,
+    /// Highest LSN of any intact record, including those behind `cut`.
+    max_lsn: u64,
+    /// Longest prefix any watermark proves durable.
+    proven_len: usize,
 }
 
 impl DecodedWal {
-    fn damage(&self) -> Option<String> {
-        (self.tail == WalTail::Damaged).then(|| {
-            format!(
-                "Staging WAL is damaged at byte {} with intact records after it; nothing in this folder is replayed or uploaded until it is exported and reviewed",
-                self.valid_len
-            )
-        })
-    }
-
-    fn refuse_damage(&self) -> std::io::Result<()> {
-        match self.damage() {
-            Some(message) => Err(Error::new(ErrorKind::InvalidData, message)),
-            None => Ok(()),
-        }
+    fn torn(&self) -> bool {
+        self.cut < self.len
     }
 }
 
 enum RecordAt {
-    Valid(WalRecord, usize),
-    /// Right magic, unknown version: a real record this build cannot read.
+    Valid {
+        record: WalRecord,
+        len: usize,
+        watermark: u64,
+    },
+    /// An intact record from a newer build: a later format version, or the
+    /// current one with an operation this build does not define.
     Unsupported,
     Invalid,
 }
 
 fn decode_records(bytes: &[u8]) -> DecodedWal {
-    let mut records: Vec<WalRecord> = Vec::new();
+    // Every intact record, resynchronising after each invalid stretch. LSNs
+    // rise in file order, so an intact record with an older LSN can only be
+    // payload bytes that happen to hold a WAL record.
+    let mut intact: Vec<(usize, WalRecord, u64)> = Vec::new();
+    let mut gaps: Vec<(usize, bool)> = Vec::new();
     let mut offset = 0usize;
-    let mut tail = WalTail::Clean;
     while offset < bytes.len() {
+        let last_lsn = intact.last().map(|(_, record, _)| record.lsn);
         match decode_record_at(bytes, offset) {
-            RecordAt::Valid(record, len) => {
-                records.push(record);
+            RecordAt::Valid {
+                record,
+                len,
+                watermark,
+            } if last_lsn.is_none_or(|lsn| record.lsn > lsn) => {
+                intact.push((offset, record, watermark));
                 offset += len;
             }
-            RecordAt::Unsupported => {
-                tail = WalTail::Damaged;
-                break;
-            }
-            RecordAt::Invalid => {
-                let last_lsn = records.last().map(|record| record.lsn);
-                tail = if newer_record_after(bytes, offset + 1, last_lsn) {
-                    WalTail::Damaged
-                } else {
-                    WalTail::Torn
-                };
-                break;
+            other => {
+                gaps.push((offset, matches!(other, RecordAt::Unsupported)));
+                offset = next_record_after(bytes, offset + 1, last_lsn).unwrap_or(bytes.len());
             }
         }
     }
+    let proven_len = intact
+        .iter()
+        .map(|(_, _, watermark)| usize::try_from(*watermark).unwrap_or(usize::MAX))
+        .max()
+        .unwrap_or(0)
+        .min(bytes.len());
+    let mut cut = bytes.len();
+    let mut damage = Vec::new();
+    for &(gap, unsupported) in &gaps {
+        if !unsupported && gap >= proven_len {
+            cut = gap;
+            break;
+        }
+        damage.push(Damage {
+            offset: gap,
+            lsn_after: intact
+                .iter()
+                .find(|(offset, _, _)| *offset > gap)
+                .map(|(_, record, _)| record.lsn),
+        });
+    }
+    let max_lsn = intact
+        .iter()
+        .map(|(_, record, _)| record.lsn)
+        .max()
+        .unwrap_or(0);
     DecodedWal {
-        records,
-        tail,
-        valid_len: offset,
+        records: intact
+            .into_iter()
+            .filter(|(offset, _, _)| *offset < cut)
+            .map(|(_, record, _)| record)
+            .collect(),
+        cut,
+        len: bytes.len(),
+        damage,
+        max_lsn,
+        proven_len,
     }
 }
 
-/// Whether an intact record newer than `last_lsn` starts at or after `from`.
-/// Appends assign LSNs in file order, so an intact record with an older LSN
-/// can only be payload bytes that happen to contain a WAL record.
-fn newer_record_after(bytes: &[u8], from: usize, last_lsn: Option<u64>) -> bool {
+/// The next offset at or after `from` where an intact record newer than
+/// `last_lsn` starts.
+fn next_record_after(bytes: &[u8], from: usize, last_lsn: Option<u64>) -> Option<usize> {
     let mut start = from;
     while let Some(found) = bytes
         .get(start..)
         .and_then(|rest| rest.windows(MAGIC.len()).position(|window| window == MAGIC))
     {
         let candidate = start + found;
-        if let RecordAt::Valid(record, _) = decode_record_at(bytes, candidate) {
+        if let RecordAt::Valid { record, .. } = decode_record_at(bytes, candidate) {
             if last_lsn.is_none_or(|lsn| record.lsn > lsn) {
-                return true;
+                return Some(candidate);
             }
         }
         start = candidate + 1;
     }
-    false
+    None
 }
 
 fn decode_record_at(bytes: &[u8], offset: usize) -> RecordAt {
     let rest = &bytes[offset..];
-    if rest.len() < HEADER_LEN {
+    if rest.len() < HEADER_LEN || &rest[0..4] != MAGIC {
         return RecordAt::Invalid;
     }
     let header = &rest[..HEADER_LEN];
-    if &header[0..4] != MAGIC {
-        return RecordAt::Invalid;
-    }
-    if u16::from_le_bytes([header[4], header[5]]) != VERSION {
-        return RecordAt::Unsupported;
-    }
-    let Ok(op) = WalOp::from_u8(header[6]) else {
-        return RecordAt::Invalid;
-    };
     let key_len = read_u32(header, 44) as usize;
-    let payload_len = read_u64(header, 48) as usize;
+    let payload_len = usize::try_from(read_u64(header, 48)).unwrap_or(usize::MAX);
     let data_name_len = read_u32(header, 56) as usize;
     if key_len > MAX_KEY_LEN || data_name_len > MAX_DATA_NAME_LEN || payload_len > MAX_PAYLOAD_LEN {
         return RecordAt::Invalid;
@@ -1144,27 +1449,45 @@ fn decode_record_at(bytes: &[u8], offset: usize) -> RecordAt {
     if rest.len() < total {
         return RecordAt::Invalid;
     }
+    let version = u16::from_le_bytes([header[4], header[5]]);
+    if version != VERSION {
+        // A header torn just after its magic reads as version 0 or noise;
+        // only a plausible later version is a record from a newer build.
+        return if version > VERSION && version <= VERSION + 64 {
+            RecordAt::Unsupported
+        } else {
+            RecordAt::Invalid
+        };
+    }
+    if record_checksum(header, &rest[HEADER_LEN..total]) != header[60..92] {
+        return RecordAt::Invalid;
+    }
+    // Intact from here on: anything this build cannot interpret was written
+    // by a newer one and must be refused, never cut as a torn tail.
+    let Ok(op) = WalOp::from_u8(header[6]) else {
+        return RecordAt::Unsupported;
+    };
     let (Ok(data_name), Ok(key)) = (
         String::from_utf8(rest[HEADER_LEN..key_start].to_vec()),
         String::from_utf8(rest[key_start..payload_start].to_vec()),
     ) else {
-        return RecordAt::Invalid;
+        return RecordAt::Unsupported;
     };
-    let record = WalRecord {
-        lsn: read_u64(header, 8),
-        generation: read_u64(header, 16),
-        op,
-        offset: read_u64(header, 24),
-        resulting_size: read_u64(header, 32),
-        mtime_secs: read_u32(header, 40),
-        dirty_at_ms: read_i64(header, 92),
-        data_name,
-        key,
-        payload: rest[payload_start..total].to_vec(),
-    };
-    match encode_record(&record) {
-        Ok(encoded) if encoded[60..92] == header[60..92] => RecordAt::Valid(record, total),
-        _ => RecordAt::Invalid,
+    RecordAt::Valid {
+        record: WalRecord {
+            lsn: read_u64(header, 8),
+            generation: read_u64(header, 16),
+            op,
+            offset: read_u64(header, 24),
+            resulting_size: read_u64(header, 32),
+            mtime_secs: read_u32(header, 40),
+            dirty_at_ms: read_i64(header, 92),
+            data_name,
+            key,
+            payload: rest[payload_start..total].to_vec(),
+        },
+        len: total,
+        watermark: read_u64(header, 100),
     }
 }
 
@@ -1205,7 +1528,7 @@ mod tests {
         );
         assert!(!encoded.windows(5).any(|window| window == b"[0,1,"));
         let decoded = decode_records(&encoded);
-        assert_eq!(decoded.tail, WalTail::Clean);
+        assert!(!decoded.torn() && decoded.damage.is_empty());
         assert_eq!(decoded.records[0].payload, record.payload);
     }
 
@@ -1467,12 +1790,16 @@ mod tests {
         let mut bad_op = encode_record(&third).unwrap();
         bad_op[6] = 9;
         let garbage: Vec<u8> = (0..777u32).map(|i| (i * 31 + 7) as u8).collect();
-        let tails: [(&str, Vec<u8>); 5] = [
+        // A header torn right after its magic bytes is not a newer format.
+        let mut torn_after_magic = MAGIC.to_vec();
+        torn_after_magic.resize(HEADER_LEN + 64, 0);
+        let tails: [(&str, Vec<u8>); 6] = [
             ("zero-fill", vec![0u8; 4096]),
             ("bad-checksum", bad_checksum),
             ("bad-op", bad_op),
             ("garbage", garbage),
             ("short", encode_record(&third).unwrap()[..50].to_vec()),
+            ("torn-after-magic", torn_after_magic),
         ];
         for (label, tail) in tails {
             let (root, data, wal, acknowledged_len) = two_acknowledged_records(label).await;
@@ -1509,37 +1836,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn damage_followed_by_a_valid_record_is_reported_and_never_cut() {
-        let (root, data, wal, _) = two_acknowledged_records("mid-file").await;
+    async fn a_hole_before_unacknowledged_records_is_cut_like_a_torn_tail() {
+        // No commit ever acknowledged these appends: the batch was still in
+        // flight, and unsynced bytes can reach the disk out of order.
+        let (root, data, wal, _) = two_acknowledged_records("power-loss-hole").await;
         append_record(&wal, &write_record(3, 6, b"ghi"))
             .await
             .unwrap();
         let mut bytes = tokio::fs::read(&wal).await.unwrap();
-        // Flip a payload byte of the middle record: the third stays intact.
         let first_len = encode_record(&write_record(1, 0, b"abc")).unwrap().len();
-        let second_payload = first_len + HEADER_LEN + "record.data".len() + "key".len();
-        bytes[second_payload] ^= 0xff;
+        let second_len = encode_record(&write_record(2, 3, b"def")).unwrap().len();
+        // The middle record never landed; the one after it did.
+        bytes[first_len..first_len + second_len].fill(0);
         tokio::fs::write(&wal, &bytes).await.unwrap();
         forget_append_state(&wal).await;
 
-        let errors = replay_all(&root)
-            .await
-            .expect("mid-file damage is reported, not a failed recovery");
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].0, wal);
-        assert!(errors[0].1.contains("damaged"), "{}", errors[0].1);
+        let errors = replay_all(&root).await.unwrap();
         assert!(
-            tokio::fs::read(&data).await.unwrap().is_empty(),
-            "nothing is replayed from a damaged WAL"
+            errors.is_empty(),
+            "a power-loss hole is not damage: {errors:?}"
         );
-        assert!(repair_tail(&wal).await.is_err());
-        assert!(replay_file(&data, 0).await.is_err());
-        assert!(checkpoint(&data, 1).await.is_err());
+        assert_eq!(tokio::fs::read(&data).await.unwrap(), b"abc");
+        repair_tail(&wal).await.unwrap();
+        assert_eq!(
+            tokio::fs::metadata(&wal).await.unwrap().len(),
+            first_len as u64,
+            "the hole and everything behind it were never acknowledged"
+        );
+        // No LSN is handed out twice, not even one that was cut.
+        assert_eq!(
+            append_record(&wal, &write_record(1, 3, b"DEF"))
+                .await
+                .unwrap(),
+            4
+        );
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_valid_record_from_a_newer_build_is_refused_never_cut() {
+        let (root, _data, wal, acknowledged_len) = two_acknowledged_records("newer-op").await;
+        append_raw(&wal, &encode_with_op(&write_record(3, 6, b"ghi"), 9)).await;
+        let bytes = tokio::fs::read(&wal).await.unwrap();
+        assert!(acknowledged_len < bytes.len() as u64);
+        forget_append_state(&wal).await;
+
+        repair_tail(&wal).await.unwrap();
         assert_eq!(
             tokio::fs::read(&wal).await.unwrap(),
             bytes,
-            "records after the damage may be acknowledged; keep every byte"
+            "an intact record this build cannot read is never cut"
         );
+        assert!(recovery_index(&root).await.unwrap().damage().is_some());
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }
