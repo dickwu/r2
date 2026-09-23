@@ -9,7 +9,7 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
 
-use crate::providers::resources::DiskLease;
+use crate::providers::resources::{ByteLease, DiskLease, ResourceKind};
 
 use super::{
     stage::PublicationGuard,
@@ -311,6 +311,48 @@ struct AppendState {
     /// LSN and end offset of each appended record whose commit has not
     /// returned yet, in file order.
     pending: VecDeque<(u64, u64)>,
+    /// Bytes of records no stage needs any more (checkpointed, or of deleted
+    /// stages) still in the file until the next compaction. The WAL owns
+    /// them in the resource accounting from the moment their stage lets go.
+    reclaimable: ByteLease,
+    compaction_scheduled: bool,
+    /// Bumped whenever the file is cut or replaced, so a compaction that ran
+    /// unlocked can tell its snapshot of the file is still the WAL.
+    layout: u64,
+    compacting: bool,
+}
+
+/// Dead bytes a WAL holds before it is compacted. Compaction also waits until
+/// they are at least as many as the live bytes, so each O(WAL) rewrite is
+/// paid for by at least that many bytes appended since the last one.
+const COMPACT_MIN_RECLAIMABLE: u64 = 64 * 1024 * 1024;
+
+#[cfg(test)]
+static COMPACTION_FLOORS: OnceLock<std::sync::Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+
+/// Lowers the compaction threshold of one WAL, so tests need not write 64 MiB.
+#[cfg(test)]
+pub fn set_compaction_floor(path: &Path, bytes: u64) {
+    COMPACTION_FLOORS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), bytes);
+}
+
+fn compaction_floor(path: &Path) -> u64 {
+    #[cfg(test)]
+    if let Some(bytes) = COMPACTION_FLOORS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get(path)
+    {
+        return *bytes;
+    }
+    #[cfg(not(test))]
+    let _ = path;
+    COMPACT_MIN_RECLAIMABLE
 }
 
 impl AppendState {
@@ -321,7 +363,17 @@ impl AppendState {
             file_len: 0,
             durable_len: 0,
             pending: VecDeque::new(),
+            reclaimable: ByteLease::new(ResourceKind::Wal, 0),
+            compaction_scheduled: false,
+            layout: 0,
+            compacting: false,
         }
+    }
+
+    fn compaction_due(&self, path: &Path) -> bool {
+        let reclaimable = self.reclaimable.bytes();
+        let live = self.file_len.saturating_sub(reclaimable);
+        reclaimable > 0 && reclaimable >= compaction_floor(path).max(live)
     }
 
     /// The WAL was just cut, rewritten or checked, and `durable_len` of its
@@ -332,7 +384,54 @@ impl AppendState {
         self.file_len = len;
         self.durable_len = durable_len.min(len);
         self.pending.clear();
+        self.layout = self.layout.wrapping_add(1);
     }
+}
+
+/// Hands `bytes` of a stage's records to the WAL's own account once no stage
+/// needs them — checkpointed, or of a deleted stage — and schedules a
+/// compaction once enough have piled up. It never compacts inline: callers
+/// may hold the mount's stage locks, and compaction rewrites the whole WAL.
+pub async fn note_reclaimable(path: &Path, bytes: u64) {
+    let mut states = append_states().lock().await;
+    let state = states
+        .entry(path.to_path_buf())
+        .or_insert_with(|| AppendState::new(1));
+    state
+        .reclaimable
+        .resize(state.reclaimable.bytes().saturating_add(bytes));
+    if state.compaction_scheduled || !state.compaction_due(path) {
+        return;
+    }
+    state.compaction_scheduled = true;
+    let path = path.to_path_buf();
+    tokio::spawn(async move {
+        if let Err(error) = compact_if_due(&path).await {
+            log::warn!("mount: compacting the staging WAL failed: {}", error);
+        }
+    });
+}
+
+/// Compaction now, whatever the threshold says.
+#[cfg(test)]
+pub async fn compact_now(path: &Path) -> std::io::Result<bool> {
+    compact(path).await
+}
+
+/// Compacts the WAL at `path` if its dead bytes have reached the threshold;
+/// the background task `note_reclaimable` schedules runs this.
+pub async fn compact_if_due(path: &Path) -> std::io::Result<bool> {
+    {
+        let mut states = append_states().lock().await;
+        let Some(state) = states.get_mut(path) else {
+            return Ok(false);
+        };
+        state.compaction_scheduled = false;
+        if !state.compaction_due(path) {
+            return Ok(false);
+        }
+    }
+    compact(path).await
 }
 
 /// Raises the watermark once the commit of `lsn` has returned: its fsync
@@ -749,6 +848,7 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     };
     let truncated_tail = index.truncated_tail;
     let max_lsn = index.max_lsn;
+    let mut dead_bytes = 0u64;
     for (name, bucket) in index.buckets {
         if affected.contains(&name) {
             continue;
@@ -765,6 +865,13 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
         };
         let checkpoint_lsn = existing.as_ref().map_or(0, |record| record.checkpoint_lsn);
         let generation_floor = existing.as_ref().map_or(0, |record| record.generation);
+        let bucket_bytes = bucket.bytes;
+        let checkpointed_bytes: u64 = bucket
+            .records
+            .iter()
+            .filter(|record| record.lsn <= checkpoint_lsn)
+            .map(|record| estimated_record_len(record).unwrap_or(0))
+            .sum();
         match replay_bucket(
             &data_path,
             bucket,
@@ -782,13 +889,18 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
                         continue;
                     }
                 };
-                if let Err(error) = write_json_atomic(&manifest_path, &recovery).await {
-                    errors.push((error_key, error.to_string()));
+                match write_json_atomic(&manifest_path, &recovery).await {
+                    // The manifest now checkpoints every record of the file.
+                    Ok(()) => dead_bytes = dead_bytes.saturating_add(bucket_bytes),
+                    Err(error) => errors.push((error_key, error.to_string())),
                 }
             }
-            Ok(None) => {}
+            Ok(None) => dead_bytes = dead_bytes.saturating_add(checkpointed_bytes),
             Err(error) => errors.push((error_key, error.to_string())),
         }
+    }
+    if set_aside.is_none() && dead_bytes > 0 {
+        note_reclaimable(&root_wal_path(root), dead_bytes).await;
     }
     if let Some(target) = set_aside {
         set_aside_wal(root, &target, max_lsn)
@@ -1010,116 +1122,193 @@ async fn read_manifest(path: &Path) -> std::io::Result<Option<StageRecovery>> {
     }
 }
 
-pub async fn checkpoint(data_path: &Path, checkpoint_lsn: u64) -> std::io::Result<()> {
-    let name = data_name(data_path)?;
-    compact(
-        data_path,
-        |record| record.data_name == name && record.lsn <= checkpoint_lsn,
-        checkpoint_lsn.saturating_add(1),
-    )
-    .await
+/// Who still needs a data file's records, judged by what is on disk.
+enum RecordOwner {
+    /// A manifest: records at or below its checkpoint are in the data file.
+    Manifest { checkpoint_lsn: u64 },
+    /// No manifest but the data file: records still wait for replay.
+    DataOnly,
+    /// Neither: the stage was deleted and its records can go.
+    Gone,
+    /// An unreadable manifest: keep everything.
+    Unknown,
 }
 
-/// Drops every record of a deleted stage, its discard record included. Only
-/// for once its data file and manifest are gone for good.
-pub async fn forget(data_path: &Path) -> std::io::Result<()> {
-    let name = data_name(data_path)?;
-    compact(data_path, |record| record.data_name == name, 1).await
-}
-
-/// Rewrites the WAL without the records `removes` selects. Records a discard
-/// made dead go as well; the discard itself stays until its stage forgets it.
-async fn compact(
-    data_path: &Path,
-    removes: impl Fn(&WalRecord) -> bool,
-    next_lsn_floor: u64,
-) -> std::io::Result<()> {
-    let path = wal_path(data_path);
-    let mut states = append_states().lock().await;
-    let mut file = match File::open(&path).await {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            let next_lsn = read_highwater(&path).await?.unwrap_or(1);
-            states
-                .entry(path)
-                .or_insert_with(|| AppendState::new(next_lsn))
-                .relaid(next_lsn, 0, 0);
-            return Ok(());
+/// Rewrites the WAL without the records no stage can need any more: those at
+/// or below their stage's durable checkpoint, those of deleted stages, and
+/// the discards of deletions whose files are all gone. What may go is judged
+/// from the manifests and data files on disk, so it holds whatever state the
+/// live stages are in. A WAL with proven damage is left for recovery to set
+/// aside: dropping records around the damage could drop its only evidence.
+///
+/// The O(WAL) part runs without the append lock — the WAL only grows between
+/// layout changes, so its first bytes stay put — and appends keep flowing.
+/// The lock is taken only to copy over what was appended meanwhile and swap
+/// the files; if anything cut or replaced the WAL in between, it gives up.
+async fn compact(path: &Path) -> std::io::Result<bool> {
+    let root = path
+        .parent()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "WAL path has no parent"))?;
+    let (layout, len) = {
+        let mut states = append_states().lock().await;
+        match states.get_mut(path) {
+            Some(state) if state.tail_valid && !state.compacting => {
+                state.compacting = true;
+                (state.layout, state.file_len)
+            }
+            _ => return Ok(false),
         }
+    };
+    let temporary = path.with_extension("wal.compact");
+    let result = compact_unlocked(path, root, &temporary, layout, len).await;
+    let _ = tokio::fs::remove_file(&temporary).await;
+    if let Some(state) = append_states().lock().await.get_mut(path) {
+        state.compacting = false;
+    }
+    result
+}
+
+async fn compact_unlocked(
+    path: &Path,
+    root: &Path,
+    temporary: &Path,
+    layout: u64,
+    len: u64,
+) -> std::io::Result<bool> {
+    let mut bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
+    let Ok(len) = usize::try_from(len) else {
+        return Ok(false);
+    };
+    if bytes.len() < len {
+        return Ok(false);
+    }
+    bytes.truncate(len);
     #[cfg(test)]
-    note_wal_read(&path);
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).await?;
+    note_wal_read(path);
     let decoded = decode_records(&bytes);
-    // Proven damage stays byte for byte until recovery sets the WAL aside:
-    // dropping records around it could drop the only evidence of it.
-    if !decoded.damage.is_empty() {
-        return Ok(());
+    if !decoded.damage.is_empty() || decoded.torn() {
+        return Ok(false);
     }
     let discarded = discards(&decoded.records);
-    // The highwater must stay past every LSN ever written, including the
-    // records about to be dropped, so no LSN is handed out twice.
+    let mut owners = HashMap::<String, RecordOwner>::new();
+    for record in &decoded.records {
+        if owners.contains_key(&record.data_name) {
+            continue;
+        }
+        let data = root.join(&record.data_name);
+        let owner = match read_manifest(&data.with_extension("stage.json")).await {
+            Ok(Some(manifest)) => RecordOwner::Manifest {
+                checkpoint_lsn: manifest.checkpoint_lsn,
+            },
+            Ok(None) => match tokio::fs::symlink_metadata(&data).await {
+                Ok(_) => RecordOwner::DataOnly,
+                Err(error) if error.kind() == ErrorKind::NotFound => RecordOwner::Gone,
+                Err(_) => RecordOwner::Unknown,
+            },
+            Err(_) => RecordOwner::Unknown,
+        };
+        owners.insert(record.data_name.clone(), owner);
+    }
+    let total = decoded.records.len();
     let past_every_record = decoded.max_lsn.saturating_add(1);
     let retained: Vec<_> = decoded
         .records
         .into_iter()
-        .filter(|record| !removes(record) && !is_dead(record, &discarded))
+        .filter(|record| {
+            if is_dead(record, &discarded) {
+                return false;
+            }
+            match owners.get(&record.data_name) {
+                Some(RecordOwner::Gone) => false,
+                // An unfinished deletion keeps its discard.
+                Some(RecordOwner::Manifest { checkpoint_lsn }) => {
+                    record.op == WalOp::Discard || record.lsn > *checkpoint_lsn
+                }
+                _ => true,
+            }
+        })
         .collect();
-    let next_lsn = states
-        .get(&path)
-        .map(|state| state.next_lsn)
-        .unwrap_or(1)
-        .max(past_every_record)
-        .max(next_lsn_floor);
-    persist_highwater(&path, next_lsn).await?;
-    if retained.is_empty() {
-        drop(file);
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+    if retained.len() == total {
+        // The estimate that scheduled this was stale; nothing can go.
+        if let Some(state) = append_states().lock().await.get_mut(path) {
+            state.reclaimable.resize(0);
         }
-        sync_replaced_entry(&path).await?;
-        states
-            .entry(path)
-            .or_insert_with(|| AppendState::new(next_lsn))
-            .relaid(next_lsn, 0, 0);
-        return Ok(());
+        return Ok(false);
     }
-    let retained_bytes: u64 = retained
+    let prefix_len: u64 = retained
         .iter()
         .map(estimated_record_len)
         .try_fold(0u64, |total, next| {
             next.map(|next| total.saturating_add(next))
         })?;
-    let wal_parent = path
-        .parent()
-        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "WAL path has no parent"))?;
-    let compaction_growth = DiskLease::reserve(wal_parent, retained_bytes, || {
-        super::available_space(wal_parent)
-    })?;
-    let temporary = path.with_extension("wal.tmp");
-    let mut output = File::create(&temporary).await?;
-    for record in retained {
-        // The whole new file is fsynced before it replaces the WAL, so each
-        // record may vouch for all of it.
+    let growth = DiskLease::reserve(root, prefix_len, || super::available_space(root))?;
+    let mut output = File::create(temporary).await?;
+    for record in &retained {
+        // The new prefix is fsynced before it can become the WAL, so every
+        // record in it may vouch for all of it.
         output
-            .write_all(&encode_stamped(&record, retained_bytes)?)
+            .write_all(&encode_stamped(record, prefix_len)?)
             .await?;
     }
+    output.flush().await?;
     output.sync_all().await?;
-    stage_commit::record_file_sync_bytes(retained_bytes);
+    stage_commit::record_file_sync_bytes(prefix_len);
+
+    let mut states = append_states().lock().await;
+    let Some(state) = states.get_mut(path) else {
+        return Ok(false);
+    };
+    if state.layout != layout || !state.tail_valid {
+        return Ok(false);
+    }
+    // Records appended while the prefix was being rewritten, carried over as
+    // they are (their watermarks restamped for the new file).
+    let appended_len = state.file_len.saturating_sub(len as u64);
+    let mut appended = vec![0u8; usize::try_from(appended_len).unwrap_or(usize::MAX)];
+    if appended_len > 0 {
+        let mut wal = File::open(path).await?;
+        wal.seek(SeekFrom::Start(len as u64)).await?;
+        wal.read_exact(&mut appended).await?;
+    }
+    let tail = decode_records(&appended);
+    if tail.torn() || !tail.damage.is_empty() {
+        return Ok(false);
+    }
+    let final_len = prefix_len.saturating_add(appended_len);
+    for record in &tail.records {
+        output
+            .write_all(&encode_stamped(record, final_len)?)
+            .await?;
+    }
+    output.flush().await?;
+    output.sync_all().await?;
+    stage_commit::record_file_sync_bytes(appended_len);
     drop(output);
-    tokio::fs::rename(&temporary, &path).await?;
-    drop(compaction_growth);
-    sync_replaced_entry(&path).await?;
-    states
-        .entry(path)
-        .or_insert_with(|| AppendState::new(next_lsn))
-        .relaid(next_lsn, retained_bytes, retained_bytes);
-    Ok(())
+    // The highwater must stay past every LSN ever written, including the
+    // records being dropped, so no LSN is handed out twice.
+    let next_lsn = state
+        .next_lsn
+        .max(past_every_record)
+        .max(tail.max_lsn.saturating_add(1));
+    persist_highwater(path, next_lsn).await?;
+    if final_len == 0 {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    } else {
+        tokio::fs::rename(temporary, path).await?;
+    }
+    sync_replaced_entry(path).await?;
+    drop(growth);
+    state.relaid(next_lsn, final_len, final_len);
+    state.reclaimable.resize(0);
+    Ok(true)
 }
 
 /// Directory fsync after the WAL's name was pointed at a new file or removed.
@@ -1587,7 +1776,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_retains_other_stage_records_in_shared_wal() {
+    async fn compaction_keeps_the_records_other_stages_still_need() {
         let root = std::env::temp_dir().join(format!(
             "r2-wal-retain-other-{}-{}",
             std::process::id(),
@@ -1633,15 +1822,99 @@ mod tests {
         )
         .await
         .unwrap();
-        checkpoint(&first, 1).await.unwrap();
+        // first's manifest checkpoints its record; second has only the WAL.
+        manifest_at(&first, "first", 1).await;
+        assert!(compact_now(&wal).await.unwrap());
+        let decoded = decode_records(&tokio::fs::read(&wal).await.unwrap());
+        assert_eq!(decoded.records.len(), 1);
+        assert_eq!(decoded.records[0].data_name, "second.data");
         let summary = replay_file(&second, 0).await.unwrap().unwrap();
         assert_eq!(summary.record.key, "second");
         assert_eq!(tokio::fs::read(&second).await.unwrap(), b"two");
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn records_appended_while_a_compaction_runs_are_never_lost() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-wal-compact-concurrent-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let dead = root.join("dead.data");
+        let live = root.join("live.data");
+        File::create(&dead).await.unwrap();
+        File::create(&live).await.unwrap();
+        let wal = wal_path(&live);
+        let record = |name: &str, payload: u8| WalRecord {
+            lsn: 0,
+            generation: 1,
+            op: WalOp::Write,
+            offset: 0,
+            resulting_size: 4096,
+            mtime_secs: 1,
+            dirty_at_ms: 1,
+            data_name: name.into(),
+            key: name.into(),
+            payload: vec![payload; 4096],
+        };
+        for index in 0..200u8 {
+            append_record(&wal, &record("dead.data", index))
+                .await
+                .unwrap();
+        }
+        let mut expected = Vec::new();
+        for index in 0..10u8 {
+            expected.push(
+                append_record(&wal, &record("live.data", index))
+                    .await
+                    .unwrap(),
+            );
+        }
+        manifest_at(&dead, "dead.data", u64::MAX).await;
+
+        let compaction = tokio::spawn({
+            let wal = wal.clone();
+            async move { compact_now(&wal).await.unwrap() }
+        });
+        for index in 10..60u8 {
+            expected.push(
+                append_record(&wal, &record("live.data", index))
+                    .await
+                    .unwrap(),
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(compaction.await.unwrap(), "the compaction was not needed");
+
+        let decoded = decode_records(&tokio::fs::read(&wal).await.unwrap());
+        assert!(!decoded.torn() && decoded.damage.is_empty());
+        assert!(decoded
+            .records
+            .iter()
+            .all(|record| record.data_name == "live.data"));
+        let lsns: Vec<u64> = decoded.records.iter().map(|record| record.lsn).collect();
+        assert_eq!(lsns, expected, "a record appended meanwhile was lost");
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    async fn manifest_at(data: &Path, key: &str, checkpoint_lsn: u64) {
+        write_json_atomic(
+            &data.with_extension("stage.json"),
+            &StageRecovery {
+                key: key.into(),
+                checkpoint_lsn,
+                generation: checkpoint_lsn,
+                ..recovery_placeholder(data)
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
-    async fn checkpoint_highwater_prevents_lsn_reuse_after_restart() {
+    async fn compaction_highwater_prevents_lsn_reuse_after_restart() {
         let root = std::env::temp_dir().join(format!(
             "r2-wal-highwater-{}-{}",
             std::process::id(),
@@ -1664,7 +1937,9 @@ mod tests {
             payload: b"abc".to_vec(),
         };
         assert_eq!(append_record(&wal, &record).await.unwrap(), 64);
-        checkpoint(&data, 64).await.unwrap();
+        manifest_at(&data, "key", 64).await;
+        assert!(compact_now(&wal).await.unwrap());
+        assert!(!wal.exists(), "nothing was left to keep");
         forget_append_state(&wal).await;
         let next = WalRecord {
             lsn: 1,

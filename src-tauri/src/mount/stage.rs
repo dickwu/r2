@@ -192,9 +192,6 @@ pub struct Stage {
     /// a read-modify-write) has not yet been proven durable by a manifest.
     /// The WAL cannot rebuild that content, so a failed fsync then is final.
     base_proven: bool,
-    /// Whether the shared WAL may still hold records of this stage, at any
-    /// LSN. Cleared once a checkpoint or removal has compacted them away.
-    owns_wal_records: bool,
     pub checkpoint_lsn: u64,
     pub next_lsn: u64,
     records_since_checkpoint: u64,
@@ -811,7 +808,6 @@ impl Stage {
             manifest_gen: 0,
             manifest_checkpoint: 0,
             base_proven: true,
-            owns_wal_records: false,
             checkpoint_lsn: 0,
             next_lsn: 1,
             records_since_checkpoint: 0,
@@ -868,8 +864,6 @@ impl Stage {
             manifest_gen: record.generation,
             manifest_checkpoint: record.checkpoint_lsn,
             base_proven: true,
-            // Replayed records stay in the WAL until the next checkpoint.
-            owns_wal_records: true,
             checkpoint_lsn: record.checkpoint_lsn,
             next_lsn: record.checkpoint_lsn.saturating_add(1),
             records_since_checkpoint: 0,
@@ -1108,7 +1102,6 @@ impl Stage {
         };
 
         self.needs_replay = true;
-        self.owns_wal_records = true;
         self.wal_tail_repaired = false;
         match stage_wal::append_record_unchecked(&wal_path, &record).await {
             Ok(assigned_lsn) => {
@@ -1258,63 +1251,57 @@ impl Stage {
     /// it, a failed prime, or eviction once uploaded.
     ///
     /// Ordered so that a crash at any point never brings the file back. A
-    /// stage with content the bucket may lack, or records in the WAL, first
-    /// gets a durable discard record: from then on recovery neither restores
-    /// it nor rebuilds its manifest from the WAL. The data file goes before the
-    /// manifest, so even without a discard a crash leaves nothing to replay
-    /// into. After a directory fsync the stage's WAL records, discard
-    /// included, are compacted away, so removed files stop growing the WAL.
+    /// stage with content the bucket may lack, or a WAL record not yet
+    /// applied, first gets a durable discard record: from then on recovery
+    /// neither restores it nor rebuilds its manifest from the WAL. The data
+    /// file goes before the manifest, so even without a discard a crash
+    /// leaves nothing to replay into. The stage's WAL records are not touched
+    /// here — the caller may hold the mount's stage lock, and a discard makes
+    /// them inert — they are handed to the WAL's dead-byte account, which
+    /// compacts them away in the background once enough have piled up.
     pub async fn remove_files(&mut self) {
-        let discarded = if self.dirty || self.owns_wal_records || self.needs_replay {
+        let wal_path = stage_wal::wal_path(&self.path);
+        let mut dead = self.wal_lease.bytes();
+        if self.dirty || self.needs_replay {
             match self.append_discard().await {
-                Ok(()) => true,
-                Err(error) => {
-                    log::warn!(
-                        "mount: could not record the removal of \"{}\" in the staging WAL: {}",
-                        self.key,
-                        error
-                    );
-                    false
-                }
+                Ok(bytes) => dead = dead.saturating_add(bytes),
+                Err(error) => log::warn!(
+                    "mount: could not record the removal of \"{}\" in the staging WAL: {}",
+                    self.key,
+                    error
+                ),
             }
-        } else {
-            false
-        };
+        }
         if remove_stops_after(&self.path, 1) {
             return;
         }
-        let mut removed = remove_if_present(&self.path.with_extension("write.json")).await;
-        removed &= remove_if_present(&self.path).await;
+        let _ = remove_if_present(&self.path.with_extension("write.json")).await;
+        let _ = remove_if_present(&self.path).await;
         if remove_stops_after(&self.path, 2) {
             return;
         }
         if let Some(snapshot) = &self.snapshot {
             snapshot.remove().await;
         }
-        removed &= remove_if_present(&self.manifest_path()).await;
+        let _ = remove_if_present(&self.manifest_path()).await;
         if remove_stops_after(&self.path, 3) {
             return;
         }
-        let synced = sync_parent(&self.path).await.is_ok();
+        let _ = sync_parent(&self.path).await;
         if remove_stops_after(&self.path, 4) {
-            return;
-        }
-        // Without all three the discard must stay: it is what keeps a
-        // surviving manifest or data file from being recovered.
-        if discarded && removed && synced && stage_wal::forget(&self.path).await.is_ok() {
-            self.owns_wal_records = false;
-        }
-        if remove_stops_after(&self.path, 5) {
             return;
         }
         self.stage_lease.resize(0);
         self.snapshot_lease.resize(0);
         self.wal_lease.resize(0);
+        if dead > 0 {
+            stage_wal::note_reclaimable(&wal_path, dead).await;
+        }
     }
 
     /// Makes "this stage was deleted" durable in the WAL before any of its
-    /// files go.
-    async fn append_discard(&mut self) -> std::io::Result<()> {
+    /// files go; returns the record's size.
+    async fn append_discard(&mut self) -> std::io::Result<u64> {
         let wal_path = stage_wal::wal_path(&self.path);
         let admitted = stage_wal::begin_append(&wal_path).await?;
         let record = stage_wal::WalRecord {
@@ -1332,17 +1319,13 @@ impl Stage {
         let wal_parent = wal_path
             .parent()
             .ok_or_else(|| std::io::Error::other("Missing WAL folder"))?;
-        let _growth = DiskLease::reserve(
-            wal_parent,
-            stage_wal::estimated_record_len(&record)?,
-            || super::available_space(wal_parent),
-        )?;
-        self.owns_wal_records = true;
+        let bytes = stage_wal::estimated_record_len(&record)?;
+        let _growth = DiskLease::reserve(wal_parent, bytes, || super::available_space(wal_parent))?;
         let lsn = stage_wal::append_record_unchecked(&wal_path, &record).await?;
         stage_commit::commit(vec![wal_path.clone()]).await?;
         stage_wal::note_committed(&wal_path, lsn).await;
         drop(admitted);
-        Ok(())
+        Ok(bytes)
     }
 
     #[cfg(test)]
@@ -1436,20 +1419,21 @@ impl Stage {
         let previous = self.checkpoint_lsn;
         self.checkpoint_lsn = self.next_lsn.saturating_sub(1);
         // persist proves the data file with an fsync before the manifest
-        // records the new checkpoint; nothing is compacted unless it did.
+        // records the new checkpoint; no record becomes reclaimable unless
+        // it did.
         if let Err(error) = self.persist().await {
             self.checkpoint_lsn = previous;
             return Err(error);
         }
-        // Compaction rewrites the whole shared WAL; skip it when nothing of
-        // this stage is left there (a re-checkpoint, an upload retry).
-        if self.owns_wal_records {
-            stage_wal::checkpoint(&self.path, self.checkpoint_lsn).await?;
-            self.owns_wal_records = false;
-        }
+        // O(1): the records stay in the WAL until a threshold compaction,
+        // which runs in the background, never on an upload or a write.
+        let reclaimed = self.wal_lease.bytes();
         self.records_since_checkpoint = 0;
         self.bytes_since_checkpoint = 0;
         self.wal_lease.resize(0);
+        if reclaimed > 0 {
+            stage_wal::note_reclaimable(&stage_wal::wal_path(&self.path), reclaimed).await;
+        }
         Ok(())
     }
 
@@ -1977,17 +1961,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn removing_staged_files_returns_their_wal_bytes() {
+    async fn uploads_and_removals_below_the_threshold_never_rewrite_the_wal() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-no-sync-compaction-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let wal = root.join(".stage.wal");
+        let mut stages = Vec::new();
+        for index in 0..8usize {
+            let mut stage =
+                Stage::create(root.join(format!("{index}.data")), format!("{index}"), 1)
+                    .await
+                    .unwrap();
+            stage
+                .write_durable(0, &[index as u8; 2048], 1)
+                .await
+                .unwrap();
+            stages.push(stage);
+        }
+        let reads = stage_wal::wal_read_count(&wal);
+        let mut length = tokio::fs::metadata(&wal).await.unwrap().len();
+        for (index, mut stage) in stages.into_iter().enumerate() {
+            if index % 2 == 0 {
+                // Uploaded, then evicted.
+                stage.upload_snapshot().await.unwrap();
+                stage.dirty = false;
+            }
+            // The other half is deleted while still dirty (REMOVE).
+            stage.remove_files().await;
+            let now = tokio::fs::metadata(&wal).await.map_or(0, |m| m.len());
+            assert!(now >= length, "an upload or removal rewrote the WAL");
+            length = now;
+        }
+        assert_eq!(
+            stage_wal::wal_read_count(&wal),
+            reads,
+            "an upload or removal re-read the whole WAL"
+        );
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn removed_and_checkpointed_bytes_are_reclaimed_once_past_the_threshold() {
         let root = std::env::temp_dir().join(format!(
             "r2-remove-wal-growth-{}-{}",
             std::process::id(),
             chrono::Utc::now().timestamp_nanos_opt().unwrap()
         ));
         let wal = root.join(".stage.wal");
+        stage_wal::set_compaction_floor(&wal, 64 * 1024);
         let mut kept = Stage::create(root.join("kept.data"), "kept".into(), 1)
             .await
             .unwrap();
         kept.write_durable(0, b"kept", 1).await.unwrap();
+        let reads = stage_wal::wal_read_count(&wal);
         for index in 0..40usize {
             let path = root.join(format!("{index}.data"));
             let mut stage = Stage::create(path, format!("key/{index}"), 1)
@@ -1999,20 +2027,36 @@ mod tests {
                     .await
                     .unwrap();
             }
+            if index % 2 == 0 {
+                stage.upload_snapshot().await.unwrap();
+            }
             stage.remove_files().await;
             assert_eq!(stage.wal_lease.bytes(), 0);
         }
-        // Only the live stage's records are left, and the accounting agrees.
+        // Past the threshold the dead records are compacted away — off the
+        // caller's locks and amortized, never once per removal or upload —
+        // so what is left dead is bounded by the threshold.
+        stage_wal::compact_if_due(&wal).await.unwrap();
+        let compactions = stage_wal::wal_read_count(&wal) - reads;
+        assert!(
+            (1..=4).contains(&compactions),
+            "{compactions} WAL rewrites for 40 files"
+        );
+        assert!(
+            tokio::fs::metadata(&wal).await.unwrap().len() <= kept.wal_lease.bytes() + 64 * 1024
+        );
+        // Whatever is due goes: only the live stage's records are left...
+        stage_wal::set_compaction_floor(&wal, 0);
+        stage_wal::compact_if_due(&wal).await.unwrap();
         assert_eq!(
             tokio::fs::metadata(&wal).await.unwrap().len(),
-            kept.wal_lease.bytes()
+            kept.wal_lease.bytes(),
+            "only the live stage's records are left"
         );
+        // ...and once everything is dead, no WAL at all.
         kept.remove_files().await;
-        assert_eq!(
-            tokio::fs::metadata(&wal).await.map_or(0, |m| m.len()),
-            0,
-            "a folder with nothing staged keeps no WAL"
-        );
+        stage_wal::compact_if_due(&wal).await.unwrap();
+        assert_eq!(tokio::fs::metadata(&wal).await.map_or(0, |m| m.len()), 0);
         drop(kept);
         assert!(recovery_entries(&root).await.unwrap().is_empty());
         tokio::fs::remove_dir_all(root).await.unwrap();
@@ -2559,9 +2603,10 @@ mod tests {
             reads_after_first_write,
             "a write or read rescanned the WAL"
         );
-        // An upload checkpoints once (one compaction pass) and replays nothing.
+        // An upload checkpoints in O(1): below the compaction threshold it
+        // neither replays nor rewrites the WAL.
         stage.upload_snapshot().await.unwrap();
-        assert!(stage_wal::wal_read_count(&wal) <= reads_after_first_write + 1);
+        assert_eq!(stage_wal::wal_read_count(&wal), reads_after_first_write);
         drop(stage);
 
         replay_write_intents(&root).await.unwrap();
