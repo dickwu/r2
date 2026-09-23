@@ -98,6 +98,21 @@ jobs:
         id: rust
         shell: pwsh
         run: |
+          # The test binaries load the choco ffmpeg/sqlite DLLs they link
+          # against through PATH. The SDK step pins Path through GITHUB_ENV
+          # from a snapshot taken before choco ran, which shadows the
+          # GITHUB_PATH entries of the install step, so older same-named DLLs
+          # on the image win and the loader stops with 0xc0000139. Put the
+          # linked copies first here, where the tests run.
+          $env:Path = "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin;C:\ProgramData\chocolatey\lib\SQLite\tools;$env:Path"
+          cargo test --manifest-path src-tauri/Cargo.toml --workspace --no-run 2>&1 | Tee-Object -FilePath windows-rust-build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Name the DLLs the test binary needs and the copies PATH resolves,
+          # so a loader failure identifies its culprit.
+          Get-ChildItem "$env:CARGO_TARGET_DIR\debug\deps\r2_lib-*.exe" | ForEach-Object { dumpbin /nologo /dependents $_.FullName }
+          foreach ($dll in 'sqlite3.dll', 'avcodec-*.dll', 'avformat-*.dll', 'avutil-*.dll', 'swscale-*.dll', 'swresample-*.dll', 'avfilter-*.dll', 'avdevice-*.dll') {
+            "where $dll"; where.exe $dll
+          }
           cargo test --manifest-path src-tauri/Cargo.toml --workspace 2>&1 | Tee-Object -FilePath windows-rust-tests.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
