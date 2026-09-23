@@ -5,7 +5,12 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { arch, platform } from 'node:os';
-import { isMainModule, productionSourceFingerprint } from './audit-source.mjs';
+import {
+  gitProvenance,
+  isMainModule,
+  jsonPointer as pointer,
+  productionSourceFingerprint,
+} from './audit-source.mjs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -51,19 +56,7 @@ function readJsonSync(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
-function pointer(document, expression) {
-  if (!expression) return undefined;
-  if (expression === '') return document;
-  assert(expression.startsWith('/'), `JSON pointer must start with /: ${expression}`);
-  return expression
-    .slice(1)
-    .split('/')
-    .reduce((current, part) => {
-      if (current === undefined || current === null) return undefined;
-      const key = part.replaceAll('~1', '/').replaceAll('~0', '~');
-      return current[key];
-    }, document);
-}
+const SHA256_HEX = /^[a-f0-9]{64}$/;
 
 function stringifyPointerValue(value) {
   if (typeof value === 'boolean') return String(value);
@@ -80,9 +73,10 @@ function missingHarnesses(gate, root) {
   return (gate.harnesses ?? []).filter((harness) => !existsSync(resolve(root, harness)));
 }
 
+// Typed: `true` never matches the string "true", nor 1 the string "1".
 function checkMatches(actual, expected) {
   const allowed = Array.isArray(expected) ? expected : [expected];
-  return allowed.map(String).includes(stringifyPointerValue(actual));
+  return allowed.some((value) => value === actual);
 }
 
 function evaluateRequiredChecks(gate, evidence) {
@@ -95,8 +89,9 @@ function evaluateRequiredChecks(gate, evidence) {
   return checks;
 }
 
+// The first limited_when check the evidence matches, so the note can say why.
 function evaluateLimited(gate, evidence) {
-  return (gate.limited_when ?? []).some((check) =>
+  return (gate.limited_when ?? []).find((check) =>
     checkMatches(pointer(evidence, check.pointer), check.equals)
   );
 }
@@ -129,14 +124,37 @@ function provenanceReason(gate, evidence, git, sourceFingerprint) {
       return `evidence production source fingerprint ${evidenceSource} does not match current ${sourceFingerprint?.production_source_sha256 ?? 'unknown'}`;
     }
   }
-  if (gate.app_binary_sha256_from && !pointer(evidence, gate.app_binary_sha256_from)) {
-    return `evidence is missing app binary hash at ${gate.app_binary_sha256_from}`;
+  if (gate.app_binary_sha256_from) {
+    const appBinary = pointer(evidence, gate.app_binary_sha256_from);
+    if (!appBinary) return `evidence is missing app binary hash at ${gate.app_binary_sha256_from}`;
+    // The generator cannot re-hash the tested binary; it can refuse a
+    // placeholder standing in for one.
+    if (!SHA256_HEX.test(String(appBinary))) {
+      return `evidence app binary hash at ${gate.app_binary_sha256_from} is not a SHA-256 hex digest: ${JSON.stringify(appBinary)}`;
+    }
   }
   if (!gate.require_current_git) return null;
+  return gitBindingReason(gate, evidence, git);
+}
+
+// Binding needs a real commit/tree on both sides; absent or null values never
+// bind vacuously, and a dirty worktree is not the commit it points at.
+function gitBindingReason(gate, evidence, git) {
+  if (!git?.commit || !git?.tree) return 'current git metadata unavailable';
   const evidenceCommit = pointer(evidence, gate.git_commit_from ?? '/git/commit');
   const evidenceTree = pointer(evidence, gate.git_tree_from ?? '/git/tree');
-  if (evidenceCommit === git?.commit && evidenceTree === git?.tree) return null;
-  return `evidence is not bound to current git commit/tree (${git?.commit ?? 'unknown'} / ${git?.tree ?? 'unknown'})`;
+  const evidenceDirty = pointer(evidence, gate.git_dirty_from ?? '/git/dirty');
+  if (!evidenceCommit || !evidenceTree) return 'evidence records no git commit/tree';
+  if (evidenceCommit !== git.commit || evidenceTree !== git.tree) {
+    return `evidence is not bound to current git commit/tree (${git.commit} / ${git.tree}); it records ${evidenceCommit} / ${evidenceTree}`;
+  }
+  if (git.dirty === true)
+    return `current worktree is dirty; evidence cannot be bound to ${git.commit}`;
+  if (git.dirty !== false) return 'current worktree dirty state is unknown';
+  if (evidenceDirty === true)
+    return `evidence was captured on a dirty worktree at ${evidenceCommit}`;
+  if (evidenceDirty !== false) return 'evidence does not record whether its worktree was clean';
+  return null;
 }
 
 export function classifyGate(gate, root, git = null, sourceFingerprint = null) {
@@ -173,11 +191,24 @@ export function classifyGate(gate, root, git = null, sourceFingerprint = null) {
     status = 'failed';
     reason = `${failed.pointer} expected ${JSON.stringify(failed.expected)} but found ${JSON.stringify(failed.actual)}`;
   } else if (checks.length) {
-    status = evaluateLimited(gate, evidence) ? 'limited' : 'passed';
-  } else {
+    const limit = evaluateLimited(gate, evidence);
+    status = limit ? 'limited' : 'passed';
+    if (limit) reason = `limited by ${limit.pointer} = ${JSON.stringify(limit.equals)}`;
+  } else if (gate.status_from) {
     const raw = stringifyPointerValue(pointer(evidence, gate.status_from));
     const mapped = gate.map_status?.[raw] ?? raw;
-    status = normalizeStatus(mapped);
+    if (STATUSES.has(mapped)) {
+      status = mapped;
+    } else {
+      // Evidence that maps to no status is a failure to report, not a crash
+      // and never a pass by default.
+      status = 'failed';
+      reason = `${gate.status_from} resolved to ${JSON.stringify(raw)}, which maps to no acceptance status`;
+    }
+  } else {
+    status = 'failed';
+    reason =
+      'gate defines neither required_checks nor status_from, so its evidence cannot be evaluated';
   }
   // A 'limited' result is still real execution evidence, so it is held to
   // the same current-source/binary provenance requirements as 'passed' — a
@@ -189,7 +220,7 @@ export function classifyGate(gate, root, git = null, sourceFingerprint = null) {
       : null;
   if (staleReason) {
     status = status === 'limited' ? 'historical_limited' : 'historical_pass';
-    reason = staleReason;
+    reason = reason ? `${staleReason}; ${reason}` : staleReason;
   }
   return {
     ...base,
@@ -215,25 +246,6 @@ function summarize(gates) {
   return summary;
 }
 
-function gitMetadata(root) {
-  const runGit = (args) =>
-    execFileSync('git', args, {
-      cwd: root,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-  try {
-    const porcelain = runGit(['status', '--porcelain']);
-    return {
-      commit: runGit(['rev-parse', 'HEAD']),
-      tree: runGit(['rev-parse', 'HEAD^{tree}']),
-      dirty: porcelain.length > 0,
-    };
-  } catch {
-    return { commit: null, tree: null, dirty: null };
-  }
-}
-
 async function collectHarnesses(root, manifest) {
   const harnesses = new Set();
   for (const gate of manifest.gates ?? []) {
@@ -252,7 +264,7 @@ async function collectHarnesses(root, manifest) {
 export async function createAcceptanceStatus({
   repoRoot: root = repoRoot,
   manifest,
-  git = gitMetadata(root),
+  git = gitProvenance(root),
   sourceFingerprint = productionSourceFingerprint(root),
   platform: host = { os: platform(), arch: arch() },
   capturedAt = new Date().toISOString(),
@@ -307,7 +319,7 @@ Generated from \`${manifestPath}\`.
 - Captured at: ${status.captured_at}
 - Git commit: ${status.git.commit ?? 'unknown'}
 - Git tree: ${status.git.tree ?? 'unknown'}
-- Dirty worktree: ${status.git.dirty}
+- Dirty worktree: ${status.git.dirty}${status.git.dirty_paths?.length ? ` (${status.git.dirty_paths.join(', ')})` : ''}
 - Host: ${status.host.os} ${status.host.arch}
 
 ## Summary
@@ -320,23 +332,30 @@ ${rows}
 
 ## Status meanings
 
-- passed: requested runtime behavior executed and evidence is bound to the current git tree, production-source fingerprint and app binary hash when required.
+- passed: requested runtime behavior executed and, where the gate requires it, the evidence is bound to the current git commit/tree (captured and generated on a clean worktree), matches the current production-source fingerprint and records a well-formed app binary SHA-256 (the generator cannot re-hash the tested binary).
 - historical_pass: older evidence passed, but it is not bound to the current git tree/build.
-- limited: real execution happened, but the evidence records a compatibility or safety-retention limit, and (when the gate requires it) is bound to the current git tree/build.
-- historical_limited: older evidence recorded a compatibility or safety-retention limit, but it is not bound to the current git tree/build.
+- limited: real execution happened, but the evidence records a compatibility or safety-retention limit or a declared partial run (e.g. a smoke subset), and (when the gate requires it) is bound to the current git tree/build.
+- historical_limited: older evidence recorded a compatibility or safety-retention limit or a declared partial run, but it is not bound to the current git tree/build.
 - prepared_not_executed: a harness exists but isolated external inputs were not supplied.
 - not_executed: a defined non-provider runtime gate has no execution evidence yet.
 - not_implemented: no runnable harness is present for the gate.
 - prerequisite_only: setup/prerequisite validation exists without runtime behavior execution.
 - ci_only_not_reproduced_locally: CI has the runtime lane, but no local evidence artifact is present in this checkout.
 - blocked: required local runtime/tooling is unavailable.
-- failed: evidence exists and records a failed gate.
+- failed: evidence exists and records a failed gate, or cannot be evaluated against its gate.
 `;
 }
 
 async function selfTest() {
   const testModule = relative(repoRoot, join(repoRoot, 'scripts/r2-audit-manifest.test.mjs'));
-  execFileSync(process.execPath, ['--test', testModule], { cwd: repoRoot, stdio: 'inherit' });
+  // Bounded: a hung test fails after a minute and a hung runner is killed,
+  // instead of stalling CI until the job timeout.
+  execFileSync(process.execPath, ['--test', '--test-timeout=60000', testModule], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    timeout: 5 * 60_000,
+    killSignal: 'SIGKILL',
+  });
 }
 
 async function main() {

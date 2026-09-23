@@ -73,6 +73,86 @@ export function isMainModule(argv1, moduleFilename) {
   }
 }
 
+// Resolves a JSON pointer against a document; undefined when any step of the
+// path is absent.
+export function jsonPointer(document, expression) {
+  if (!expression) return undefined;
+  if (expression === '') return document;
+  if (!expression.startsWith('/')) throw new Error(`JSON pointer must start with /: ${expression}`);
+  return expression
+    .slice(1)
+    .split('/')
+    .reduce((current, part) => {
+      if (current === undefined || current === null) return undefined;
+      const key = part.replaceAll('~1', '/').replaceAll('~0', '~');
+      return current[key];
+    }, document);
+}
+
+// Evidence and generated status are written into this directory before they
+// are committed, so uncommitted files there never make a worktree dirty for
+// provenance purposes. The manifest is an acceptance input and is not exempt.
+const AUDIT_OUTPUT_DIR = 'docs/engineering/r2-audit/';
+const AUDIT_INPUTS = new Set(['docs/engineering/r2-audit/acceptance-manifest.json']);
+
+function isAuditOutput(path) {
+  return path.startsWith(AUDIT_OUTPUT_DIR) && !AUDIT_INPUTS.has(path);
+}
+
+// Paths `git status --porcelain -z` reports as modified, staged, renamed or
+// untracked. A rename lists the new path and then, as its own entry, the
+// original path.
+function porcelainPaths(output) {
+  const entries = output.split('\0');
+  const paths = [];
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    if (!entry) continue;
+    paths.push(entry.slice(3));
+    if (/[RC]/.test(entry.slice(0, 2))) paths.push(entries[++index]);
+  }
+  return paths;
+}
+
+// The commit and tree a run is bound to, plus whether anything other than
+// audit outputs was uncommitted at the time. Every field is null when git or
+// a repository is unavailable; nothing is ever fabricated.
+export function gitProvenance(root = DEFAULT_ROOT) {
+  const runGit = (args) =>
+    execFileSync('git', args, {
+      cwd: resolve(root),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 60_000,
+    });
+  try {
+    const commit = runGit(['rev-parse', 'HEAD']).trim();
+    const tree = runGit(['rev-parse', 'HEAD^{tree}']).trim();
+    const dirtyPaths = porcelainPaths(
+      runGit(['status', '--porcelain', '-z', '--untracked-files=all'])
+    )
+      .filter((path) => !isAuditOutput(path))
+      .sort();
+    return { commit, tree, dirty: dirtyPaths.length > 0, dirty_paths: dirtyPaths };
+  } catch {
+    return { commit: null, tree: null, dirty: null, dirty_paths: null };
+  }
+}
+
+// Pointers every harness report carries once it embeds auditProvenance().
+export const PROVENANCE_POINTERS = Object.freeze([
+  '/git/commit',
+  '/git/tree',
+  '/git/dirty',
+  '/source_fingerprint/production_source_sha256',
+]);
+
+// What a harness records at report creation so the acceptance manifest can
+// bind its evidence to the checkout it ran from.
+export function auditProvenance(root = DEFAULT_ROOT) {
+  return { git: gitProvenance(root), source_fingerprint: productionSourceFingerprint(root) };
+}
+
 function isProductionInput(path) {
   if (!path || path.startsWith('../') || path.startsWith('/')) return false;
   if (EXCLUDED_PREFIXES.some((prefix) => path.startsWith(prefix))) return false;
