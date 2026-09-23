@@ -1765,19 +1765,95 @@ pub(crate) mod tests {
         );
     }
 
+    /// Reads one request's head off a raw fixture socket.
+    async fn read_request(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 2048];
+        while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+            let size = socket.read(&mut chunk).await.unwrap();
+            assert!(size > 0, "connection closed before the request ended");
+            request.extend_from_slice(&chunk[..size]);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pausing_a_relay_part_mid_body_reports_paused_and_keeps_the_transfer_stage() {
+        use tokio::io::AsyncWriteExt;
+        let _guard = test_db_guard().await;
+        let (session, mut journal) = journal_fixture("paused-mid-part", 8).await;
+        journal.stage = "transferring".into();
+        save_move_journal(&journal).await.unwrap();
+        const HEAD: &[u8] = b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-7/8\r\nContent-Length: 8\r\nETag: \"source\"\r\nConnection: close\r\n\r\n";
+        // test_s3::serve writes a whole body at once, so a raw socket
+        // trickles instead: the headers and one byte, then nothing more
+        // for as long as the test runs.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = fixture_config(&format!("http://{}", listener.local_addr().unwrap()));
+        let (first_byte_sent, first_byte) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            socket.write_all(HEAD).await.unwrap();
+            socket.write_all(b"o").await.unwrap();
+            let _ = first_byte_sent.send(());
+            std::future::pending::<()>().await
+        });
+        let client = config.client().await.unwrap();
+        let http = shared_http_client().unwrap();
+        let budget = RelayBudget::shared();
+        let plan = MultipartPlan::new(&config, 8, Some(5 * MIB)).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let paused = AtomicBool::new(false);
+        let transfer = transfer_part(
+            &budget,
+            &http,
+            &client,
+            &client,
+            &config,
+            &config,
+            &session,
+            &journal.source,
+            "upload",
+            1,
+            plan,
+            &cancelled,
+            &paused,
+        );
+        let pause = async {
+            tokio::time::timeout(Duration::from_secs(10), first_byte)
+                .await
+                .expect("the fixture sends the first body byte")
+                .unwrap();
+            // Paused time advances only once every task is idle: by then the
+            // relay has read the headers and the first byte and is waiting
+            // for the next chunk, so the pause lands mid-body.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            paused.store(true, Ordering::SeqCst);
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(transfer, pause)
+        })
+        .await
+        .expect("a paused read returns promptly");
+        server.abort();
+        let error = result.unwrap_err();
+        assert!(error.starts_with("paused:"), "{error}");
+        assert!(!error.contains("transient:"), "{error}");
+        assert_eq!(
+            crate::move_transfer::worker::recovery_failure_status(&error, Some("transferring")),
+            "paused"
+        );
+        assert_eq!(
+            get_move_journal(&session.id).await.unwrap().unwrap().stage,
+            "transferring"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_read_stalled_past_one_attempt_timeout_still_gets_its_retry() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         const HEAD: &[u8] = b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-3/4\r\nContent-Length: 2\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n";
-        async fn read_request(socket: &mut tokio::net::TcpStream) {
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 2048];
-            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
-                let size = socket.read(&mut chunk).await.unwrap();
-                assert!(size > 0, "connection closed before the request ended");
-                request.extend_from_slice(&chunk[..size]);
-            }
-        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let config = fixture_config(&format!("http://{}", listener.local_addr().unwrap()));
         let server = tokio::spawn(async move {
