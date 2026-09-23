@@ -2448,27 +2448,26 @@ mod tests {
 
         // Its rows are written without a fresh marker: nothing vouches for them
         // (there is no full index here either), so the next open re-lists.
-        let mut rows = crate::db::get_connection()
-            .unwrap()
-            .lock()
-            .await
-            .query(
-                "SELECT last_synced_at, listed_at, file_count FROM prefix_sync_times
-                 WHERE bucket = ?1 AND account_id = ?2 AND prefix = ''",
-                turso::params![BUCKET, ACCOUNT],
-            )
-            .await
-            .unwrap();
-        let row = rows.next().await.unwrap().unwrap();
-        assert_eq!(
+        // Other tests share this connection: keep the lock until the statement
+        // is dropped, or its step and reset race theirs ("concurrent use").
+        let marker = {
+            let conn = crate::db::get_connection().unwrap().lock().await;
+            let mut rows = conn
+                .query(
+                    "SELECT last_synced_at, listed_at, file_count FROM prefix_sync_times
+                     WHERE bucket = ?1 AND account_id = ?2 AND prefix = ''",
+                    turso::params![BUCKET, ACCOUNT],
+                )
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().unwrap();
             (
                 row.get::<i64>(0).unwrap(),
                 row.get::<i64>(1).unwrap(),
-                row.get::<i64>(2).unwrap()
-            ),
-            (0, 0, 3)
-        );
-        drop(rows);
+                row.get::<i64>(2).unwrap(),
+            )
+        };
+        assert_eq!(marker, (0, 0, 3));
         let cached = read_prefix_cache_scoped(&input, ListScope::new(&input), &scope)
             .await
             .unwrap();
