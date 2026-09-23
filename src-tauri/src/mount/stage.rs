@@ -2934,6 +2934,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn writes_on_a_damaged_wal_kept_for_a_failed_replay_survive_the_next_restore() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-damage-kept-writes-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let a_path = root.join("a.data");
+        let b_path = root.join("b.data");
+        let e_path = root.join("e.data");
+        let wal = stage_wal::wal_path(&a_path);
+        let mut a = Stage::create(a_path.clone(), "a".into(), 1).await.unwrap();
+        let mut b = Stage::create(b_path.clone(), "b".into(), 1).await.unwrap();
+        let mut e = Stage::create(e_path.clone(), "e".into(), 1).await.unwrap();
+        a.write_durable(0, &[1u8; 4096], 1).await.unwrap();
+        b.write_durable(0, b"bbbb", 1).await.unwrap();
+        e.write_durable(0, b"eeee", 1).await.unwrap();
+        drop(a);
+        drop(b);
+        drop(e);
+        let mut bytes = tokio::fs::read(&wal).await.unwrap();
+        bytes[1024] ^= 0xff;
+        tokio::fs::write(&wal, &bytes).await.unwrap();
+        stage_wal::fail_replay_of(&b_path, true);
+        stage_wal::forget_append_state(&wal).await;
+        // b's replay fails, so the damaged WAL stays where it is...
+        replay_write_intents(&root).await.unwrap();
+        assert!(damaged_wal_copies(&root).await.is_empty());
+        let entries = recovery_entries(&root).await.unwrap();
+        let e_entry = entries.iter().find(|entry| entry.key == "e").unwrap();
+        let mut e = Stage::restore(e_entry.clone()).await.unwrap();
+        // ...and the mount writes on after it: a restored stage and a new one.
+        e.write_durable(4, b"EEEE", 2).await.unwrap();
+        let mut d = Stage::create(root.join("d.data"), "d".into(), 2)
+            .await
+            .unwrap();
+        d.write_durable(0, b"dddd", 2).await.unwrap();
+        drop(e);
+        drop(d);
+        stage_wal::fail_replay_of(&b_path, false);
+        stage_wal::forget_append_state(&wal).await;
+        replay_write_intents(&root).await.unwrap();
+        assert_eq!(damaged_wal_copies(&root).await.len(), 1);
+        let entries = recovery_entries(&root).await.unwrap();
+        for (key, expected) in [("b", &b"bbbb"[..]), ("e", b"eeeeEEEE"), ("d", b"dddd")] {
+            let entry = entries.iter().find(|entry| entry.key == key).unwrap();
+            assert!(
+                !["unreadable", "replay_pending"].contains(&entry.state.as_str()),
+                "{key}: {} {:?}",
+                entry.state,
+                entry.error
+            );
+            let mut stage = Stage::restore(entry.clone()).await.unwrap();
+            assert_eq!(stage.read_at(0, 16).await.unwrap(), expected, "{key}");
+        }
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn proven_damage_found_while_mounted_never_blocks_writes() {
         let root = std::env::temp_dir().join(format!(
             "r2-live-damage-{}-{}",
