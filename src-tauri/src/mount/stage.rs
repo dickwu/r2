@@ -985,7 +985,11 @@ impl Stage {
         // The interrupted apply may still have a write in flight on this
         // handle: let it land, and learn whether a write-back through this
         // handle failed before it is swapped for a fresh one below.
-        if !self.data_unsynced {
+        if self.data_unsynced {
+            // Proven or not, a write still in flight must land before the
+            // re-apply below rewrites those bytes through another handle.
+            let _ = self.file.flush().await;
+        } else {
             let _ = self.sync_data().await;
         }
         if self.data_unsynced && !self.base_proven {
