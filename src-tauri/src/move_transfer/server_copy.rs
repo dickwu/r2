@@ -156,8 +156,412 @@ async fn copy_part(job: PartCopyJob<'_>) -> Result<(i32, String, i64), String> {
     Ok((job.part_number, etag, size))
 }
 
+async fn save(journal: &MoveJournal) -> Result<(), String> {
+    save_move_journal(journal)
+        .await
+        .map_err(|e| format!("Cannot persist move recovery state: {e}"))
+}
+
+/// A SingleCopy plan for an endpoint that is neither native AWS nor R2 must
+/// come from the worker's execution plan, which only chooses it once
+/// CopyCreate and CopySource are confirmed. Nothing is probed again here, so a
+/// failing probe cannot fail a copy that was already confirmed.
+#[allow(deprecated)] // AWS SDK has not exposed a string setter for outgoing Expires.
+#[allow(clippy::too_many_arguments)] // Preserve explicit mutation, journal, and cancellation ownership at call sites.
+pub(crate) async fn copy(
+    plan: TransferPlan,
+    session: &MoveSession,
+    dest: &MoveConfig,
+    source_head: &aws_sdk_s3::operation::head_object::HeadObjectOutput,
+    journal: &mut MoveJournal,
+    app: Option<&AppHandle>,
+    cancelled: &Arc<AtomicBool>,
+    paused: &Arc<AtomicBool>,
+) -> Result<u64, String> {
+    check_control(cancelled, paused)?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    journal.metrics.copy_started_at_ms.get_or_insert(now_ms);
+    save(journal).await?;
+    let client = dest.client().await?;
+    let source = encoded_copy_source(
+        &session.source_bucket,
+        &session.source_key,
+        journal.source.version_id.as_deref(),
+    );
+    let mut metadata = source_head.metadata().cloned().unwrap_or_default();
+    metadata.insert(TRANSFER_MARKER.into(), session.id.clone());
+    if plan == TransferPlan::SingleCopy {
+        journal.stage = "outcome_unknown".into();
+        save(journal).await?;
+        let request = client
+            .copy_object()
+            .bucket(dest.bucket())
+            .key(&session.dest_key)
+            .copy_source(source)
+            .copy_source_if_match(&journal.source.etag)
+            .metadata_directive(MetadataDirective::Replace)
+            .set_metadata(Some(metadata))
+            .set_content_type(source_head.content_type().map(str::to_string))
+            .set_cache_control(source_head.cache_control().map(str::to_string))
+            .set_content_disposition(source_head.content_disposition().map(str::to_string))
+            .set_content_encoding(source_head.content_encoding().map(str::to_string))
+            .set_content_language(source_head.content_language().map(str::to_string))
+            .set_expires(source_head.expires().cloned());
+        check_control(cancelled, paused)?;
+        let response = if matches!(dest, MoveConfig::R2(_)) {
+            await_unknown_mutation(
+                "CopyObject",
+                cancelled,
+                paused,
+                request
+                    .customize()
+                    .mutate_request(|request| {
+                        request
+                            .headers_mut()
+                            .insert("cf-copy-destination-if-none-match", "*");
+                    })
+                    .send(),
+            )
+            .await?
+        } else {
+            await_unknown_mutation(
+                "CopyObject",
+                cancelled,
+                paused,
+                request.if_none_match("*").send(),
+            )
+            .await?
+        };
+        match response {
+            Ok(response) => {
+                journal.destination =
+                    response
+                        .copy_object_result()
+                        .and_then(|r| r.e_tag())
+                        .map(|etag| SourceIdentity {
+                            size: journal.source.size,
+                            etag: etag.into(),
+                            version_id: response
+                                .version_id()
+                                .filter(|v| *v != "null")
+                                .map(str::to_string),
+                        });
+                journal.metrics.copy_completed_at_ms = Some(chrono::Utc::now().timestamp_millis());
+                save(journal).await?;
+                return Ok(journal.source.size);
+            }
+            Err(error) => {
+                let reason = storage_error(
+                    "CopyObject",
+                    error.as_service_error().and_then(|e| e.code()),
+                    error.raw_response().map(|r| r.status().as_u16()),
+                    &error,
+                    true,
+                );
+                if !reason.starts_with("outcome_unknown:") {
+                    journal.stage = "transferring".into();
+                    save(journal).await?;
+                }
+                return Err(reason);
+            }
+        }
+    }
+
+    let persisted = db::get_move_upload_session(&session.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let geometry = super::stream::MultipartPlan::new(
+        dest,
+        journal.source.size,
+        persisted.as_ref().map(|(_, size)| *size as u64),
+    )?;
+    let upload_id = if let Some((id, _)) = persisted {
+        id
+    } else {
+        check_control(cancelled, paused)?;
+        let response = await_unknown_mutation(
+            "CreateMultipartUpload",
+            cancelled,
+            paused,
+            client
+                .create_multipart_upload()
+                .bucket(dest.bucket())
+                .key(&session.dest_key)
+                .set_metadata(Some(metadata))
+                .set_content_type(source_head.content_type().map(str::to_string))
+                .set_cache_control(source_head.cache_control().map(str::to_string))
+                .set_content_disposition(source_head.content_disposition().map(str::to_string))
+                .set_content_encoding(source_head.content_encoding().map(str::to_string))
+                .set_content_language(source_head.content_language().map(str::to_string))
+                .set_expires(source_head.expires().cloned())
+                .send(),
+        )
+        .await?
+        .map_err(|e| {
+            storage_error(
+                "CreateMultipartUpload",
+                e.as_service_error().and_then(|e| e.code()),
+                e.raw_response().map(|r| r.status().as_u16()),
+                &e,
+                false,
+            )
+        })?;
+        let id = response
+            .upload_id()
+            .ok_or("Missing multipart upload ID")?
+            .to_string();
+        if let Err(error) =
+            db::save_move_upload_session(&session.id, &id, geometry.part_size as i64).await
+        {
+            let _ = client
+                .abort_multipart_upload()
+                .bucket(dest.bucket())
+                .key(&session.dest_key)
+                .upload_id(&id)
+                .send()
+                .await;
+            return Err(format!("Cannot journal multipart upload: {error}"));
+        }
+        id
+    };
+
+    let local: Vec<PartReceipt> = db::get_move_upload_parts(&session.id)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(number, etag, size)| PartReceipt {
+            number,
+            etag,
+            size: size as u64,
+        })
+        .collect::<Vec<_>>();
+    let mut reconciler = PartReconciler::new(journal.source.size, geometry.part_size, local)?;
+    let operation_endpoint = dest.operation_endpoint();
+    let operation_scope = operation_scope(&session.dest_account_id, &session.dest_bucket);
+    let mut marker = None;
+    let mut seen = HashSet::new();
+    loop {
+        check_control(cancelled, paused)?;
+        let marker_identity = marker.as_deref().unwrap_or("start");
+        let identity = format!("{upload_id}:{marker_identity}:{}", journal.source.etag);
+        let context = operation_context(
+            OperationKind::ListParts,
+            &operation_endpoint,
+            &operation_scope,
+            &identity,
+            cancelled,
+            paused,
+        );
+        let page = execute_operation(&context, || async {
+            client
+                .list_parts()
+                .bucket(dest.bucket())
+                .key(&session.dest_key)
+                .upload_id(&upload_id)
+                .set_part_number_marker(marker.clone())
+                .send()
+                .await
+                .map_err(|error| AttemptError::from_sdk(&error))
+        })
+        .await
+        .map_err(|error| super::planner::operation_error("ListParts", error))?;
+        for part in page.parts() {
+            reconciler.accept(PartReceipt {
+                number: part.part_number().ok_or("Missing copied part number")?,
+                etag: part.e_tag().ok_or("Missing copied part ETag")?.to_string(),
+                size: part
+                    .size()
+                    .and_then(|size| u64::try_from(size).ok())
+                    .ok_or("Missing copied part size")?,
+            })?;
+        }
+        if !page.is_truncated().unwrap_or(false) {
+            break;
+        }
+        let next = page
+            .next_part_number_marker()
+            .filter(|s| !s.is_empty())
+            .ok_or("Truncated ListParts omitted cursor")?
+            .to_string();
+        if !seen.insert(next.clone()) {
+            return Err("ListParts repeated cursor".into());
+        }
+        marker = Some(next);
+    }
+    let mut completed = reconciler.finish();
+
+    let pending: Vec<i32> = (1..=geometry.total_parts)
+        .filter(|number| !completed.contains_key(number))
+        .collect();
+    journal.metrics.copy_requests = journal
+        .metrics
+        .copy_requests
+        .saturating_add(pending.len() as u64);
+    journal.metrics.max_copy_in_flight = journal.metrics.max_copy_in_flight.max(
+        pending
+            .len()
+            .min(SERVER_COPY_PART_CONCURRENCY)
+            .try_into()
+            .unwrap_or(u32::MAX),
+    );
+    save(journal).await?;
+    let source_etag = journal.source.etag.clone();
+    let source_size = journal.source.size;
+    let client_ref = &client;
+    let source_ref = source.as_str();
+    let source_etag_ref = source_etag.as_str();
+    let upload_id_ref = upload_id.as_str();
+    let endpoint_ref = operation_endpoint.as_str();
+    let scope_ref = operation_scope.as_str();
+    let stopped = AtomicBool::new(false);
+    let jobs = stream::iter(pending.into_iter().map(|number| {
+        let stopped = &stopped;
+        let client = client_ref;
+        let source = source_ref;
+        let source_etag = source_etag_ref;
+        let upload_id = upload_id_ref;
+        let endpoint = endpoint_ref;
+        let scope = scope_ref;
+        async move {
+            if stopped.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            let result = copy_part(PartCopyJob {
+                client,
+                dest,
+                session,
+                source,
+                source_etag,
+                source_size,
+                upload_id,
+                part_number: number,
+                plan: geometry,
+                endpoint,
+                scope,
+                cancelled,
+                paused,
+            })
+            .await;
+            if result.is_err() {
+                stopped.store(true, Ordering::SeqCst);
+            }
+            result.map(Some)
+        }
+    }))
+    .buffer_unordered(SERVER_COPY_PART_CONCURRENCY);
+    tokio::pin!(jobs);
+    let mut first_error = None;
+    let mut copied_bytes: u64 = completed.values().map(|receipt| receipt.size).sum();
+    while let Some(result) = jobs.next().await {
+        match result {
+            Ok(Some((number, etag, size))) => {
+                completed.insert(
+                    number,
+                    PartReceipt {
+                        number,
+                        etag,
+                        size: size as u64,
+                    },
+                );
+                copied_bytes += size as u64;
+                let percent = ((copied_bytes as f64 / source_size as f64) * 100.0)
+                    .floor()
+                    .min(99.0) as i64;
+                let _ = db::update_move_progress(&session.id, percent).await;
+                if let Some(app) = app {
+                    let _ = app.emit(
+                        "move-progress",
+                        crate::move_transfer::types::MoveProgress {
+                            task_id: session.id.clone(),
+                            phase: "copying".into(),
+                            percent: percent as u32,
+                            transferred_bytes: copied_bytes,
+                            total_bytes: source_size,
+                            speed: 0.0,
+                        },
+                    );
+                }
+                info!(
+                    "server_copy_part_complete: task={} part={} bytes={} copied={} total={}",
+                    session.id, number, size, copied_bytes, source_size
+                );
+            }
+            Ok(None) => {}
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    let receipts = complete_receipts(
+        journal.source.size,
+        geometry.part_size,
+        completed.into_values(),
+    )?;
+    check_control(cancelled, paused)?;
+    journal.stage = "outcome_unknown".into();
+    save(journal).await?;
+    let parts = receipts
+        .into_iter()
+        .map(|receipt| {
+            CompletedPart::builder()
+                .part_number(receipt.number)
+                .e_tag(receipt.etag)
+                .build()
+        })
+        .collect();
+    check_control(cancelled, paused)?;
+    let complete_response = await_unknown_mutation(
+        "CompleteMultipartUpload",
+        cancelled,
+        paused,
+        client
+            .complete_multipart_upload()
+            .if_none_match("*")
+            .bucket(dest.bucket())
+            .key(&session.dest_key)
+            .upload_id(&upload_id)
+            .multipart_upload(
+                CompletedMultipartUpload::builder()
+                    .set_parts(Some(parts))
+                    .build(),
+            )
+            .send(),
+    )
+    .await?;
+    match complete_response {
+        Ok(response) => {
+            journal.destination = response.e_tag().map(|etag| SourceIdentity {
+                size: journal.source.size,
+                etag: etag.into(),
+                version_id: response
+                    .version_id()
+                    .filter(|v| *v != "null")
+                    .map(str::to_string),
+            });
+            journal.metrics.copy_completed_at_ms = Some(chrono::Utc::now().timestamp_millis());
+            save(journal).await?;
+            Ok(journal.source.size)
+        }
+        Err(error) => {
+            let reason = storage_error(
+                "CompleteMultipartUpload",
+                error.as_service_error().and_then(|e| e.code()),
+                error.raw_response().map(|r| r.status().as_u16()),
+                &error,
+                true,
+            );
+            if !reason.starts_with("outcome_unknown:") && !reason.starts_with("not_found:") {
+                journal.stage = "transferring".into();
+                save(journal).await?;
+            }
+            Err(reason)
+        }
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)] // Keep protocol regression fixtures near the private copy helpers they exercise.
 mod tests {
     use super::*;
     use crate::move_transfer::{
@@ -583,410 +987,5 @@ mod tests {
         let requests = fixture.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].path.contains("/destination"));
-    }
-}
-
-async fn save(journal: &MoveJournal) -> Result<(), String> {
-    save_move_journal(journal)
-        .await
-        .map_err(|e| format!("Cannot persist move recovery state: {e}"))
-}
-
-/// A SingleCopy plan for an endpoint that is neither native AWS nor R2 must
-/// come from the worker's execution plan, which only chooses it once
-/// CopyCreate and CopySource are confirmed. Nothing is probed again here, so a
-/// failing probe cannot fail a copy that was already confirmed.
-#[allow(deprecated)] // AWS SDK has not exposed a string setter for outgoing Expires.
-#[allow(clippy::too_many_arguments)] // Preserve explicit mutation, journal, and cancellation ownership at call sites.
-pub(crate) async fn copy(
-    plan: TransferPlan,
-    session: &MoveSession,
-    dest: &MoveConfig,
-    source_head: &aws_sdk_s3::operation::head_object::HeadObjectOutput,
-    journal: &mut MoveJournal,
-    app: Option<&AppHandle>,
-    cancelled: &Arc<AtomicBool>,
-    paused: &Arc<AtomicBool>,
-) -> Result<u64, String> {
-    check_control(cancelled, paused)?;
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    journal.metrics.copy_started_at_ms.get_or_insert(now_ms);
-    save(journal).await?;
-    let client = dest.client().await?;
-    let source = encoded_copy_source(
-        &session.source_bucket,
-        &session.source_key,
-        journal.source.version_id.as_deref(),
-    );
-    let mut metadata = source_head.metadata().cloned().unwrap_or_default();
-    metadata.insert(TRANSFER_MARKER.into(), session.id.clone());
-    if plan == TransferPlan::SingleCopy {
-        journal.stage = "outcome_unknown".into();
-        save(journal).await?;
-        let request = client
-            .copy_object()
-            .bucket(dest.bucket())
-            .key(&session.dest_key)
-            .copy_source(source)
-            .copy_source_if_match(&journal.source.etag)
-            .metadata_directive(MetadataDirective::Replace)
-            .set_metadata(Some(metadata))
-            .set_content_type(source_head.content_type().map(str::to_string))
-            .set_cache_control(source_head.cache_control().map(str::to_string))
-            .set_content_disposition(source_head.content_disposition().map(str::to_string))
-            .set_content_encoding(source_head.content_encoding().map(str::to_string))
-            .set_content_language(source_head.content_language().map(str::to_string))
-            .set_expires(source_head.expires().cloned());
-        check_control(cancelled, paused)?;
-        let response = if matches!(dest, MoveConfig::R2(_)) {
-            await_unknown_mutation(
-                "CopyObject",
-                cancelled,
-                paused,
-                request
-                    .customize()
-                    .mutate_request(|request| {
-                        request
-                            .headers_mut()
-                            .insert("cf-copy-destination-if-none-match", "*");
-                    })
-                    .send(),
-            )
-            .await?
-        } else {
-            await_unknown_mutation(
-                "CopyObject",
-                cancelled,
-                paused,
-                request.if_none_match("*").send(),
-            )
-            .await?
-        };
-        match response {
-            Ok(response) => {
-                journal.destination =
-                    response
-                        .copy_object_result()
-                        .and_then(|r| r.e_tag())
-                        .map(|etag| SourceIdentity {
-                            size: journal.source.size,
-                            etag: etag.into(),
-                            version_id: response
-                                .version_id()
-                                .filter(|v| *v != "null")
-                                .map(str::to_string),
-                        });
-                journal.metrics.copy_completed_at_ms = Some(chrono::Utc::now().timestamp_millis());
-                save(journal).await?;
-                return Ok(journal.source.size);
-            }
-            Err(error) => {
-                let reason = storage_error(
-                    "CopyObject",
-                    error.as_service_error().and_then(|e| e.code()),
-                    error.raw_response().map(|r| r.status().as_u16()),
-                    &error,
-                    true,
-                );
-                if !reason.starts_with("outcome_unknown:") {
-                    journal.stage = "transferring".into();
-                    save(journal).await?;
-                }
-                return Err(reason);
-            }
-        }
-    }
-
-    let persisted = db::get_move_upload_session(&session.id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let geometry = super::stream::MultipartPlan::new(
-        dest,
-        journal.source.size,
-        persisted.as_ref().map(|(_, size)| *size as u64),
-    )?;
-    let upload_id = if let Some((id, _)) = persisted {
-        id
-    } else {
-        check_control(cancelled, paused)?;
-        let response = await_unknown_mutation(
-            "CreateMultipartUpload",
-            cancelled,
-            paused,
-            client
-                .create_multipart_upload()
-                .bucket(dest.bucket())
-                .key(&session.dest_key)
-                .set_metadata(Some(metadata))
-                .set_content_type(source_head.content_type().map(str::to_string))
-                .set_cache_control(source_head.cache_control().map(str::to_string))
-                .set_content_disposition(source_head.content_disposition().map(str::to_string))
-                .set_content_encoding(source_head.content_encoding().map(str::to_string))
-                .set_content_language(source_head.content_language().map(str::to_string))
-                .set_expires(source_head.expires().cloned())
-                .send(),
-        )
-        .await?
-        .map_err(|e| {
-            storage_error(
-                "CreateMultipartUpload",
-                e.as_service_error().and_then(|e| e.code()),
-                e.raw_response().map(|r| r.status().as_u16()),
-                &e,
-                false,
-            )
-        })?;
-        let id = response
-            .upload_id()
-            .ok_or("Missing multipart upload ID")?
-            .to_string();
-        if let Err(error) =
-            db::save_move_upload_session(&session.id, &id, geometry.part_size as i64).await
-        {
-            let _ = client
-                .abort_multipart_upload()
-                .bucket(dest.bucket())
-                .key(&session.dest_key)
-                .upload_id(&id)
-                .send()
-                .await;
-            return Err(format!("Cannot journal multipart upload: {error}"));
-        }
-        id
-    };
-
-    let local: Vec<PartReceipt> = db::get_move_upload_parts(&session.id)
-        .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|(number, etag, size)| PartReceipt {
-            number,
-            etag,
-            size: size as u64,
-        })
-        .collect::<Vec<_>>();
-    let mut reconciler = PartReconciler::new(journal.source.size, geometry.part_size, local)?;
-    let operation_endpoint = dest.operation_endpoint();
-    let operation_scope = operation_scope(&session.dest_account_id, &session.dest_bucket);
-    let mut marker = None;
-    let mut seen = HashSet::new();
-    loop {
-        check_control(cancelled, paused)?;
-        let marker_identity = marker.as_deref().unwrap_or("start");
-        let identity = format!("{upload_id}:{marker_identity}:{}", journal.source.etag);
-        let context = operation_context(
-            OperationKind::ListParts,
-            &operation_endpoint,
-            &operation_scope,
-            &identity,
-            cancelled,
-            paused,
-        );
-        let page = execute_operation(&context, || async {
-            client
-                .list_parts()
-                .bucket(dest.bucket())
-                .key(&session.dest_key)
-                .upload_id(&upload_id)
-                .set_part_number_marker(marker.clone())
-                .send()
-                .await
-                .map_err(|error| AttemptError::from_sdk(&error))
-        })
-        .await
-        .map_err(|error| super::planner::operation_error("ListParts", error))?;
-        for part in page.parts() {
-            reconciler.accept(PartReceipt {
-                number: part.part_number().ok_or("Missing copied part number")?,
-                etag: part.e_tag().ok_or("Missing copied part ETag")?.to_string(),
-                size: part
-                    .size()
-                    .and_then(|size| u64::try_from(size).ok())
-                    .ok_or("Missing copied part size")?,
-            })?;
-        }
-        if !page.is_truncated().unwrap_or(false) {
-            break;
-        }
-        let next = page
-            .next_part_number_marker()
-            .filter(|s| !s.is_empty())
-            .ok_or("Truncated ListParts omitted cursor")?
-            .to_string();
-        if !seen.insert(next.clone()) {
-            return Err("ListParts repeated cursor".into());
-        }
-        marker = Some(next);
-    }
-    let mut completed = reconciler.finish();
-
-    let pending: Vec<i32> = (1..=geometry.total_parts)
-        .filter(|number| !completed.contains_key(number))
-        .collect();
-    journal.metrics.copy_requests = journal
-        .metrics
-        .copy_requests
-        .saturating_add(pending.len() as u64);
-    journal.metrics.max_copy_in_flight = journal.metrics.max_copy_in_flight.max(
-        pending
-            .len()
-            .min(SERVER_COPY_PART_CONCURRENCY)
-            .try_into()
-            .unwrap_or(u32::MAX),
-    );
-    save(journal).await?;
-    let source_etag = journal.source.etag.clone();
-    let source_size = journal.source.size;
-    let client_ref = &client;
-    let source_ref = source.as_str();
-    let source_etag_ref = source_etag.as_str();
-    let upload_id_ref = upload_id.as_str();
-    let endpoint_ref = operation_endpoint.as_str();
-    let scope_ref = operation_scope.as_str();
-    let stopped = AtomicBool::new(false);
-    let jobs = stream::iter(pending.into_iter().map(|number| {
-        let stopped = &stopped;
-        let client = client_ref;
-        let source = source_ref;
-        let source_etag = source_etag_ref;
-        let upload_id = upload_id_ref;
-        let endpoint = endpoint_ref;
-        let scope = scope_ref;
-        async move {
-            if stopped.load(Ordering::SeqCst) {
-                return Ok(None);
-            }
-            let result = copy_part(PartCopyJob {
-                client,
-                dest,
-                session,
-                source,
-                source_etag,
-                source_size,
-                upload_id,
-                part_number: number,
-                plan: geometry,
-                endpoint,
-                scope,
-                cancelled,
-                paused,
-            })
-            .await;
-            if result.is_err() {
-                stopped.store(true, Ordering::SeqCst);
-            }
-            result.map(Some)
-        }
-    }))
-    .buffer_unordered(SERVER_COPY_PART_CONCURRENCY);
-    tokio::pin!(jobs);
-    let mut first_error = None;
-    let mut copied_bytes: u64 = completed.values().map(|receipt| receipt.size).sum();
-    while let Some(result) = jobs.next().await {
-        match result {
-            Ok(Some((number, etag, size))) => {
-                completed.insert(
-                    number,
-                    PartReceipt {
-                        number,
-                        etag,
-                        size: size as u64,
-                    },
-                );
-                copied_bytes += size as u64;
-                let percent = ((copied_bytes as f64 / source_size as f64) * 100.0)
-                    .floor()
-                    .min(99.0) as i64;
-                let _ = db::update_move_progress(&session.id, percent).await;
-                if let Some(app) = app {
-                    let _ = app.emit(
-                        "move-progress",
-                        crate::move_transfer::types::MoveProgress {
-                            task_id: session.id.clone(),
-                            phase: "copying".into(),
-                            percent: percent as u32,
-                            transferred_bytes: copied_bytes,
-                            total_bytes: source_size,
-                            speed: 0.0,
-                        },
-                    );
-                }
-                info!(
-                    "server_copy_part_complete: task={} part={} bytes={} copied={} total={}",
-                    session.id, number, size, copied_bytes, source_size
-                );
-            }
-            Ok(None) => {}
-            Err(error) if first_error.is_none() => first_error = Some(error),
-            Err(_) => {}
-        }
-    }
-    if let Some(error) = first_error {
-        return Err(error);
-    }
-    let receipts = complete_receipts(
-        journal.source.size,
-        geometry.part_size,
-        completed.into_values(),
-    )?;
-    check_control(cancelled, paused)?;
-    journal.stage = "outcome_unknown".into();
-    save(journal).await?;
-    let parts = receipts
-        .into_iter()
-        .map(|receipt| {
-            CompletedPart::builder()
-                .part_number(receipt.number)
-                .e_tag(receipt.etag)
-                .build()
-        })
-        .collect();
-    check_control(cancelled, paused)?;
-    let complete_response = await_unknown_mutation(
-        "CompleteMultipartUpload",
-        cancelled,
-        paused,
-        client
-            .complete_multipart_upload()
-            .if_none_match("*")
-            .bucket(dest.bucket())
-            .key(&session.dest_key)
-            .upload_id(&upload_id)
-            .multipart_upload(
-                CompletedMultipartUpload::builder()
-                    .set_parts(Some(parts))
-                    .build(),
-            )
-            .send(),
-    )
-    .await?;
-    match complete_response {
-        Ok(response) => {
-            journal.destination = response.e_tag().map(|etag| SourceIdentity {
-                size: journal.source.size,
-                etag: etag.into(),
-                version_id: response
-                    .version_id()
-                    .filter(|v| *v != "null")
-                    .map(str::to_string),
-            });
-            journal.metrics.copy_completed_at_ms = Some(chrono::Utc::now().timestamp_millis());
-            save(journal).await?;
-            Ok(journal.source.size)
-        }
-        Err(error) => {
-            let reason = storage_error(
-                "CompleteMultipartUpload",
-                error.as_service_error().and_then(|e| e.code()),
-                error.raw_response().map(|r| r.status().as_u16()),
-                &error,
-                true,
-            );
-            if !reason.starts_with("outcome_unknown:") && !reason.starts_with("not_found:") {
-                journal.stage = "transferring".into();
-                save(journal).await?;
-            }
-            Err(reason)
-        }
     }
 }
