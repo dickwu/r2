@@ -390,7 +390,7 @@ async fn withdraw_account_cache_on(conn: &Connection, account_id: &str) -> DbRes
     let prefix = format!("skipped_prefixes:{account_id}:");
     conn.execute(
         "DELETE FROM app_state WHERE substr(key,1,?1)=?2",
-        turso::params![prefix.len() as i64, prefix],
+        turso::params![prefix.chars().count() as i64, prefix],
     )
     .await?;
     // A listing still in flight for this account must not publish as fresh.
@@ -949,6 +949,24 @@ mod tests {
             ]
         );
         assert_eq!(journal_accounts(&conn).await, vec!["other".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn account_reset_drops_the_skipped_prefix_note_of_a_non_ascii_account() {
+        let (_db, conn) = fixture().await;
+        conn.execute(
+            "INSERT INTO app_state(key,value) VALUES ('skipped_prefixes:账户:bucket','[\"broken/\"]'), ('skipped_prefixes:other:bucket','[]')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        reset_account_on(&conn, "账户").await.unwrap();
+
+        assert_eq!(
+            app_state_keys(&conn).await,
+            vec!["skipped_prefixes:other:bucket".to_string()]
+        );
     }
 
     #[tokio::test]
