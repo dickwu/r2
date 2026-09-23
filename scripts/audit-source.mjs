@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync, readdirSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
 
 const DEFAULT_ROOT = resolve(import.meta.dirname, '..');
@@ -55,6 +55,22 @@ const EXCLUDED_SUFFIXES = ['.map', '.log'];
 
 function toRepoPath(root, path) {
   return relative(root, path).split(sep).join('/');
+}
+
+// process.argv[1] is left exactly as invoked (a symlink path is never
+// resolved), while import.meta.url/import.meta.filename is Node's resolved
+// module identity. A plain string/path comparison between the two silently
+// no-ops when this script is run through a symlink; comparing real paths
+// makes the entrypoint check symlink-safe. Never throw on a non-existent or
+// unresolvable argv[1] (e.g. a bare `bun test` runner path) — that just
+// means this module was imported, not executed directly.
+export function isMainModule(argv1, moduleFilename) {
+  if (!argv1) return false;
+  try {
+    return realpathSync(argv1) === realpathSync(moduleFilename);
+  } catch {
+    return false;
+  }
 }
 
 function isProductionInput(path) {
@@ -131,7 +147,7 @@ export function productionSourceFingerprint(root = DEFAULT_ROOT) {
   };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
+if (isMainModule(process.argv[1], import.meta.filename)) {
   const json = process.argv.includes('--json');
   const rootIndex = process.argv.indexOf('--root');
   const root = rootIndex === -1 ? DEFAULT_ROOT : resolve(process.argv[rootIndex + 1]);

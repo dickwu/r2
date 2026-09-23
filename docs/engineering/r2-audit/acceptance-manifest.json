@@ -166,9 +166,24 @@
           ]
         }
       ],
+      "limited_when": [
+        {
+          "pointer": "/conditions/get_match/behavior",
+          "equals": "rejected_unsupported"
+        },
+        {
+          "pointer": "/conditions/put_absent/behavior",
+          "equals": "rejected_unsupported"
+        },
+        {
+          "pointer": "/conditions/copy_source_match/behavior",
+          "equals": "rejected_unsupported"
+        }
+      ],
       "harnesses": [
         "scripts/r2-protocol-audit.mjs"
-      ]
+      ],
+      "require_current_git": true
     },
     {
       "id": "aws-s3-provider",
@@ -232,7 +247,8 @@
       ],
       "harnesses": [
         "scripts/aws-s3-protocol-audit.mjs"
-      ]
+      ],
+      "require_current_git": true
     },
     {
       "id": "linux-native-nfs",
@@ -350,6 +366,12 @@
             "kernel_nfs_ack_vm_powercut_matrix",
             "smoke"
           ]
+        }
+      ],
+      "limited_when": [
+        {
+          "pointer": "/mode",
+          "equals": "smoke"
         }
       ],
       "harnesses": [

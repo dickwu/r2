@@ -26,6 +26,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # import.meta.dirname (scripts/audit-source.mjs) needs Node >= 20.11;
+      # pin instead of relying on whatever the runner image happens to ship.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      # Captured immediately after checkout, before bun/cargo touch the
+      # working tree, so the fingerprint reflects exactly what was checked
+      # out and is not disturbed by build-step side effects.
+      - name: Capture production source fingerprint
+        shell: pwsh
+        run: node scripts/audit-source.mjs --json | Out-File source-fingerprint.json -Encoding utf8
+
       # The runner context is not available to job-level env.
       - name: Place the Cargo target directory in runner temp
         shell: pwsh
@@ -95,30 +108,55 @@ jobs:
           }
 
       - name: Record exact runtime evidence
+        # Field names/shape must match the windows-native-nfs-behavior gate in
+        # acceptance-manifest.json: /status, /native_nfs/write_read_rename_unmount,
+        # /runner, /source_fingerprint/production_source_sha256. status and
+        # native_nfs.write_read_rename_unmount are derived from the actual step
+        # outcomes below, never hardcoded to a passing value, so a loader
+        # failure, reboot, empty run or skipped mount cannot read as a pass.
         if: always()
         shell: pwsh
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           $binaries = @(Get-ChildItem "$env:CARGO_TARGET_DIR\debug\deps\r2_lib-*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
             @{ path = $_.FullName; sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
           })
+          $rustOutcome = '${{ steps.rust.outcome }}'
+          $nfsOutcome = '${{ steps.nfs.outcome }}'
+          $observed = ($rustOutcome -eq 'success') -and ($nfsOutcome -eq 'success')
+          $sourceFingerprint = $null
+          if (Test-Path source-fingerprint.json) {
+            $sourceFingerprint = Get-Content source-fingerprint.json -Raw | ConvertFrom-Json
+          }
           @{
+            status = $(if ($observed) { 'observations_collected' } else { 'run_incomplete' })
+            # The tested commit: actions/checkout on a pull_request event checks
+            # out the ephemeral merge commit, not the PR branch head, so both are
+            # recorded distinctly.
             source_commit = (git rev-parse HEAD)
             source_tree = (git rev-parse 'HEAD^{tree}')
+            pr_head_sha = $env:PR_HEAD_SHA
+            runner = 'windows-2022'
             runner_image = $env:ImageVersion
             platform = [System.Environment]::OSVersion.VersionString
             sdk = $env:R2_NATIVE_SDK
             mode = 'native_behavior'
-            rust_outcome = '${{ steps.rust.outcome }}'
-            nfs_outcome = '${{ steps.nfs.outcome }}'
+            rust_outcome = $rustOutcome
+            nfs_outcome = $nfsOutcome
+            native_nfs = @{
+              write_read_rename_unmount = $(if ($nfsOutcome -eq 'success') { 'passed' } else { 'failed' })
+            }
+            source_fingerprint = $sourceFingerprint
             binaries = $binaries
-          } | ConvertTo-Json -Depth 5 | Out-File windows-native-evidence.json -Encoding utf8
+          } | ConvertTo-Json -Depth 8 | Out-File windows-native-nfs-behavior.json -Encoding utf8
 
       - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: windows-native-evidence
+          name: windows-native-nfs-behavior
           path: |
-            windows-native-evidence.json
+            windows-native-nfs-behavior.json
             windows-rust-tests.log
             windows-nfs-*.log
           if-no-files-found: error

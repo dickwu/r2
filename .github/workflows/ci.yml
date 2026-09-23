@@ -37,6 +37,15 @@ jobs:
         with:
           bun-version: 1.3.13
 
+      # import.meta.dirname (scripts/audit-source.mjs, scripts/provider-fault-audit.mjs)
+      # needs Node >= 20.11; pin instead of relying on whatever the runner
+      # image happens to ship, so the harness self-tests below don't silently
+      # depend on ambient tooling.
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
