@@ -2914,6 +2914,14 @@ mod tests {
         );
         let a_entry = entries.iter().find(|entry| entry.key == "a").unwrap();
         assert_eq!(a_entry.state, "unreadable");
+        // While the WAL is kept in place there is no set-aside copy, and the
+        // reason a user reads must not name one.
+        let reason = a_entry.error.as_deref().unwrap();
+        assert!(reason.contains("damaged"), "{reason}");
+        assert!(
+            !reason.contains(stage_wal::DAMAGED_WAL_PREFIX),
+            "the reason names a set-aside copy that does not exist: {reason}"
+        );
         let c_entry = entries
             .iter()
             .find(|entry| entry.key == "c")
@@ -2925,7 +2933,8 @@ mod tests {
         stage_wal::fail_replay_of(&c_path, false);
         stage_wal::forget_append_state(&wal).await;
         replay_write_intents(&root).await.unwrap();
-        assert_eq!(damaged_wal_copies(&root).await.len(), 1);
+        let set_aside = damaged_wal_copies(&root).await;
+        assert_eq!(set_aside.len(), 1);
         let entries = recovery_entries(&root).await.unwrap();
         let b_entry = entries.iter().find(|entry| entry.key == "b").unwrap();
         assert!(!["unreadable", "replay_pending"].contains(&b_entry.state.as_str()));
@@ -2936,6 +2945,13 @@ mod tests {
         assert_eq!(c.read_at(0, 8).await.unwrap(), b"ccc");
         let a_entry = entries.iter().find(|entry| entry.key == "a").unwrap();
         assert_eq!(a_entry.state, "unreadable");
+        // Now the copy exists, and the reason names it.
+        let copy = set_aside[0].file_name().unwrap().to_string_lossy();
+        assert!(
+            a_entry.error.as_deref().unwrap().contains(copy.as_ref()),
+            "the reason names the set-aside copy once it exists: {:?}",
+            a_entry.error
+        );
         drop(b);
         drop(c);
         tokio::fs::remove_dir_all(root).await.unwrap();

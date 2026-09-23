@@ -871,7 +871,7 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
         ))
     });
     let affected = match &set_aside {
-        Some(target) => quarantine_affected(root, &index, target).await?,
+        Some(_) => quarantine_affected(root, &index).await?,
         None => std::collections::HashSet::new(),
     };
     let truncated_tail = index.truncated_tail;
@@ -959,6 +959,7 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
             set_aside_wal(root, &target, max_lsn)
                 .await
                 .map_err(|e| e.to_string())?;
+            name_set_aside_copy(root, &affected, &target).await;
             errors.push((
                 target,
                 "Damaged staging WAL kept for export and review".into(),
@@ -970,20 +971,15 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
 
 /// Marks every stage the damage may affect as unreadable in its manifest —
 /// creating one for a stage known only from the WAL whose data file is still
-/// there — so the quarantine outlives the WAL, which is about to be set
-/// aside. Returns their data file names.
+/// there — so the quarantine outlives the WAL, which this restore sets aside
+/// once every other stage has replayed. The reason names no set-aside copy:
+/// none exists yet, and while a failed replay keeps the WAL in place none
+/// will (`name_set_aside_copy`). Returns their data file names.
 async fn quarantine_affected(
     root: &Path,
     index: &WalRecoveryIndex,
-    set_aside: &Path,
 ) -> Result<std::collections::HashSet<String>, String> {
-    let reason = format!(
-        "Acknowledged changes to this file may be in a damaged part of the staging WAL, kept as {} for export and review",
-        set_aside
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-    );
+    let reason = quarantine_reason(None);
     let mut names: std::collections::BTreeSet<String> = index.buckets.keys().cloned().collect();
     let mut dir = tokio::fs::read_dir(root).await.map_err(|e| e.to_string())?;
     while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
@@ -1042,6 +1038,59 @@ async fn quarantine_affected(
         }
     }
     Ok(affected)
+}
+
+/// Why an affected stage is quarantined. The set-aside copy is named only
+/// once it exists: a reason a user reads must never name a file that does
+/// not.
+fn quarantine_reason(set_aside: Option<&Path>) -> String {
+    let kept = match set_aside {
+        Some(copy) => format!(
+            "kept as {}",
+            copy.file_name().unwrap_or_default().to_string_lossy()
+        ),
+        None => "kept".to_string(),
+    };
+    format!(
+        "Acknowledged changes to this file may be in a damaged part of the staging WAL, {kept} for export and review"
+    )
+}
+
+/// Once the WAL has been renamed to `set_aside`, puts that name into the
+/// reason of every affected manifest. The quarantine itself was made
+/// durable before the rename and the copy is listed on its own, so a
+/// manifest this cannot rewrite keeps its nameless reason; it never fails
+/// the restore.
+async fn name_set_aside_copy(
+    root: &Path,
+    affected: &std::collections::HashSet<String>,
+    set_aside: &Path,
+) {
+    let reason = quarantine_reason(Some(set_aside));
+    for name in affected {
+        let manifest_path = root.join(name).with_extension("stage.json");
+        let named = async {
+            let Some(record) = read_manifest(&manifest_path).await? else {
+                return Ok(());
+            };
+            write_json_atomic(
+                &manifest_path,
+                &StageRecovery {
+                    error: Some(reason.clone()),
+                    ..record
+                },
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = named {
+            log::warn!(
+                "mount: the quarantine reason of {} cannot name the set-aside WAL: {}",
+                name,
+                error
+            );
+        }
+    }
 }
 
 fn recovery_placeholder(path: &Path) -> StageRecovery {
