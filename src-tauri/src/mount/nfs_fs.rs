@@ -70,6 +70,20 @@ const FILE_MODE: u32 = 0o644;
 const MAX_RENAME_KEYS: usize = 1000;
 /// Server-side copies issued at once while renaming a directory.
 const RENAME_COPY_CONCURRENCY: usize = 8;
+/// Times an operation re-derives the key it has to fence after finding that
+/// a rename moved it during the fence wait. Each retry follows a rename that
+/// completed in between, so running out means the name is being moved
+/// continuously: an NFS call answers NFS3ERR_JUKEBOX (try again later) and a
+/// flush is left for a later pass.
+const FENCED_KEY_ATTEMPTS: usize = 16;
+
+/// The answer once every fenced-key attempt found `what` moved again.
+fn fenced_key_kept_moving(what: std::fmt::Arguments<'_>) -> nfsstat3 {
+    log::warn!(
+        "mount: {what} kept moving across {FENCED_KEY_ATTEMPTS} fence waits; the client is asked to retry"
+    );
+    nfsstat3::NFS3ERR_JUKEBOX
+}
 
 // ============ Key helpers (pure) ============
 
@@ -407,6 +421,10 @@ use directory_listing::{DirListing, DirectoryCookie};
 #[derive(Debug, Clone)]
 struct NegativeLookup {
     generation: u64,
+    /// The directory key the miss was probed under. A lookup that raced a
+    /// rename of the directory may probe its old path; that miss says
+    /// nothing about the new one.
+    dir_key: String,
     stored_at: Instant,
 }
 
@@ -572,6 +590,10 @@ pub struct FsInner {
     read_only: bool,
     /// Directory holding this mount's staging files.
     staging_root: PathBuf,
+    // Lock order for the std locks below: `dirs` before `inodes` and before
+    // `directory_cookies` (a directory page interns its children while it
+    // holds `dirs`). `inodes` is never held while any of them is taken, and
+    // none of them is held across an `.await`.
     inodes: RwLock<InodeTable>,
     dirs: RwLock<HashMap<fileid3, DirListing>>,
     /// Files with content that is not in the bucket yet.
@@ -585,6 +607,9 @@ pub struct FsInner {
     namespace: AsyncRwLock<()>,
     key_lifecycles: std::sync::Mutex<HashMap<String, Weak<KeyLifecycle>>>,
     accepting_writes: AtomicBool,
+    /// Cancel flag of every storage request this mount makes. Set only by a
+    /// forced abort: the unmount drain still has to publish staged files after
+    /// `accepting_writes` is cleared.
     shutdown: AtomicBool,
     directory_generation: AtomicU64,
     directory_cookies: RwLock<HashMap<(fileid3, fileid3), DirectoryCookie>>,
@@ -766,6 +791,100 @@ impl S3NfsFs {
         }
     }
 
+    // Keys change only inside a rename, which holds exclusive fences on the
+    // old key (a directory's whole prefix). A key derived before waiting on a
+    // fence can be stale once the wait ends; one re-derived while the fence is
+    // held stays valid until it is released, because any rename that could
+    // move it — of the file or of an ancestor — overlaps the held path.
+
+    /// Exclusive fence on the entry `name` names in `dirid` once the fence is
+    /// held. The name is resolved before the wait to know what to fence and
+    /// again after it, because a rename holding the fence meanwhile may have
+    /// moved that id to another key; acting on the id alone would then delete
+    /// the file under its new name.
+    async fn fence_existing_child(
+        &self,
+        dirid: fileid3,
+        name: &str,
+    ) -> Result<(FenceGuard, fileid3, Inode), nfsstat3> {
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let dir_key = normalize_dir_key(&self.dir_inode(dirid)?.key);
+            let Some((id, target)) = self.resolve_child_in(dirid, &dir_key, name).await? else {
+                continue;
+            };
+            let fence = self
+                .fence_paths(vec![Self::fence_path_for_inode(&target)])
+                .await;
+            if normalize_dir_key(&self.dir_inode(dirid)?.key) != dir_key {
+                continue;
+            }
+            let (current_id, current) = self.resolve_child_fenced(dirid, &dir_key, name).await?;
+            if current_id == id && current.key == target.key {
+                return Ok((fence, id, current));
+            }
+        }
+        Err(fenced_key_kept_moving(format_args!(
+            "\"{name}\" in directory {dirid}"
+        )))
+    }
+
+    /// `name` inside `dirid`, resolved without a fence of the caller's, or
+    /// `None` when the directory was renamed during the lookup: the lookup
+    /// may itself wait behind that rename and then look under the old path,
+    /// so its miss says nothing about the new one and the caller retries.
+    async fn resolve_child_in(
+        &self,
+        dirid: fileid3,
+        dir_key: &str,
+        name: &str,
+    ) -> Result<Option<(fileid3, Inode)>, nfsstat3> {
+        match self.resolve_child(dirid, dir_key, name).await {
+            Err(nfsstat3::NFS3ERR_NOENT)
+                if normalize_dir_key(&self.dir_inode(dirid)?.key) != dir_key =>
+            {
+                Ok(None)
+            }
+            result => result.map(Some),
+        }
+    }
+
+    /// Exclusive fence on the key `name` gets inside `dirid`, built from the
+    /// directory's key as it stands once the fence is held — a directory
+    /// renamed during the wait must not have its old path published again.
+    /// Returns the directory key the child key was built from, and that key.
+    async fn fence_new_child(
+        &self,
+        dirid: fileid3,
+        name: &str,
+        is_dir: bool,
+    ) -> Result<(FenceGuard, String, String), nfsstat3> {
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let dir_key = normalize_dir_key(&self.dir_inode(dirid)?.key);
+            let key = child_key(&dir_key, name, is_dir);
+            let fence = self.fence_exact_key(&key).await;
+            if normalize_dir_key(&self.dir_inode(dirid)?.key) == dir_key {
+                return Ok((fence, dir_key, key));
+            }
+        }
+        Err(fenced_key_kept_moving(format_args!(
+            "the path for new \"{name}\" in directory {dirid}"
+        )))
+    }
+
+    /// Shared fence on the key `id` has once the fence is held, with the inode
+    /// as read under it.
+    async fn fence_inode_shared(&self, id: fileid3) -> Result<(FenceGuard, Inode), nfsstat3> {
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let key = self.inode(id)?.key;
+            let fence = self.fence_exact_key_shared(&key).await;
+            let inode = self.inode(id)?;
+            if inode.key == key {
+                return Ok((fence, inode));
+            }
+        }
+        Err(fenced_key_kept_moving(format_args!("file {id}")))
+    }
+
     fn storage_endpoint(&self) -> &str {
         &self.inner.endpoint
     }
@@ -804,8 +923,17 @@ impl S3NfsFs {
         )
     }
 
+    /// Refuses every new mutation. Storage requests keep running: in-flight
+    /// operations settle and the unmount drain publishes what is staged,
+    /// multipart uploads included.
     pub fn stop_accepting_writes(&self) {
         self.inner.accepting_writes.store(false, Ordering::SeqCst);
+    }
+
+    /// Forced teardown: cancels this mount's in-flight and queued storage
+    /// requests at their next check. Nothing is lost — unpublished content
+    /// stays staged for the next session — but no drain can publish after it.
+    pub fn abort_storage_operations(&self) {
         self.inner.shutdown.store(true, Ordering::SeqCst);
     }
 
@@ -939,6 +1067,9 @@ impl S3NfsFs {
         match namespace_recovery::pending_operations(&self.inner.staging_root).await {
             Ok(operations) => {
                 health.pending_uploads += operations.len();
+                // Every NFS mutation holds `namespace` shared for as long as
+                // its journal can exist, so a journal seen while nothing
+                // holds it belongs to no running operation.
                 if !operations.is_empty() && self.inner.namespace.try_write().is_ok() {
                     health.last_error =
                         Some("Interrupted file changes are retained for recovery".into());
@@ -1330,26 +1461,34 @@ impl S3NfsFs {
         }
     }
 
-    fn negative_lookup_hit(&self, dirid: fileid3, name: &str, generation: u64) -> bool {
+    fn negative_lookup_hit(
+        &self,
+        dirid: fileid3,
+        dir_key: &str,
+        name: &str,
+        generation: u64,
+    ) -> bool {
         self.inner
             .negative_lookups
             .read()
             .map(|cache| {
                 cache.get(&(dirid, name.to_string())).is_some_and(|entry| {
                     entry.generation == generation
+                        && entry.dir_key == dir_key
                         && entry.stored_at.elapsed() < NEGATIVE_LOOKUP_TTL
                 })
             })
             .unwrap_or(false)
     }
 
-    fn remember_negative_lookup(&self, dirid: fileid3, name: &str, generation: u64) {
+    fn remember_negative_lookup(&self, dirid: fileid3, dir_key: &str, name: &str, generation: u64) {
         if let Ok(mut cache) = self.inner.negative_lookups.write() {
             cache.retain(|_, entry| entry.stored_at.elapsed() < NEGATIVE_LOOKUP_TTL);
             cache.insert(
                 (dirid, name.to_string()),
                 NegativeLookup {
                     generation,
+                    dir_key: dir_key.to_string(),
                     stored_at: Instant::now(),
                 },
             );
@@ -1470,6 +1609,7 @@ impl S3NfsFs {
             None
         };
 
+        let mut generation = generation;
         if let Some((child, complete, current_generation)) =
             self.cached_directory_child(dirid, dir_key, name)?
         {
@@ -1488,10 +1628,11 @@ impl S3NfsFs {
             if complete {
                 return Ok(None);
             }
-            if current_generation == generation && self.negative_lookup_hit(dirid, name, generation)
-            {
-                return Ok(None);
-            }
+            // A cache entry holds only for the generation that recorded it.
+            // A listing made while this lookup waited is newer than anything
+            // recorded under the generation it began with, so the lookup
+            // checks, and records what it observes, under the listing's.
+            generation = current_generation;
         }
 
         if let Some(fileid) = self.positive_lookup_hit(dirid, name, generation) {
@@ -1500,7 +1641,12 @@ impl S3NfsFs {
                 return Ok(Some((fileid, inode)));
             }
         }
-        if self.negative_lookup_hit(dirid, name, generation) {
+        // A listing's generation is fixed before its pages arrive, so a miss
+        // recorded under it can predate the page that returned the name.
+        // Once any page has, only a fresh probe may say the name is gone.
+        if !self.cached_listing_mentions(dirid, dir_key, name)
+            && self.negative_lookup_hit(dirid, dir_key, name, generation)
+        {
             return Ok(None);
         }
 
@@ -1519,7 +1665,7 @@ impl S3NfsFs {
                 Ok(Some((id, self.inode(id)?)))
             }
             None => {
-                self.remember_negative_lookup(dirid, name, generation);
+                self.remember_negative_lookup(dirid, dir_key, name, generation);
                 Ok(None)
             }
         }
@@ -1713,26 +1859,31 @@ impl S3NfsFs {
             if stages.contains_key(&id) {
                 return Err(nfsstat3::NFS3ERR_IO);
             }
-            let mut inodes = self
-                .inner
-                .inodes
-                .write()
-                .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-            let old = inodes
-                .get(id)
-                .filter(|inode| inode.key == key)
-                .cloned()
-                .ok_or(nfsstat3::NFS3ERR_STALE)?;
-            inodes.remove(id);
-            let new_id = inodes.intern(
-                key,
-                old.parent,
-                old.kind,
-                identity.size,
-                head.last_modified()
-                    .map(|value| value.secs().max(0) as u32)
-                    .unwrap_or(old.mtime_secs),
-            );
+            // `inodes` is released before `invalidate_dir` takes `dirs`; see
+            // the lock order on `FsInner`.
+            let (old, new_id) = {
+                let mut inodes = self
+                    .inner
+                    .inodes
+                    .write()
+                    .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                let old = inodes
+                    .get(id)
+                    .filter(|inode| inode.key == key)
+                    .cloned()
+                    .ok_or(nfsstat3::NFS3ERR_STALE)?;
+                inodes.remove(id);
+                let new_id = inodes.intern(
+                    key,
+                    old.parent,
+                    old.kind,
+                    identity.size,
+                    head.last_modified()
+                        .map(|value| value.secs().max(0) as u32)
+                        .unwrap_or(old.mtime_secs),
+                );
+                (old, new_id)
+            };
             identities.remove(&id);
             identities.insert(new_id, identity);
             self.inner.read_cache.forget_file(id);
@@ -1909,7 +2060,11 @@ impl S3NfsFs {
             tokio::spawn(async move {
                 let _permit = permit;
                 let _fence = fs.fence_exact_key_shared(&key).await;
-                let _ = fs.chunk_bytes(id, &key, index, &identity).await;
+                // A rename that finished while this waited moved the file;
+                // its next read warms the new key instead.
+                if fs.inode(id).is_ok_and(|inode| inode.key == key) {
+                    let _ = fs.chunk_bytes(id, &key, index, &identity).await;
+                }
             });
         }
     }
@@ -3476,14 +3631,7 @@ impl S3NfsFs {
             let mount_id = mount_id.to_string();
             tokio::spawn(async move {
                 let _permit = permit;
-                let _namespace = fs.inner.namespace.read().await;
-                let _fence = fs.fence_exact_key_shared(&key).await;
-                let lifecycle = fs.lifecycle(&key);
-                let _access = lifecycle.access.read().await;
-                let _publication = lifecycle.publication.lock().await;
-                // DELETE may have unpublished this stage while the task was
-                // queued; resolve again only after taking the lifecycle fence.
-                if let Err(error) = fs.flush_one_locked(id, stage::UPLOAD_ATTEMPTS, false).await {
+                if let Err(error) = fs.flush_fenced(id, stage::UPLOAD_ATTEMPTS, false).await {
                     let _ = app.emit(
                         "mount-flush-error",
                         FlushErrorPayload {
@@ -3498,9 +3646,50 @@ impl S3NfsFs {
         }
     }
 
-    /// Caller holds namespace + key lifecycle + publication fences, or the
-    /// exclusive namespace fence used by rename. Stage data is locked only
-    /// while making its immutable snapshot and settling durable state.
+    /// Publishes the stage for `id` under the fence and lifecycle locks of the
+    /// key the stage has once they are held. A rename rekeys a stage only
+    /// inside its exclusive fence, so a key read before the wait can be stale
+    /// when it ends, and publishing under a stale key's locks would let a
+    /// DELETE or rename of the real key run alongside this upload.
+    async fn flush_fenced(
+        &self,
+        id: fileid3,
+        attempts: u32,
+        explicit: bool,
+    ) -> Result<(), UploadFailure> {
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let Some(key) = self.stage_guard(id).await.map(|guard| guard.key.clone()) else {
+                return Ok(());
+            };
+            let _namespace = self.inner.namespace.read().await;
+            let _fence = self.fence_exact_key_shared(&key).await;
+            let lifecycle = self.lifecycle(&key);
+            let _access = lifecycle.access.read().await;
+            let _publication = lifecycle.publication.lock().await;
+            // DELETE may have unpublished this stage, and a rename rekeyed it,
+            // while this task waited; resolve again under the locks.
+            match self.stage_guard(id).await.map(|guard| guard.key.clone()) {
+                None => return Ok(()),
+                Some(current) if current == key => {
+                    return self.flush_one_locked(id, attempts, explicit).await;
+                }
+                Some(_) => {}
+            }
+        }
+        log::warn!(
+            "mount: staged file {id} kept moving across {FENCED_KEY_ATTEMPTS} fence waits; its upload waits for a later pass"
+        );
+        Err(UploadFailure {
+            message: "Staged file kept moving; publication deferred".into(),
+            retryable: true,
+            uncertain: false,
+        })
+    }
+
+    /// Caller holds the shared fence, lifecycle and publication locks of the
+    /// stage's current key (see [`Self::flush_fenced`]), or the exclusive
+    /// fence of a rename covering it. Stage data is locked only while making
+    /// its immutable snapshot and settling durable state.
     async fn flush_one_locked(
         &self,
         id: fileid3,
@@ -3648,8 +3837,35 @@ impl S3NfsFs {
                 .map(|(&id, handle)| (id, handle.clone()))
                 .collect()
         };
+        // A stage is created from its inode's key and rekeyed with it inside
+        // the rename fence the caller holds, so one whose inode lies outside
+        // `prefix` is not waited for: it may stay locked for a whole
+        // download. A stage without an inode is checked to be safe.
+        let (staged, elsewhere): (Vec<_>, Vec<_>) = match self.inner.inodes.read() {
+            Ok(inodes) => staged.into_iter().partition(|(id, _)| {
+                inodes
+                    .get(*id)
+                    .is_none_or(|inode| inode.key.starts_with(prefix))
+            }),
+            Err(_) => (staged, Vec::new()),
+        };
 
         let mut under = Vec::new();
+        // Should a stage's key ever disagree with its inode's, one keyed under
+        // `prefix` must not be left to publish under the old path: any of them
+        // that can be checked without waiting still is.
+        for (id, handle) in elsewhere {
+            if let Ok(guard) = handle.try_lock() {
+                if !guard.evicted && guard.key.starts_with(prefix) {
+                    log::warn!(
+                        "mount: staged file \"{}\" is keyed apart from its inode; including it in the rename of \"{}\"",
+                        guard.key,
+                        prefix
+                    );
+                    under.push(id);
+                }
+            }
+        }
         for (id, handle) in staged {
             // Locked outside the map so a file that is mid-write is waited for
             // rather than missed — this decides what a rename copies.
@@ -3738,15 +3954,8 @@ impl S3NfsFs {
     /// Publishers own their lifecycle fences and resource permits through disk
     /// snapshotting, network publication and durable settlement.
     async fn flush_everything(&self, attempts: u32) -> usize {
-        let staged: Vec<_> = self
-            .inner
-            .stages
-            .lock()
-            .await
-            .iter()
-            .map(|(&id, handle)| (id, handle.clone()))
-            .collect();
-        let pending = stream::iter(staged.into_iter().map(|(id, handle)| async move {
+        let staged: Vec<_> = self.inner.stages.lock().await.keys().copied().collect();
+        let pending = stream::iter(staged.into_iter().map(|id| async move {
             let Ok(permit) = self.inner.flush_slots.clone().acquire_owned().await else {
                 return 1;
             };
@@ -3756,13 +3965,7 @@ impl S3NfsFs {
             // fence and permit until those operations actually settle.
             tokio::spawn(async move {
                 let _permit = permit;
-                let key = handle.lock().await.key.clone();
-                let _namespace = fs.inner.namespace.read().await;
-                let _fence = fs.fence_exact_key_shared(&key).await;
-                let lifecycle = fs.lifecycle(&key);
-                let _access = lifecycle.access.read().await;
-                let _publication = lifecycle.publication.lock().await;
-                usize::from(fs.flush_one_locked(id, attempts, true).await.is_err())
+                usize::from(fs.flush_fenced(id, attempts, true).await.is_err())
             })
             .await
             .unwrap_or(1)
@@ -3840,11 +4043,15 @@ impl NFSFileSystem for S3NfsFs {
             return Ok(dir.parent);
         }
 
-        let dir_key = normalize_dir_key(&dir.key);
-        self.lookup_child(dirid, &dir_key, name)
-            .await?
-            .map(|(id, _)| id)
-            .ok_or(nfsstat3::NFS3ERR_NOENT)
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let dir_key = normalize_dir_key(&self.dir_inode(dirid)?.key);
+            if let Some((id, _)) = self.resolve_child_in(dirid, &dir_key, name).await? {
+                return Ok(id);
+            }
+        }
+        Err(fenced_key_kept_moving(format_args!(
+            "directory {dirid} (looking up \"{name}\")"
+        )))
     }
 
     async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
@@ -3858,9 +4065,7 @@ impl NFSFileSystem for S3NfsFs {
     async fn setattr(&self, id: fileid3, setattr: sattr3) -> Result<fattr3, nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
-        let inode = self.inode(id)?;
-        let _fence = self.fence_exact_key_shared(&inode.key).await;
-        let inode = self.inode(id)?;
+        let (_fence, inode) = self.fence_inode_shared(id).await?;
         let lifecycle = self.lifecycle(&inode.key);
         let _access = lifecycle.access.read().await;
         self.ensure_writable()?;
@@ -3967,9 +4172,7 @@ impl NFSFileSystem for S3NfsFs {
         count: u32,
     ) -> Result<(Vec<u8>, bool), nfsstat3> {
         let _namespace = self.inner.namespace.read().await;
-        let inode = self.inode(id)?;
-        let _fence = self.fence_exact_key_shared(&inode.key).await;
-        let inode = self.inode(id)?;
+        let (_fence, inode) = self.fence_inode_shared(id).await?;
         self.ensure_rename_available(&inode.key)?;
         if inode.kind != EntryKind::File {
             return Err(nfsstat3::NFS3ERR_ISDIR);
@@ -4035,9 +4238,7 @@ impl NFSFileSystem for S3NfsFs {
     async fn write(&self, id: fileid3, offset: u64, data: &[u8]) -> Result<fattr3, nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
-        let inode = self.inode(id)?;
-        let _fence = self.fence_exact_key_shared(&inode.key).await;
-        let inode = self.inode(id)?;
+        let (_fence, inode) = self.fence_inode_shared(id).await?;
         let lifecycle = self.lifecycle(&inode.key);
         let _access = lifecycle.access.read().await;
         self.ensure_writable()?;
@@ -4106,11 +4307,9 @@ impl NFSFileSystem for S3NfsFs {
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
-        let dir = self.dir_inode(dirid)?;
+        self.dir_inode(dirid)?;
         let name = self.child_name(filename)?;
-        let dir_key = normalize_dir_key(&dir.key);
-        let key = child_key(&dir_key, &name, false);
-        let _fence = self.fence_exact_key(&key).await;
+        let (_fence, _, key) = self.fence_new_child(dirid, &name, false).await?;
         let lifecycle = self.lifecycle(&key);
         let _access = lifecycle.access.write().await;
         self.ensure_writable()?;
@@ -4154,11 +4353,9 @@ impl NFSFileSystem for S3NfsFs {
     ) -> Result<fileid3, nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
-        let dir = self.dir_inode(dirid)?;
+        self.dir_inode(dirid)?;
         let name = self.child_name(filename)?;
-        let dir_key = normalize_dir_key(&dir.key);
-        let key = child_key(&dir_key, &name, false);
-        let _fence = self.fence_exact_key(&key).await;
+        let (_fence, _, key) = self.fence_new_child(dirid, &name, false).await?;
         let lifecycle = self.lifecycle(&key);
         let _access = lifecycle.access.write().await;
         self.ensure_writable()?;
@@ -4184,20 +4381,17 @@ impl NFSFileSystem for S3NfsFs {
     ) -> Result<(fileid3, fattr3), nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
-        let dir = self.dir_inode(dirid)?;
+        self.dir_inode(dirid)?;
         let name = self.child_name(dirname)?;
-        let dir_key = normalize_dir_key(&dir.key);
-
-        let children = self.children_of(dirid, &dir_key).await?;
-        if children.iter().any(|child| child.name == name) {
-            return Err(nfsstat3::NFS3ERR_EXIST);
-        }
 
         // A zero-byte object whose key ends in `/` is the folder marker every
         // S3 tool understands, and is what makes an empty directory visible at
         // all — without it there is no prefix to list.
-        let key = child_key(&dir_key, &name, true);
-        let _fence = self.fence_exact_key(&key).await;
+        let (_fence, dir_key, key) = self.fence_new_child(dirid, &name, true).await?;
+        let children = self.children_of(dirid, &dir_key).await?;
+        if children.iter().any(|child| child.name == name) {
+            return Err(nfsstat3::NFS3ERR_EXIST);
+        }
         let lifecycle = self.lifecycle(&key);
         let _access = lifecycle.access.write().await;
         self.ensure_writable()?;
@@ -4215,16 +4409,12 @@ impl NFSFileSystem for S3NfsFs {
     async fn remove(&self, dirid: fileid3, filename: &filename3) -> Result<(), nfsstat3> {
         self.ensure_writable()?;
         let _namespace = self.inner.namespace.read().await;
-        let dir = self.dir_inode(dirid)?;
+        self.dir_inode(dirid)?;
         let name = self.child_name(filename)?;
-        let dir_key = normalize_dir_key(&dir.key);
 
         // RMDIR and REMOVE both land here, so the entry's kind decides what
         // "delete" means.
-        let (id, target) = self.resolve_child(dirid, &dir_key, &name).await?;
-        let _fence = Self::fence_path_for_inode(&target);
-        let _fence = self.fence_paths(vec![_fence]).await;
-        let target = self.inode(id)?;
+        let (_fence, id, target) = self.fence_existing_child(dirid, &name).await?;
         let lifecycle = self.lifecycle(&target.key);
         let _access = lifecycle.access.write().await;
         self.ensure_writable()?;
@@ -4267,64 +4457,24 @@ impl NFSFileSystem for S3NfsFs {
         to_filename: &filename3,
     ) -> Result<(), nfsstat3> {
         self.ensure_writable()?;
-        self.ensure_writable()?;
-        let from_dir = self.dir_inode(from_dirid)?;
-        let to_dir = self.dir_inode(to_dirid)?;
+        // Shared like every other mutation's: health tells a running rename's
+        // journal from an interrupted one by whether this is held.
+        let _namespace = self.inner.namespace.read().await;
+        self.dir_inode(from_dirid)?;
+        self.dir_inode(to_dirid)?;
         let from_name = self.child_name(from_filename)?;
         let to_name = self.child_name(to_filename)?;
 
-        let from_dir_key = normalize_dir_key(&from_dir.key);
-        let to_dir_key = normalize_dir_key(&to_dir.key);
-
-        let mut recovered_source = None;
-        for kind in [EntryKind::File, EntryKind::Dir] {
-            let from_key = child_key(&from_dir_key, &from_name, kind == EntryKind::Dir);
-            let to_key = child_key(&to_dir_key, &to_name, kind == EntryKind::Dir);
-            if let Ok(bytes) = tokio::fs::read(self.rename_journal_path(&from_key, &to_key)).await {
-                let journal: RenameJournal =
-                    serde_json::from_slice(&bytes).map_err(|_| nfsstat3::NFS3ERR_IO)?;
-                if journal.from != from_key || journal.to != to_key {
-                    return Err(nfsstat3::NFS3ERR_IO);
-                }
-                let size = if kind == EntryKind::Dir {
-                    DIR_SIZE
-                } else {
-                    journal.objects.first().map(|o| o.size).unwrap_or(0)
-                };
-                let id = self.intern_child(&from_key, from_dirid, kind, size, 0)?;
-                recovered_source = Some((id, self.inode(id)?));
-                break;
-            }
-        }
-        let (_id, source) = match recovered_source.clone() {
-            Some(source) => source,
-            None => {
-                self.resolve_child(from_dirid, &from_dir_key, &from_name)
-                    .await?
-            }
-        };
-        let is_dir = source.kind == EntryKind::Dir;
-        let target_key = child_key(&to_dir_key, &to_name, is_dir);
-        if target_key == source.key {
+        let Some((_fence, id, source, to_dir_key)) = self
+            .fence_rename(from_dirid, &from_name, to_dirid, &to_name)
+            .await?
+        else {
             return Ok(());
-        }
-        let _fence = self
-            .fence_paths(vec![
-                Self::fence_path_for_inode(&source),
-                if is_dir {
-                    FencePath::prefix(normalize_dir_key(&target_key))
-                } else {
-                    FencePath::exact(target_key.clone())
-                },
-            ])
-            .await;
-        let (id, source) = match recovered_source {
-            Some(source) => source,
-            None => {
-                self.resolve_child_fenced(from_dirid, &from_dir_key, &from_name)
-                    .await?
-            }
         };
+        // Storage requests outlive `stop_accepting_writes` so the unmount
+        // drain can publish; a rename that waited out its fence past that
+        // point must not start copying.
+        self.ensure_writable()?;
         let is_dir = source.kind == EntryKind::Dir;
         let target_key = child_key(&to_dir_key, &to_name, is_dir);
         let journal_path = self.rename_journal_path(&source.key, &target_key);
@@ -4444,6 +4594,103 @@ impl NFSFileSystem for S3NfsFs {
 }
 
 impl S3NfsFs {
+    /// Exclusive fences on a rename's source and target, with both keys
+    /// derived from the directories' keys as they stand once the fences are
+    /// held: a rename of either directory, or of the source, that finished
+    /// during the wait would otherwise send this one to paths that no longer
+    /// name anything — or resurrect an old one. Returns the fence, the source
+    /// and the target directory's key; `None` when the source is already at
+    /// the target.
+    async fn fence_rename(
+        &self,
+        from_dirid: fileid3,
+        from_name: &str,
+        to_dirid: fileid3,
+        to_name: &str,
+    ) -> Result<Option<(FenceGuard, fileid3, Inode, String)>, nfsstat3> {
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let from_dir_key = normalize_dir_key(&self.dir_inode(from_dirid)?.key);
+            let to_dir_key = normalize_dir_key(&self.dir_inode(to_dirid)?.key);
+            let recovered = self
+                .recovered_rename_source(from_dirid, &from_dir_key, from_name, &to_dir_key, to_name)
+                .await?;
+            let source = match recovered.clone() {
+                Some(source) => Some(source),
+                None => {
+                    self.resolve_child_in(from_dirid, &from_dir_key, from_name)
+                        .await?
+                }
+            };
+            let Some((_, source)) = source else {
+                continue;
+            };
+            let is_dir = source.kind == EntryKind::Dir;
+            let target_key = child_key(&to_dir_key, to_name, is_dir);
+            if target_key == source.key {
+                return Ok(None);
+            }
+            let fence = self
+                .fence_paths(vec![
+                    Self::fence_path_for_inode(&source),
+                    if is_dir {
+                        FencePath::prefix(normalize_dir_key(&target_key))
+                    } else {
+                        FencePath::exact(target_key)
+                    },
+                ])
+                .await;
+            if normalize_dir_key(&self.dir_inode(from_dirid)?.key) != from_dir_key
+                || normalize_dir_key(&self.dir_inode(to_dirid)?.key) != to_dir_key
+            {
+                continue;
+            }
+            let (id, current) = match recovered {
+                Some(source) => source,
+                None => {
+                    self.resolve_child_fenced(from_dirid, &from_dir_key, from_name)
+                        .await?
+                }
+            };
+            if current.key == source.key {
+                return Ok(Some((fence, id, current, to_dir_key)));
+            }
+        }
+        Err(fenced_key_kept_moving(format_args!(
+            "the source or target of renaming \"{from_name}\" in directory {from_dirid} to \"{to_name}\" in directory {to_dirid}"
+        )))
+    }
+
+    /// The source of an interrupted rename whose journal is still on disk,
+    /// re-interned so that repeating the rename finishes it.
+    async fn recovered_rename_source(
+        &self,
+        from_dirid: fileid3,
+        from_dir_key: &str,
+        from_name: &str,
+        to_dir_key: &str,
+        to_name: &str,
+    ) -> Result<Option<(fileid3, Inode)>, nfsstat3> {
+        for kind in [EntryKind::File, EntryKind::Dir] {
+            let from_key = child_key(from_dir_key, from_name, kind == EntryKind::Dir);
+            let to_key = child_key(to_dir_key, to_name, kind == EntryKind::Dir);
+            if let Ok(bytes) = tokio::fs::read(self.rename_journal_path(&from_key, &to_key)).await {
+                let journal: RenameJournal =
+                    serde_json::from_slice(&bytes).map_err(|_| nfsstat3::NFS3ERR_IO)?;
+                if journal.from != from_key || journal.to != to_key {
+                    return Err(nfsstat3::NFS3ERR_IO);
+                }
+                let size = if kind == EntryKind::Dir {
+                    DIR_SIZE
+                } else {
+                    journal.objects.first().map(|o| o.size).unwrap_or(0)
+                };
+                let id = self.intern_child(&from_key, from_dirid, kind, size, 0)?;
+                return Ok(Some((id, self.inode(id)?)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Moves one object. The same copy-then-delete the app's own rename
     /// performs, issued on this mount's client so it completes inside the
     /// client's retransmission window with no session bookkeeping.

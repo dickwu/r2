@@ -887,6 +887,10 @@ fn drain_on_exit(mounts: Vec<S3NfsFs>) {
         };
 
         if unflushed > 0 {
+            // What is left is abandoned for this session. Its detached
+            // uploads would otherwise keep their endpoint permits while the
+            // next mount drains from the same shared budget.
+            fs.abort_storage_operations();
             log::warn!(
                 "mount: quit before everything was uploaded; the unsent copies are kept in {}",
                 staging_root.display()

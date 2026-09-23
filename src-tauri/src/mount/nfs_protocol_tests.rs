@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_s3::{serve, Response};
+use crate::test_s3::{serve, Request, Response};
 
 fn filesystem(client: Client, label: &str) -> S3NfsFs {
     let fs = S3NfsFs::new(
@@ -471,7 +471,7 @@ async fn relay_rename_upload_part_retries_transient_upload_and_honors_cancel_bef
     assert_eq!(puts.load(Ordering::SeqCst), 2);
 
     let cancelled = filesystem(fixture.client.clone(), "relay-upload-part-cancel");
-    cancelled.stop_accepting_writes();
+    cancelled.abort_storage_operations();
     assert!(cancelled
         .copy_rename_part(&object, "upload", "", false, 1, &plan)
         .await
@@ -2605,5 +2605,1398 @@ async fn pending_rename_record_blocks_source_and_target_prefix_operations() {
             .await,
         Err(nfsstat3::NFS3ERR_IO)
     ));
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// Objects behind a fixture, for tests that assert on the namespace a race
+/// leaves behind rather than on the requests it sent. Every condition the
+/// mount relies on is enforced the way S3 enforces it, at the moment the
+/// request is applied — after any delay a test adds in front of it.
+#[derive(Default)]
+struct ModelBucket {
+    objects: BTreeMap<String, ModelObject>,
+    versions: u64,
+}
+
+struct ModelObject {
+    body: Vec<u8>,
+    etag: String,
+    metadata: Vec<(String, String)>,
+}
+
+impl ModelBucket {
+    fn with(objects: &[(&str, &[u8])]) -> Arc<std::sync::Mutex<Self>> {
+        let mut bucket = Self::default();
+        for (key, body) in objects {
+            bucket.store(key, body.to_vec(), Vec::new());
+        }
+        Arc::new(std::sync::Mutex::new(bucket))
+    }
+
+    fn store(&mut self, key: &str, body: Vec<u8>, metadata: Vec<(String, String)>) -> String {
+        self.versions += 1;
+        let etag = format!("\"model-{}\"", self.versions);
+        self.objects.insert(
+            key.to_string(),
+            ModelObject {
+                body,
+                etag: etag.clone(),
+                metadata,
+            },
+        );
+        etag
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.objects.keys().cloned().collect()
+    }
+
+    fn body(&self, key: &str) -> Option<&[u8]> {
+        self.objects.get(key).map(|object| object.body.as_slice())
+    }
+
+    fn respond(&mut self, request: &Request) -> Response {
+        let url = reqwest::Url::parse(&format!("http://fixture{}", request.path)).unwrap();
+        let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        let key = urlencoding::decode(
+            url.path()
+                .trim_start_matches("/photos")
+                .trim_start_matches('/'),
+        )
+        .unwrap()
+        .into_owned();
+        let precondition_failed =
+            || Response::xml(412, "<Error><Code>PreconditionFailed</Code></Error>");
+        let current = self.objects.get(&key).map(|object| object.etag.clone());
+        match request.method.as_str() {
+            "GET" if query.contains_key("list-type") => self.list(&query),
+            "HEAD" | "GET" => {
+                let Some(object) = self.objects.get(&key) else {
+                    return if request.method == "HEAD" {
+                        Response::empty(404)
+                    } else {
+                        Response::xml(404, "<Error><Code>NoSuchKey</Code></Error>")
+                    };
+                };
+                if request
+                    .headers
+                    .get("if-match")
+                    .is_some_and(|expected| *expected != object.etag)
+                {
+                    return precondition_failed();
+                }
+                let total = object.body.len();
+                let range = request
+                    .headers
+                    .get("range")
+                    .and_then(|range| range.strip_prefix("bytes="))
+                    .and_then(|range| range.split_once('-'))
+                    .map(|(start, end)| {
+                        let start: usize = start.parse().unwrap();
+                        let end = end.parse::<usize>().unwrap().min(total.max(1) - 1);
+                        (start, end)
+                    });
+                let mut response = match (request.method.as_str(), range) {
+                    ("HEAD", _) => Response::empty(200).header("content-length", total),
+                    (_, Some((start, end))) => Response {
+                        status: 206,
+                        headers: Vec::new(),
+                        body: object.body[start..=end].to_vec(),
+                    }
+                    .header("content-range", format!("bytes {start}-{end}/{total}")),
+                    _ => Response {
+                        status: 200,
+                        headers: Vec::new(),
+                        body: object.body.clone(),
+                    },
+                }
+                .header("etag", &object.etag);
+                for (name, value) in &object.metadata {
+                    response = response.header(&format!("x-amz-meta-{name}"), value);
+                }
+                response
+            }
+            "PUT" if query.contains_key("uploadId") => Response::empty(400),
+            "PUT" => {
+                let copied = if let Some(source) = request.headers.get("x-amz-copy-source") {
+                    let source = urlencoding::decode(
+                        source.trim_start_matches('/').trim_start_matches("photos/"),
+                    )
+                    .unwrap()
+                    .into_owned();
+                    let Some(source) = self.objects.get(&source) else {
+                        return Response::xml(404, "<Error><Code>NoSuchKey</Code></Error>");
+                    };
+                    if request
+                        .headers
+                        .get("x-amz-copy-source-if-match")
+                        .is_some_and(|expected| *expected != source.etag)
+                    {
+                        return precondition_failed();
+                    }
+                    Some(source.body.clone())
+                } else {
+                    None
+                };
+                let exclusive = request
+                    .headers
+                    .get("if-none-match")
+                    .is_some_and(|value| value == "*");
+                if (exclusive && current.is_some())
+                    || request
+                        .headers
+                        .get("if-match")
+                        .is_some_and(|expected| current.as_ref() != Some(expected))
+                {
+                    return precondition_failed();
+                }
+                let is_copy = copied.is_some();
+                let metadata = request
+                    .headers
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        name.strip_prefix("x-amz-meta-")
+                            .map(|name| (name.to_string(), value.clone()))
+                    })
+                    .collect();
+                let etag = self.store(
+                    &key,
+                    copied.unwrap_or_else(|| aws_chunked_payload(request)),
+                    metadata,
+                );
+                if is_copy {
+                    Response::xml(
+                        200,
+                        &format!(
+                            "<CopyObjectResult><ETag>{}</ETag></CopyObjectResult>",
+                            etag.replace('"', "&quot;")
+                        ),
+                    )
+                } else {
+                    Response::empty(200).header("etag", etag)
+                }
+            }
+            "DELETE" => {
+                if request
+                    .headers
+                    .get("if-match")
+                    .is_some_and(|expected| current.as_ref() != Some(expected))
+                {
+                    return precondition_failed();
+                }
+                self.objects.remove(&key);
+                Response::empty(204)
+            }
+            _ => Response::empty(400),
+        }
+    }
+
+    fn list(&self, query: &HashMap<String, String>) -> Response {
+        let prefix = query.get("prefix").cloned().unwrap_or_default();
+        let delimiter = query.get("delimiter");
+        let max_keys = query
+            .get("max-keys")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1000usize);
+        let mut entries = BTreeMap::new();
+        for (key, object) in self
+            .objects
+            .range(prefix.clone()..)
+            .take_while(|(key, _)| key.starts_with(&prefix))
+        {
+            let common = delimiter.and_then(|delimiter| {
+                key[prefix.len()..]
+                    .find(delimiter.as_str())
+                    .map(|index| key[..prefix.len() + index + delimiter.len()].to_string())
+            });
+            match common {
+                Some(common) => entries.entry(common).or_insert(None),
+                None => entries.entry(key.clone()).or_insert(Some(object)),
+            };
+        }
+        let after = query.get("continuation-token");
+        let page: Vec<_> = entries
+            .iter()
+            .filter(|(key, _)| after.is_none_or(|after| key.as_str() > after.as_str()))
+            .take(max_keys + 1)
+            .collect();
+        let truncated = page.len() > max_keys;
+        let page = &page[..page.len().min(max_keys)];
+        let mut body = format!("<ListBucketResult><IsTruncated>{truncated}</IsTruncated>");
+        for (key, object) in page {
+            if let Some(object) = object {
+                body.push_str(&format!(
+                    "<Contents><Key>{key}</Key><Size>{}</Size><ETag>{}</ETag></Contents>",
+                    object.body.len(),
+                    object.etag.replace('"', "&quot;")
+                ));
+            }
+        }
+        for (key, object) in page {
+            if object.is_none() {
+                body.push_str(&format!(
+                    "<CommonPrefixes><Prefix>{key}</Prefix></CommonPrefixes>"
+                ));
+            }
+        }
+        if truncated {
+            if let Some((last, _)) = page.last() {
+                body.push_str(&format!(
+                    "<NextContinuationToken>{last}</NextContinuationToken>"
+                ));
+            }
+        }
+        body.push_str("</ListBucketResult>");
+        Response::xml(200, &body)
+    }
+}
+
+/// The bytes a PUT stores. The SDK may frame a streamed body with
+/// `aws-chunked` content encoding and a trailing checksum.
+fn aws_chunked_payload(request: &Request) -> Vec<u8> {
+    let framed = request
+        .headers
+        .get("content-encoding")
+        .is_some_and(|value| value.contains("aws-chunked"))
+        || request.headers.contains_key("x-amz-decoded-content-length");
+    if !framed {
+        return request.body.clone();
+    }
+    let mut payload = Vec::new();
+    let mut rest = request.body.as_slice();
+    while let Some(end) = rest.windows(2).position(|pair| pair == b"\r\n") {
+        let header = std::str::from_utf8(&rest[..end]).unwrap();
+        let size = usize::from_str_radix(header.split(';').next().unwrap().trim(), 16).unwrap();
+        rest = &rest[end + 2..];
+        if size == 0 {
+            break;
+        }
+        payload.extend_from_slice(&rest[..size]);
+        rest = &rest[(size + 2).min(rest.len())..];
+    }
+    payload
+}
+
+/// A staged upload that is still in flight when a rename of its key (or onto
+/// its key) is issued must settle before the rename copies or deletes
+/// anything: a late PUT landing after the rename's DELETE would bring the
+/// moved-away source back, and one landing after the copy would overwrite
+/// the renamed content with the replaced file's bytes.
+#[tokio::test]
+async fn a_late_staged_put_cannot_resurrect_a_rename_source_or_its_replaced_target() {
+    for replace_target in [false, true] {
+        let bucket = if replace_target {
+            ModelBucket::with(&[("src", b"renamed bytes")])
+        } else {
+            ModelBucket::with(&[])
+        };
+        let put_entered = Arc::new(tokio::sync::Notify::new());
+        let release_put = Arc::new(tokio::sync::Notify::new());
+        let held = Arc::new(AtomicBool::new(false));
+        let fixture = serve({
+            let bucket = bucket.clone();
+            let put_entered = put_entered.clone();
+            let release_put = release_put.clone();
+            let held = held.clone();
+            move |request| {
+                let bucket = bucket.clone();
+                let put_entered = put_entered.clone();
+                let release_put = release_put.clone();
+                let held = held.clone();
+                async move {
+                    // Only the publication of the staged bytes is delayed.
+                    if request.headers.contains_key("x-amz-meta-r2-stage-snapshot")
+                        && !held.swap(true, Ordering::SeqCst)
+                    {
+                        put_entered.notify_one();
+                        release_put.notified().await;
+                    }
+                    bucket.lock().unwrap().respond(&request)
+                }
+            }
+        })
+        .await;
+        let fs = filesystem(fixture.client.clone(), "late-put-rename");
+        let staged_key = if replace_target { "dst" } else { "src" };
+        let staged = intern(&fs, staged_key).await;
+        fs.write(staged, 0, b"late staged bytes").await.unwrap();
+        if replace_target {
+            let source = fs
+                .intern_child("src", ROOT_ID, EntryKind::File, 13, 0)
+                .unwrap();
+            fs.inner.dirs.write().unwrap().insert(
+                ROOT_ID,
+                DirListing::complete(Arc::new(vec![
+                    DirChild {
+                        fileid: staged,
+                        name: "dst".into(),
+                    },
+                    DirChild {
+                        fileid: source,
+                        name: "src".into(),
+                    },
+                ])),
+            );
+        }
+
+        let flush = tokio::spawn({
+            let fs = fs.clone();
+            async move { fs.drain(1, 1).await }
+        });
+        tokio::time::timeout(Duration::from_secs(3), put_entered.notified())
+            .await
+            .unwrap();
+        let mut rename = tokio::spawn({
+            let fs = fs.clone();
+            async move {
+                fs.rename(
+                    ROOT_ID,
+                    &b"src".as_slice().into(),
+                    ROOT_ID,
+                    &b"dst".as_slice().into(),
+                )
+                .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut rename)
+                .await
+                .is_err(),
+            "the rename must wait for the in-flight publication of {staged_key}"
+        );
+        assert!(!fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.headers.contains_key("x-amz-copy-source")));
+        release_put.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), flush)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), rename)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        {
+            let bucket = bucket.lock().unwrap();
+            assert_eq!(bucket.keys(), ["dst"], "nothing may come back at src");
+            let expected: &[u8] = if replace_target {
+                b"renamed bytes"
+            } else {
+                b"late staged bytes"
+            };
+            assert_eq!(bucket.body("dst"), Some(expected));
+        }
+        assert_eq!(fs.pending_upload_count().await, 0);
+        let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+    }
+}
+
+/// A fixture over `bucket` that announces every server-side copy on
+/// `copy_entered` and holds it until `release_copy` grants it a permit.
+async fn copy_gated_fixture(
+    bucket: Arc<std::sync::Mutex<ModelBucket>>,
+    copy_entered: Arc<tokio::sync::Notify>,
+    release_copy: Arc<tokio::sync::Semaphore>,
+) -> crate::test_s3::Fixture {
+    serve(move |request| {
+        let bucket = bucket.clone();
+        let copy_entered = copy_entered.clone();
+        let release_copy = release_copy.clone();
+        async move {
+            if request.headers.contains_key("x-amz-copy-source") {
+                copy_entered.notify_one();
+                release_copy.acquire().await.unwrap().forget();
+            }
+            bucket.lock().unwrap().respond(&request)
+        }
+    })
+    .await
+}
+
+/// `rm d/x` resolved to the file's id while `mv d/x t/y` held the fence.
+/// Once the rename finishes that id names `t/y`, so a REMOVE that acts on the
+/// id instead of the name would delete the file the user just moved.
+#[tokio::test]
+async fn remove_racing_a_rename_never_deletes_the_renamed_file() {
+    let bucket = ModelBucket::with(&[("d/x", b"payload"), ("t/", b"")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture =
+        copy_gated_fixture(bucket.clone(), copy_entered.clone(), release_copy.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "remove-racing-rename");
+    let d = fs
+        .intern_child("d/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let t = fs
+        .intern_child("t/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    // A complete listing lets REMOVE resolve `x` without waiting on anything.
+    let listed = fs.readdir(d, 0, 100).await.unwrap();
+    assert_eq!(directory_names(&listed), ["x"]);
+    let x = listed.entries[0].fileid;
+
+    let rename = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(d, &b"x".as_slice().into(), t, &b"y".as_slice().into())
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let mut removal = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.remove(d, &b"x".as_slice().into()).await }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut removal)
+            .await
+            .is_err(),
+        "REMOVE must wait for the rename that holds d/x"
+    );
+    release_copy.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(3), rename)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let removed = tokio::time::timeout(Duration::from_secs(3), removal)
+        .await
+        .unwrap()
+        .unwrap();
+
+    {
+        let bucket = bucket.lock().unwrap();
+        assert_eq!(
+            bucket.keys(),
+            ["t/", "t/y"],
+            "the renamed file must survive"
+        );
+        assert_eq!(bucket.body("t/y"), Some(b"payload".as_slice()));
+    }
+    assert!(
+        matches!(removed, Err(nfsstat3::NFS3ERR_NOENT)),
+        "d/x no longer exists, so REMOVE must report it missing: {removed:?}"
+    );
+    assert_eq!(fs.inode(x).unwrap().key, "t/y");
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// A CREATE and a MKDIR inside A waited behind `mv A C` with keys built from
+/// A's old path. Publishing those keys once the rename finished would bring
+/// A back as a second directory next to C.
+#[tokio::test]
+async fn create_and_mkdir_inside_a_directory_being_renamed_land_in_its_new_path() {
+    let bucket = ModelBucket::with(&[("A/x", b"x")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture =
+        copy_gated_fixture(bucket.clone(), copy_entered.clone(), release_copy.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "create-in-renamed-directory");
+    let a = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+
+    let rename = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"A".as_slice().into(),
+                ROOT_ID,
+                &b"C".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let mut created = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.create(a, &b"late".as_slice().into(), sattr3::default())
+                .await
+        }
+    });
+    let mut made = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.mkdir(a, &b"sub".as_slice().into()).await }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut created)
+            .await
+            .is_err()
+    );
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut made)
+        .await
+        .is_err());
+    release_copy.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(3), rename)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let (created, _) = tokio::time::timeout(Duration::from_secs(3), created)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let (made, _) = tokio::time::timeout(Duration::from_secs(3), made)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        bucket.lock().unwrap().keys(),
+        ["C/late", "C/sub/", "C/x"],
+        "nothing may be published under the old path A/"
+    );
+    assert_eq!(fs.inode(created).unwrap().key, "C/late");
+    assert_eq!(fs.inode(made).unwrap().key, "C/sub/");
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// A WRITE that waited behind `mv A C` must hold its fence on the key it
+/// actually writes, C/f, so a rename or delete of C/f waits for it, and its
+/// bytes must be published there.
+#[tokio::test]
+async fn a_write_racing_a_directory_rename_is_fenced_on_the_renamed_key() {
+    let bucket = ModelBucket::with(&[("A/f", b"old!")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let read_entered = Arc::new(tokio::sync::Notify::new());
+    let release_read = Arc::new(tokio::sync::Semaphore::new(0));
+    let read_held = Arc::new(AtomicBool::new(false));
+    let fixture = serve({
+        let bucket = bucket.clone();
+        let copy_entered = copy_entered.clone();
+        let release_copy = release_copy.clone();
+        let read_entered = read_entered.clone();
+        let release_read = release_read.clone();
+        let read_held = read_held.clone();
+        move |request| {
+            let bucket = bucket.clone();
+            let copy_entered = copy_entered.clone();
+            let release_copy = release_copy.clone();
+            let read_entered = read_entered.clone();
+            let release_read = release_read.clone();
+            let read_held = read_held.clone();
+            async move {
+                if request.headers.contains_key("x-amz-copy-source") {
+                    copy_entered.notify_one();
+                    release_copy.acquire().await.unwrap().forget();
+                }
+                // The write primes its stage from the renamed object.
+                if request.method == "GET"
+                    && request.path.starts_with("/photos/C/f")
+                    && !read_held.swap(true, Ordering::SeqCst)
+                {
+                    read_entered.notify_one();
+                    release_read.acquire().await.unwrap().forget();
+                }
+                bucket.lock().unwrap().respond(&request)
+            }
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "write-racing-rename");
+    let a = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let f = fs.intern_child("A/f", a, EntryKind::File, 4, 0).unwrap();
+
+    let rename = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"A".as_slice().into(),
+                ROOT_ID,
+                &b"C".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let write = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.write(f, 0, b"new").await }
+    });
+    release_copy.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(3), rename)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), read_entered.notified())
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), fs.fence_exact_key("C/f"))
+            .await
+            .is_err(),
+        "the write must hold its fence on C/f, the key it is writing"
+    );
+    release_read.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(3), write)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), fs.drain(1, 1))
+            .await
+            .unwrap(),
+        0
+    );
+
+    {
+        let bucket = bucket.lock().unwrap();
+        assert_eq!(bucket.keys(), ["C/f"]);
+        assert_eq!(bucket.body("C/f"), Some(b"new!".as_slice()));
+    }
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// Renames that waited behind `mv A C` with A's old path in their source or
+/// target must follow A to C: the source is no longer at A/x, and a target
+/// under A/ would bring A back.
+#[tokio::test]
+async fn renames_waiting_behind_a_directory_rename_follow_it_to_its_new_path() {
+    let bucket = ModelBucket::with(&[("A/x", b"x-bytes"), ("D/f", b"f-bytes")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture =
+        copy_gated_fixture(bucket.clone(), copy_entered.clone(), release_copy.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "rename-behind-directory-rename");
+    let a = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let d = fs
+        .intern_child("D/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    // Cached listings resolve both sources before their fences are waited on.
+    let x = fs.readdir(a, 0, 100).await.unwrap().entries[0].fileid;
+    let f = fs.readdir(d, 0, 100).await.unwrap().entries[0].fileid;
+
+    let directory = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"A".as_slice().into(),
+                ROOT_ID,
+                &b"C".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let mut out_of_a = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(a, &b"x".as_slice().into(), d, &b"y".as_slice().into())
+                .await
+        }
+    });
+    let mut into_a = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(d, &b"f".as_slice().into(), a, &b"g".as_slice().into())
+                .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut out_of_a)
+            .await
+            .is_err()
+    );
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut into_a)
+        .await
+        .is_err());
+    // One copy for the directory's object, then one per file rename.
+    release_copy.add_permits(3);
+    let mut results = Vec::new();
+    for rename in [directory, out_of_a, into_a] {
+        results.push(
+            tokio::time::timeout(Duration::from_secs(3), rename)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+
+    assert_eq!(
+        bucket.lock().unwrap().keys(),
+        ["C/g", "D/y"],
+        "both files must have followed A to C"
+    );
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(fs.inode(x).unwrap().key, "D/y");
+    assert_eq!(fs.inode(f).unwrap().key, "C/g");
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// Unmount refuses new writes before its final drain, and that drain must
+/// still publish what was acknowledged: a staged file past the single-PUT
+/// limit needs ListParts and UploadPart, which a cancelled request executor
+/// refuses outright, leaving the file staged.
+#[tokio::test]
+async fn a_drain_after_writes_stop_still_publishes_a_multipart_stage() {
+    const SIZE: u64 = stage::MULTIPART_THRESHOLD + 1;
+    let fixture = serve(|request| async move {
+        if request.method == "GET" && request.path.contains("uploadId=resumed") {
+            // Five full parts reached the provider before the unmount began;
+            // the one-byte tail did not.
+            let mut body = String::from("<ListPartsResult><IsTruncated>false</IsTruncated>");
+            for number in 1..=5 {
+                body.push_str(&format!(
+                    "<Part><PartNumber>{number}</PartNumber><ETag>&quot;part-{number}&quot;</ETag><Size>{}</Size></Part>",
+                    stage::PART_SIZE
+                ));
+            }
+            body.push_str("</ListPartsResult>");
+            return Response::xml(200, &body);
+        }
+        if request.method == "PUT" && request.path.contains("partNumber=6") {
+            return Response::empty(200).header("etag", "\"part-6\"");
+        }
+        if request.method == "POST" && request.path.contains("uploadId=resumed") {
+            return Response::xml(
+                200,
+                "<CompleteMultipartUploadResult><ETag>&quot;large&quot;</ETag></CompleteMultipartUploadResult>",
+            );
+        }
+        Response::empty(404)
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "drain-after-stop");
+    let id = intern(&fs, "large").await;
+    fs.setattr(
+        id,
+        sattr3 {
+            size: set_size3::size(SIZE),
+            ..sattr3::default()
+        },
+    )
+    .await
+    .unwrap();
+    let snapshot = fs
+        .stage_guard(id)
+        .await
+        .unwrap()
+        .upload_snapshot()
+        .await
+        .unwrap();
+    let mut journal = snapshot.journal().await.unwrap();
+    journal.upload_id = Some("resumed".into());
+    snapshot.save_journal(&journal).await.unwrap();
+
+    fs.stop_accepting_writes();
+    assert!(
+        matches!(fs.write(id, 0, b"late").await, Err(nfsstat3::NFS3ERR_IO)),
+        "writes stop being accepted"
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), fs.drain(1, 1))
+            .await
+            .unwrap(),
+        0,
+        "the staged file must be published"
+    );
+    {
+        let requests = fixture.requests.lock().unwrap();
+        assert!(requests
+            .iter()
+            .any(|r| r.method == "PUT" && r.path.contains("partNumber=6")));
+        assert!(requests
+            .iter()
+            .any(|r| r.method == "POST" && r.path.contains("uploadId=resumed")));
+    }
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// Retiring a handle whose object changed re-interns its key under `inodes`
+/// and then invalidates the parent listing under `dirs`; a directory page
+/// takes `dirs` and then `inodes`. Holding `inodes` while waiting for `dirs`
+/// deadlocks the two on std locks, blocking runtime workers until the whole
+/// mount stops answering.
+///
+/// A worker blocked on a std lock can also leave the runtime's timers
+/// undriven, so everything that must happen while `dirs` is held runs on a
+/// plain thread with its own deadline, and `dirs` is always released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retiring_a_changed_handle_never_holds_inodes_while_waiting_for_dirs() {
+    const BOUND: Duration = Duration::from_secs(10);
+    let fixture = serve(|_| async {
+        Response::empty(200)
+            .header("content-length", 4)
+            .header("etag", "\"new\"")
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "inode-directory-lock-order");
+    let old = fs
+        .intern_child("note", ROOT_ID, EntryKind::File, 4, 0)
+        .unwrap();
+    fs.inner.read_identities.lock().await.insert(
+        old,
+        ReadIdentity {
+            etag: "\"old\"".into(),
+            version_id: None,
+            size: 4,
+            observed_at: Instant::now() - DIR_CACHE_TTL,
+        },
+    );
+    let generation = fs.inner.directory_generation.load(Ordering::SeqCst);
+
+    // Holds `dirs` the way a directory page does before it takes `inodes`,
+    // and checks `inodes` once the retire is waiting for `dirs`.
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn({
+        let fs = fs.clone();
+        move || {
+            let dirs = fs.inner.dirs.write().unwrap();
+            held_tx.send(()).unwrap();
+            // `invalidate_dir` bumps the generation just before it waits
+            // for `dirs`.
+            let deadline = std::time::Instant::now() + BOUND;
+            while fs.inner.directory_generation.load(Ordering::SeqCst) == generation
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let reached = fs.inner.directory_generation.load(Ordering::SeqCst) != generation;
+            let inodes_free = fs.inner.inodes.try_write().is_ok();
+            drop(dirs);
+            (reached, inodes_free)
+        }
+    });
+    held_rx.recv_timeout(BOUND).unwrap();
+    let retire = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.read_identity(old, "note").await }
+    });
+    // Blocks this (non-worker) thread for at most the holder's deadline.
+    let (reached, inodes_free) = holder.join().unwrap();
+
+    assert!(reached, "the handle was never retired");
+    assert!(inodes_free, "`inodes` was held while waiting for `dirs`");
+    assert!(matches!(
+        tokio::time::timeout(BOUND, retire).await.unwrap().unwrap(),
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
+}
+
+/// A root whose name `x` is missing until `created` is set — by another
+/// client, so nothing on this mount invalidates the directory. Its first
+/// listing page is partial and already shows `x`: `z` is held back as the
+/// lookahead for the page after it.
+async fn externally_created_child_fixture(created: Arc<AtomicBool>) -> crate::test_s3::Fixture {
+    serve(move |request| {
+        let created = created.clone();
+        async move {
+            if request.method == "GET" && request.path.contains("list-type") {
+                if request.path.contains("prefix=x%2F") {
+                    return directory_response(&[], &[], None);
+                }
+                return directory_response(&["a", "x", "z"], &[], Some("next"));
+            }
+            if request.method == "HEAD"
+                && request.path.starts_with("/photos/x")
+                && created.load(Ordering::SeqCst)
+            {
+                return Response::empty(200)
+                    .header("content-length", 1)
+                    .header("etag", "\"x\"");
+            }
+            Response::empty(404)
+        }
+    })
+    .await
+}
+
+/// LOOKUP cached `x` as missing while the directory had no listing; `x` was
+/// then created elsewhere and a READDIR listed it. That listing was given the
+/// generation the miss had been recorded under, so the next LOOKUP answered
+/// NOENT for a name the client had just been shown.
+#[tokio::test]
+async fn a_listing_made_after_a_cached_miss_is_not_contradicted_by_it() {
+    let created = Arc::new(AtomicBool::new(false));
+    let fixture = externally_created_child_fixture(created.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "listing-after-miss");
+    assert!(fs.lookup_child(ROOT_ID, "", "x").await.unwrap().is_none());
+    created.store(true, Ordering::SeqCst);
+
+    let page = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+    assert_eq!(directory_names(&page), ["a", "x"]);
+    assert!(!page.end);
+    assert!(
+        fs.lookup_child(ROOT_ID, "", "x").await.unwrap().is_some(),
+        "the listing that shows `x` is newer than the cached miss"
+    );
+}
+
+/// The same miss must not answer a LOOKUP that began before the listing
+/// existed but waited — here behind a fence on `x` — until after it was
+/// made: whatever that LOOKUP checks or records belongs to the listing's
+/// generation, not the older one it started with.
+#[tokio::test]
+async fn a_lookup_that_waited_out_a_new_listing_does_not_answer_from_an_older_miss() {
+    let created = Arc::new(AtomicBool::new(false));
+    let fixture = externally_created_child_fixture(created.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "lookup-across-listing");
+    assert!(fs.lookup_child(ROOT_ID, "", "x").await.unwrap().is_none());
+    created.store(true, Ordering::SeqCst);
+
+    let held = fs.fence_exact_key("x").await;
+    let mut lookup = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.lookup_child(ROOT_ID, "", "x").await }
+    });
+    // The lookup reads its generation, then parks on the fence.
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut lookup)
+        .await
+        .is_err());
+    let page = tokio::time::timeout(Duration::from_secs(3), fs.readdir(ROOT_ID, 0, 100))
+        .await
+        .expect("READDIR must not wait for the fence on `x`")
+        .unwrap();
+    assert_eq!(directory_names(&page), ["a", "x"]);
+    drop(held);
+    let found = tokio::time::timeout(Duration::from_secs(3), lookup)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        found.is_some(),
+        "a listing that shows `x` outranks the older miss"
+    );
+}
+
+/// Every rename keeps a journal on disk until it finishes. Health must not
+/// report that journal as an interrupted change while the rename that owns
+/// it is still running, or every rename flips the mount to Degraded; a
+/// journal no live operation owns must still be reported.
+#[tokio::test]
+async fn health_reports_interrupted_renames_but_not_running_ones() {
+    let bucket = ModelBucket::with(&[("a", b"a-bytes")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture =
+        copy_gated_fixture(bucket.clone(), copy_entered.clone(), release_copy.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "rename-health");
+    let rename = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"a".as_slice().into(),
+                ROOT_ID,
+                &b"b".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let running = tokio::time::timeout(Duration::from_secs(3), fs.health_snapshot())
+        .await
+        .unwrap();
+    release_copy.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(3), rename)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(running.pending_uploads, 1, "the running rename is pending");
+    assert_eq!(
+        running.last_error, None,
+        "a running rename is not interrupted"
+    );
+
+    stage::write_json_atomic(
+        &fs.rename_journal_path("old", "new"),
+        &serde_json::json!({"from": "old", "to": "new", "token": "left", "objects": []}),
+    )
+    .await
+    .unwrap();
+    let interrupted = tokio::time::timeout(Duration::from_secs(3), fs.health_snapshot())
+        .await
+        .unwrap();
+    assert_eq!(
+        interrupted.last_error.as_deref(),
+        Some("Interrupted file changes are retained for recovery")
+    );
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// A directory rename looks for the stages under its prefix. A stage
+/// elsewhere can stay locked for a whole download while it is primed, and
+/// the rename must not wait for it.
+#[tokio::test]
+async fn finding_the_stages_under_a_prefix_skips_busy_stages_elsewhere() {
+    let fixture = serve(|_| async { Response::empty(404) }).await;
+    let fs = filesystem(fixture.client.clone(), "stages-under-prefix");
+    let a = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let b = fs
+        .intern_child("B/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let inside = fs.intern_child("A/x", a, EntryKind::File, 0, 0).unwrap();
+    let outside = fs.intern_child("B/y", b, EntryKind::File, 0, 0).unwrap();
+    drop(
+        fs.reset_stage(inside, &fs.inode(inside).unwrap())
+            .await
+            .unwrap(),
+    );
+    let busy = fs
+        .reset_stage(outside, &fs.inode(outside).unwrap())
+        .await
+        .unwrap();
+
+    let under = tokio::time::timeout(Duration::from_secs(1), fs.stages_under("A/"))
+        .await
+        .expect("the busy stage under B/ must not be waited for");
+    assert_eq!(under, [inside]);
+    drop(busy);
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// With no listing cached, REMOVE and RENAME find their source by an exact
+/// lookup that itself waits behind `mv A C` and then looks under A/. A miss
+/// there says nothing about the directory's new path: both must follow A to
+/// C, as they did when 0.3.5 serialised them with the rename.
+#[tokio::test]
+async fn a_remove_and_a_rename_resolved_during_a_directory_rename_follow_it() {
+    let bucket = ModelBucket::with(&[("A/x", b"x"), ("A/z", b"z")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture =
+        copy_gated_fixture(bucket.clone(), copy_entered.clone(), release_copy.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "resolve-during-directory-rename");
+    let a = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let d = fs
+        .intern_child("D/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+
+    let directory = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"A".as_slice().into(),
+                ROOT_ID,
+                &b"C".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let mut removal = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.remove(a, &b"x".as_slice().into()).await }
+    });
+    let mut moved = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(a, &b"z".as_slice().into(), d, &b"w".as_slice().into())
+                .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut removal)
+            .await
+            .is_err()
+    );
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut moved)
+        .await
+        .is_err());
+    // Two copies for the directory's objects, then one for the file rename.
+    release_copy.add_permits(3);
+    let mut results = Vec::new();
+    for task in [directory, removal, moved] {
+        results.push(
+            tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+
+    assert_eq!(
+        bucket.lock().unwrap().keys(),
+        ["D/w"],
+        "C/x must be removed and C/z moved"
+    );
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// LOOKUP with no listing cached probes the exact name under a shared fence,
+/// so behind `mv A C` it waits — and must then look in C/, where the file
+/// now is, rather than answer NOENT from A/.
+#[tokio::test]
+async fn a_lookup_during_a_directory_rename_finds_the_file_at_its_new_path() {
+    let bucket = ModelBucket::with(&[("A/x", b"x")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture =
+        copy_gated_fixture(bucket.clone(), copy_entered.clone(), release_copy.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "lookup-during-directory-rename");
+    let a = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+
+    let directory = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"A".as_slice().into(),
+                ROOT_ID,
+                &b"C".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let mut lookup = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.lookup(a, &b"x".as_slice().into()).await }
+    });
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut lookup)
+        .await
+        .is_err());
+    release_copy.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(3), directory)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let found = tokio::time::timeout(Duration::from_secs(3), lookup)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let id = found.expect("x moved with its directory; it did not disappear");
+    assert_eq!(fs.inode(id).unwrap().key, "C/x");
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// A root listed over pages whose second page reaches `x` only once
+/// `created` is set, as the last name (the lookahead) when `x_last`.
+async fn later_page_child_fixture(
+    created: Arc<AtomicBool>,
+    x_last: bool,
+) -> crate::test_s3::Fixture {
+    serve(move |request| {
+        let created = created.clone();
+        async move {
+            if request.method == "GET" && request.path.contains("list-type") {
+                if request.path.contains("prefix=x%2F") {
+                    return directory_response(&[], &[], None);
+                }
+                if request.path.contains("continuation-token=p2") {
+                    let page: &[&str] = match (created.load(Ordering::SeqCst), x_last) {
+                        (true, true) => &["c", "x"],
+                        (true, false) => &["c", "x", "z"],
+                        (false, _) => &["c", "z"],
+                    };
+                    return directory_response(page, &[], Some("p3"));
+                }
+                return directory_response(&["a", "b"], &[], Some("p2"));
+            }
+            if request.method == "HEAD"
+                && request.path.starts_with("/photos/x")
+                && created.load(Ordering::SeqCst)
+            {
+                return Response::empty(200)
+                    .header("content-length", 1)
+                    .header("etag", "\"x\"");
+            }
+            Response::empty(404)
+        }
+    })
+    .await
+}
+
+/// A listing's generation is fixed before its pages arrive. A LOOKUP that
+/// probed `x` while the listing had not reached it recorded its miss under
+/// that generation; once `x` is created and a later page of the same listing
+/// shows it, that older miss must not answer for it.
+#[tokio::test]
+async fn a_miss_probed_before_a_later_page_does_not_hide_the_name_it_shows() {
+    let created = Arc::new(AtomicBool::new(false));
+    let fixture = later_page_child_fixture(created.clone(), false).await;
+    let fs = filesystem(fixture.client.clone(), "miss-before-later-page");
+
+    // The lookup starts with no listing and parks on the fence on `x`.
+    let held = fs.fence_exact_key("x").await;
+    let mut parked = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.lookup_child(ROOT_ID, "", "x").await }
+    });
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut parked)
+        .await
+        .is_err());
+    let first = tokio::time::timeout(Duration::from_secs(3), fs.readdir(ROOT_ID, 0, 100))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(directory_names(&first), ["a"]);
+    drop(held);
+    // It probes under the listing's generation; `x` does not exist yet.
+    let missed = tokio::time::timeout(Duration::from_secs(3), parked)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(missed.is_none());
+
+    created.store(true, Ordering::SeqCst);
+    let second = tokio::time::timeout(
+        Duration::from_secs(3),
+        fs.readdir(ROOT_ID, first.entries[0].fileid, 100),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(directory_names(&second), ["b", "c", "x"]);
+    assert!(!second.end);
+    let found = tokio::time::timeout(Duration::from_secs(3), fs.lookup_child(ROOT_ID, "", "x"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        found.is_some(),
+        "the page that shows `x` is newer than the miss"
+    );
+}
+
+/// The same holds while `x` is still the held-back last name of the page
+/// that returned it: a lookup that began before the listing and resumes
+/// now must not answer from the older miss either.
+#[tokio::test]
+async fn a_miss_probed_before_a_later_page_does_not_hide_a_held_back_name() {
+    let created = Arc::new(AtomicBool::new(false));
+    let fixture = later_page_child_fixture(created.clone(), true).await;
+    let fs = filesystem(fixture.client.clone(), "miss-before-held-back-name");
+    let before_listing = fs.inner.directory_generation.load(Ordering::SeqCst);
+
+    let first = tokio::time::timeout(Duration::from_secs(3), fs.readdir(ROOT_ID, 0, 100))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(directory_names(&first), ["a"]);
+    // A lookup that read its generation before the listing existed, resumed
+    // while the listing had not reached `x`: `x` does not exist yet.
+    let missed = tokio::time::timeout(
+        Duration::from_secs(3),
+        fs.lookup_exact_child(ROOT_ID, "", "x", before_listing, true, true),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(missed.is_none());
+
+    created.store(true, Ordering::SeqCst);
+    let second = tokio::time::timeout(
+        Duration::from_secs(3),
+        fs.readdir(ROOT_ID, first.entries[0].fileid, 100),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // `x` came back last, so the listing holds it until the next page.
+    assert_eq!(directory_names(&second), ["b", "c"]);
+    let found = tokio::time::timeout(
+        Duration::from_secs(3),
+        fs.lookup_exact_child(ROOT_ID, "", "x", before_listing, true, true),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        found.is_some(),
+        "the page that returned `x` is newer than the miss"
+    );
+}
+
+/// A lookup that built its directory key before `mv A C` finished probes
+/// A/x after the rename and misses; its retry under C/ reads the same
+/// generation, and must not be answered by a miss recorded for the old path.
+#[tokio::test]
+async fn a_miss_recorded_for_a_directorys_old_path_never_answers_for_its_new_one() {
+    let fixture = serve(|request| async move {
+        if request.method == "GET" && request.path.contains("list-type") {
+            return directory_response(&[], &[], None);
+        }
+        if request.method == "HEAD" && request.path.starts_with("/photos/C/x") {
+            return Response::empty(200)
+                .header("content-length", 1)
+                .header("etag", "\"x\"");
+        }
+        Response::empty(404)
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "old-path-miss");
+    let a = fs
+        .intern_child("C/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let stale = tokio::time::timeout(Duration::from_secs(3), fs.lookup_child(a, "A/", "x"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stale.is_none());
+    let found = tokio::time::timeout(Duration::from_secs(3), fs.lookup_child(a, "C/", "x"))
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, inode) = found.expect("the miss was recorded for A/x, not C/x");
+    assert_eq!(inode.key, "C/x");
+}
+
+/// Finding the stages under a prefix skips those whose inode lies outside
+/// it, relying on a stage's key matching its inode's. Should the two ever
+/// disagree, a stage keyed under the prefix must still be found when it can
+/// be checked without waiting: missed by a directory rename, it would
+/// later publish under the old path.
+#[tokio::test]
+async fn a_stage_keyed_under_the_prefix_is_found_even_if_its_inode_is_not() {
+    let fixture = serve(|_| async { Response::empty(404) }).await;
+    let fs = filesystem(fixture.client.clone(), "stage-key-guard");
+    let b = fs
+        .intern_child("B/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let id = fs.intern_child("B/y", b, EntryKind::File, 0, 0).unwrap();
+    let mut stage = fs.reset_stage(id, &fs.inode(id).unwrap()).await.unwrap();
+    stage.key = "A/y".into();
+    drop(stage);
+
+    let under = tokio::time::timeout(Duration::from_secs(1), fs.stages_under("A/"))
+        .await
+        .unwrap();
+    assert_eq!(under, [id]);
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
 }
