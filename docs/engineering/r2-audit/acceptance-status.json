@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
-  "captured_at": "2026-09-23T20:52:48.244Z",
+  "captured_at": "2026-09-23T21:08:38.137Z",
   "git": {
-    "commit": "23b23d93908589d5ec59f162f465f2c0aab4c89f",
-    "tree": "532ae7b97d7b94b8020df625c3599c31d7601181",
+    "commit": "89b9e3f3d0b6270dc99dd1f6774e2adb5d54e142",
+    "tree": "183618885c847e67382f50ffbef0820bb36a0eb7",
     "dirty": false,
     "dirty_paths": []
   },
   "source_fingerprint": {
     "schema_version": 1,
     "algorithm": "sha256-production-inputs-v1",
-    "production_source_sha256": "dfbfc224516e0622d9e031bd6dc7cfdeda7c9c481285e10b879a57f2b9a472e0",
+    "production_source_sha256": "bd9c571a298984726897b009f4dff2dfe9eea4cf752d1e2a874a0bd5c77361a0",
     "file_count": 278,
     "includes_untracked_nonignored": true,
     "excludes": [

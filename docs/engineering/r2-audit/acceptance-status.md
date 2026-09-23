@@ -2,9 +2,9 @@
 
 Generated from `docs/engineering/r2-audit/acceptance-manifest.json`.
 
-- Captured at: 2026-09-23T20:52:48.244Z
-- Git commit: 23b23d93908589d5ec59f162f465f2c0aab4c89f
-- Git tree: 532ae7b97d7b94b8020df625c3599c31d7601181
+- Captured at: 2026-09-23T21:08:38.137Z
+- Git commit: 89b9e3f3d0b6270dc99dd1f6774e2adb5d54e142
+- Git tree: 183618885c847e67382f50ffbef0820bb36a0eb7
 - Dirty worktree: false
 - Host: darwin arm64
 
