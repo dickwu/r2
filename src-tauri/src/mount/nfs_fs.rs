@@ -73,7 +73,8 @@ const RENAME_COPY_CONCURRENCY: usize = 8;
 /// Times an operation re-derives the key it has to fence after finding that
 /// a rename moved it during the fence wait. Each retry follows a rename that
 /// completed in between, so running out means the name is being moved
-/// continuously and the client is told to try again later.
+/// continuously: an NFS call answers NFS3ERR_JUKEBOX (try again later) and a
+/// flush is left for a later pass.
 const FENCED_KEY_ATTEMPTS: usize = 16;
 
 // ============ Key helpers (pure) ============
