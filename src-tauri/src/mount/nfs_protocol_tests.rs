@@ -3569,7 +3569,10 @@ async fn a_lookup_that_waited_out_a_new_listing_does_not_answer_from_an_older_mi
     assert!(tokio::time::timeout(Duration::from_millis(50), &mut lookup)
         .await
         .is_err());
-    let page = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+    let page = tokio::time::timeout(Duration::from_secs(3), fs.readdir(ROOT_ID, 0, 100))
+        .await
+        .expect("READDIR must not wait for the fence on `x`")
+        .unwrap();
     assert_eq!(directory_names(&page), ["a", "x"]);
     drop(held);
     let found = tokio::time::timeout(Duration::from_secs(3), lookup)
