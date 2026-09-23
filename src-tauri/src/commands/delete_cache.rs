@@ -1,12 +1,13 @@
 use crate::commands::cache_events::{
     get_unique_parent_paths, CacheUpdatedEvent, PathsRemovedEvent,
 };
+use crate::commands::upload_cache::CacheEventSink;
 use crate::db;
 use log::{error, info};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
@@ -29,7 +30,7 @@ fn delete_cache_queue() -> &'static Mutex<DeleteCacheQueueState> {
 /// Update cache after a single file deletion.
 /// Handles file cache, directory tree updates, and emits appropriate events.
 pub(crate) async fn update_cache_after_delete(
-    app: &AppHandle,
+    app: &impl CacheEventSink,
     bucket: &str,
     account_id: &str,
     key: &str,
@@ -38,7 +39,7 @@ pub(crate) async fn update_cache_after_delete(
         db::cache_scope::invalidate_unscoped(account_id)
             .await
             .map_err(|e| e.to_string())?;
-        let _ = app.emit(
+        app.emit_cache_event(
             "cache-updated",
             CacheUpdatedEvent {
                 action: "delete".into(),
@@ -84,10 +85,10 @@ pub(crate) async fn update_cache_after_delete(
     };
 
     if !removed_paths.is_empty() {
-        let _ = app.emit("paths-removed", PathsRemovedEvent { removed_paths });
+        app.emit_cache_event("paths-removed", PathsRemovedEvent { removed_paths });
     }
 
-    let _ = app.emit(
+    app.emit_cache_event(
         "cache-updated",
         CacheUpdatedEvent {
             action: "delete".to_string(),
@@ -101,7 +102,7 @@ pub(crate) async fn update_cache_after_delete(
 /// Update cache after batch file deletion.
 /// Handles file cache, directory tree updates, and emits appropriate events.
 pub(crate) async fn update_cache_after_batch_delete(
-    app: &AppHandle,
+    app: &impl CacheEventSink,
     bucket: &str,
     account_id: &str,
     deleted_keys: &[String],
@@ -110,7 +111,7 @@ pub(crate) async fn update_cache_after_batch_delete(
         db::cache_scope::invalidate_unscoped(account_id)
             .await
             .map_err(|e| e.to_string())?;
-        let _ = app.emit(
+        app.emit_cache_event(
             "cache-updated",
             CacheUpdatedEvent {
                 action: "delete".into(),
@@ -167,7 +168,7 @@ pub(crate) async fn update_cache_after_batch_delete(
     };
 
     if !all_removed_paths.is_empty() {
-        let _ = app.emit(
+        app.emit_cache_event(
             "paths-removed",
             PathsRemovedEvent {
                 removed_paths: all_removed_paths,
@@ -175,7 +176,7 @@ pub(crate) async fn update_cache_after_batch_delete(
         );
     }
 
-    let _ = app.emit(
+    app.emit_cache_event(
         "cache-updated",
         CacheUpdatedEvent {
             action: "delete".to_string(),

@@ -4,7 +4,7 @@ use crate::commands::batch_move::{
 };
 use crate::commands::delete_cache::{update_cache_after_batch_delete, update_cache_after_delete};
 use crate::commands::move_cache::{update_cache_after_batch_move, update_cache_after_move};
-use crate::commands::upload_cache::update_cache_after_upload;
+use crate::commands::upload_cache::{update_cache_after_upload, CacheEventSink};
 use crate::db::{self, CachedFile};
 use crate::providers::minio;
 use serde::{Deserialize, Serialize};
@@ -307,6 +307,14 @@ pub async fn delete_minio_object(
     key: String,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    delete_minio_object_with(config, key, &app).await
+}
+
+pub(crate) async fn delete_minio_object_with(
+    config: MinioConfigInput,
+    key: String,
+    app: &impl CacheEventSink,
+) -> Result<(), String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
     let minio_config: minio::MinioConfig = config.into();
@@ -316,7 +324,7 @@ pub async fn delete_minio_object(
         .map_err(|e| format!("Failed to delete object: {}", e))?;
 
     // Update cache and emit events (including paths-removed if any folders became empty)
-    update_cache_after_delete(&app, &bucket, &account_id, &key).await?;
+    update_cache_after_delete(app, &bucket, &account_id, &key).await?;
 
     Ok(())
 }
@@ -460,6 +468,16 @@ pub async fn upload_minio_content(
     content_type: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
+    upload_minio_content_with(config, key, content, content_type, &app).await
+}
+
+pub(crate) async fn upload_minio_content_with(
+    config: MinioConfigInput,
+    key: String,
+    content: String,
+    content_type: Option<String>,
+    app: &impl CacheEventSink,
+) -> Result<String, String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
     let minio_config: minio::MinioConfig = config.into();
@@ -473,15 +491,7 @@ pub async fn upload_minio_content(
 
     let last_modified = chrono::Utc::now().to_rfc3339();
 
-    crate::commands::upload_cache::update_cache_after_upload(
-        &app,
-        &bucket,
-        &account_id,
-        &key,
-        new_size,
-        &last_modified,
-    )
-    .await?;
+    update_cache_after_upload(app, &bucket, &account_id, &key, new_size, &last_modified).await?;
 
     Ok(etag)
 }

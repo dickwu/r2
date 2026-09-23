@@ -1,9 +1,22 @@
 use crate::commands::cache_events::{get_unique_parent_paths, CacheUpdatedEvent};
 use crate::db;
+use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
+/// Where a cache update reports the folders it changed. The app forwards the
+/// events to the webview; tests record them.
+pub(crate) trait CacheEventSink {
+    fn emit_cache_event<S: Serialize + Clone>(&self, event: &str, payload: S);
+}
+
+impl CacheEventSink for AppHandle {
+    fn emit_cache_event<S: Serialize + Clone>(&self, event: &str, payload: S) {
+        let _ = self.emit(event, payload);
+    }
+}
+
 pub(crate) async fn update_cache_after_upload(
-    app: &AppHandle,
+    app: &impl CacheEventSink,
     bucket: &str,
     account_id: &str,
     key: &str,
@@ -14,7 +27,7 @@ pub(crate) async fn update_cache_after_upload(
         db::cache_scope::invalidate_unscoped(account_id)
             .await
             .map_err(|e| e.to_string())?;
-        let _ = app.emit(
+        app.emit_cache_event(
             "cache-updated",
             CacheUpdatedEvent {
                 action: "update".into(),
@@ -54,7 +67,7 @@ pub(crate) async fn update_cache_after_upload(
     }
     finish_result?;
 
-    let _ = app.emit(
+    app.emit_cache_event(
         "cache-updated",
         CacheUpdatedEvent {
             action: "update".to_string(),
