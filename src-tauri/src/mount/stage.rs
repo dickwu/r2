@@ -745,8 +745,31 @@ fn apply_fails(path: &Path) -> bool {
         .remove(path)
 }
 
+/// Test hook: unlinking one of these paths fails.
+#[cfg(test)]
+static FAILING_REMOVALS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn fail_removal_of(path: &Path) {
+    FAILING_REMOVALS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf());
+}
+
 /// Deletes `path`; true if it is gone afterwards, whether or not it existed.
 async fn remove_if_present(path: &Path) -> bool {
+    #[cfg(test)]
+    if FAILING_REMOVALS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .contains(path)
+    {
+        return false;
+    }
     match tokio::fs::remove_file(path).await {
         Ok(()) => true,
         Err(error) => error.kind() == std::io::ErrorKind::NotFound,
@@ -1259,12 +1282,48 @@ impl Stage {
     /// here — the caller may hold the mount's stage lock, and a discard makes
     /// them inert — they are handed to the WAL's dead-byte account, which
     /// compacts them away in the background once enough have piled up.
+    ///
+    /// For callers that cannot report a failure (eviction of an uploaded
+    /// stage): the durable removal of `try_remove_files` first, then, if that
+    /// cannot record the removal, whatever can still be done safely.
     pub async fn remove_files(&mut self) {
+        let Err(error) = self.try_remove_files().await else {
+            return;
+        };
+        log::warn!(
+            "mount: could not record the removal of \"{}\" in the staging WAL: {}",
+            self.key,
+            error
+        );
+        if let Err(error) = self.remove_files_inner(true).await {
+            log::error!(
+                "mount: the staged copy of \"{}\" could not be deleted durably: {}",
+                self.key,
+                error
+            );
+        }
+    }
+
+    /// `remove_files` for a REMOVE, a truncating CREATE or a rename over the
+    /// file: it succeeds only once the deletion is durable — a discard record
+    /// committed for content the bucket may lack — so the client is only
+    /// acknowledged then. On error nothing was removed and the stage is whole.
+    pub async fn try_remove_files(&mut self) -> std::io::Result<()> {
+        self.remove_files_inner(false).await
+    }
+
+    async fn remove_files_inner(&mut self, best_effort: bool) -> std::io::Result<()> {
         let wal_path = stage_wal::wal_path(&self.path);
         let mut dead = self.wal_lease.bytes();
-        if self.dirty || self.needs_replay {
+        let needs_discard = self.dirty || self.needs_replay;
+        let mut discarded = false;
+        if needs_discard {
             match self.append_discard().await {
-                Ok(bytes) => dead = dead.saturating_add(bytes),
+                Ok(bytes) => {
+                    dead = dead.saturating_add(bytes);
+                    discarded = true;
+                }
+                Err(error) if !best_effort => return Err(error),
                 Err(error) => log::warn!(
                     "mount: could not record the removal of \"{}\" in the staging WAL: {}",
                     self.key,
@@ -1273,23 +1332,40 @@ impl Stage {
             }
         }
         if remove_stops_after(&self.path, 1) {
-            return;
+            return Ok(());
+        }
+        // The data file goes first: it is what the WAL would replay into. If
+        // it stays, so does everything else, so a crash finds the stage whole
+        // rather than half deleted and rebuildable from the WAL.
+        if !remove_if_present(&self.path).await {
+            if needs_discard && !discarded {
+                return Err(std::io::Error::other(
+                    "The staged copy could not be deleted, nor its removal recorded",
+                ));
+            }
+            // Recorded as discarded, or already in the bucket: the leftover
+            // cannot come back, it is merely garbage in the staging folder.
+            return Ok(());
         }
         let _ = remove_if_present(&self.path.with_extension("write.json")).await;
-        let _ = remove_if_present(&self.path).await;
         if remove_stops_after(&self.path, 2) {
-            return;
+            return Ok(());
         }
         if let Some(snapshot) = &self.snapshot {
             snapshot.remove().await;
         }
         let _ = remove_if_present(&self.manifest_path()).await;
         if remove_stops_after(&self.path, 3) {
-            return;
+            return Ok(());
         }
-        let _ = sync_parent(&self.path).await;
+        let synced = sync_parent(&self.path).await;
         if remove_stops_after(&self.path, 4) {
-            return;
+            return Ok(());
+        }
+        if needs_discard && !discarded {
+            // Only best effort gets here: without a discard, the data file's
+            // unlink is the deletion, and it is only durable once synced.
+            synced?;
         }
         self.stage_lease.resize(0);
         self.snapshot_lease.resize(0);
@@ -1297,6 +1373,7 @@ impl Stage {
         if dead > 0 {
             stage_wal::note_reclaimable(&wal_path, dead).await;
         }
+        Ok(())
     }
 
     /// Makes "this stage was deleted" durable in the WAL before any of its
@@ -2088,6 +2165,112 @@ mod tests {
         assert_eq!(tokio::fs::read(&wal).await.unwrap(), before);
         drop(stage);
         drop(other);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_removal_that_cannot_be_made_durable_leaves_the_stage_whole() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-remove-not-durable-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let wal = stage_wal::wal_path(&path);
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        stage
+            .write_durable(0, b"not uploaded yet", 1)
+            .await
+            .unwrap();
+        // Neither the discard (a failed fsync, or a full disk — twice: the
+        // durable attempt and the best-effort retry) nor the unlink of the
+        // data file the WAL replays into goes through.
+        stage_commit::fail_next_syncs(&wal, 2);
+        fail_removal_of(&path);
+        stage.remove_files().await;
+        assert!(
+            tokio::fs::try_exists(path.with_extension("stage.json"))
+                .await
+                .unwrap(),
+            "the manifest went while the data file it describes stayed"
+        );
+        // The stage lives on and keeps acknowledging writes. The discard its
+        // failed commit left in the WAL — made durable by the rewrite the next
+        // append runs — must not void them.
+        stage.write_durable(16, b"!", 2).await.unwrap();
+        drop(stage);
+        let mut restored = recover_single(&root).await;
+        assert_eq!(restored.read_at(0, 64).await.unwrap(), b"not uploaded yet!");
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_remove_is_acknowledged_only_once_its_deletion_is_durable() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-remove-acknowledged-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let wal = stage_wal::wal_path(&path);
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        stage
+            .write_durable(0, b"not uploaded yet", 1)
+            .await
+            .unwrap();
+        stage_commit::fail_next_syncs(&wal, 1);
+        assert!(
+            stage.try_remove_files().await.is_err(),
+            "a REMOVE was acknowledged without a durable discard"
+        );
+        assert!(tokio::fs::try_exists(&path).await.unwrap());
+        assert!(tokio::fs::try_exists(path.with_extension("stage.json"))
+            .await
+            .unwrap());
+        assert_eq!(stage.read_at(0, 64).await.unwrap(), b"not uploaded yet");
+        // Once the WAL is healthy again the removal goes through, even if an
+        // unlink fails: the durable discard already settles it.
+        fail_removal_of(&path);
+        stage.try_remove_files().await.unwrap();
+        drop(stage);
+        stage_wal::forget_append_state(&wal).await;
+        assert!(replay_write_intents(&root).await.unwrap().is_empty());
+        assert!(recovery_entries(&root)
+            .await
+            .unwrap()
+            .iter()
+            .all(|entry| entry.key != "key"));
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn records_of_a_stage_removed_without_its_discard_are_still_reclaimed() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-remove-no-discard-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let wal = stage_wal::wal_path(&path);
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        stage.write_durable(0, b"deleted", 1).await.unwrap();
+        // A full disk: the discard cannot be written, the unlinks can.
+        stage_commit::fail_next_syncs(&wal, 1);
+        stage.remove_files().await;
+        assert!(!tokio::fs::try_exists(&path).await.unwrap());
+        drop(stage);
+        // With data file and manifest gone the records are dead without it.
+        let mut next = Stage::create(root.join("next.data"), "next".into(), 1)
+            .await
+            .unwrap();
+        next.write_durable(0, b"next", 1).await.unwrap();
+        assert!(stage_wal::compact_now(&wal).await.unwrap());
+        assert_eq!(
+            tokio::fs::metadata(&wal).await.unwrap().len(),
+            next.wal_lease.bytes()
+        );
+        drop(next);
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 

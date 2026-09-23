@@ -269,14 +269,23 @@ fn generations_unbroken(chain: &[&WalRecord], generation: u64) -> bool {
     true
 }
 
-/// The newest discard LSN of every data file that has one.
+/// The LSN of every discard still in force: one that is the newest record of
+/// its data file. A later record of the same file means that removal never
+/// completed — its commit failed and the stage lived on — so the discard is
+/// void, even if a rewrite made its bytes durable afterwards.
 fn discards(records: &[WalRecord]) -> HashMap<String, u64> {
-    let mut discarded = HashMap::<String, u64>::new();
-    for record in records.iter().filter(|record| record.op == WalOp::Discard) {
-        let lsn = discarded.entry(record.data_name.clone()).or_default();
-        *lsn = (*lsn).max(record.lsn);
+    let mut newest = HashMap::<&str, &WalRecord>::new();
+    for record in records {
+        let entry = newest.entry(record.data_name.as_str()).or_insert(record);
+        if record.lsn > entry.lsn {
+            *entry = record;
+        }
     }
-    discarded
+    newest
+        .into_iter()
+        .filter(|(_, record)| record.op == WalOp::Discard)
+        .map(|(name, record)| (name.to_string(), record.lsn))
+        .collect()
 }
 
 /// Whether a record belongs to a stage that was deleted after writing it.
@@ -1220,6 +1229,11 @@ async fn compact_unlocked(
         .into_iter()
         .filter(|record| {
             if is_dead(record, &discarded) {
+                return false;
+            }
+            if record.op == WalOp::Discard && discarded.get(&record.data_name) != Some(&record.lsn)
+            {
+                // A void discard: its removal never completed.
                 return false;
             }
             match owners.get(&record.data_name) {
