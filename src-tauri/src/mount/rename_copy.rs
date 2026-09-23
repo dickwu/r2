@@ -1,8 +1,9 @@
 //! Resumable large NFS rename copies; relay bodies share Move's byte budget.
 use super::*;
+use crate::move_transfer::server_copy::SERVER_COPY_OPERATION_BUDGET;
 use crate::move_transfer::stream::{
     data_timeouts,
-    protocol::{attempt_timeout, Payload, RelayBudget, MAX_ATTEMPTS},
+    protocol::{attempt_timeout, operation_budget, Payload, RelayBudget, MAX_ATTEMPTS},
     shared_http_client, MultipartPlan,
 };
 use crate::providers::{
@@ -371,12 +372,13 @@ impl S3NfsFs {
                 object.source_etag,
                 object.source_version.as_deref().unwrap_or_default()
             );
+            // Room for every attempt; data_timeouts bounds each one.
             let context = self
                 .read_operation_context(
                     OperationKind::UploadPart,
                     &scope,
                     &identity,
-                    attempt_timeout(length),
+                    operation_budget(length),
                 )
                 .with_max_attempts(MAX_ATTEMPTS as u32);
             let etag = execute_storage_operation(&context, || async {
@@ -433,11 +435,12 @@ impl S3NfsFs {
             object.source_version.as_deref().unwrap_or_default(),
             object.to
         );
+        // Each attempt is bounded by the client's own operation timeout.
         let context = self.read_operation_context(
             OperationKind::UploadPartCopy,
             &scope,
             &identity,
-            attempt_timeout(length),
+            SERVER_COPY_OPERATION_BUDGET,
         );
         let etag = execute_storage_operation(&context, || {
             let request = request.clone();
@@ -488,12 +491,13 @@ impl S3NfsFs {
             object.source_etag,
             object.source_version.as_deref().unwrap_or_default()
         );
+        // Room for every attempt; the timeout around each read bounds it.
         let context = self
             .read_operation_context(
                 OperationKind::Get,
                 &scope,
                 &identity,
-                attempt_timeout(length),
+                operation_budget(length),
             )
             .with_pause(&paused)
             .with_max_attempts(MAX_ATTEMPTS as u32);
@@ -541,5 +545,131 @@ impl S3NfsFs {
         .await
         .map(|fetched| reservation.into_payload(fetched))
         .map_err(|error| self.map_operation_error("GET", error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_s3::{serve, Response};
+    use std::sync::atomic::AtomicUsize;
+
+    fn filesystem(client: Client, endpoint: String) -> S3NfsFs {
+        S3NfsFs::new_with_endpoint(
+            client,
+            "photos".into(),
+            endpoint,
+            false,
+            std::env::temp_dir().join(format!(
+                "r2-rename-copy-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap()
+            )),
+        )
+    }
+
+    fn object(size: u64) -> RenameObject {
+        RenameObject {
+            from: "source".into(),
+            to: "target".into(),
+            source_etag: "\"v1\"".into(),
+            size,
+            destination_etag: None,
+            phase: "pending".into(),
+            replaced_etag: None,
+            source_version: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_read_stalled_past_one_attempt_timeout_still_gets_its_retry() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        const HEAD: &[u8] = b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-3/4\r\nContent-Length: 2\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n";
+        async fn read_request(socket: &mut tokio::net::TcpStream) {
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 2048];
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let size = socket.read(&mut chunk).await.unwrap();
+                assert!(size > 0, "connection closed before the request ended");
+                request.extend_from_slice(&chunk[..size]);
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let client = crate::providers::s3_client::create_s3_client(
+            &crate::providers::s3_client::S3ClientConfig {
+                access_key_id: "fixture",
+                secret_access_key: "fixture-secret",
+                region: "us-east-1",
+                endpoint_url: Some(&endpoint),
+                force_path_style: true,
+            },
+        )
+        .unwrap();
+        let server = tokio::spawn(async move {
+            // Every gap of the first response is inside the idle timeout, but
+            // the whole response outlasts attempt_timeout(2) = 31 s.
+            let (mut stalled, _) = listener.accept().await.unwrap();
+            let trickle = tokio::spawn(async move {
+                read_request(&mut stalled).await;
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                let _ = stalled.write_all(HEAD).await;
+                let _ = stalled.write_all(b"c").await;
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                let _ = stalled.write_all(b"d").await;
+            });
+            let (mut retry, _) = listener.accept().await.unwrap();
+            read_request(&mut retry).await;
+            retry.write_all(HEAD).await.unwrap();
+            retry.write_all(b"cd").await.unwrap();
+            trickle.abort();
+        });
+        let fs = filesystem(client, format!("rename-read-stall:{endpoint}"));
+        let start = tokio::time::Instant::now();
+        let payload = fs.rename_range(&object(4), 2, 3).await.unwrap();
+        assert_eq!(payload.len, 2);
+        assert!(start.elapsed() >= attempt_timeout(2));
+        server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_upload_part_stalled_past_one_attempt_timeout_still_gets_its_retry() {
+        let puts = Arc::new(AtomicUsize::new(0));
+        let fixture = serve({
+            let puts = puts.clone();
+            move |request| {
+                let puts = puts.clone();
+                async move {
+                    if request.method == "GET" {
+                        return Response::xml(206, "original")
+                            .header("etag", "\"v1\"")
+                            .header("content-range", "bytes 0-7/8");
+                    }
+                    if puts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        // Answers after attempt_timeout(8) = 31 s has passed.
+                        tokio::time::sleep(Duration::from_secs(40)).await;
+                    }
+                    Response::empty(200).header("etag", "\"relay-part\"")
+                }
+            }
+        })
+        .await;
+        let fs = filesystem(
+            fixture.client.clone(),
+            format!("rename-upload-stall:{}", fixture.endpoint),
+        );
+        let plan = MultipartPlan {
+            part_size: 5 * 1024 * 1024,
+            total_parts: 1,
+        };
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            fs.copy_rename_part(&object(8), "upload", "", false, 1, &plan)
+                .await
+                .unwrap(),
+            (1, "\"relay-part\"".into())
+        );
+        assert_eq!(puts.load(Ordering::SeqCst), 2);
+        assert!(start.elapsed() >= attempt_timeout(8));
     }
 }

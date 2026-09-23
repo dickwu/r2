@@ -4,7 +4,7 @@ pub mod commands;
 pub(crate) mod config;
 mod finishing;
 pub(crate) mod planner;
-mod server_copy;
+pub(crate) mod server_copy;
 mod state;
 pub(crate) mod stream;
 mod types;

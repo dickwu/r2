@@ -35,8 +35,8 @@ const SERVER_COPY_PART_CONCURRENCY: usize = 4;
 /// server-side; cutting it shorter only manufactures `outcome_unknown`.
 const SERVER_COPY_MUTATION_BUDGET: Duration = Duration::from_secs(120);
 /// Replayable part copies and ListParts pages: room for every executor attempt
-/// at the SDK's per-attempt timeout.
-const SERVER_COPY_OPERATION_BUDGET: Duration = Duration::from_secs(3 * 120);
+/// at the SDK's per-attempt timeout. The mount's rename part copies use it too.
+pub(crate) const SERVER_COPY_OPERATION_BUDGET: Duration = Duration::from_secs(3 * 120);
 
 fn check_control(cancelled: &AtomicBool, paused: &AtomicBool) -> Result<(), String> {
     if cancelled.load(Ordering::SeqCst) {
