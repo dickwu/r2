@@ -91,9 +91,13 @@ export function jsonPointer(document, expression) {
 
 // Evidence and generated status are written into this directory before they
 // are committed, so uncommitted files there never make a worktree dirty for
-// provenance purposes. The manifest is an acceptance input and is not exempt.
+// provenance purposes. The manifest and the hand-written verification.md are
+// acceptance inputs, not outputs, and are never exempt.
 const AUDIT_OUTPUT_DIR = 'docs/engineering/r2-audit/';
-const AUDIT_INPUTS = new Set(['docs/engineering/r2-audit/acceptance-manifest.json']);
+const AUDIT_INPUTS = new Set([
+  'docs/engineering/r2-audit/acceptance-manifest.json',
+  'docs/engineering/r2-audit/verification.md',
+]);
 
 function isAuditOutput(path) {
   return path.startsWith(AUDIT_OUTPUT_DIR) && !AUDIT_INPUTS.has(path);
