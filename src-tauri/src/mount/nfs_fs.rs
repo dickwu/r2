@@ -1028,6 +1028,9 @@ impl S3NfsFs {
         match namespace_recovery::pending_operations(&self.inner.staging_root).await {
             Ok(operations) => {
                 health.pending_uploads += operations.len();
+                // Every NFS mutation holds `namespace` shared for as long as
+                // its journal can exist, so a journal seen while nothing
+                // holds it belongs to no running operation.
                 if !operations.is_empty() && self.inner.namespace.try_write().is_ok() {
                     health.last_error =
                         Some("Interrupted file changes are retained for recovery".into());
@@ -4368,6 +4371,9 @@ impl NFSFileSystem for S3NfsFs {
         to_filename: &filename3,
     ) -> Result<(), nfsstat3> {
         self.ensure_writable()?;
+        // Shared like every other mutation's: health tells a running rename's
+        // journal from an interrupted one by whether this is held.
+        let _namespace = self.inner.namespace.read().await;
         self.dir_inode(from_dirid)?;
         self.dir_inode(to_dirid)?;
         let from_name = self.child_name(from_filename)?;

@@ -3582,3 +3582,61 @@ async fn a_lookup_that_waited_out_a_new_listing_does_not_answer_from_an_older_mi
         "a listing that shows `x` outranks the older miss"
     );
 }
+
+/// Every rename keeps a journal on disk until it finishes. Health must not
+/// report that journal as an interrupted change while the rename that owns
+/// it is still running, or every rename flips the mount to Degraded; a
+/// journal no live operation owns must still be reported.
+#[tokio::test]
+async fn health_reports_interrupted_renames_but_not_running_ones() {
+    let bucket = ModelBucket::with(&[("a", b"a-bytes")]);
+    let copy_entered = Arc::new(tokio::sync::Notify::new());
+    let release_copy = Arc::new(tokio::sync::Semaphore::new(0));
+    let fixture =
+        copy_gated_fixture(bucket.clone(), copy_entered.clone(), release_copy.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "rename-health");
+    let rename = tokio::spawn({
+        let fs = fs.clone();
+        async move {
+            fs.rename(
+                ROOT_ID,
+                &b"a".as_slice().into(),
+                ROOT_ID,
+                &b"b".as_slice().into(),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), copy_entered.notified())
+        .await
+        .unwrap();
+    let running = tokio::time::timeout(Duration::from_secs(3), fs.health_snapshot())
+        .await
+        .unwrap();
+    release_copy.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(3), rename)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(running.pending_uploads, 1, "the running rename is pending");
+    assert_eq!(
+        running.last_error, None,
+        "a running rename is not interrupted"
+    );
+
+    stage::write_json_atomic(
+        &fs.rename_journal_path("old", "new"),
+        &serde_json::json!({"from": "old", "to": "new", "token": "left", "objects": []}),
+    )
+    .await
+    .unwrap();
+    let interrupted = tokio::time::timeout(Duration::from_secs(3), fs.health_snapshot())
+        .await
+        .unwrap();
+    assert_eq!(
+        interrupted.last_error.as_deref(),
+        Some("Interrupted file changes are retained for recovery")
+    );
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
