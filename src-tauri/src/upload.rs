@@ -671,8 +671,10 @@ pub async fn upload_file(
         registry.insert(task_id.clone(), cancelled.clone());
     }
     // Captured before the upload, as a sync captures its scope before listing.
-    // It may wait for the database, so only after a cancel can be heard: both
-    // upload paths check the flag before sending anything.
+    // It may wait for the database, so only after a cancel can be heard. The
+    // single-part path then checks the flag before its PUT; the multipart path
+    // first finds or creates the multipart upload and its session row, and
+    // checks the flag before each part.
     let scope = db::cache_scope::capture_write_scope([db::cache_scope::CacheConfig::r2(
         &config.account_id,
         &config.access_key_id,

@@ -102,7 +102,10 @@ pub fn get_table_sql() -> &'static str {
     );
 
     -- Local cache writes made while a full sync is scanning, replayed onto
-    -- its staged snapshot before publish (op: put | delete | move).
+    -- its staged snapshot before publish (op: put | delete | move), plus what
+    -- that publish may not vouch for: relist, a write the cache could not
+    -- apply as rows (the key's folders re-list on open), and unvouch, a
+    -- folder whose listing published stale.
     CREATE TABLE IF NOT EXISTS sync_mutation_journal (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         bucket TEXT NOT NULL,
