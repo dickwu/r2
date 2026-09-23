@@ -72,16 +72,17 @@ pub async fn init_db(db_path: &Path) -> DbResult<()> {
     Ok(())
 }
 
-/// Add a column a database created by an older release may lack. Only the
-/// error for a column that already exists (this step ran on an earlier start)
-/// is expected; any other failure is a broken migration and is surfaced.
-async fn add_column_on(conn: &Connection, table: &str, column: &str) -> DbResult<()> {
+/// Add a column a database created by an older release may lack, and say
+/// whether it was added now. Only the error for a column that already exists
+/// (this step ran on an earlier start) is expected; any other failure is a
+/// broken migration and is surfaced.
+async fn add_column_on(conn: &Connection, table: &str, column: &str) -> DbResult<bool> {
     match conn
         .execute(&format!("ALTER TABLE {table} ADD COLUMN {column}"), ())
         .await
     {
-        Ok(_) => Ok(()),
-        Err(error) if error.to_string().contains("duplicate column name") => Ok(()),
+        Ok(_) => Ok(true),
+        Err(error) if error.to_string().contains("duplicate column name") => Ok(false),
         Err(error) => Err(format!("Failed to add {table} column {column}: {error}").into()),
     }
 }
@@ -227,6 +228,22 @@ async fn migrate_on(conn: &Connection) -> DbResult<()> {
         "listed_at INTEGER NOT NULL DEFAULT 0",
     )
     .await?;
+    // Markers from before this column: one that was ever fresh came from a
+    // listing, so its rows are that folder's snapshot. One that never was may
+    // have been left by a write on a folder never listed, and is not trusted.
+    if add_column_on(
+        conn,
+        "prefix_sync_times",
+        "complete INTEGER NOT NULL DEFAULT 0",
+    )
+    .await?
+    {
+        conn.execute(
+            "UPDATE prefix_sync_times SET complete = 1 WHERE last_synced_at > 0 OR listed_at > 0",
+            (),
+        )
+        .await?;
+    }
     cache_scope::initialize_on(conn).await?;
     file_cache::clear_interrupted_work_on(conn).await?;
     Ok(())
@@ -281,11 +298,10 @@ pub use rustfs_buckets::{list_rustfs_buckets_by_account, save_rustfs_buckets_for
 // Re-export file cache functions
 pub use file_cache::{
     begin_local_cache_mutation, begin_sync, calculate_folder_size, clear_file_cache,
-    clear_full_sync_marker, delete_cached_file, delete_cached_files_batch,
-    finish_local_cache_mutation, finish_sync_with_metadata, get_all_cached_files,
-    get_all_directory_nodes, get_bucket_summary, get_cached_file_size, get_directory_node,
-    get_directory_nodes, get_folder_contents, move_cached_file, parse_key, search_cached_files,
-    store_file_batch, update_cached_file,
+    delete_cached_file, delete_cached_files_batch, finish_local_cache_mutation,
+    finish_sync_with_metadata, get_all_cached_files, get_all_directory_nodes, get_bucket_summary,
+    get_cached_file_size, get_directory_node, get_directory_nodes, get_folder_contents,
+    move_cached_file, parse_key, search_cached_files, store_file_batch, update_cached_file,
 };
 // Re-export directory tree builder
 pub use dir_tree::{
@@ -319,7 +335,8 @@ mod tests {
     const V0_3_5_SCHEMA: &str = include_str!("testdata/v0.3.5-schema.sql");
 
     /// What a v0.3.5 user's database holds: accounts, bucket settings, a synced
-    /// and a lazily listed cache, resumable transfers and app settings.
+    /// and a lazily listed cache (one folder still fresh, one written to since
+    /// it was listed), resumable transfers and app settings.
     const V0_3_5_ROWS: &str = "
         INSERT INTO accounts (id, name, created_at, updated_at) VALUES ('acct', 'Main', 1, 1);
         INSERT INTO tokens (id, account_id, name, api_token, access_key_id, secret_access_key, created_at, updated_at)
@@ -338,7 +355,7 @@ mod tests {
             ('photos', 'acct', 'a/', '', 1, 1, 10, 10, '2025-01-01', 5);
         INSERT INTO sync_meta (bucket, account_id, last_sync, file_count) VALUES ('photos', 'acct', 5, 2);
         INSERT INTO prefix_sync_times (bucket, account_id, prefix, last_synced_at, file_count, folder_count)
-            VALUES ('photos', 'acct', 'a/', 6, 1, 0);
+            VALUES ('photos', 'acct', 'a/', 6, 1, 0), ('photos', 'acct', 'b/', 0, 0, 0);
         INSERT INTO cache_scopes (account_id, provider, fingerprint, revision) VALUES ('acct', 'r2', 'fp', 3);
         INSERT INTO upload_sessions (id, file_path, file_size, file_mtime, object_key, bucket, account_id, upload_id, content_type, total_parts, created_at, updated_at, status)
             VALUES ('up', '/tmp/big.bin', 100, 1, 'big.bin', 'photos', 'acct', 'mpu', 'application/octet-stream', 2, 1, 1, 'uploading');
@@ -440,9 +457,18 @@ mod tests {
             rows(&conn, "SELECT generation FROM sync_meta").await,
             vec!["Integer(0)".to_string()]
         );
+        // A marker that was ever fresh came from a listing: its rows are that
+        // folder's snapshot. One that never was is not trusted as one.
         assert_eq!(
-            rows(&conn, "SELECT generation, listed_at FROM prefix_sync_times").await,
-            vec!["Integer(0)|Integer(0)".to_string()]
+            rows(
+                &conn,
+                "SELECT prefix, generation, listed_at, complete FROM prefix_sync_times ORDER BY prefix"
+            )
+            .await,
+            vec![
+                "Text(\"a/\")|Integer(0)|Integer(0)|Integer(1)".to_string(),
+                "Text(\"b/\")|Integer(0)|Integer(0)|Integer(0)".into()
+            ]
         );
         let names = rows(
             &conn,
@@ -498,8 +524,8 @@ mod tests {
             .await
             .unwrap();
 
-        add_column_on(&conn, "sample", "extra TEXT").await.unwrap();
-        add_column_on(&conn, "sample", "extra TEXT").await.unwrap();
+        assert!(add_column_on(&conn, "sample", "extra TEXT").await.unwrap());
+        assert!(!add_column_on(&conn, "sample", "extra TEXT").await.unwrap());
         // Any other failure, such as a table that was never created, surfaces.
         let missing = add_column_on(&conn, "absent", "extra TEXT").await;
         assert!(missing

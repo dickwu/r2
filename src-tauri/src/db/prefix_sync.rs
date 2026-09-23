@@ -14,6 +14,12 @@ pub fn get_table_sql() -> &'static str {
         -- When a listing last published this folder fresh; 0 after a stale
         -- publish. Unlike last_synced_at, local writes never reset it.
         listed_at INTEGER NOT NULL DEFAULT 0,
+        -- Whether the cached rows are the folder's complete snapshot: a
+        -- listing no local write overlapped published them, and every local
+        -- write since was applied to them. Served first, stale, once a write
+        -- has zeroed last_synced_at. A stale publish clears it; the marker a
+        -- write leaves on a folder never listed does not set it.
+        complete INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (bucket, account_id, prefix)
     );
     CREATE INDEX IF NOT EXISTS idx_prefix_sync ON prefix_sync_times(bucket, account_id, prefix);
@@ -37,10 +43,11 @@ pub fn get_table_sql() -> &'static str {
 /// `listed_generation` is the folder's mutation generation captured before the
 /// listing's first request. If a local write advanced it since, the pages may
 /// predate that write: the rows are still written, but without a fresh marker
-/// so the next open re-lists, and without `listed_at`, so a running full sync
-/// publishes its own (journal-replayed) rows for the folder instead of these
-/// -- and, since this listing may have seen changes the scan did not, does not
-/// vouch for them either. Returns whether the listing was published fresh.
+/// or the `complete` bit, so the next open lists live instead of serving them
+/// first, and without `listed_at`, so a running full sync publishes its own
+/// (journal-replayed) rows for the folder instead of these -- and, since this
+/// listing may have seen changes the scan did not, does not vouch for them
+/// either. Returns whether the listing was published fresh.
 pub async fn replace_complete_prefix(
     bucket: &str,
     account_id: &str,
@@ -95,15 +102,16 @@ pub(crate) async fn replace_complete_prefix_on(
         }
         super::dir_tree::replace_prefix_children_on(conn, bucket, account_id, prefix, folders).await?;
         conn.execute(
-            "INSERT INTO prefix_sync_times (bucket, account_id, prefix, last_synced_at, listed_at, file_count, folder_count, generation)
-             VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, 1)
+            "INSERT INTO prefix_sync_times (bucket, account_id, prefix, last_synced_at, listed_at, file_count, folder_count, generation, complete)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, 1, ?7)
              ON CONFLICT (bucket, account_id, prefix) DO UPDATE SET
                last_synced_at = ?4,
                listed_at = ?4,
                file_count = ?5,
                folder_count = ?6,
-               generation = prefix_sync_times.generation + 1",
-            turso::params![bucket, account_id, prefix, listed_at, files.len() as i64, folders.len() as i64],
+               generation = prefix_sync_times.generation + 1,
+               complete = ?7",
+            turso::params![bucket, account_id, prefix, listed_at, files.len() as i64, folders.len() as i64, fresh as i64],
         ).await?;
         super::file_cache::bump_content_revision_on(conn, bucket, account_id).await?;
         Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(fresh)
@@ -530,7 +538,7 @@ mod tests {
         assert_eq!(count(&conn, "prefix_sync_times").await, 1);
         let mut rows = conn
             .query(
-                "SELECT prefix, last_synced_at, generation FROM prefix_sync_times",
+                "SELECT prefix, last_synced_at, generation, complete FROM prefix_sync_times",
                 (),
             )
             .await
@@ -539,6 +547,8 @@ mod tests {
         assert_eq!(row.get::<String>(0).unwrap(), "known/");
         assert_eq!(row.get::<i64>(1).unwrap(), 0);
         assert_eq!(row.get::<i64>(2).unwrap(), 2);
+        // The rows stay the folder's snapshot: served first, stale.
+        assert_eq!(row.get::<i64>(3).unwrap(), 1);
     }
 
     async fn marker(conn: &turso::Connection, prefix: &str) -> Option<i64> {
@@ -553,6 +563,17 @@ mod tests {
             .await
             .unwrap()
             .map(|row| row.get::<i64>(0).unwrap())
+    }
+
+    async fn complete(conn: &turso::Connection, prefix: &str) -> bool {
+        let mut rows = conn
+            .query(
+                "SELECT complete FROM prefix_sync_times WHERE prefix = ?1",
+                turso::params![prefix],
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap() != 0
     }
 
     #[tokio::test]
@@ -583,6 +604,8 @@ mod tests {
         .unwrap();
         assert!(!fresh);
         assert_eq!(marker(&conn, "dir/").await, Some(0));
+        // Its rows may predate the write: they are no snapshot to serve first.
+        assert!(!complete(&conn, "dir/").await);
         assert_eq!(count(&conn, "cached_files").await, 1);
         let root_fresh =
             replace_complete_prefix_on(&conn, "bucket", "account", "", &[], &[], root_listed)
@@ -595,6 +618,7 @@ mod tests {
             .await
             .unwrap());
         assert!(marker(&conn, "dir/").await.unwrap() > 0);
+        assert!(complete(&conn, "dir/").await);
 
         // Plain invalidation advances never-listed folders too.
         let listed = capture_mutation_generation_on(&conn, "bucket", "account", "other/")

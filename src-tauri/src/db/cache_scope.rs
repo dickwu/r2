@@ -390,7 +390,7 @@ async fn withdraw_account_cache_on(conn: &Connection, account_id: &str) -> DbRes
     let prefix = format!("skipped_prefixes:{account_id}:");
     conn.execute(
         "DELETE FROM app_state WHERE substr(key,1,?1)=?2",
-        turso::params![prefix.len() as i64, prefix],
+        turso::params![prefix.chars().count() as i64, prefix],
     )
     .await?;
     // A listing still in flight for this account must not publish as fresh.
@@ -462,25 +462,26 @@ pub async fn validate_app_state_on(conn: &Connection, key: &str, mutation: bool)
     Ok(())
 }
 
-#[allow(dead_code)]
-pub struct PrefixSnapshot {
-    pub prefix_time: Option<i64>,
-    pub full_sync: bool,
-    pub skipped_prefixes: Option<Vec<String>>,
-    pub contents: super::file_cache::FolderContents,
-}
-
-#[allow(dead_code)]
 pub struct PrefixPageSnapshot {
-    pub prefix_time: Option<i64>,
-    pub full_time: Option<i64>,
+    /// The folder's own complete snapshot: a listing no local write
+    /// overlapped published its rows, and every local write since was applied
+    /// to them. Served first even once a write has zeroed the marker; the
+    /// marker a write leaves on a folder never listed is no snapshot.
+    pub prefix_complete: bool,
     /// When the rows were last known current. None once the folder changed
     /// after it was listed: neither its marker nor the full index vouch then.
     pub freshness_time: Option<i64>,
     pub full_sync: bool,
-    pub snapshot_token: Option<String>,
     pub skipped_prefixes: Option<Vec<String>>,
     pub page: super::file_cache::CachedFolderPage,
+    // The marker, index and snapshot token behind the fields above, which
+    // tests read to pin exactly where a page came from.
+    #[cfg(test)]
+    pub prefix_time: Option<i64>,
+    #[cfg(test)]
+    pub full_time: Option<i64>,
+    #[cfg(test)]
+    pub snapshot_token: Option<String>,
 }
 
 /// Capture the folder's mutation generation before a listing's first request.
@@ -493,53 +494,6 @@ pub async fn capture_prefix_generation(
     validate_on(&conn, scope).await?;
     super::prefix_sync::capture_mutation_generation_on(&conn, bucket, &scope.account_id, prefix)
         .await
-}
-
-#[allow(dead_code)]
-pub async fn read_prefix_snapshot(
-    scope: &CacheScope,
-    bucket: &str,
-    prefix: &str,
-) -> DbResult<PrefixSnapshot> {
-    let conn = get_connection()?.lock().await;
-    read_prefix_snapshot_on(&conn, scope, bucket, prefix).await
-}
-
-#[allow(dead_code)]
-async fn read_prefix_snapshot_on(
-    conn: &Connection,
-    scope: &CacheScope,
-    bucket: &str,
-    prefix: &str,
-) -> DbResult<PrefixSnapshot> {
-    validate_on(conn, scope).await?;
-    let mut rows = conn.query("SELECT last_synced_at FROM prefix_sync_times WHERE bucket=?1 AND account_id=?2 AND prefix=?3", turso::params![bucket, scope.account_id.as_str(), prefix]).await?;
-    let prefix_time = rows.next().await?.map(|row| row.get(0)).transpose()?;
-    let mut rows = conn
-        .query(
-            "SELECT file_count FROM sync_meta WHERE bucket=?1 AND account_id=?2",
-            turso::params![bucket, scope.account_id.as_str()],
-        )
-        .await?;
-    let full_sync = rows.next().await?.is_some();
-    let mut rows = conn
-        .query(
-            "SELECT value FROM app_state WHERE key=?1",
-            turso::params![format!("skipped_prefixes:{}:{bucket}", scope.account_id)],
-        )
-        .await?;
-    let skipped_prefixes = match rows.next().await? {
-        None => Some(Vec::new()),
-        Some(row) => serde_json::from_str(&row.get::<String>(0)?).ok(),
-    };
-    let contents =
-        super::file_cache::folder_contents_on(conn, bucket, &scope.account_id, prefix).await?;
-    Ok(PrefixSnapshot {
-        prefix_time,
-        full_sync,
-        skipped_prefixes,
-        contents,
-    })
 }
 
 pub async fn read_prefix_page(
@@ -574,16 +528,24 @@ async fn read_prefix_page_on(
 ) -> DbResult<PrefixPageSnapshot> {
     validate_on(conn, scope).await?;
     super::file_cache::ensure_no_local_cache_mutation_on(conn, bucket, &scope.account_id).await?;
-    let mut rows = conn.query("SELECT last_synced_at,generation FROM prefix_sync_times WHERE bucket=?1 AND account_id=?2 AND prefix=?3", turso::params![bucket, scope.account_id.as_str(), prefix]).await?;
+    let mut rows = conn.query("SELECT last_synced_at,generation,complete FROM prefix_sync_times WHERE bucket=?1 AND account_id=?2 AND prefix=?3", turso::params![bucket, scope.account_id.as_str(), prefix]).await?;
     let prefix_row = match rows.next().await? {
-        Some(row) => Some((row.get::<i64>(0)?, row.get::<i64>(1)?)),
+        Some(row) => Some((
+            row.get::<i64>(0)?,
+            row.get::<i64>(1)?,
+            row.get::<i64>(2)? != 0,
+        )),
         None => None,
     };
-    let prefix_marker = prefix_row.filter(|(time, _)| *time > 0);
+    // The folder's own complete snapshot, fresh or not; the marker a write
+    // leaves on a folder never listed is not one.
+    let prefix_snapshot = prefix_row.filter(|(_, _, complete)| *complete);
+    let prefix_complete = prefix_snapshot.is_some();
+    let prefix_marker = prefix_row.filter(|(time, _, _)| *time > 0);
     // A kept zero marker: the folder changed locally after it was listed, or
     // its last listing overlapped such a change.
     let prefix_changed = prefix_row.is_some() && prefix_marker.is_none();
-    let prefix_time = prefix_marker.map(|(time, _)| time);
+    let prefix_time = prefix_marker.map(|(time, _, _)| time);
     let mut rows = conn
         .query(
             "SELECT last_sync,generation FROM sync_meta WHERE bucket=?1 AND account_id=?2",
@@ -603,8 +565,10 @@ async fn read_prefix_page_on(
     let full_sync = full_marker.is_some();
     let content_revision =
         super::file_cache::content_revision_on(conn, bucket, &scope.account_id).await?;
-    let snapshot_token = prefix_marker
-        .map(|(time, generation)| format!("prefix:{time}:{generation}:{content_revision}"))
+    // Pages come from the folder's own snapshot when it has one, else from the
+    // index; a cursor stays bound to whichever produced its first page.
+    let snapshot_token = prefix_snapshot
+        .map(|(time, generation, _)| format!("prefix:{time}:{generation}:{content_revision}"))
         .or_else(|| {
             full_marker
                 .map(|(time, generation)| format!("full:{time}:{generation}:{content_revision}"))
@@ -630,13 +594,17 @@ async fn read_prefix_page_on(
     )
     .await?;
     Ok(PrefixPageSnapshot {
-        prefix_time,
-        full_time,
+        prefix_complete,
         freshness_time,
         full_sync,
-        snapshot_token,
         skipped_prefixes,
         page,
+        #[cfg(test)]
+        prefix_time,
+        #[cfg(test)]
+        full_time,
+        #[cfg(test)]
+        snapshot_token,
     })
 }
 
@@ -936,6 +904,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_reset_drops_the_skipped_prefix_note_of_a_non_ascii_account() {
+        let (_db, conn) = fixture().await;
+        conn.execute(
+            "INSERT INTO app_state(key,value) VALUES ('skipped_prefixes:账户:bucket','[\"broken/\"]'), ('skipped_prefixes:other:bucket','[]')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        reset_account_on(&conn, "账户").await.unwrap();
+
+        assert_eq!(
+            app_state_keys(&conn).await,
+            vec!["skipped_prefixes:other:bucket".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn unscoped_cache_write_withdraws_rows_but_never_cancels_a_sync() {
         let (_db, conn) = fixture().await;
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
@@ -1224,6 +1210,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_listed_folder_written_to_locally_stays_complete_but_stale() {
+        let (_db, conn) = fixture().await;
+        let scope = capture_on(&conn, &config("a.example")).await.unwrap();
+        in_scope(scope.clone(), async {
+            list_root(&conn, &[file("a.txt")]).await
+        })
+        .await
+        .unwrap();
+        // A local upload into the listed root drops its marker to zero. With
+        // no full index, the rows are still the folder's complete snapshot:
+        // served first and stale, then re-listed.
+        super::super::prefix_sync::note_local_mutation_on(&conn, "bucket", "account", &["b.txt"])
+            .await
+            .unwrap();
+        let root = read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
+            .await
+            .unwrap();
+        assert!(root.prefix_complete);
+        assert!(root.prefix_time.is_none());
+        assert!(root.freshness_time.is_none());
+        assert!(!root.full_sync);
+        assert_eq!(root.snapshot_token.as_deref(), Some("prefix:0:2:1"));
+        assert_eq!(root.page.files[0].key, "a.txt");
+
+        // A write the cache could not apply marks its folder and every
+        // ancestor changed. The root keeps its snapshot; a folder never listed
+        // has only the marker, which is no snapshot at all.
+        super::super::prefix_sync::note_unapplied_write_on(
+            &conn,
+            "bucket",
+            "account",
+            &["never/in.txt"],
+        )
+        .await
+        .unwrap();
+        let root = read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
+            .await
+            .unwrap();
+        assert!(root.prefix_complete);
+        assert!(root.freshness_time.is_none());
+        assert_eq!(root.snapshot_token.as_deref(), Some("prefix:0:3:1"));
+        let never = read_prefix_page_on(&conn, &scope, "bucket", "never/", None, 10)
+            .await
+            .unwrap();
+        assert!(!never.prefix_complete);
+        assert!(never.prefix_time.is_none());
+        assert!(never.freshness_time.is_none());
+        assert!(never.snapshot_token.is_none());
+        assert!(never.page.files.is_empty());
+    }
+
+    #[tokio::test]
     async fn endpoint_edit_fences_inflight_publish_and_preserves_new_namespace() {
         let (_db, conn) = fixture().await;
         let scope_a = capture_on(&conn, &config("a.example")).await.unwrap();
@@ -1255,14 +1293,14 @@ mod tests {
             .await
             .unwrap();
             assert!(capture_on(&conn, &config("a.example")).await.is_err());
-            assert!(read_prefix_snapshot_on(&conn, &scope_a, "bucket", "")
+            assert!(read_prefix_page_on(&conn, &scope_a, "bucket", "", None, 10)
                 .await
                 .is_err());
             let scope_b = capture_on(&conn, &config("b.example")).await.unwrap();
-            let empty = read_prefix_snapshot_on(&conn, &scope_b, "bucket", "")
+            let empty = read_prefix_page_on(&conn, &scope_b, "bucket", "", None, 10)
                 .await
                 .unwrap();
-            assert!(empty.contents.files.is_empty());
+            assert!(empty.page.files.is_empty());
             assert!(empty.prefix_time.is_none());
             assert!(!empty.full_sync);
             publish_on(&conn, scope_b.clone(), "from-b").await.unwrap();
@@ -1271,10 +1309,10 @@ mod tests {
         release_tx.send(()).unwrap();
         assert!(old_request.await.unwrap().is_err());
         let conn = shared.lock().await;
-        let snapshot = read_prefix_snapshot_on(&conn, &scope_b, "bucket", "")
+        let snapshot = read_prefix_page_on(&conn, &scope_b, "bucket", "", None, 10)
             .await
             .unwrap();
-        assert_eq!(snapshot.contents.files[0].key, "from-b");
+        assert_eq!(snapshot.page.files[0].key, "from-b");
         // An old A task also cannot regain authority after A -> B -> A.
         super::super::minio_accounts::update_minio_account_on(
             &conn,
@@ -1315,10 +1353,10 @@ mod tests {
             scope
         );
         assert_eq!(
-            read_prefix_snapshot_on(&conn, &scope, "bucket", "")
+            read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
                 .await
                 .unwrap()
-                .contents
+                .page
                 .files[0]
                 .key,
             "warm"
@@ -1383,10 +1421,10 @@ mod tests {
         conn.execute("INSERT INTO sync_meta(bucket,account_id,last_sync,file_count) VALUES ('bucket','account',1,1)", ()).await.unwrap();
         initialize_on(&conn).await.unwrap();
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
-        let snapshot = read_prefix_snapshot_on(&conn, &scope, "bucket", "")
+        let snapshot = read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
             .await
             .unwrap();
-        assert!(snapshot.contents.files.is_empty());
+        assert!(snapshot.page.files.is_empty());
         assert!(snapshot.prefix_time.is_none());
         assert!(!snapshot.full_sync);
         publish_on(&conn, scope.clone(), "proven").await.unwrap();
@@ -1403,10 +1441,10 @@ mod tests {
             scope
         );
         assert_eq!(
-            read_prefix_snapshot_on(&conn, &scope, "bucket", "")
+            read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
                 .await
                 .unwrap()
-                .contents
+                .page
                 .files[0]
                 .key,
             "proven"
@@ -1441,15 +1479,19 @@ mod tests {
         narrow.access_key_id = "narrow".into();
         narrow.secret_access_key = "narrow-secret".into();
         let scope_narrow = capture_on(&conn, &narrow).await.unwrap();
-        assert!(read_prefix_snapshot_on(&conn, &scope_wide, "bucket", "")
-            .await
-            .is_err());
-        assert!(read_prefix_snapshot_on(&conn, &scope_narrow, "bucket", "")
-            .await
-            .unwrap()
-            .contents
-            .files
-            .is_empty());
+        assert!(
+            read_prefix_page_on(&conn, &scope_wide, "bucket", "", None, 10)
+                .await
+                .is_err()
+        );
+        assert!(
+            read_prefix_page_on(&conn, &scope_narrow, "bucket", "", None, 10)
+                .await
+                .unwrap()
+                .page
+                .files
+                .is_empty()
+        );
         // A pending wide-token metadata read cannot run inside the new scope.
         assert!(
             in_scope(scope_wide, check_context_on(&conn, "account", false))
@@ -1489,7 +1531,7 @@ mod tests {
             stored_scope_on(&conn, "account").await.unwrap().as_ref(),
             Some(&scope)
         );
-        assert!(read_prefix_snapshot_on(&conn, &scope, "bucket", "")
+        assert!(read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
             .await
             .is_err());
         assert!(publish_on(&conn, scope, "after-delete").await.is_err());
