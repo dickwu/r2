@@ -28,7 +28,9 @@ function committedGate(id) {
 
 const sha256Like = (fill) => fill.repeat(64);
 
-// Fixture repositories carry their own identity and never run user hooks.
+// Fixture repositories carry their own identity, never run user hooks (the
+// hooks path is a directory that does not exist, unambiguous on every OS) and
+// never let a runner's core.autocrlf decide whether LF content reads dirty.
 function git(cwd, args) {
   return execFileSync(
     'git',
@@ -40,7 +42,9 @@ function git(cwd, args) {
       '-c',
       'commit.gpgsign=false',
       '-c',
-      'core.hooksPath=/dev/null',
+      'core.autocrlf=false',
+      '-c',
+      `core.hooksPath=${join(cwd, 'no-hooks')}`,
       ...args,
     ],
     { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000 }
