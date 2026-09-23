@@ -329,13 +329,23 @@ pub async fn pause_all_moves(
 
 /// A user's resume starts the automatic retries over: the budget a task
 /// spent before it paused or failed does not count against its next run.
-async fn reset_retry_budget(task_id: &str) -> Result<(), String> {
-    db::move_sessions::clear_move_retry(task_id)
-        .await
-        .map_err(|e| format!("Failed to reset the move's retry budget: {}", e))?;
-    db::move_sessions::clear_move_task_retry(task_id)
-        .await
-        .map_err(|e| format!("Failed to reset the move's retry budget: {}", e))
+/// Best-effort, like the worker's own clear on its success path: a corrupt
+/// journal must not block the resume itself, only leave the budget as it
+/// was, since a bad journal already surfaces later as `needs_action` when
+/// the worker touches the task.
+async fn reset_retry_budget(task_id: &str) {
+    if let Err(e) = db::move_sessions::clear_move_retry(task_id).await {
+        warn!(
+            "reset_retry_budget: could not reset journal retry for task {}: {}",
+            task_id, e
+        );
+    }
+    if let Err(e) = db::move_sessions::clear_move_task_retry(task_id).await {
+        warn!(
+            "reset_retry_budget: could not reset preflight retry for task {}: {}",
+            task_id, e
+        );
+    }
 }
 
 /// The persisted side of resuming every paused move of a source: its retry
@@ -363,7 +373,7 @@ async fn resume_paused_moves(source_bucket: &str, source_account_id: &str) -> Re
     }
 
     for task_id in &paused_ids {
-        reset_retry_budget(task_id).await?;
+        reset_retry_budget(task_id).await;
     }
 
     // Clear pause flags for tasks that will be resumed
@@ -475,7 +485,7 @@ async fn resume_move_task(
         (None, None) => {}
         _ => return Err("Both source and destination credentials are required to resume".into()),
     }
-    reset_retry_budget(task_id).await?;
+    reset_retry_budget(task_id).await;
     MOVE_PAUSE_REGISTRY.lock().unwrap().remove(task_id);
     MOVE_CANCEL_REGISTRY.lock().unwrap().remove(task_id);
     db::update_move_status(task_id, "pending", None)
@@ -692,6 +702,19 @@ mod tests {
             .unwrap();
     }
 
+    /// Damages a task's persisted journal so it can no longer be parsed,
+    /// simulating the corrupt `move_journal` row that made a manual resume
+    /// fail outright before the retry-budget reset became best-effort.
+    async fn corrupt_journal(task_id: &str) {
+        let conn = db::get_connection().unwrap().lock().await;
+        conn.execute(
+            "UPDATE move_journal SET data = 'not valid json' WHERE task_id = ?1",
+            turso::params![task_id],
+        )
+        .await
+        .unwrap();
+    }
+
     /// The same for a task that failed before it had a journal.
     async fn exhaust_preflight_retries(task_id: &str) {
         for _ in 0..MAX_PERSISTED_RETRIES {
@@ -823,6 +846,88 @@ mod tests {
             .is_some());
         assert!(
             schedule_move_task_retry(&preflight.id, "preflight", "transient")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_a_move_with_a_corrupt_journal_still_resumes() {
+        let _guard = test_db_guard().await;
+        let (template, mut journal) = journal_fixture("resume-corrupt-journal", 8).await;
+        // A source of its own: the fix leaves this task's status 'pending'
+        // with a journal no query can parse, and a shared-scope scan (e.g.
+        // the queue's next-retry lookup) must never see it.
+        let session = MoveSession {
+            id: format!("{}-corrupt", template.id),
+            source_bucket: "resume-corrupt-journal-bucket".into(),
+            status: "paused".into(),
+            ..template
+        };
+        db::move_sessions::create_move_session(&session)
+            .await
+            .unwrap();
+        journal.task_id = session.id.clone();
+        journal.stage = "transferring".into();
+        save_move_journal(&journal).await.unwrap();
+        corrupt_journal(&session.id).await;
+
+        let resumed = resume_move_task(&session.id, None, None).await.unwrap();
+        assert_eq!(resumed.id, session.id);
+        assert_eq!(
+            get_move_session(&session.id).await.unwrap().unwrap().status,
+            "pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_all_moves_resets_the_healthy_budget_despite_a_sibling_with_a_corrupt_journal()
+    {
+        let _guard = test_db_guard().await;
+        let (template, mut journal) = journal_fixture("resume-all-corrupt", 8).await;
+        // A source of its own, so no other test's paused tasks are resumed.
+        let source_bucket = "resume-all-corrupt-bucket";
+        let paused = |suffix: &str| MoveSession {
+            id: format!("{}-{suffix}", template.id),
+            source_bucket: source_bucket.into(),
+            status: "paused".into(),
+            ..template.clone()
+        };
+        let corrupt = paused("corrupt");
+        let healthy = paused("healthy");
+        for session in [&corrupt, &healthy] {
+            db::move_sessions::create_move_session(session)
+                .await
+                .unwrap();
+        }
+        journal.task_id = corrupt.id.clone();
+        journal.stage = "transferring".into();
+        save_move_journal(&journal).await.unwrap();
+        corrupt_journal(&corrupt.id).await;
+        exhaust_preflight_retries(&healthy.id).await;
+        for session in [&corrupt, &healthy] {
+            db::update_move_status(&session.id, "paused", None)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            resume_paused_moves(source_bucket, &template.source_account_id)
+                .await
+                .unwrap(),
+            2
+        );
+        for session in [&corrupt, &healthy] {
+            assert_eq!(
+                get_move_session(&session.id).await.unwrap().unwrap().status,
+                "pending"
+            );
+        }
+        // The healthy sibling's budget was still reset even though the
+        // corrupt task's journal could not be cleared.
+        assert!(
+            schedule_move_task_retry(&healthy.id, "preflight", "transient")
                 .await
                 .unwrap()
                 .is_some()
