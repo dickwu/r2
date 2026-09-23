@@ -503,6 +503,16 @@ fn retry_phase(error: &str, fallback: &str) -> String {
         .to_string()
 }
 
+/// When a queue run that started nothing should look again on its own: only
+/// for a retry that is not due yet. With every slot busy the task that frees
+/// one re-signals the queue, and that run starts whatever is due by then; a
+/// wakeup for an already-due retry would fire at once, run the queue into
+/// this same branch and spin until a slot frees. Journal retries also keep
+/// their own per-task sleeper, and preflight retries a source wakeup.
+fn retry_wakeup_after(slots_available: i64, next_attempt_at: Option<i64>, now: i64) -> Option<i64> {
+    next_attempt_at.filter(|&next| slots_available > 0 && next > now)
+}
+
 fn schedule_retry_wakeup(app: AppHandle, session: &MoveSession, next_attempt_at: i64) {
     let task_id = session.id.clone();
     let source_bucket = session.source_bucket.clone();
@@ -806,13 +816,23 @@ async fn continue_move_queue(app: &AppHandle, source_bucket: &str, source_accoun
     match get_pending_sessions_to_start(source_bucket, source_account_id).await {
         Ok((next_sessions, slots_available)) => {
             if next_sessions.is_empty() || slots_available <= 0 {
-                if let Ok(Some(next_attempt_at)) =
+                // With no slot there is nothing to wake for: the task that
+                // frees one re-signals the queue.
+                let next_attempt_at = if slots_available > 0 {
                     db::move_sessions::get_next_move_retry_attempt_for_source(
                         source_bucket,
                         source_account_id,
                     )
                     .await
-                {
+                    .unwrap_or_default()
+                } else {
+                    None
+                };
+                if let Some(next_attempt_at) = retry_wakeup_after(
+                    slots_available,
+                    next_attempt_at,
+                    chrono::Utc::now().timestamp(),
+                ) {
                     schedule_retry_wakeup_for_source(
                         app.clone(),
                         source_bucket.to_string(),
@@ -1000,6 +1020,119 @@ mod recovery_tests {
             "delete_pending"
         );
     }
+
+    #[test]
+    fn a_due_retry_never_wakes_the_queue_while_every_slot_is_busy() {
+        use super::retry_wakeup_after;
+        let now = 1_700_000_000;
+        // Every slot busy: the task that frees one re-signals the queue, and
+        // a wakeup for an already-due retry would fire at once, run the
+        // queue into the same branch and spin until then.
+        assert_eq!(retry_wakeup_after(0, Some(now - 60), now), None);
+        assert_eq!(retry_wakeup_after(0, Some(now), now), None);
+        assert_eq!(retry_wakeup_after(0, Some(now + 60), now), None);
+        // With a slot free, a due retry was picked by the pending query
+        // already; only a retry not due yet is worth a timed wakeup.
+        assert_eq!(retry_wakeup_after(1, Some(now - 60), now), None);
+        assert_eq!(retry_wakeup_after(1, Some(now), now), None);
+        assert_eq!(retry_wakeup_after(1, Some(now + 60), now), Some(now + 60));
+        assert_eq!(retry_wakeup_after(1, None, now), None);
+    }
+
+    #[tokio::test]
+    async fn a_busy_queue_schedules_nothing_and_starts_the_due_retry_once_a_slot_frees() {
+        use super::*;
+        use crate::db::move_sessions::MoveRetrySchedule;
+        use crate::move_transfer::stream::tests::{journal_fixture, test_db_guard};
+        let _guard = test_db_guard().await;
+        // journal_fixture opens the shared test database; this queue is a
+        // source of its own so no other test's tasks count as active.
+        let (template, mut journal) = journal_fixture("queue-spin", 8).await;
+        let source_bucket = "queue-spin-bucket";
+        let session = |id: String, status: &str| MoveSession {
+            id,
+            source_bucket: source_bucket.into(),
+            status: status.into(),
+            ..template.clone()
+        };
+        for slot in 0..MAX_CONCURRENT_MOVES {
+            db::move_sessions::create_move_session(&session(
+                format!("{}-running-{slot}", template.id),
+                "uploading",
+            ))
+            .await
+            .unwrap();
+        }
+        let pending = session(format!("{}-pending", template.id), "pending");
+        db::move_sessions::create_move_session(&pending)
+            .await
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        journal.task_id = pending.id.clone();
+        journal.stage = "transferring".into();
+        journal.retry = MoveRetrySchedule {
+            next_attempt_at: Some(now - 60),
+            attempt_count: 1,
+            last_error_class: Some("transient".into()),
+            phase: Some("GET".into()),
+        };
+        save_move_journal(&journal).await.unwrap();
+
+        // Every slot busy and a retry long due: nothing to start, and the
+        // queue must not wake itself for the retry.
+        let (sessions, slots) =
+            get_pending_sessions_to_start(source_bucket, &template.source_account_id)
+                .await
+                .unwrap();
+        assert!(sessions.is_empty());
+        assert_eq!(slots, 0);
+        let next = db::move_sessions::get_next_move_retry_attempt_for_source(
+            source_bucket,
+            &template.source_account_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(next, Some(now - 60));
+        assert_eq!(
+            retry_wakeup_after(slots, next, chrono::Utc::now().timestamp()),
+            None
+        );
+
+        // A slot frees: the run its task signals starts the due retry.
+        db::update_move_status(&format!("{}-running-0", template.id), "success", None)
+            .await
+            .unwrap();
+        let (sessions, slots) =
+            get_pending_sessions_to_start(source_bucket, &template.source_account_id)
+                .await
+                .unwrap();
+        assert_eq!(
+            sessions.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            [pending.id.as_str()]
+        );
+        assert_eq!(slots, 1);
+
+        // A retry not due yet is waited for at its time.
+        journal.retry.next_attempt_at = Some(now + 60);
+        save_move_journal(&journal).await.unwrap();
+        let (sessions, slots) =
+            get_pending_sessions_to_start(source_bucket, &template.source_account_id)
+                .await
+                .unwrap();
+        assert!(sessions.is_empty());
+        assert_eq!(slots, 1);
+        let next = db::move_sessions::get_next_move_retry_attempt_for_source(
+            source_bucket,
+            &template.source_account_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            retry_wakeup_after(slots, next, chrono::Utc::now().timestamp()),
+            Some(now + 60)
+        );
+    }
+
     #[tokio::test]
     async fn legacy_transferring_multipart_verifies_bytes_before_adopting_destination() {
         use super::*;

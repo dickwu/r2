@@ -162,7 +162,7 @@ pub async fn save_move_journal(journal: &MoveJournal) -> DbResult<()> {
     Ok(())
 }
 
-const MAX_PERSISTED_RETRIES: u32 = 20;
+pub(crate) const MAX_PERSISTED_RETRIES: u32 = 20;
 const MAX_MOVE_RETRY_DELAY_SECS: i64 = 30;
 
 fn move_retry_delay_secs(attempt: u32) -> i64 {
