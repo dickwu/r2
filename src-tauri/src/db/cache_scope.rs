@@ -474,6 +474,11 @@ pub struct PrefixSnapshot {
 pub struct PrefixPageSnapshot {
     pub prefix_time: Option<i64>,
     pub full_time: Option<i64>,
+    /// The folder's own complete snapshot: a listing no local write
+    /// overlapped published its rows, and every local write since was applied
+    /// to them. Served first even once a write has zeroed the marker; the
+    /// marker a write leaves on a folder never listed is no snapshot.
+    pub prefix_complete: bool,
     /// When the rows were last known current. None once the folder changed
     /// after it was listed: neither its marker nor the full index vouch then.
     pub freshness_time: Option<i64>,
@@ -574,16 +579,24 @@ async fn read_prefix_page_on(
 ) -> DbResult<PrefixPageSnapshot> {
     validate_on(conn, scope).await?;
     super::file_cache::ensure_no_local_cache_mutation_on(conn, bucket, &scope.account_id).await?;
-    let mut rows = conn.query("SELECT last_synced_at,generation FROM prefix_sync_times WHERE bucket=?1 AND account_id=?2 AND prefix=?3", turso::params![bucket, scope.account_id.as_str(), prefix]).await?;
+    let mut rows = conn.query("SELECT last_synced_at,generation,complete FROM prefix_sync_times WHERE bucket=?1 AND account_id=?2 AND prefix=?3", turso::params![bucket, scope.account_id.as_str(), prefix]).await?;
     let prefix_row = match rows.next().await? {
-        Some(row) => Some((row.get::<i64>(0)?, row.get::<i64>(1)?)),
+        Some(row) => Some((
+            row.get::<i64>(0)?,
+            row.get::<i64>(1)?,
+            row.get::<i64>(2)? != 0,
+        )),
         None => None,
     };
-    let prefix_marker = prefix_row.filter(|(time, _)| *time > 0);
+    // The folder's own complete snapshot, fresh or not; the marker a write
+    // leaves on a folder never listed is not one.
+    let prefix_snapshot = prefix_row.filter(|(_, _, complete)| *complete);
+    let prefix_complete = prefix_snapshot.is_some();
+    let prefix_marker = prefix_row.filter(|(time, _, _)| *time > 0);
     // A kept zero marker: the folder changed locally after it was listed, or
     // its last listing overlapped such a change.
     let prefix_changed = prefix_row.is_some() && prefix_marker.is_none();
-    let prefix_time = prefix_marker.map(|(time, _)| time);
+    let prefix_time = prefix_marker.map(|(time, _, _)| time);
     let mut rows = conn
         .query(
             "SELECT last_sync,generation FROM sync_meta WHERE bucket=?1 AND account_id=?2",
@@ -603,8 +616,10 @@ async fn read_prefix_page_on(
     let full_sync = full_marker.is_some();
     let content_revision =
         super::file_cache::content_revision_on(conn, bucket, &scope.account_id).await?;
-    let snapshot_token = prefix_marker
-        .map(|(time, generation)| format!("prefix:{time}:{generation}:{content_revision}"))
+    // Pages come from the folder's own snapshot when it has one, else from the
+    // index; a cursor stays bound to whichever produced its first page.
+    let snapshot_token = prefix_snapshot
+        .map(|(time, generation, _)| format!("prefix:{time}:{generation}:{content_revision}"))
         .or_else(|| {
             full_marker
                 .map(|(time, generation)| format!("full:{time}:{generation}:{content_revision}"))
@@ -632,6 +647,7 @@ async fn read_prefix_page_on(
     Ok(PrefixPageSnapshot {
         prefix_time,
         full_time,
+        prefix_complete,
         freshness_time,
         full_sync,
         snapshot_token,
@@ -1221,6 +1237,58 @@ mod tests {
         assert_eq!(first.full_time, Some(123));
         assert_eq!(first.snapshot_token.as_deref(), Some("full:123:7:0"));
         assert!(first.page.next_cursor.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_listed_folder_written_to_locally_stays_complete_but_stale() {
+        let (_db, conn) = fixture().await;
+        let scope = capture_on(&conn, &config("a.example")).await.unwrap();
+        in_scope(scope.clone(), async {
+            list_root(&conn, &[file("a.txt")]).await
+        })
+        .await
+        .unwrap();
+        // A local upload into the listed root drops its marker to zero. With
+        // no full index, the rows are still the folder's complete snapshot:
+        // served first and stale, then re-listed.
+        super::super::prefix_sync::note_local_mutation_on(&conn, "bucket", "account", &["b.txt"])
+            .await
+            .unwrap();
+        let root = read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
+            .await
+            .unwrap();
+        assert!(root.prefix_complete);
+        assert!(root.prefix_time.is_none());
+        assert!(root.freshness_time.is_none());
+        assert!(!root.full_sync);
+        assert_eq!(root.snapshot_token.as_deref(), Some("prefix:0:2:1"));
+        assert_eq!(root.page.files[0].key, "a.txt");
+
+        // A write the cache could not apply marks its folder and every
+        // ancestor changed. The root keeps its snapshot; a folder never listed
+        // has only the marker, which is no snapshot at all.
+        super::super::prefix_sync::note_unapplied_write_on(
+            &conn,
+            "bucket",
+            "account",
+            &["never/in.txt"],
+        )
+        .await
+        .unwrap();
+        let root = read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
+            .await
+            .unwrap();
+        assert!(root.prefix_complete);
+        assert!(root.freshness_time.is_none());
+        assert_eq!(root.snapshot_token.as_deref(), Some("prefix:0:3:1"));
+        let never = read_prefix_page_on(&conn, &scope, "bucket", "never/", None, 10)
+            .await
+            .unwrap();
+        assert!(!never.prefix_complete);
+        assert!(never.prefix_time.is_none());
+        assert!(never.freshness_time.is_none());
+        assert!(never.snapshot_token.is_none());
+        assert!(never.page.files.is_empty());
     }
 
     #[tokio::test]

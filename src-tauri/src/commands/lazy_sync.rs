@@ -303,7 +303,9 @@ pub async fn get_prefix_cache_page(input: LazyListInput) -> Result<Option<Folder
             .skipped_prefixes
             .as_ref()
             .is_some_and(|skipped| !is_under_skipped_prefix(&input.prefix, skipped));
-    let cache_complete = snapshot.prefix_time.is_some() || complete_index;
+    // The folder's own snapshot, like the index, is served even after a local
+    // write expired its marker: stale, ahead of the listing that revalidates.
+    let cache_complete = snapshot.prefix_complete || complete_index;
     if !cache_complete {
         return Ok(None);
     }
@@ -367,13 +369,12 @@ async fn read_prefix_cache_scoped(
         cache_scope::read_prefix_page(cache_scope, &input.bucket, &input.prefix, None, 1000)
             .await
             .map_err(|e| format!("DB error: {e}"))?;
-    let prefix_time = snapshot.prefix_time;
     let complete_index = snapshot.full_sync
         && snapshot
             .skipped_prefixes
             .as_ref()
             .is_some_and(|skipped| !is_under_skipped_prefix(&input.prefix, skipped));
-    let cache_complete = prefix_time.is_some() || complete_index;
+    let cache_complete = snapshot.prefix_complete || complete_index;
     let page = snapshot.page;
     if !cache_complete {
         return Ok(None);
@@ -441,7 +442,7 @@ async fn emit_fresh_cached_prefix_stream(
                 .skipped_prefixes
                 .as_ref()
                 .is_some_and(|skipped| !is_under_skipped_prefix(&input.prefix, skipped));
-        let cache_complete = snapshot.prefix_time.is_some() || complete_index;
+        let cache_complete = snapshot.prefix_complete || complete_index;
         let fresh = snapshot.freshness_time.is_some_and(|time| {
             let age = chrono::Utc::now().timestamp() - time;
             (0..DIRECTORY_TTL_SECS).contains(&age)
@@ -2514,6 +2515,126 @@ mod tests {
             .unwrap();
         assert_eq!(cached.freshness, "fresh");
         assert!(!cached.files.iter().any(|file| file.key == "k.txt"));
+    }
+
+    #[tokio::test]
+    async fn a_listed_folder_written_to_locally_is_served_stale_before_it_relists() {
+        use crate::test_s3::{serve, Response};
+        const ACCOUNT: &str = "listed-then-written-account";
+        const BUCKET: &str = "warm";
+        let fixture = serve(|request| async move {
+            if request.method == "DELETE" {
+                return Response::empty(204);
+            }
+            Response::xml(200, &list_page_xml(&["a.txt", "k.txt"], None))
+        })
+        .await;
+        let host = fixture
+            .endpoint
+            .strip_prefix("http://")
+            .unwrap()
+            .to_string();
+        crate::db::init_test_db().await;
+        crate::db::get_connection()
+            .unwrap()
+            .lock()
+            .await
+            .execute(
+                "INSERT INTO minio_accounts (id, access_key_id, secret_access_key, endpoint_scheme, endpoint_host, force_path_style, created_at, updated_at)
+                 VALUES (?1, 'fixture', 'fixture-secret', 'http', ?2, 1, 0, 0)",
+                turso::params![ACCOUNT, host.clone()],
+            )
+            .await
+            .unwrap();
+        let input = LazyListInput {
+            account_id: ACCOUNT.into(),
+            bucket: BUCKET.into(),
+            access_key_id: "fixture".into(),
+            secret_access_key: "fixture-secret".into(),
+            prefix: String::new(),
+            provider: Some("minio".into()),
+            endpoint_scheme: Some("http".into()),
+            endpoint_host: Some(host.clone()),
+            force_path_style: Some(true),
+            region: None,
+            force_refresh: Some(true),
+            request_id: None,
+            generation: None,
+            cache_cursor: None,
+            page_index: None,
+            run_id: None,
+        };
+        let scope = CacheScope::capture(&cache_config(&input)).await.unwrap();
+        let keys = |page: &FolderPage| -> Vec<String> {
+            page.page
+                .files
+                .iter()
+                .map(|file| file.key.clone())
+                .collect()
+        };
+
+        // The folder is opened once: its listing publishes fresh.
+        let listed = join_prefix_flight(input.clone(), scope.clone())
+            .await
+            .unwrap();
+        assert_eq!(flight_result(&listed.0).await.unwrap().freshness, "fresh");
+        let page = get_prefix_cache_page(input.clone()).await.unwrap().unwrap();
+        assert_eq!((page.page.freshness, page.page.complete), ("fresh", true));
+
+        // The user deletes k.txt. The delete command removes it from the
+        // provider and from the cached rows, and the folder's marker drops to
+        // zero. No full index exists: the bucket was never synced. As in
+        // v0.3.5, the rows are still the folder's first frame, served stale
+        // ahead of the listing that revalidates them.
+        crate::commands::delete_minio_object_with(
+            crate::commands::MinioConfigInput {
+                account_id: ACCOUNT.into(),
+                bucket: BUCKET.into(),
+                access_key_id: "fixture".into(),
+                secret_access_key: "fixture-secret".into(),
+                endpoint_scheme: "http".into(),
+                endpoint_host: host,
+                force_path_style: true,
+            },
+            "k.txt".into(),
+            &crate::commands::upload_cache::RecordedCacheEvents::default(),
+        )
+        .await
+        .unwrap();
+        let page = get_prefix_cache_page(input.clone())
+            .await
+            .unwrap()
+            .expect("the folder's cached rows are its first frame");
+        assert_eq!((page.page.freshness, page.page.complete), ("stale", true));
+        assert_eq!(keys(&page), ["a.txt"]);
+
+        // A write the cache could not apply (a Move finishing in the
+        // background) leaves a zero marker on its folder and every ancestor.
+        // The root, listed before, keeps its rows as a stale first frame; a
+        // folder never listed holds only the marker, which is no snapshot.
+        crate::commands::upload_cache::update_cache_after_upload(
+            &crate::commands::upload_cache::RecordedCacheEvents::default(),
+            BUCKET,
+            ACCOUNT,
+            "never/in.txt",
+            9,
+            "now",
+        )
+        .await
+        .unwrap();
+        let root = get_prefix_cache_page(input.clone()).await.unwrap().unwrap();
+        assert_eq!((root.page.freshness, root.page.complete), ("stale", true));
+        assert_eq!(keys(&root), ["a.txt"]);
+        let never = get_prefix_cache_page(LazyListInput {
+            prefix: "never/".into(),
+            ..input
+        })
+        .await
+        .unwrap();
+        assert!(
+            never.is_none(),
+            "a marker on a folder never listed was served as a snapshot"
+        );
     }
 
     #[test]
