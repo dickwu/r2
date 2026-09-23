@@ -421,6 +421,18 @@ pub async fn note_reclaimable(path: &Path, bytes: u64) {
     });
 }
 
+/// The operations of a data file's intact records in the WAL, in file order.
+#[cfg(test)]
+pub async fn ops_for(path: &Path, data_name: &str) -> Vec<WalOp> {
+    let bytes = tokio::fs::read(path).await.unwrap_or_default();
+    decode_records(&bytes)
+        .records
+        .into_iter()
+        .filter(|record| record.data_name == data_name)
+        .map(|record| record.op)
+        .collect()
+}
+
 /// Compaction now, whatever the threshold says.
 #[cfg(test)]
 pub async fn compact_now(path: &Path) -> std::io::Result<bool> {
@@ -1155,8 +1167,12 @@ enum RecordOwner {
 /// or below their stage's durable checkpoint, those of deleted stages, and
 /// the discards of deletions whose files are all gone. What may go is judged
 /// from the manifests and data files on disk, so it holds whatever state the
-/// live stages are in. A WAL with proven damage is left for recovery to set
-/// aside: dropping records around the damage could drop its only evidence.
+/// live stages are in. A discard alone drops nothing: while a file of its
+/// stage remains the removal may not have completed, the stage may live on,
+/// and its next write voids the discard. A WAL with proven damage is left for
+/// recovery to set aside: dropping records around the damage could drop its
+/// only evidence. A WAL whose fsync failed is left for the rewrite that makes
+/// it trustworthy again (`rewrite_after_failed_sync`).
 ///
 /// The O(WAL) part runs without the append lock — the WAL only grows between
 /// layout changes, so its first bytes stay put — and appends keep flowing.
@@ -1168,6 +1184,9 @@ async fn compact(path: &Path) -> std::io::Result<bool> {
         .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "WAL path has no parent"))?;
     let (layout, len) = {
         let mut states = append_states().lock().await;
+        if stage_commit::poisoned(path).is_some() {
+            return Ok(false);
+        }
         match states.get_mut(path) {
             Some(state) if state.tail_valid && !state.compacting => {
                 state.compacting = true;
@@ -1236,14 +1255,13 @@ async fn compact_unlocked(
         .records
         .into_iter()
         .filter(|record| {
-            if is_dead(record, &discarded) {
-                return false;
-            }
             if record.op == WalOp::Discard && discarded.get(&record.data_name) != Some(&record.lsn)
             {
                 // A void discard: its removal never completed.
                 return false;
             }
+            // Records under a discard in force go only with their stage's
+            // files, never on the discard's word alone.
             match owners.get(&record.data_name) {
                 Some(RecordOwner::Gone) => false,
                 // An unfinished deletion keeps its discard.
@@ -1284,7 +1302,7 @@ async fn compact_unlocked(
     let Some(state) = states.get_mut(path) else {
         return Ok(false);
     };
-    if state.layout != layout || !state.tail_valid {
+    if state.layout != layout || !state.tail_valid || stage_commit::poisoned(path).is_some() {
         return Ok(false);
     }
     // Records appended while the prefix was being rewritten, carried over as

@@ -745,6 +745,38 @@ fn apply_fails(path: &Path) -> bool {
         .remove(path)
 }
 
+/// Test hook: the next discard records of the stage at a data path cannot be
+/// written at all — no room on the disk — before anything reaches the WAL.
+#[cfg(test)]
+static FAILING_DISCARDS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, u32>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn fail_next_discards(path: &Path, count: u32) {
+    *FAILING_DISCARDS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(path.to_path_buf())
+        .or_default() += count;
+}
+
+#[cfg(test)]
+fn discard_fails(path: &Path) -> bool {
+    let mut failing = FAILING_DISCARDS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap();
+    match failing.get_mut(path) {
+        Some(remaining) if *remaining > 0 => {
+            *remaining -= 1;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Test hook: unlinking one of these paths fails.
 #[cfg(test)]
 static FAILING_REMOVALS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
@@ -1383,6 +1415,12 @@ impl Stage {
     /// Makes "this stage was deleted" durable in the WAL before any of its
     /// files go; returns the record's size.
     async fn append_discard(&mut self) -> std::io::Result<u64> {
+        #[cfg(test)]
+        if discard_fails(&self.path) {
+            return Err(std::io::Error::other(
+                "injected: no room for the discard record",
+            ));
+        }
         let wal_path = stage_wal::wal_path(&self.path);
         let admitted = stage_wal::begin_append(&wal_path).await?;
         let record = stage_wal::WalRecord {
@@ -2259,10 +2297,17 @@ mod tests {
         let wal = stage_wal::wal_path(&path);
         let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
         stage.write_durable(0, b"deleted", 1).await.unwrap();
-        // A full disk: the discard cannot be written, the unlinks can.
-        stage_commit::fail_next_syncs(&wal, 1);
+        // A full disk: neither the durable attempt nor the best-effort retry
+        // can write a discard, but the unlinks go through.
+        fail_next_discards(&path, 2);
         stage.remove_files().await;
         assert!(!tokio::fs::try_exists(&path).await.unwrap());
+        assert!(
+            !stage_wal::ops_for(&wal, "record.data")
+                .await
+                .contains(&stage_wal::WalOp::Discard),
+            "a discard was written after all"
+        );
         drop(stage);
         // With data file and manifest gone the records are dead without it.
         let mut next = Stage::create(root.join("next.data"), "next".into(), 1)
@@ -2275,6 +2320,70 @@ mod tests {
             next.wal_lease.bytes()
         );
         drop(next);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_compaction_keeps_the_records_of_a_stage_whose_removal_never_completed() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-compact-live-discard-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let wal = stage_wal::wal_path(&path);
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        stage.write_durable(0, b"acked", 1).await.unwrap();
+        // A stage deleted for good, so the compaction has records to drop.
+        let mut gone = Stage::create(root.join("gone.data"), "gone".into(), 1)
+            .await
+            .unwrap();
+        gone.write_durable(0, b"gone", 1).await.unwrap();
+        gone.try_remove_files().await.unwrap();
+        drop(gone);
+        // A REMOVE whose discard committed but which was cut short before
+        // any file went — cancelled, or failed after the discard: the stage
+        // lives on, and a compaction runs in that window.
+        crash_remove_after(&path, 1);
+        stage.remove_files().await;
+        assert!(stage_wal::compact_now(&wal).await.unwrap());
+        // Its next write voids the discard.
+        stage.write_durable(5, b"!", 2).await.unwrap();
+        drop(stage);
+        // Crash before any checkpoint: neither write reached the data file.
+        tokio::fs::write(&path, b"").await.unwrap();
+        let mut restored = recover_single(&root).await;
+        assert_eq!(
+            restored.read_at(0, 64).await.unwrap(),
+            b"acked!",
+            "a compaction dropped acknowledged records of a live stage"
+        );
+        drop(restored);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_wal_is_never_compacted() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-compact-poisoned-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let path = root.join("record.data");
+        let wal = stage_wal::wal_path(&path);
+        let mut stage = Stage::create(path.clone(), "key".into(), 1).await.unwrap();
+        stage.write_durable(0, b"one", 1).await.unwrap();
+        stage.checkpoint_durable().await.unwrap();
+        stage_commit::fail_next_syncs(&wal, 1);
+        assert!(stage.write_durable(3, b"two", 2).await.is_err());
+        // Only the rewrite that clears the poison may replace this WAL.
+        let before = tokio::fs::read(&wal).await.unwrap();
+        assert!(
+            !stage_wal::compact_now(&wal).await.unwrap(),
+            "a poisoned WAL was compacted"
+        );
+        assert_eq!(tokio::fs::read(&wal).await.unwrap(), before);
+        drop(stage);
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
