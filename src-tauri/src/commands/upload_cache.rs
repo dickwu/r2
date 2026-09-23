@@ -15,6 +15,19 @@ impl CacheEventSink for AppHandle {
     }
 }
 
+/// Records the events a cache update reports, as (event, payload) pairs.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct RecordedCacheEvents(pub std::sync::Mutex<Vec<(String, serde_json::Value)>>);
+
+#[cfg(test)]
+impl CacheEventSink for RecordedCacheEvents {
+    fn emit_cache_event<S: Serialize + Clone>(&self, event: &str, payload: S) {
+        let payload = serde_json::to_value(payload).unwrap();
+        self.0.lock().unwrap().push((event.to_string(), payload));
+    }
+}
+
 pub(crate) async fn update_cache_after_upload(
     app: &impl CacheEventSink,
     bucket: &str,
@@ -24,7 +37,9 @@ pub(crate) async fn update_cache_after_upload(
     last_modified: &str,
 ) -> Result<(), String> {
     if db::cache_scope::current_scope().is_none() {
-        db::cache_scope::invalidate_unscoped(account_id)
+        // No scope was captured before this write (e.g. a Move finishing in
+        // the background): its rows cannot be attributed to this namespace.
+        db::file_cache::relist_unscoped_writes(bucket, account_id, &[key])
             .await
             .map_err(|e| e.to_string())?;
         app.emit_cache_event(

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::Emitter;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct MinioConfigInput {
     pub account_id: String,
     pub bucket: String,
@@ -20,6 +20,28 @@ pub struct MinioConfigInput {
     pub endpoint_scheme: String,
     pub endpoint_host: String,
     pub force_path_style: bool,
+}
+
+impl MinioConfigInput {
+    /// The legacy RustFS adapter uses the MinIO commands, so the namespace is
+    /// a MinIO account's or, failing that, a RustFS account's.
+    fn cache_configs(&self) -> [db::cache_scope::CacheConfig; 2] {
+        let minio = db::cache_scope::CacheConfig {
+            provider: "minio".into(),
+            account_id: self.account_id.clone(),
+            access_key_id: self.access_key_id.clone(),
+            secret_access_key: self.secret_access_key.clone(),
+            region: None,
+            endpoint_scheme: Some(self.endpoint_scheme.clone()),
+            endpoint_host: Some(self.endpoint_host.clone()),
+            force_path_style: self.force_path_style,
+        };
+        let rustfs = db::cache_scope::CacheConfig {
+            provider: "rustfs".into(),
+            ..minio.clone()
+        };
+        [minio, rustfs]
+    }
 }
 
 impl From<MinioConfigInput> for minio::MinioConfig {
@@ -122,26 +144,13 @@ pub async fn sync_minio_bucket(
     config: MinioConfigInput,
     app: tauri::AppHandle,
 ) -> Result<SyncResult, String> {
-    let cache_config = db::cache_scope::CacheConfig {
-        provider: "minio".into(),
-        account_id: config.account_id.clone(),
-        access_key_id: config.access_key_id.clone(),
-        secret_access_key: config.secret_access_key.clone(),
-        region: None,
-        endpoint_scheme: Some(config.endpoint_scheme.clone()),
-        endpoint_host: Some(config.endpoint_host.clone()),
-        force_path_style: config.force_path_style,
-    };
-    let scope = match db::cache_scope::CacheScope::capture(&cache_config).await {
+    let [minio_config, rustfs_config] = config.cache_configs();
+    let scope = match db::cache_scope::CacheScope::capture(&minio_config).await {
         Ok(scope) => scope,
-        Err(_) => {
-            // The legacy RustFS adapter intentionally uses the MinIO protocol command.
-            let mut rustfs_config = cache_config;
-            rustfs_config.provider = "rustfs".into();
-            db::cache_scope::CacheScope::capture(&rustfs_config)
-                .await
-                .map_err(|e| e.to_string())?
-        }
+        // The legacy RustFS adapter intentionally uses the MinIO protocol command.
+        Err(_) => db::cache_scope::CacheScope::capture(&rustfs_config)
+            .await
+            .map_err(|e| e.to_string())?,
     };
     db::cache_scope::in_scope(scope, sync_minio_bucket_scoped(config, app)).await
 }
@@ -317,6 +326,8 @@ pub(crate) async fn delete_minio_object_with(
 ) -> Result<(), String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope(config.cache_configs()).await;
     let minio_config: minio::MinioConfig = config.into();
 
     minio::delete_object(&minio_config, &key)
@@ -324,7 +335,8 @@ pub(crate) async fn delete_minio_object_with(
         .map_err(|e| format!("Failed to delete object: {}", e))?;
 
     // Update cache and emit events (including paths-removed if any folders became empty)
-    update_cache_after_delete(app, &bucket, &account_id, &key).await?;
+    let update = update_cache_after_delete(app, &bucket, &account_id, &key);
+    db::cache_scope::in_optional_scope(scope, update).await?;
 
     Ok(())
 }
@@ -344,6 +356,8 @@ pub async fn batch_delete_minio_objects(
 ) -> Result<BatchDeleteResult, String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope(config.cache_configs()).await;
     let minio_config: minio::MinioConfig = config.into();
     let total = keys.len();
 
@@ -368,9 +382,9 @@ pub async fn batch_delete_minio_objects(
 
     // Update cache and emit events (including paths-removed if any folders became empty)
     if !outcome.deleted_keys.is_empty() {
-        if let Err(e) =
-            update_cache_after_batch_delete(&app, &bucket, &account_id, &outcome.deleted_keys).await
-        {
+        let update =
+            update_cache_after_batch_delete(&app, &bucket, &account_id, &outcome.deleted_keys);
+        if let Err(e) = db::cache_scope::in_optional_scope(scope, update).await {
             outcome.errors.push(e);
         }
     }
@@ -391,6 +405,8 @@ pub async fn rename_minio_object(
 ) -> Result<(), String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope(config.cache_configs()).await;
     let minio_config: minio::MinioConfig = config.into();
 
     minio::rename_object(&minio_config, &old_key, &new_key)
@@ -398,7 +414,8 @@ pub async fn rename_minio_object(
         .map_err(|e| format!("Failed to rename object: {}", e))?;
 
     // Update cache and emit events (including paths-created/removed)
-    update_cache_after_move(&app, &bucket, &account_id, &old_key, &new_key).await?;
+    let update = update_cache_after_move(&app, &bucket, &account_id, &old_key, &new_key);
+    db::cache_scope::in_optional_scope(scope, update).await?;
 
     Ok(())
 }
@@ -412,6 +429,8 @@ pub async fn batch_move_minio_objects(
 ) -> Result<BatchMoveResult, String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope(config.cache_configs()).await;
     let minio_config: minio::MinioConfig = config.into();
     let batch_id = batch_id.unwrap_or_else(fallback_batch_id);
 
@@ -428,9 +447,8 @@ pub async fn batch_move_minio_objects(
 
     let mut errors = outcome.errors;
     if !outcome.successful.is_empty() {
-        if let Err(e) =
-            update_cache_after_batch_move(&app, &bucket, &account_id, &outcome.successful).await
-        {
+        let update = update_cache_after_batch_move(&app, &bucket, &account_id, &outcome.successful);
+        if let Err(e) = db::cache_scope::in_optional_scope(scope, update).await {
             errors.push(e);
         }
     }
@@ -480,6 +498,8 @@ pub(crate) async fn upload_minio_content_with(
 ) -> Result<String, String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope(config.cache_configs()).await;
     let minio_config: minio::MinioConfig = config.into();
 
     let content_bytes = content.into_bytes();
@@ -491,7 +511,9 @@ pub(crate) async fn upload_minio_content_with(
 
     let last_modified = chrono::Utc::now().to_rfc3339();
 
-    update_cache_after_upload(app, &bucket, &account_id, &key, new_size, &last_modified).await?;
+    let update =
+        update_cache_after_upload(app, &bucket, &account_id, &key, new_size, &last_modified);
+    db::cache_scope::in_optional_scope(scope, update).await?;
 
     Ok(etag)
 }
@@ -528,7 +550,8 @@ pub async fn upload_minio_file(
     endpoint_host: String,
     force_path_style: bool,
 ) -> Result<UploadResult, String> {
-    let config = minio::MinioConfig {
+    let input = MinioConfigInput {
+        account_id,
         bucket,
         access_key_id,
         secret_access_key,
@@ -536,6 +559,10 @@ pub async fn upload_minio_file(
         endpoint_host,
         force_path_style,
     };
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope(input.cache_configs()).await;
+    let account_id = input.account_id.clone();
+    let config: minio::MinioConfig = input.into();
 
     let path = PathBuf::from(&file_path);
     if !path.exists() {
@@ -594,16 +621,15 @@ pub async fn upload_minio_file(
             );
 
             let last_modified = chrono::Utc::now().to_rfc3339();
-            if let Err(err) = update_cache_after_upload(
+            let update = update_cache_after_upload(
                 &app,
                 &config.bucket,
                 &account_id,
                 &key,
                 file_size as i64,
                 &last_modified,
-            )
-            .await
-            {
+            );
+            if let Err(err) = db::cache_scope::in_optional_scope(scope, update).await {
                 log::warn!("Failed to update cache after upload: {}", err);
             }
 
@@ -620,5 +646,199 @@ pub async fn upload_minio_file(
             error: Some(e.to_string()),
             upload_id: None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::upload_cache::RecordedCacheEvents;
+    use crate::db::cache_scope::{self, CacheConfig, CacheScope};
+    use crate::test_s3::{serve, Fixture, Response};
+
+    /// A MinIO account whose endpoint is an in-process S3 fixture that accepts
+    /// every PUT and DELETE, registered in the app database like a saved one.
+    async fn saved_account(account_id: &str) -> (Fixture, MinioConfigInput, CacheConfig) {
+        crate::db::init_test_db().await;
+        let fixture = serve(|request| async move {
+            match request.method.as_str() {
+                "PUT" => Response::empty(200).header("etag", "\"fixture\""),
+                "DELETE" => Response::empty(204),
+                _ => Response::empty(404),
+            }
+        })
+        .await;
+        let host = fixture
+            .endpoint
+            .strip_prefix("http://")
+            .unwrap()
+            .to_string();
+        crate::db::get_connection()
+            .unwrap()
+            .lock()
+            .await
+            .execute(
+                "INSERT INTO minio_accounts (id, access_key_id, secret_access_key, endpoint_scheme, endpoint_host, force_path_style, created_at, updated_at)
+                 VALUES (?1, 'fixture', 'fixture-secret', 'http', ?2, 1, 0, 0)",
+                turso::params![account_id, host.clone()],
+            )
+            .await
+            .unwrap();
+        let input = MinioConfigInput {
+            account_id: account_id.into(),
+            bucket: "journal".into(),
+            access_key_id: "fixture".into(),
+            secret_access_key: "fixture-secret".into(),
+            endpoint_scheme: "http".into(),
+            endpoint_host: host.clone(),
+            force_path_style: true,
+        };
+        let cache_config = CacheConfig {
+            provider: "minio".into(),
+            account_id: account_id.into(),
+            access_key_id: "fixture".into(),
+            secret_access_key: "fixture-secret".into(),
+            region: None,
+            endpoint_scheme: Some("http".into()),
+            endpoint_host: Some(host),
+            force_path_style: true,
+        };
+        (fixture, input, cache_config)
+    }
+
+    fn scanned(account_id: &str, key: &str, size: i64) -> CachedFile {
+        let (parent_path, name) = db::parse_key(key);
+        CachedFile {
+            bucket: "journal".into(),
+            account_id: account_id.into(),
+            key: key.into(),
+            parent_path,
+            name,
+            size,
+            last_modified: "scan".into(),
+            synced_at: 1,
+        }
+    }
+
+    /// What a sync command does up to its publish: capture its scope, begin
+    /// the run, and stage what its scan listed.
+    async fn start_sync(
+        cache_config: &CacheConfig,
+        account_id: &str,
+        listed: &[CachedFile],
+    ) -> (CacheScope, String) {
+        let scope = CacheScope::capture(cache_config).await.unwrap();
+        let run = cache_scope::in_scope(scope.clone(), async {
+            let run = db::begin_sync("journal", account_id).await.unwrap();
+            db::store_file_batch("journal", account_id, &run, listed)
+                .await
+                .unwrap();
+            run
+        })
+        .await;
+        (scope, run)
+    }
+
+    async fn publish(scope: &CacheScope, account_id: &str, run: &str) -> Result<(), String> {
+        cache_scope::in_scope(
+            scope.clone(),
+            db::finish_sync_with_metadata("journal", account_id, run, 2, &[], &[]),
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+
+    async fn folder(scope: &CacheScope, prefix: &str) -> cache_scope::PrefixPageSnapshot {
+        cache_scope::read_prefix_page(scope, "journal", prefix, None, 100)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn deletes_and_uploads_through_the_commands_reach_a_running_sync() {
+        const ACCOUNT: &str = "command-journal-account";
+        let (fixture, input, cache_config) = saved_account(ACCOUNT).await;
+        // The scan listed both files before the user deleted one of them.
+        let (scope, run) = start_sync(
+            &cache_config,
+            ACCOUNT,
+            &[
+                scanned(ACCOUNT, "gone.txt", 2),
+                scanned(ACCOUNT, "keep.txt", 1),
+            ],
+        )
+        .await;
+        let events = RecordedCacheEvents::default();
+
+        delete_minio_object_with(input.clone(), "gone.txt".into(), &events)
+            .await
+            .unwrap();
+        upload_minio_content_with(input, "new.txt".into(), "hello".into(), None, &events)
+            .await
+            .unwrap();
+        publish(&scope, ACCOUNT, &run).await.unwrap();
+
+        let requests: Vec<_> = fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| {
+                let path = request.path.split('?').next().unwrap_or_default();
+                format!("{} {path}", request.method)
+            })
+            .collect();
+        assert_eq!(
+            requests,
+            vec!["DELETE /journal/gone.txt", "PUT /journal/new.txt"]
+        );
+        let root = folder(&scope, "").await;
+        assert!(root.full_sync);
+        assert_eq!(
+            root.page
+                .files
+                .iter()
+                .map(|file| (file.key.as_str(), file.size))
+                .collect::<Vec<_>>(),
+            vec![("keep.txt", 1), ("new.txt", 5)]
+        );
+        let emitted: Vec<_> = events
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(event, _)| event.clone())
+            .collect();
+        assert_eq!(emitted, vec!["cache-updated", "cache-updated"]);
+    }
+
+    #[tokio::test]
+    async fn an_unattributed_write_keeps_the_sync_running_but_unvouched() {
+        const ACCOUNT: &str = "move-journal-account";
+        let (_fixture, _input, cache_config) = saved_account(ACCOUNT).await;
+        let (scope, run) =
+            start_sync(&cache_config, ACCOUNT, &[scanned(ACCOUNT, "keep.txt", 1)]).await;
+        let events = RecordedCacheEvents::default();
+
+        // The Move pipeline reports its destination write with no cache scope.
+        update_cache_after_upload(&events, "journal", ACCOUNT, "moved/in.txt", 9, "now")
+            .await
+            .unwrap();
+        publish(&scope, ACCOUNT, &run).await.unwrap();
+
+        let root = folder(&scope, "").await;
+        assert!(root.full_sync);
+        assert_eq!(
+            root.page
+                .files
+                .iter()
+                .map(|file| file.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["keep.txt"]
+        );
+        // Neither the destination nor its parent, whose child folders the
+        // write changed, may be served as fresh: both re-list on open.
+        assert_eq!(root.freshness_time, None);
+        assert_eq!(folder(&scope, "moved/").await.freshness_time, None);
     }
 }

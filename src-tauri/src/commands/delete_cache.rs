@@ -3,6 +3,7 @@ use crate::commands::cache_events::{
 };
 use crate::commands::upload_cache::CacheEventSink;
 use crate::db;
+use crate::db::cache_scope::CacheScope;
 use log::{error, info};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -11,8 +12,12 @@ use tauri::AppHandle;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
+/// Deletes waiting to be applied, grouped by bucket, account and the cache
+/// scope each was reported in (None when the caller had none).
+type PendingDeletes = HashMap<(String, String, Option<CacheScope>), HashSet<String>>;
+
 struct DeleteCacheQueueState {
-    pending: HashMap<(String, String), HashSet<String>>,
+    pending: PendingDeletes,
     scheduled: bool,
 }
 
@@ -36,7 +41,9 @@ pub(crate) async fn update_cache_after_delete(
     key: &str,
 ) -> Result<(), String> {
     if db::cache_scope::current_scope().is_none() {
-        db::cache_scope::invalidate_unscoped(account_id)
+        // No scope was captured before this write (e.g. a Move finishing in
+        // the background): its rows cannot be attributed to this namespace.
+        db::file_cache::relist_unscoped_writes(bucket, account_id, &[key])
             .await
             .map_err(|e| e.to_string())?;
         app.emit_cache_event(
@@ -108,7 +115,10 @@ pub(crate) async fn update_cache_after_batch_delete(
     deleted_keys: &[String],
 ) -> Result<(), String> {
     if db::cache_scope::current_scope().is_none() {
-        db::cache_scope::invalidate_unscoped(account_id)
+        // No scope was captured before this write (e.g. a Move finishing in
+        // the background): its rows cannot be attributed to this namespace.
+        let keys: Vec<&str> = deleted_keys.iter().map(String::as_str).collect();
+        db::file_cache::relist_unscoped_writes(bucket, account_id, &keys)
             .await
             .map_err(|e| e.to_string())?;
         app.emit_cache_event(
@@ -194,12 +204,14 @@ pub(crate) async fn queue_cache_after_delete(
     account_id: String,
     key: String,
 ) {
+    // The flush runs on another task: carry the caller's scope over to it.
+    let scope = db::cache_scope::current_scope();
     let should_schedule = {
         let queue = delete_cache_queue();
         let mut state = queue.lock().await;
         state
             .pending
-            .entry((bucket.clone(), account_id.clone()))
+            .entry((bucket.clone(), account_id.clone(), scope))
             .or_insert_with(HashSet::new)
             .insert(key);
         if state.scheduled {
@@ -223,7 +235,7 @@ pub(crate) async fn queue_cache_after_delete(
             std::mem::take(&mut state.pending)
         };
 
-        for ((bucket, account_id), keys) in batch {
+        for ((bucket, account_id, scope), keys) in batch {
             let key_list: Vec<String> = keys.into_iter().collect();
             info!(
                 "delete_cache_batch: flushing {} keys for {}/{}",
@@ -231,9 +243,8 @@ pub(crate) async fn queue_cache_after_delete(
                 account_id,
                 bucket
             );
-            if let Err(e) =
-                update_cache_after_batch_delete(&app, &bucket, &account_id, &key_list).await
-            {
+            let update = update_cache_after_batch_delete(&app, &bucket, &account_id, &key_list);
+            if let Err(e) = db::cache_scope::in_optional_scope(scope, update).await {
                 error!(
                     "delete_cache_batch: failed for {}/{}: {}",
                     account_id, bucket, e

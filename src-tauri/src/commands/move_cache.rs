@@ -15,7 +15,9 @@ pub(crate) async fn update_cache_after_move(
     new_key: &str,
 ) -> Result<(), String> {
     if db::cache_scope::current_scope().is_none() {
-        db::cache_scope::invalidate_unscoped(account_id)
+        // No scope was captured before this write (e.g. a Move finishing in
+        // the background): its rows cannot be attributed to this namespace.
+        db::file_cache::relist_unscoped_writes(bucket, account_id, &[old_key, new_key])
             .await
             .map_err(|e| e.to_string())?;
         app.emit_cache_event(
@@ -115,7 +117,13 @@ pub(crate) async fn update_cache_after_batch_move(
     operations: &[(String, String)],
 ) -> Result<(), String> {
     if db::cache_scope::current_scope().is_none() {
-        db::cache_scope::invalidate_unscoped(account_id)
+        // No scope was captured before this write (e.g. a Move finishing in
+        // the background): its rows cannot be attributed to this namespace.
+        let keys: Vec<&str> = operations
+            .iter()
+            .flat_map(|(old_key, new_key)| [old_key.as_str(), new_key.as_str()])
+            .collect();
+        db::file_cache::relist_unscoped_writes(bucket, account_id, &keys)
             .await
             .map_err(|e| e.to_string())?;
         app.emit_cache_event(

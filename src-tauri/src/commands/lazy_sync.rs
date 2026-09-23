@@ -2353,6 +2353,10 @@ mod tests {
                 let deleted = deleted.clone();
                 let second_page = second_page.clone();
                 async move {
+                    if request.method == "DELETE" {
+                        deleted.store(true, Ordering::SeqCst);
+                        return Response::empty(204);
+                    }
                     if request.path.contains("continuation-token=") {
                         second_page.acquire().await.unwrap().forget();
                         return Response::xml(200, &list_page_xml(&["z.txt"], None));
@@ -2392,7 +2396,7 @@ mod tests {
             prefix: String::new(),
             provider: Some("minio".into()),
             endpoint_scheme: Some("http".into()),
-            endpoint_host: Some(host),
+            endpoint_host: Some(host.clone()),
             force_path_style: Some(true),
             region: None,
             force_refresh: Some(true),
@@ -2419,25 +2423,54 @@ mod tests {
             .files
             .iter()
             .any(|file| file.key == "k.txt"));
-        // The provider delete lands after page one was listed, and the app then
-        // applies it to the cache while page two is still in flight.
-        deleted.store(true, Ordering::SeqCst);
-        cache_scope::in_scope(
-            scope.clone(),
-            db::delete_cached_file(BUCKET, ACCOUNT, "k.txt"),
+        // The user deletes k.txt after page one was listed: the delete command
+        // removes it on the provider and from the cache while page two is
+        // still in flight.
+        crate::commands::delete_minio_object_with(
+            crate::commands::MinioConfigInput {
+                account_id: ACCOUNT.into(),
+                bucket: BUCKET.into(),
+                access_key_id: "fixture".into(),
+                secret_access_key: "fixture-secret".into(),
+                endpoint_scheme: "http".into(),
+                endpoint_host: host,
+                force_path_style: true,
+            },
+            "k.txt".into(),
+            &crate::commands::upload_cache::RecordedCacheEvents::default(),
         )
         .await
         .unwrap();
+        assert!(deleted.load(Ordering::SeqCst));
         second_page.add_permits(16);
-        flight_result(&first.0).await.unwrap();
+        let overlapped = flight_result(&first.0).await.unwrap();
+        assert_eq!(overlapped.freshness, "stale");
 
+        // Its rows are written without a fresh marker: nothing vouches for them
+        // (there is no full index here either), so the next open re-lists.
+        let mut rows = crate::db::get_connection()
+            .unwrap()
+            .lock()
+            .await
+            .query(
+                "SELECT last_synced_at, file_count FROM prefix_sync_times
+                 WHERE bucket = ?1 AND account_id = ?2 AND prefix = ''",
+                turso::params![BUCKET, ACCOUNT],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(
+            (row.get::<i64>(0).unwrap(), row.get::<i64>(1).unwrap()),
+            (0, 3)
+        );
+        drop(rows);
         let cached = read_prefix_cache_scoped(&input, ListScope::new(&input), &scope)
             .await
             .unwrap();
-        assert_ne!(
-            cached.map(|cached| cached.freshness),
-            Some("fresh"),
-            "a listing that overlapped a local delete was published as fresh"
+        assert!(
+            cached.is_none(),
+            "a listing that overlapped a local delete was served from cache"
         );
 
         // A request made after the delete must list again, not share the

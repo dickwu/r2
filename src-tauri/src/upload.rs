@@ -649,6 +649,13 @@ pub async fn upload_file(
         access_key_id,
         secret_access_key,
     };
+    // Captured before the upload, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope([db::cache_scope::CacheConfig::r2(
+        &config.account_id,
+        &config.access_key_id,
+        &config.secret_access_key,
+    )])
+    .await;
 
     let path = PathBuf::from(&file_path);
     if !path.exists() {
@@ -710,16 +717,15 @@ pub async fn upload_file(
     match result {
         Ok(()) => {
             let last_modified = chrono::Utc::now().to_rfc3339();
-            if let Err(err) = update_cache_after_upload(
+            let update = update_cache_after_upload(
                 &app,
                 &config.bucket,
                 &config.account_id,
                 &key,
                 file_size as i64,
                 &last_modified,
-            )
-            .await
-            {
+            );
+            if let Err(err) = db::cache_scope::in_optional_scope(scope, update).await {
                 log::warn!("Failed to update cache after upload: {}", err);
             }
 

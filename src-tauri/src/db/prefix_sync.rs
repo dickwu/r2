@@ -184,11 +184,24 @@ async fn advance_mutation_generations_on(
     Ok(())
 }
 
-/// Record a local cache write to `keys` (upload, delete, move/rename).
-/// Their folders lose listing freshness, and every folder whose listing can
-/// show the change advances its mutation generation: the parent, whose files
-/// change, and each ancestor, whose child folders may appear or disappear.
-/// This holds whether or not the cache already had the keys.
+/// Every folder whose listing shows a write to `keys`: each key's parent,
+/// whose files change, and every ancestor, whose child folders may appear or
+/// disappear.
+pub(crate) fn listing_folders(keys: &[&str]) -> BTreeSet<String> {
+    let mut folders = BTreeSet::new();
+    for key in keys {
+        let mut folder = super::parse_key(key).0;
+        while folders.insert(folder.clone()) && !folder.is_empty() {
+            folder = super::parse_key(folder.trim_end_matches('/')).0;
+        }
+    }
+    folders
+}
+
+/// Record a local cache write to `keys` (upload, delete, move/rename) whose
+/// rows the cache now holds. Their folders lose listing freshness, and every
+/// folder whose listing can show the change advances its mutation generation,
+/// whether or not the cache already had the keys.
 pub(crate) async fn note_local_mutation_on(
     conn: &turso::Connection,
     bucket: &str,
@@ -197,14 +210,61 @@ pub(crate) async fn note_local_mutation_on(
 ) -> DbResult<()> {
     let parents: BTreeSet<String> = keys.iter().map(|key| super::parse_key(key).0).collect();
     expire_prefix_markers_on(conn, bucket, account_id, &parents).await?;
-    let mut folders = BTreeSet::new();
-    for parent in &parents {
-        let mut folder = parent.clone();
-        while folders.insert(folder.clone()) && !folder.is_empty() {
-            folder = super::parse_key(folder.trim_end_matches('/')).0;
-        }
-    }
+    advance_mutation_generations_on(conn, bucket, account_id, &listing_folders(keys)).await
+}
+
+/// Record a write to `keys` that the cache could not apply as rows (it ran
+/// without a cache scope). No complete snapshot may vouch for the folders
+/// that show it any more, the full index included: all of them re-list on
+/// next open, and listings in flight publish stale.
+pub(crate) async fn note_unapplied_write_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    keys: &[&str],
+) -> DbResult<()> {
+    let folders = listing_folders(keys);
+    mark_folders_changed_on(conn, bucket, account_id, &folders).await?;
     advance_mutation_generations_on(conn, bucket, account_id, &folders).await
+}
+
+/// Leave a zero marker on each folder, listed or not: a kept zero marker
+/// means "changed since listed", so neither the folder's own listing nor a
+/// fresh full index makes it fresh, and it re-lists on next open.
+pub(crate) async fn mark_folders_changed_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    folders: &BTreeSet<String>,
+) -> DbResult<()> {
+    let folders: Vec<&String> = folders.iter().collect();
+    for chunk in folders.chunks(500) {
+        let values = chunk
+            .iter()
+            .map(|_| "(?, ?, ?, 0, 1)")
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut params: Vec<turso::Value> = Vec::with_capacity(chunk.len() * 3);
+        for folder in chunk {
+            params.extend([
+                bucket.to_string().into(),
+                account_id.to_string().into(),
+                (*folder).clone().into(),
+            ]);
+        }
+        conn.execute(
+            &format!(
+                "INSERT INTO prefix_sync_times (bucket, account_id, prefix, last_synced_at, generation)
+                 VALUES {values}
+                 ON CONFLICT (bucket, account_id, prefix) DO UPDATE SET
+                   last_synced_at = 0,
+                   generation = prefix_sync_times.generation + 1"
+            ),
+            params,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Invalidate freshness for already complete prefixes after local mutation.
@@ -259,12 +319,27 @@ pub(crate) async fn advance_all_mutation_generations_on(
     account_id: &str,
     bucket: Option<&str>,
 ) -> DbResult<()> {
-    conn.execute(
-        "UPDATE prefix_mutation_generations SET generation = generation + 1
-         WHERE account_id = ?1 AND (?2 IS NULL OR bucket = ?2)",
-        turso::params![account_id, bucket],
-    )
-    .await?;
+    match bucket {
+        // A primary-key prefix range.
+        Some(bucket) => {
+            conn.execute(
+                "UPDATE prefix_mutation_generations SET generation = generation + 1
+                 WHERE bucket = ?1 AND account_id = ?2",
+                turso::params![bucket, account_id],
+            )
+            .await?
+        }
+        // Only on an account reset or the unscoped-write safety net, never
+        // per mutation.
+        None => {
+            conn.execute(
+                "UPDATE prefix_mutation_generations SET generation = generation + 1
+                 WHERE account_id = ?1",
+                turso::params![account_id],
+            )
+            .await?
+        }
+    };
     Ok(())
 }
 

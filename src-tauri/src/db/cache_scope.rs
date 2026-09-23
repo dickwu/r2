@@ -20,6 +20,20 @@ pub struct CacheConfig {
 }
 
 impl CacheConfig {
+    /// An R2 account's namespace: its account id and the token's S3 keys.
+    pub fn r2(account_id: &str, access_key_id: &str, secret_access_key: &str) -> Self {
+        Self {
+            provider: "r2".into(),
+            account_id: account_id.into(),
+            access_key_id: access_key_id.into(),
+            secret_access_key: secret_access_key.into(),
+            region: None,
+            endpoint_scheme: None,
+            endpoint_host: None,
+            force_path_style: true,
+        }
+    }
+
     pub fn from_current(config: &super::tokens::CurrentConfig) -> Self {
         let provider = match config.provider {
             super::tokens::StorageProvider::R2 => "r2",
@@ -99,7 +113,7 @@ fn normalize_endpoint(scheme: &str, host: &str) -> DbResult<String> {
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheScope {
     pub provider: String,
     pub account_id: String,
@@ -121,6 +135,30 @@ impl CacheScope {
     pub async fn capture(config: &CacheConfig) -> DbResult<Self> {
         let conn = get_connection()?.lock().await;
         capture_on(&conn, config).await
+    }
+}
+
+/// Capture the scope a local write (upload, delete, rename) reports into,
+/// before the write is sent -- as a sync captures its scope before listing.
+/// Candidates are tried in order. None when no candidate matches the saved
+/// account: the write still runs, and its cache update then only withdraws
+/// the cache's claims about the folders it touched.
+pub async fn capture_write_scope(
+    candidates: impl IntoIterator<Item = CacheConfig>,
+) -> Option<CacheScope> {
+    for config in candidates {
+        if let Ok(scope) = CacheScope::capture(&config).await {
+            return Some(scope);
+        }
+    }
+    None
+}
+
+/// Run `future` in `scope`, or with no scope when there is none.
+pub async fn in_optional_scope<F: Future>(scope: Option<CacheScope>, future: F) -> F::Output {
+    match scope {
+        Some(scope) => in_scope(scope, future).await,
+        None => future.await,
     }
 }
 
@@ -286,7 +324,7 @@ async fn capture_on(conn: &Connection, config: &CacheConfig) -> DbResult<CacheSc
     }
     conn.execute("BEGIN TRANSACTION", ()).await?;
     let result = async {
-        invalidate_account_on(conn, &config.account_id).await?;
+        reset_account_on(conn, &config.account_id).await?;
         conn.execute("INSERT INTO cache_scopes(account_id,provider,fingerprint,revision) VALUES (?1,?2,?3,1)
             ON CONFLICT(account_id) DO UPDATE SET provider=excluded.provider,fingerprint=excluded.fingerprint,revision=cache_scopes.revision+1",
             turso::params![config.account_id.as_str(), config.provider.as_str(), fingerprint.as_str()]).await?;
@@ -311,17 +349,34 @@ pub async fn account_updated_on(
             return Ok(());
         }
     }
-    invalidate_account_on(conn, account_id).await?;
+    reset_account_on(conn, account_id).await?;
     conn.execute("INSERT INTO cache_scopes(account_id,provider,fingerprint,revision) VALUES (?1,?2,'',1)
         ON CONFLICT(account_id) DO UPDATE SET provider=excluded.provider,fingerprint='',revision=cache_scopes.revision+1",
         turso::params![account_id, provider]).await?;
     Ok(())
 }
 
-pub async fn invalidate_account_on(conn: &Connection, account_id: &str) -> DbResult<()> {
+/// Start an account's cache over because its storage namespace changed
+/// (credential or endpoint edit, token switch). Its rows and claims go, and so
+/// does work begun under the old namespace: a sync's staging and run, the
+/// replay journal and write barriers. None of it may publish into the new
+/// namespace, and none of it may hold reads back.
+pub async fn reset_account_on(conn: &Connection, account_id: &str) -> DbResult<()> {
+    withdraw_account_cache_on(conn, account_id).await?;
+    conn.execute(
+        "DELETE FROM cached_files_staging WHERE account_id=?1",
+        turso::params![account_id],
+    )
+    .await?;
+    super::file_cache::clear_account_work_on(conn, account_id).await
+}
+
+/// Withdraw an account's cached rows and completeness claims. A running sync
+/// is left alone: its scope is still valid, so its staged snapshot is the
+/// account's current contents and it may publish.
+async fn withdraw_account_cache_on(conn: &Connection, account_id: &str) -> DbResult<()> {
     for table in [
         "cached_files",
-        "cached_files_staging",
         "directory_tree",
         "prefix_sync_times",
         "sync_meta",
@@ -339,20 +394,13 @@ pub async fn invalidate_account_on(conn: &Connection, account_id: &str) -> DbRes
     )
     .await?;
     // A listing still in flight for this account must not publish as fresh.
-    super::prefix_sync::advance_all_mutation_generations_on(conn, account_id, None).await?;
-    super::file_cache::clear_account_work_on(conn, account_id).await?;
-    Ok(())
+    super::prefix_sync::advance_all_mutation_generations_on(conn, account_id, None).await
 }
 
 async fn invalidate_unscoped_on(conn: &Connection, account_id: &str) -> DbResult<()> {
     conn.execute("BEGIN TRANSACTION", ()).await?;
-    let result = invalidate_account_on(conn, account_id).await;
+    let result = withdraw_account_cache_on(conn, account_id).await;
     finish_transaction(conn, result).await
-}
-
-pub async fn invalidate_unscoped(account_id: &str) -> DbResult<()> {
-    let conn = get_connection()?.lock().await;
-    invalidate_unscoped_on(&conn, account_id).await
 }
 
 pub async fn validate_on(conn: &Connection, scope: &CacheScope) -> DbResult<()> {
@@ -853,7 +901,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_invalidation_clears_that_accounts_interrupted_writes_and_runs() {
+    async fn account_reset_clears_that_accounts_interrupted_writes_and_runs() {
         let (_db, conn) = fixture().await;
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
         conn.execute(
@@ -869,7 +917,7 @@ mod tests {
             .await
             .is_err());
 
-        invalidate_account_on(&conn, "account").await.unwrap();
+        reset_account_on(&conn, "account").await.unwrap();
 
         read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
             .await
@@ -885,6 +933,52 @@ mod tests {
             ]
         );
         assert_eq!(journal_accounts(&conn).await, vec!["other".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn unscoped_cache_write_withdraws_rows_but_never_cancels_a_sync() {
+        let (_db, conn) = fixture().await;
+        let scope = capture_on(&conn, &config("a.example")).await.unwrap();
+        in_scope(scope, async { list_root(&conn, &[file("a.txt")]).await })
+            .await
+            .unwrap();
+        let run = super::super::file_cache::begin_sync_on(&conn, "bucket", "account")
+            .await
+            .unwrap();
+        conn.execute(
+            "INSERT INTO cached_files_staging(bucket,account_id,key,parent_path,name,size,last_modified,synced_at)
+             VALUES ('bucket','account','x','','x',1,'',1)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_mutation_journal(bucket,account_id,op,key) VALUES ('bucket','account','delete','y')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        // A write with no scope cannot be attributed to this namespace.
+        assert!(check_context_on(&conn, "account", true).await.is_err());
+
+        let mut rows = conn
+            .query(
+                "SELECT (SELECT COUNT(*) FROM cached_files),
+                        (SELECT COUNT(*) FROM cached_files_staging),
+                        (SELECT COUNT(*) FROM sync_mutation_journal)",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 0, "live rows are withdrawn");
+        assert_eq!(row.get::<i64>(1).unwrap(), 1, "the scan's staging is kept");
+        assert_eq!(row.get::<i64>(2).unwrap(), 1, "the run's journal is kept");
+        drop(rows);
+        super::super::file_cache::ensure_sync_run_on(&conn, "bucket", "account", &run)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

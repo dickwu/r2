@@ -380,6 +380,11 @@ enum SyncMutation<'a> {
         to: &'a str,
         known: Option<(i64, &'a str)>,
     },
+    /// A write the cache could not apply as rows: publish keeps the scan's
+    /// rows but leaves the key's folders unvouched, so they re-list.
+    Relist {
+        key: &'a str,
+    },
 }
 
 /// A running full sync publishes a snapshot scanned before these writes may
@@ -411,6 +416,7 @@ async fn record_sync_mutations_on(
             } => ("put", *key, None, Some((*size, *last_modified))),
             SyncMutation::Delete { key } => ("delete", *key, None, None),
             SyncMutation::Move { from, to, known } => ("move", *to, Some(*from), *known),
+            SyncMutation::Relist { key } => ("relist", *key, None, None),
         };
         conn.execute(
             "INSERT INTO sync_mutation_journal
@@ -429,6 +435,34 @@ async fn record_sync_mutations_on(
         .await?;
     }
     Ok(())
+}
+
+/// Record provider writes that ran without a cache scope, such as a Move
+/// finishing in the background. The account may have been re-pointed at
+/// another namespace since the write began, so its rows cannot be trusted
+/// into this cache; instead nothing may vouch for the folders showing the
+/// keys -- the full index and a running sync's publish included -- and they
+/// re-list on next open. Nothing is inserted, so no scope is needed, and a
+/// running sync is never cancelled.
+pub async fn relist_unscoped_writes(bucket: &str, account_id: &str, keys: &[&str]) -> DbResult<()> {
+    let conn = super::get_connection()?.lock().await;
+    conn.execute("BEGIN TRANSACTION", ()).await?;
+    let result = relist_unscoped_writes_on(&conn, bucket, account_id, keys).await;
+    super::cache_scope::finish_transaction(&conn, result).await
+}
+
+pub(crate) async fn relist_unscoped_writes_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    keys: &[&str],
+) -> DbResult<()> {
+    let journal: Vec<SyncMutation> = keys
+        .iter()
+        .map(|key| SyncMutation::Relist { key })
+        .collect();
+    record_sync_mutations_on(conn, bucket, account_id, &journal).await?;
+    super::prefix_sync::note_unapplied_write_on(conn, bucket, account_id, keys).await
 }
 
 /// Get all cached files for a bucket
@@ -1481,7 +1515,7 @@ async fn active_sync_run_on(
     }
 }
 
-async fn ensure_sync_run_on(
+pub(crate) async fn ensure_sync_run_on(
     conn: &turso::Connection,
     bucket: &str,
     account_id: &str,
@@ -1694,7 +1728,7 @@ pub(crate) async fn finish_sync_with_metadata_on(
 ) -> DbResult<()> {
     ensure_sync_run_on(conn, bucket, account_id, run_token).await?;
     let started_at = sync_started_at_on(conn, bucket, account_id).await?;
-    let unresolved = replay_sync_journal_on(conn, bucket, account_id).await?;
+    let unvouched = replay_sync_journal_on(conn, bucket, account_id).await?;
 
     // A folder listed from the network after this scan started holds rows at
     // least as new as the scan's view of it. Publish keeps those rows and the
@@ -1734,14 +1768,6 @@ pub(crate) async fn finish_sync_with_metadata_on(
     )
     .await?;
 
-    // A folder whose moved-in object neither the scan nor the cache saw cannot
-    // be vouched for by this index; it is re-listed on open like a skipped one.
-    let mut skipped_prefixes = skipped_prefixes.to_vec();
-    for prefix in unresolved {
-        if !skipped_prefixes.contains(&prefix) {
-            skipped_prefixes.push(prefix);
-        }
-    }
     let skipped_key = format!("skipped_prefixes:{account_id}:{bucket}");
     if skipped_prefixes.is_empty() {
         conn.execute(
@@ -1750,7 +1776,7 @@ pub(crate) async fn finish_sync_with_metadata_on(
         )
         .await?;
     } else {
-        let skipped_json = serde_json::to_string(&skipped_prefixes)?;
+        let skipped_json = serde_json::to_string(skipped_prefixes)?;
         conn.execute(
             "INSERT INTO app_state (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1789,6 +1815,10 @@ pub(crate) async fn finish_sync_with_metadata_on(
         turso::params![bucket, account_id, started_at, file_count as i32],
     )
     .await?;
+
+    // Folders showing writes the snapshot could not replay as rows are
+    // published but not vouched for: they re-list on next open.
+    super::prefix_sync::mark_folders_changed_on(conn, bucket, account_id, &unvouched).await?;
 
     Ok(())
 }
@@ -1844,8 +1874,8 @@ async fn relisted_prefix_children_on(
 }
 
 /// Apply the journal to the staged snapshot in write order, then drop it.
-/// Returns the folders of moved-in objects whose metadata neither the scan
-/// nor the cache knew.
+/// Returns the folders the published index must not vouch for: those showing
+/// unscoped writes, or a moved-in object neither the scan nor the cache knew.
 async fn replay_sync_journal_on(
     conn: &turso::Connection,
     bucket: &str,
@@ -1872,7 +1902,7 @@ async fn replay_sync_journal_on(
     drop(rows);
 
     let now = chrono::Utc::now().timestamp();
-    let mut unresolved = BTreeSet::new();
+    let mut unvouched = BTreeSet::new();
     for (op, key, source_key, known) in entries {
         match (op.as_str(), source_key) {
             ("put", None) => {
@@ -1880,6 +1910,7 @@ async fn replay_sync_journal_on(
                 stage_file_on(conn, bucket, account_id, &key, size, &last_modified, now).await?;
             }
             ("delete", None) => unstage_file_on(conn, bucket, account_id, &key).await?,
+            ("relist", None) => unvouched.extend(super::prefix_sync::listing_folders(&[&key])),
             ("move", Some(source)) => {
                 let moved = staged_file_on(conn, bucket, account_id, &source).await?;
                 unstage_file_on(conn, bucket, account_id, &source).await?;
@@ -1894,7 +1925,7 @@ async fn replay_sync_journal_on(
                     }
                     None => {
                         if known.is_none() {
-                            unresolved.insert(parse_key(&key).0);
+                            unvouched.extend(super::prefix_sync::listing_folders(&[&key]));
                         }
                         known
                     }
@@ -1912,7 +1943,7 @@ async fn replay_sync_journal_on(
         turso::params![bucket, account_id],
     )
     .await?;
-    Ok(unresolved)
+    Ok(unvouched)
 }
 
 async fn staged_file_on(
@@ -2082,6 +2113,24 @@ mod tests {
         let end = if result.is_ok() { "COMMIT" } else { "ROLLBACK" };
         conn.execute(end, ()).await.unwrap();
         result
+    }
+
+    /// Every folder freshness marker as (prefix, last_synced_at).
+    async fn markers(conn: &Connection) -> Vec<(String, i64)> {
+        let mut rows = conn
+            .query(
+                "SELECT prefix, last_synced_at FROM prefix_sync_times
+                 WHERE bucket = 'bucket' AND account_id = 'account'
+                 ORDER BY prefix",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut markers = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            markers.push((row.get(0).unwrap(), row.get(1).unwrap()));
+        }
+        markers
     }
 
     async fn has_full_sync_marker(conn: &Connection) -> bool {
@@ -2277,24 +2326,12 @@ mod tests {
             vec![("late/b.txt".into(), 6)]
         );
         assert!(live_files(&conn, "a/").await.is_empty());
-        let mut rows = conn
-            .query(
-                "SELECT value FROM app_state WHERE key = 'skipped_prefixes:account:bucket'",
-                (),
-            )
-            .await
-            .unwrap();
-        let skipped: Vec<String> = serde_json::from_str(
-            &rows
-                .next()
-                .await
-                .unwrap()
-                .unwrap()
-                .get::<String>(0)
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(skipped, vec!["a/".to_string()]);
+        // "a/" lacks the object and "" may lack the new folder "a/": the index
+        // keeps both but marks them changed, so both re-list on open.
+        assert_eq!(
+            markers(&conn).await,
+            vec![("".to_string(), 0), ("a/".to_string(), 0)]
+        );
     }
 
     #[tokio::test]

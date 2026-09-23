@@ -21,6 +21,16 @@ pub struct R2ConfigInput {
     pub secret_access_key: String,
 }
 
+impl R2ConfigInput {
+    fn cache_config(&self) -> db::cache_scope::CacheConfig {
+        db::cache_scope::CacheConfig::r2(
+            &self.account_id,
+            &self.access_key_id,
+            &self.secret_access_key,
+        )
+    }
+}
+
 impl From<R2ConfigInput> for r2::R2Config {
     fn from(input: R2ConfigInput) -> Self {
         r2::R2Config {
@@ -112,17 +122,7 @@ pub async fn sync_bucket(
     config: R2ConfigInput,
     app: tauri::AppHandle,
 ) -> Result<SyncResult, String> {
-    let cache_config = db::cache_scope::CacheConfig {
-        provider: "r2".into(),
-        account_id: config.account_id.clone(),
-        access_key_id: config.access_key_id.clone(),
-        secret_access_key: config.secret_access_key.clone(),
-        region: None,
-        endpoint_scheme: None,
-        endpoint_host: None,
-        force_path_style: true,
-    };
-    let scope = db::cache_scope::CacheScope::capture(&cache_config)
+    let scope = db::cache_scope::CacheScope::capture(&config.cache_config())
         .await
         .map_err(|e| e.to_string())?;
     db::cache_scope::in_scope(scope, sync_bucket_scoped(config, app)).await
@@ -303,6 +303,8 @@ pub async fn delete_r2_object(
 ) -> Result<(), String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope([config.cache_config()]).await;
     let r2_config: r2::R2Config = config.into();
 
     // Delete from R2
@@ -311,7 +313,8 @@ pub async fn delete_r2_object(
         .map_err(|e| format!("Failed to delete object: {}", e))?;
 
     // Update cache and emit events (including paths-removed if any folders became empty)
-    update_cache_after_delete(&app, &bucket, &account_id, &key).await?;
+    let update = update_cache_after_delete(&app, &bucket, &account_id, &key);
+    db::cache_scope::in_optional_scope(scope, update).await?;
 
     Ok(())
 }
@@ -331,6 +334,8 @@ pub async fn batch_delete_r2_objects(
 ) -> Result<BatchDeleteResult, String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope([config.cache_config()]).await;
     let r2_config: r2::R2Config = config.into();
     let total = keys.len();
 
@@ -355,9 +360,9 @@ pub async fn batch_delete_r2_objects(
 
     // Update cache and emit events (including paths-removed if any folders became empty)
     if !outcome.deleted_keys.is_empty() {
-        if let Err(e) =
-            update_cache_after_batch_delete(&app, &bucket, &account_id, &outcome.deleted_keys).await
-        {
+        let update =
+            update_cache_after_batch_delete(&app, &bucket, &account_id, &outcome.deleted_keys);
+        if let Err(e) = db::cache_scope::in_optional_scope(scope, update).await {
             outcome.errors.push(e);
         }
     }
@@ -380,6 +385,8 @@ pub async fn rename_r2_object(
 ) -> Result<(), String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope([config.cache_config()]).await;
     let r2_config: r2::R2Config = config.into();
 
     // Rename in R2
@@ -388,7 +395,8 @@ pub async fn rename_r2_object(
         .map_err(|e| format!("Failed to rename object: {}", e))?;
 
     // Update cache and emit events (including paths-created/removed)
-    update_cache_after_move(&app, &bucket, &account_id, &old_key, &new_key).await?;
+    let update = update_cache_after_move(&app, &bucket, &account_id, &old_key, &new_key);
+    db::cache_scope::in_optional_scope(scope, update).await?;
 
     Ok(())
 }
@@ -402,6 +410,8 @@ pub async fn batch_move_r2_objects(
 ) -> Result<BatchMoveResult, String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope([config.cache_config()]).await;
     let r2_config: r2::R2Config = config.into();
     let batch_id = batch_id.unwrap_or_else(fallback_batch_id);
 
@@ -418,9 +428,8 @@ pub async fn batch_move_r2_objects(
 
     let mut errors = outcome.errors;
     if !outcome.successful.is_empty() {
-        if let Err(e) =
-            update_cache_after_batch_move(&app, &bucket, &account_id, &outcome.successful).await
-        {
+        let update = update_cache_after_batch_move(&app, &bucket, &account_id, &outcome.successful);
+        if let Err(e) = db::cache_scope::in_optional_scope(scope, update).await {
             errors.push(e);
         }
     }
@@ -460,6 +469,8 @@ pub async fn upload_r2_content(
 ) -> Result<String, String> {
     let bucket = config.bucket.clone();
     let account_id = config.account_id.clone();
+    // Captured before the write, as a sync captures its scope before listing.
+    let scope = db::cache_scope::capture_write_scope([config.cache_config()]).await;
     let r2_config: r2::R2Config = config.into();
 
     // Calculate content size before converting to bytes
@@ -475,15 +486,15 @@ pub async fn upload_r2_content(
     let last_modified = chrono::Utc::now().to_rfc3339();
 
     // Update the file record and get (size_delta, is_new_file)
-    crate::commands::upload_cache::update_cache_after_upload(
+    let update = crate::commands::upload_cache::update_cache_after_upload(
         &app,
         &bucket,
         &account_id,
         &key,
         new_size,
         &last_modified,
-    )
-    .await?;
+    );
+    db::cache_scope::in_optional_scope(scope, update).await?;
 
     Ok(etag)
 }
