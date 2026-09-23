@@ -1877,7 +1877,11 @@ pub(crate) mod tests {
     async fn parts_sharing_an_endpoint_take_relay_memory_before_a_request_slot() {
         let _guard = test_db_guard().await;
         use crate::test_s3::{serve, Response};
-        const PARTS: i32 = 12;
+        // Relay memory for four parts, and one part in flight for every data
+        // slot of the endpoint plus those four: with reads taking their slot
+        // first, every slot ends up with a read waiting for memory.
+        const MEMORY_PARTS: usize = 4;
+        const PARTS: i32 = (crate::providers::operation::DATA_LIMIT + MEMORY_PARTS) as i32;
         // 1 MiB parts keep the test light; the fixture has no S3 part minimum.
         let part_size = MIB;
         let total = PARTS as u64 * part_size;
@@ -1904,14 +1908,13 @@ pub(crate) mod tests {
             }
         })
         .await;
-        // One endpoint serves every GET and UploadPart (eight data slots),
-        // twelve parts are in flight, and relay memory holds only four.
+        // One endpoint serves every GET and UploadPart.
         let config = fixture_config(&fixture.endpoint);
         let plan = MultipartPlan {
             part_size,
             total_parts: PARTS,
         };
-        let budget = RelayBudget::with_capacity(4, 2);
+        let budget = RelayBudget::with_capacity(MEMORY_PARTS as u32, 2);
         let http = shared_http_client().unwrap();
         let (cancelled, paused) = (AtomicBool::new(false), AtomicBool::new(false));
         let transfers = (1..=PARTS).map(|part| {
