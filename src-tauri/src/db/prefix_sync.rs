@@ -38,8 +38,9 @@ pub fn get_table_sql() -> &'static str {
 /// listing's first request. If a local write advanced it since, the pages may
 /// predate that write: the rows are still written, but without a fresh marker
 /// so the next open re-lists, and without `listed_at`, so a running full sync
-/// publishes its own (journal-replayed) rows for the folder instead of these.
-/// Returns whether the listing was published fresh.
+/// publishes its own (journal-replayed) rows for the folder instead of these
+/// -- and, since this listing may have seen changes the scan did not, does not
+/// vouch for them either. Returns whether the listing was published fresh.
 pub async fn replace_complete_prefix(
     bucket: &str,
     account_id: &str,
@@ -76,6 +77,9 @@ pub(crate) async fn replace_complete_prefix_on(
         let fresh =
             mutation_generation_on(conn, bucket, account_id, prefix).await? == listed_generation;
         let listed_at = if fresh { now } else { 0 };
+        if !fresh {
+            super::file_cache::journal_stale_listing_on(conn, bucket, account_id, prefix).await?;
+        }
         conn.execute("DELETE FROM cached_files WHERE bucket = ?1 AND account_id = ?2 AND parent_path = ?3",
             turso::params![bucket, account_id, prefix]).await?;
         for chunk in files.chunks(500) {
@@ -369,6 +373,9 @@ mod tests {
         let db = turso::Builder::new_local(":memory:").build().await.unwrap();
         let conn = db.connect().unwrap();
         conn.execute_batch(get_table_sql()).await.unwrap();
+        conn.execute_batch(super::super::app_state::get_table_sql())
+            .await
+            .unwrap();
         conn.execute_batch(
             "CREATE TABLE cached_files (bucket TEXT, account_id TEXT, key TEXT, parent_path TEXT, name TEXT, size INTEGER, last_modified TEXT, synced_at INTEGER, PRIMARY KEY(bucket, account_id, key));
              CREATE TABLE directory_tree (bucket TEXT, account_id TEXT, path TEXT, parent_path TEXT, file_count INTEGER, total_file_count INTEGER, size INTEGER, total_size INTEGER, last_modified TEXT, last_updated INTEGER, PRIMARY KEY(bucket, account_id, path));

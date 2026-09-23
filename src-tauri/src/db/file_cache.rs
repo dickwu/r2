@@ -385,6 +385,11 @@ enum SyncMutation<'a> {
     Relist {
         key: &'a str,
     },
+    /// A listing of `folder` that published stale: it may have seen changes
+    /// the scan did not, so publish must not vouch for the scan's rows either.
+    Unvouch {
+        folder: &'a str,
+    },
 }
 
 /// A running full sync publishes a snapshot scanned before these writes may
@@ -417,6 +422,7 @@ async fn record_sync_mutations_on(
             SyncMutation::Delete { key } => ("delete", *key, None, None),
             SyncMutation::Move { from, to, known } => ("move", *to, Some(*from), *known),
             SyncMutation::Relist { key } => ("relist", *key, None, None),
+            SyncMutation::Unvouch { folder } => ("unvouch", *folder, None, None),
         };
         conn.execute(
             "INSERT INTO sync_mutation_journal
@@ -449,6 +455,26 @@ pub async fn relist_unscoped_writes(bucket: &str, account_id: &str, keys: &[&str
     conn.execute("BEGIN TRANSACTION", ()).await?;
     let result = relist_unscoped_writes_on(&conn, bucket, account_id, keys).await;
     super::cache_scope::finish_transaction(&conn, result).await
+}
+
+/// Called when a folder listing publishes stale. Its rows lose the folder's
+/// re-listed status (they may predate a journaled local write), so a running
+/// sync publishes its own scanned and replayed rows for the folder; but the
+/// listing may also have seen changes made elsewhere after the scan passed
+/// the folder, so that publish must not vouch for the folder either.
+pub(crate) async fn journal_stale_listing_on(
+    conn: &turso::Connection,
+    bucket: &str,
+    account_id: &str,
+    folder: &str,
+) -> DbResult<()> {
+    record_sync_mutations_on(
+        conn,
+        bucket,
+        account_id,
+        &[SyncMutation::Unvouch { folder }],
+    )
+    .await
 }
 
 pub(crate) async fn relist_unscoped_writes_on(
@@ -1916,6 +1942,9 @@ async fn replay_sync_journal_on(
             }
             ("delete", None) => unstage_file_on(conn, bucket, account_id, &key).await?,
             ("relist", None) => unvouched.extend(super::prefix_sync::listing_folders(&[&key])),
+            ("unvouch", None) => {
+                unvouched.insert(key);
+            }
             ("move", Some(source)) => {
                 let moved = staged_file_on(conn, bucket, account_id, &source).await?;
                 unstage_file_on(conn, bucket, account_id, &source).await?;
@@ -2287,6 +2316,70 @@ mod tests {
             live_files(&conn, "a/").await,
             vec![("a/p".into(), 1), ("a/r".into(), 3)]
         );
+    }
+
+    #[tokio::test]
+    async fn a_stale_relisting_during_a_scan_never_leaves_the_folder_vouched() {
+        let (_db, conn) = fixture().await;
+        let run = begin_sync_on(&conn, "bucket", "account").await.unwrap();
+        // (1) The scan staged a/ = {p, q}; (2) then q was deleted elsewhere.
+        store_file_batch_on(
+            &conn,
+            "bucket",
+            "account",
+            &run,
+            &[cached("a/p", 1), cached("a/q", 2)],
+        )
+        .await
+        .unwrap();
+        // (3) Opening a/ re-lists it fresh: {p}.
+        let listed = super::super::prefix_sync::capture_mutation_generation_on(
+            &conn, "bucket", "account", "a/",
+        )
+        .await
+        .unwrap();
+        assert!(super::super::prefix_sync::replace_complete_prefix_on(
+            &conn,
+            "bucket",
+            "account",
+            "a/",
+            &[cached("a/p", 1)],
+            &[],
+            listed,
+        )
+        .await
+        .unwrap());
+        // (4) A later re-list of a/ overlaps a local upload and publishes stale.
+        let relisting = super::super::prefix_sync::capture_mutation_generation_on(
+            &conn, "bucket", "account", "a/",
+        )
+        .await
+        .unwrap();
+        update_cached_file_on(&conn, "bucket", "account", "a/r", 3, "later")
+            .await
+            .unwrap();
+        assert!(!super::super::prefix_sync::replace_complete_prefix_on(
+            &conn,
+            "bucket",
+            "account",
+            "a/",
+            &[cached("a/p", 1)],
+            &[],
+            relisting,
+        )
+        .await
+        .unwrap());
+
+        // (5) The sync publishes.
+        publish(&conn, &run, 2).await.unwrap();
+
+        // The upload is kept, and whatever a/ now shows is not vouched for:
+        // its zero marker outranks the fresh full index, so it re-lists on open
+        // instead of serving the scan's q as fresh.
+        assert!(live_files(&conn, "a/")
+            .await
+            .contains(&("a/r".to_string(), 3)));
+        assert!(markers(&conn).await.contains(&("a/".to_string(), 0)));
     }
 
     #[tokio::test]
