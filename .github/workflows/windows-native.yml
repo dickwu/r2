@@ -24,7 +24,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # import.meta.dirname (scripts/audit-source.mjs) needs Node >= 20.11;
       # pin instead of relying on whatever the runner image happens to ship.
@@ -151,7 +151,7 @@ jobs:
             binaries = $binaries
           } | ConvertTo-Json -Depth 8 | Out-File windows-native-nfs-behavior.json -Encoding utf8
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: windows-native-nfs-behavior
