@@ -6,8 +6,15 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import {
+  auditProvenance,
+  isMainModule,
+  jsonPointer,
+  PROVENANCE_POINTERS,
+} from './audit-source.mjs';
 
 const MiB = 1024 * 1024;
+const repoRoot = resolve(import.meta.dirname, '..');
 const PLAN = Object.freeze({
   status: 'prepared_not_executed',
   required_inputs: [
@@ -42,13 +49,49 @@ const PLAN = Object.freeze({
   ],
 });
 const MODES = new Set(['--plan', '--self-test', '--execute']);
-const args = process.argv.slice(2);
-assert(
-  args.length <= 1 && (!args.length || MODES.has(args[0])),
-  'Use --plan, --self-test, or --execute'
-);
-const mode = args[0] ?? '--plan';
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+
+// Pointers every report this harness writes carries from creation; probe
+// results (/range, /multipart, /cleanup_complete) are added as observed.
+export const REPORT_POINTERS = Object.freeze([
+  ...PROVENANCE_POINTERS,
+  '/status',
+  '/captured_at',
+  '/endpoint',
+  '/bucket',
+  '/prefix',
+  '/owner',
+  '/harness_sha256',
+  '/plan',
+  '/budget',
+  '/conditions',
+  '/requests',
+  '/cleanup',
+]);
+
+// The report skeleton execute() persists, bound to the checkout it ran from.
+export function createReport(config, { owner, harnessSha256, repo = repoRoot }) {
+  return {
+    status: 'running',
+    captured_at: new Date().toISOString(),
+    ...auditProvenance(repo),
+    endpoint: config.endpoint,
+    bucket: config.bucket,
+    prefix: config.prefix,
+    owner,
+    harness_sha256: harnessSha256,
+    plan: PLAN,
+    budget: {
+      probe_requests: 0,
+      cleanup_requests: 0,
+      uploaded_object_bytes: 0,
+      consumed_get_bytes: 0,
+    },
+    conditions: {},
+    requests: [],
+    cleanup: { removed: [], retained: [], aborted_uploads: [] },
+  };
+}
 
 function validateConfig(input) {
   for (const key of ['endpoint', 'bucket', 'accessKeyId', 'secretAccessKey', 'prefix'])
@@ -99,49 +142,70 @@ function canClean(receipt, head, owner) {
   );
 }
 
-if (mode === '--plan') {
-  console.log(JSON.stringify(PLAN, null, 2));
-} else if (mode === '--self-test') {
-  const valid = {
-    endpoint: `https://${'a'.repeat(32)}.r2.cloudflarestorage.com`,
-    bucket: 'dedicated-test',
-    accessKeyId: 'offline-placeholder',
-    secretAccessKey: 'offline-placeholder',
-    prefix: 'r2-audit/11111111-2222-4333-8444-555555555555/',
-  };
-  validateConfig(valid);
-  for (const change of [
-    { endpoint: 'http://localhost:9000' },
-    { endpoint: `${valid.endpoint}/other` },
-    { endpoint: `${valid.endpoint}.evil.example` },
-    { bucket: '' },
-    { accessKeyId: '' },
-    { secretAccessKey: '' },
-    { prefix: 'production/' },
-    { prefix: '../escape/' },
-  ])
-    assert.throws(() => validateConfig({ ...valid, ...change }));
-  assert.equal(classify({ ok: false, status: 412 }, true), 'enforced');
-  assert.equal(classify({ ok: false, status: 501 }, true), 'rejected_unsupported');
-  assert.equal(classify({ ok: true }, false), 'ignored');
-  assert.throws(() => classify({ ok: false, status: 412 }, false));
-  assert.throws(() => classify({ ok: false, status: 403 }, true));
-  assert(canClean({ etag: 'a' }, { ETag: 'a', Metadata: { 'r2-audit-owner': 'owner' } }, 'owner'));
-  assert(!canClean({ etag: 'a' }, { ETag: 'b', Metadata: { 'r2-audit-owner': 'owner' } }, 'owner'));
-  assert(!canClean({ etag: 'a' }, { ETag: 'a', Metadata: { 'r2-audit-owner': 'other' } }, 'owner'));
-  console.log(
-    'Offline configuration, condition-classification and cleanup-ownership checks passed. No credentials read; no network calls.'
+// Importing this module (the manifest self-test checks its report contract)
+// must run nothing; only a direct invocation dispatches a mode.
+if (isMainModule(process.argv[1], import.meta.filename)) await main();
+
+async function main() {
+  const args = process.argv.slice(2);
+  assert(
+    args.length <= 1 && (!args.length || MODES.has(args[0])),
+    'Use --plan, --self-test, or --execute'
   );
-} else {
-  // This is the only branch that reads explicitly supplied credential inputs.
-  const config = validateConfig({
-    endpoint: process.env.R2_AUDIT_ENDPOINT,
-    bucket: process.env.R2_AUDIT_BUCKET,
-    accessKeyId: process.env.R2_AUDIT_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_AUDIT_SECRET_ACCESS_KEY,
-    prefix: process.env.R2_AUDIT_PREFIX,
-  });
-  await execute(config);
+  const mode = args[0] ?? '--plan';
+  if (mode === '--plan') {
+    console.log(JSON.stringify(PLAN, null, 2));
+  } else if (mode === '--self-test') {
+    const valid = {
+      endpoint: `https://${'a'.repeat(32)}.r2.cloudflarestorage.com`,
+      bucket: 'dedicated-test',
+      accessKeyId: 'offline-placeholder',
+      secretAccessKey: 'offline-placeholder',
+      prefix: 'r2-audit/11111111-2222-4333-8444-555555555555/',
+    };
+    validateConfig(valid);
+    for (const change of [
+      { endpoint: 'http://localhost:9000' },
+      { endpoint: `${valid.endpoint}/other` },
+      { endpoint: `${valid.endpoint}.evil.example` },
+      { bucket: '' },
+      { accessKeyId: '' },
+      { secretAccessKey: '' },
+      { prefix: 'production/' },
+      { prefix: '../escape/' },
+    ])
+      assert.throws(() => validateConfig({ ...valid, ...change }));
+    assert.equal(classify({ ok: false, status: 412 }, true), 'enforced');
+    assert.equal(classify({ ok: false, status: 501 }, true), 'rejected_unsupported');
+    assert.equal(classify({ ok: true }, false), 'ignored');
+    assert.throws(() => classify({ ok: false, status: 412 }, false));
+    assert.throws(() => classify({ ok: false, status: 403 }, true));
+    assert(
+      canClean({ etag: 'a' }, { ETag: 'a', Metadata: { 'r2-audit-owner': 'owner' } }, 'owner')
+    );
+    assert(
+      !canClean({ etag: 'a' }, { ETag: 'b', Metadata: { 'r2-audit-owner': 'owner' } }, 'owner')
+    );
+    assert(
+      !canClean({ etag: 'a' }, { ETag: 'a', Metadata: { 'r2-audit-owner': 'other' } }, 'owner')
+    );
+    const report = createReport(valid, { owner: 'offline-owner', harnessSha256: 'offline' });
+    for (const expression of REPORT_POINTERS)
+      assert.notEqual(jsonPointer(report, expression), undefined, `report omits ${expression}`);
+    console.log(
+      'Offline configuration, condition-classification, cleanup-ownership and report-shape checks passed. No credentials read; no network calls.'
+    );
+  } else {
+    // This is the only branch that reads explicitly supplied credential inputs.
+    const config = validateConfig({
+      endpoint: process.env.R2_AUDIT_ENDPOINT,
+      bucket: process.env.R2_AUDIT_BUCKET,
+      accessKeyId: process.env.R2_AUDIT_ACCESS_KEY_ID,
+      secretAccessKey: process.env.R2_AUDIT_SECRET_ACCESS_KEY,
+      prefix: process.env.R2_AUDIT_PREFIX,
+    });
+    await execute(config);
+  }
 }
 
 async function execute(config) {
@@ -163,25 +227,10 @@ async function execute(config) {
   const started = Date.now();
   const output = resolve(process.env.R2_AUDIT_OUTPUT || `.omx/artifacts/r2-protocol/${owner}.json`);
   await mkdir(dirname(output), { recursive: true });
-  const report = {
-    status: 'running',
-    captured_at: new Date().toISOString(),
-    endpoint: config.endpoint,
-    bucket: config.bucket,
-    prefix: config.prefix,
+  const report = createReport(config, {
     owner,
-    harness_sha256: hash(await readFile(import.meta.filename)),
-    plan: PLAN,
-    budget: {
-      probe_requests: 0,
-      cleanup_requests: 0,
-      uploaded_object_bytes: 0,
-      consumed_get_bytes: 0,
-    },
-    conditions: {},
-    requests: [],
-    cleanup: { removed: [], retained: [], aborted_uploads: [] },
-  };
+    harnessSha256: hash(await readFile(import.meta.filename)),
+  });
   const metadata = { 'r2-audit-owner': owner };
   const small = Buffer.alloc(32, 17);
   const replacement = Buffer.alloc(32, 29);

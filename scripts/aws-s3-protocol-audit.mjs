@@ -15,8 +15,15 @@ import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import {
+  auditProvenance,
+  isMainModule,
+  jsonPointer,
+  PROVENANCE_POINTERS,
+} from './audit-source.mjs';
 
 const MiB = 1024 * 1024;
+const repoRoot = resolve(import.meta.dirname, '..');
 const PLAN = Object.freeze({
   status: 'prepared_not_executed',
   required_inputs: [
@@ -43,15 +50,65 @@ const PLAN = Object.freeze({
 });
 
 const MODES = new Set(['--plan', '--self-test', '--execute', '--local-response-loss-test']);
-const args = process.argv.slice(2);
-assert(
-  args.length <= 1 && (!args.length || MODES.has(args[0])),
-  'Use --plan, --self-test, --execute, or --local-response-loss-test'
-);
-const mode = args[0] ?? '--plan';
 
 function hash(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+// Pointers every report this harness writes carries from creation; probe
+// results (/range, /multipart, /cleanup_complete) are added as observed.
+export const REPORT_POINTERS = Object.freeze([
+  ...PROVENANCE_POINTERS,
+  '/status',
+  '/captured_at',
+  '/provider_kind',
+  '/local_fixture',
+  '/endpoint',
+  '/region',
+  '/source_bucket',
+  '/dest_bucket',
+  '/bucket_matrix_mode',
+  '/prefix',
+  '/owner',
+  '/harness_sha256',
+  '/plan',
+  '/budget',
+  '/conditions',
+  '/requests',
+  '/cleanup',
+]);
+
+// The report skeleton execute() persists, bound to the checkout it ran from.
+// A --local-response-loss-test run against a disposable loopback RustFS is
+// marked as such so it can never be read as AWS acceptance evidence; a real
+// run records no endpoint override.
+export function createReport(config, { owner, harnessSha256, repo = repoRoot }) {
+  const localFixture = config.localFixture === true;
+  return {
+    status: 'running',
+    captured_at: new Date().toISOString(),
+    ...auditProvenance(repo),
+    provider_kind: localFixture ? 'local-rustfs' : 'aws',
+    local_fixture: localFixture,
+    endpoint: config.endpoint ?? null,
+    region: config.region,
+    source_bucket: config.sourceBucket,
+    dest_bucket: config.destBucket,
+    bucket_matrix_mode: config.sourceBucket === config.destBucket ? 'same_bucket' : 'cross_bucket',
+    prefix: config.prefix,
+    owner,
+    harness_sha256: harnessSha256,
+    plan: PLAN,
+    budget: {
+      probe_requests: 0,
+      cleanup_requests: 0,
+      uploaded_object_bytes: 0,
+      consumed_get_bytes: 0,
+    },
+    conditions: {},
+    requests: [],
+    cleanup: { removed: [], retained: [], aborted_uploads: [] },
+  };
 }
 
 export function validateAwsConfig(input) {
@@ -216,52 +273,82 @@ async function startRustfs(binary, root, credentials) {
   }
 }
 
-if (mode === '--plan') {
-  console.log(JSON.stringify(PLAN, null, 2));
-} else if (mode === '--self-test') {
-  const valid = {
-    region: 'us-east-1',
-    sourceBucket: 'dedicated-r2-audit-source',
-    destBucket: 'dedicated-r2-audit-dest',
-    accessKeyId: 'offline-placeholder',
-    secretAccessKey: 'offline-placeholder',
-    prefix: 'r2-audit/aws/11111111-2222-4333-8444-555555555555/',
-  };
-  validateAwsConfig(valid);
-  for (const change of [
-    { region: '' },
-    { region: 'auto' },
-    { sourceBucket: '' },
-    { sourceBucket: '192.168.0.1' },
-    { sourceBucket: 'bad..bucket' },
-    { destBucket: '' },
-    { destBucket: '192.168.0.1' },
-    { destBucket: 'bad..bucket' },
-    { accessKeyId: '' },
-    { secretAccessKey: '' },
-    { prefix: 'production/' },
-    { prefix: 'r2-audit/11111111-2222-4333-8444-555555555555/' },
-  ]) {
-    assert.throws(() => validateAwsConfig({ ...valid, ...change }));
-  }
-  assert(canClean({ etag: 'a' }, { ETag: 'a', Metadata: { 'r2-audit-owner': 'owner' } }, 'owner'));
-  assert(!canClean({ etag: 'a' }, { ETag: 'b', Metadata: { 'r2-audit-owner': 'owner' } }, 'owner'));
-  assert.equal(PLAN.response_loss_faults, 'controlled_client_side_drop_after_real_response');
-  console.log(
-    'Offline AWS configuration and cleanup guard checks passed. No credentials read; no network calls.'
+// Importing this module (the manifest self-test checks its report contract)
+// must run nothing; only a direct invocation dispatches a mode.
+if (isMainModule(process.argv[1], import.meta.filename)) await main();
+
+async function main() {
+  const args = process.argv.slice(2);
+  assert(
+    args.length <= 1 && (!args.length || MODES.has(args[0])),
+    'Use --plan, --self-test, --execute, or --local-response-loss-test'
   );
-} else if (mode === '--local-response-loss-test') {
-  await localResponseLossTest();
-} else {
-  const config = validateAwsConfig({
-    region: process.env.AWS_AUDIT_REGION,
-    sourceBucket: process.env.AWS_AUDIT_SOURCE_BUCKET,
-    destBucket: process.env.AWS_AUDIT_DEST_BUCKET,
-    accessKeyId: process.env.AWS_AUDIT_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_AUDIT_SECRET_ACCESS_KEY,
-    prefix: process.env.AWS_AUDIT_PREFIX,
-  });
-  await execute(config);
+  const mode = args[0] ?? '--plan';
+  if (mode === '--plan') {
+    console.log(JSON.stringify(PLAN, null, 2));
+  } else if (mode === '--self-test') {
+    const valid = {
+      region: 'us-east-1',
+      sourceBucket: 'dedicated-r2-audit-source',
+      destBucket: 'dedicated-r2-audit-dest',
+      accessKeyId: 'offline-placeholder',
+      secretAccessKey: 'offline-placeholder',
+      prefix: 'r2-audit/aws/11111111-2222-4333-8444-555555555555/',
+    };
+    validateAwsConfig(valid);
+    for (const change of [
+      { region: '' },
+      { region: 'auto' },
+      { sourceBucket: '' },
+      { sourceBucket: '192.168.0.1' },
+      { sourceBucket: 'bad..bucket' },
+      { destBucket: '' },
+      { destBucket: '192.168.0.1' },
+      { destBucket: 'bad..bucket' },
+      { accessKeyId: '' },
+      { secretAccessKey: '' },
+      { prefix: 'production/' },
+      { prefix: 'r2-audit/11111111-2222-4333-8444-555555555555/' },
+    ]) {
+      assert.throws(() => validateAwsConfig({ ...valid, ...change }));
+    }
+    assert(
+      canClean({ etag: 'a' }, { ETag: 'a', Metadata: { 'r2-audit-owner': 'owner' } }, 'owner')
+    );
+    assert(
+      !canClean({ etag: 'a' }, { ETag: 'b', Metadata: { 'r2-audit-owner': 'owner' } }, 'owner')
+    );
+    assert.equal(PLAN.response_loss_faults, 'controlled_client_side_drop_after_real_response');
+    const skeleton = { owner: 'offline-owner', harnessSha256: 'offline' };
+    const report = createReport(valid, skeleton);
+    for (const expression of REPORT_POINTERS)
+      assert.notEqual(jsonPointer(report, expression), undefined, `report omits ${expression}`);
+    assert.equal(report.provider_kind, 'aws');
+    assert.equal(report.local_fixture, false);
+    assert.equal(report.endpoint, null);
+    const local = createReport(
+      { ...valid, endpoint: 'http://127.0.0.1:9000', localFixture: true },
+      skeleton
+    );
+    assert.equal(local.provider_kind, 'local-rustfs');
+    assert.equal(local.local_fixture, true);
+    assert.equal(local.endpoint, 'http://127.0.0.1:9000');
+    console.log(
+      'Offline AWS configuration, cleanup guard and report-shape checks passed. No credentials read; no network calls.'
+    );
+  } else if (mode === '--local-response-loss-test') {
+    await localResponseLossTest();
+  } else {
+    const config = validateAwsConfig({
+      region: process.env.AWS_AUDIT_REGION,
+      sourceBucket: process.env.AWS_AUDIT_SOURCE_BUCKET,
+      destBucket: process.env.AWS_AUDIT_DEST_BUCKET,
+      accessKeyId: process.env.AWS_AUDIT_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_AUDIT_SECRET_ACCESS_KEY,
+      prefix: process.env.AWS_AUDIT_PREFIX,
+    });
+    await execute(config);
+  }
 }
 
 async function localResponseLossTest() {
@@ -316,34 +403,20 @@ async function execute(config) {
     );
   }
   const owner = randomUUID();
+  // Loopback-fixture reports default to their own file name so they are not
+  // mistaken for a real run even before their marker is read.
   const output = resolve(
-    process.env.AWS_AUDIT_OUTPUT || `.omx/artifacts/aws-protocol/${owner}.json`
+    process.env.AWS_AUDIT_OUTPUT ||
+      `.omx/artifacts/aws-protocol/${config.localFixture ? 'local-' : ''}${owner}.json`
   );
   await mkdir(dirname(output), { recursive: true });
   const owned = new Map();
   const uploads = new Map();
   const uncertain = new Set();
-  const report = {
-    status: 'running',
-    captured_at: new Date().toISOString(),
-    region: config.region,
-    source_bucket: config.sourceBucket,
-    dest_bucket: config.destBucket,
-    bucket_matrix_mode: config.sourceBucket === config.destBucket ? 'same_bucket' : 'cross_bucket',
-    prefix: config.prefix,
+  const report = createReport(config, {
     owner,
-    harness_sha256: hash(await readFile(import.meta.filename)),
-    plan: PLAN,
-    budget: {
-      probe_requests: 0,
-      cleanup_requests: 0,
-      uploaded_object_bytes: 0,
-      consumed_get_bytes: 0,
-    },
-    conditions: {},
-    requests: [],
-    cleanup: { removed: [], retained: [], aborted_uploads: [] },
-  };
+    harnessSha256: hash(await readFile(import.meta.filename)),
+  });
   const metadata = { 'r2-audit-owner': owner };
   const small = Buffer.alloc(32, 17);
   const replacement = Buffer.alloc(32, 29);

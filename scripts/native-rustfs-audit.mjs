@@ -29,6 +29,7 @@ import {
   PutBucketVersioningCommand,
   GetBucketVersioningCommand,
 } from '@aws-sdk/client-s3';
+import { createEvidence, nativeEvidence } from './native-rustfs-report.mjs';
 
 const run = promisify(execFile);
 const repo = resolve(import.meta.dirname, '..');
@@ -97,7 +98,7 @@ assert.equal(await fileSha(archive), expectedArchiveSha, 'RustFS archive SHA256 
 // Check extracted bytes against the verified archive before executing them.
 await run('python3', [
   '-c',
-  'import hashlib,sys,zipfile\nwith zipfile.ZipFile(sys.argv[1]) as z:\n expected=hashlib.sha256(z.read("rustfs")).digest()\nwith open(sys.argv[2],"rb") as f:\n actual=hashlib.file_digest(f,"sha256").digest()\nassert actual==expected,"extracted RustFS differs from verified archive"',
+  'import hashlib,sys,zipfile\nwith zipfile.ZipFile(sys.argv[1]) as z:\n expected=hashlib.sha256(z.read("rustfs")).digest()\nactual=hashlib.sha256()\nwith open(sys.argv[2],"rb") as f:\n for chunk in iter(lambda: f.read(1<<20), b""): actual.update(chunk)\nassert actual.digest()==expected,"extracted RustFS differs from verified archive"',
   archive,
   binary,
 ]);
@@ -119,21 +120,14 @@ const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
 const bucket = 'audit-objects';
 const wrongEtag = '"00000000000000000000000000000000"';
-const evidence = {
-  scope: native
-    ? 'Disposable loopback RustFS SDK and isolated native Tauri Move/NFS'
-    : 'Disposable loopback RustFS SDK only; no Tauri application launched',
-  captured_at: new Date().toISOString(),
-  rustfs_version: '1.0.0-rc.6',
-  rustfs_commit: expectedCommit,
-  archive_sha256: expectedArchiveSha,
-  binary_sha256: await fileSha(binary),
-  harness_sha256: await fileSha(import.meta.filename),
-  version_output: version.trim(),
-  host: { platform: process.platform, architecture: process.arch },
-  conditions: {},
-  assertions: [],
-};
+const evidence = createEvidence({
+  native,
+  repo,
+  rustfs: { version: '1.0.0-rc.6', commit: expectedCommit, archiveSha256: expectedArchiveSha },
+  binarySha256: await fileSha(binary),
+  harnessSha256: await fileSha(import.meta.filename),
+  versionOutput: version.trim(),
+});
 const output = join(
   repo,
   `docs/engineering/r2-audit/real-rustfs${native ? '-native' : '-protocol'}.json`
@@ -830,12 +824,7 @@ async function nativePhase(source, destination) {
   }
   assert(connectorPort, 'Isolated connector not ready');
   assert.equal((await cli('state')).app.identifier, appId);
-  evidence.native = {
-    app_id: appId,
-    app_binary_sha256: await fileSha(appBinary),
-    discovery: 'owned PID loopback listener plus live app identifier',
-    moves: [],
-  };
+  evidence.native = nativeEvidence({ appId, appBinarySha256: await fileSha(appBinary) });
   for (const backend of [source, destination]) {
     const input = {
       name: `RustFS acceptance ${backend.role}`,

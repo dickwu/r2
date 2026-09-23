@@ -20,9 +20,17 @@ REPO = Path(__file__).resolve().parents[1]
 KEEP = {"native-listing-merge-before.json", "native-listing-merge-after.json", "native-listing-query-sharing.json"}
 
 
+def stream_sha256(stream) -> str:
+    # Chunked rather than hashlib.file_digest, which needs Python >= 3.11.
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1 << 20), b''):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def digest(path: Path) -> str:
     with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        return stream_sha256(stream)
 
 
 def untracked(path: Path) -> bool:
@@ -161,7 +169,7 @@ def main():
                 with compressed.open('wb') as target, gzip.GzipFile(filename=path.name, mode='wb', fileobj=target, compresslevel=9, mtime=0) as zipped, path.open('rb') as original:
                     shutil.copyfileobj(original, zipped)
             with gzip.open(compressed, 'rb') as restored:
-                restored_hash = hashlib.file_digest(restored, 'sha256').hexdigest()
+                restored_hash = stream_sha256(restored)
             assert restored_hash == raw_hash, f'Lossless verification failed for {path.name}'
             record.update({'gzip_file': compressed.name, 'gzip_bytes': compressed.stat().st_size,
                 'gzip_sha256': digest(compressed), 'decompressed_sha256': restored_hash})

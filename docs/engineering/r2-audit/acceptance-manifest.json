@@ -31,7 +31,8 @@
       "provider_commit_from": "/rustfs_commit",
       "provider_binary_sha256_from": "/binary_sha256",
       "harnesses": [
-        "scripts/native-rustfs-audit.mjs"
+        "scripts/native-rustfs-audit.mjs",
+        "scripts/native-rustfs-report.mjs"
       ]
     },
     {
@@ -73,6 +74,7 @@
       "app_binary_sha256_from": "/native/app_binary_sha256",
       "harnesses": [
         "scripts/native-rustfs-audit.mjs",
+        "scripts/native-rustfs-report.mjs",
         "scripts/run-native-nfs-test.py"
       ],
       "require_current_source": true,
@@ -196,6 +198,14 @@
         {
           "pointer": "/status",
           "expect": "observations_collected"
+        },
+        {
+          "pointer": "/local_fixture",
+          "expect": false
+        },
+        {
+          "pointer": "/provider_kind",
+          "expect": "aws"
         },
         {
           "pointer": "/range/exact_bytes",
