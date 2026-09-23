@@ -1878,7 +1878,8 @@ pub(crate) mod tests {
         let _guard = test_db_guard().await;
         use crate::test_s3::{serve, Response};
         const PARTS: i32 = 12;
-        let part_size = 5 * MIB;
+        // 1 MiB parts keep the test light; the fixture has no S3 part minimum.
+        let part_size = MIB;
         let total = PARTS as u64 * part_size;
         let (session, journal) = journal_fixture("shared-endpoint-budget", total).await;
         let fixture = serve(move |request| async move {
@@ -1906,8 +1907,11 @@ pub(crate) mod tests {
         // One endpoint serves every GET and UploadPart (eight data slots),
         // twelve parts are in flight, and relay memory holds only four.
         let config = fixture_config(&fixture.endpoint);
-        let plan = MultipartPlan::new(&config, total, Some(part_size)).unwrap();
-        let budget = RelayBudget::with_capacity(20, 2);
+        let plan = MultipartPlan {
+            part_size,
+            total_parts: PARTS,
+        };
+        let budget = RelayBudget::with_capacity(4, 2);
         let http = shared_http_client().unwrap();
         let (cancelled, paused) = (AtomicBool::new(false), AtomicBool::new(false));
         let transfers = (1..=PARTS).map(|part| {
@@ -1928,10 +1932,11 @@ pub(crate) mod tests {
             )
         });
         // Reads that wait for memory while holding the slots the loaded parts
-        // need to upload stall for a whole attempt_timeout(5 MiB) = 70 s
-        // before any of them gives up; taking memory first ends in seconds.
+        // need to upload stall for a whole attempt_timeout(1 MiB) = 38 s
+        // before any of them gives up; taking memory first ends in about a
+        // second.
         let results = tokio::time::timeout(
-            Duration::from_secs(20),
+            Duration::from_secs(30),
             futures_util::future::join_all(transfers),
         )
         .await
