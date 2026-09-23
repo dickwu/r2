@@ -3640,3 +3640,36 @@ async fn health_reports_interrupted_renames_but_not_running_ones() {
     );
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
 }
+
+/// A directory rename looks for the stages under its prefix. A stage
+/// elsewhere can stay locked for a whole download while it is primed, and
+/// the rename must not wait for it.
+#[tokio::test]
+async fn finding_the_stages_under_a_prefix_skips_busy_stages_elsewhere() {
+    let fixture = serve(|_| async { Response::empty(404) }).await;
+    let fs = filesystem(fixture.client.clone(), "stages-under-prefix");
+    let a = fs
+        .intern_child("A/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let b = fs
+        .intern_child("B/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let inside = fs.intern_child("A/x", a, EntryKind::File, 0, 0).unwrap();
+    let outside = fs.intern_child("B/y", b, EntryKind::File, 0, 0).unwrap();
+    drop(
+        fs.reset_stage(inside, &fs.inode(inside).unwrap())
+            .await
+            .unwrap(),
+    );
+    let busy = fs
+        .reset_stage(outside, &fs.inode(outside).unwrap())
+        .await
+        .unwrap();
+
+    let under = tokio::time::timeout(Duration::from_secs(1), fs.stages_under("A/"))
+        .await
+        .expect("the busy stage under B/ must not be waited for");
+    assert_eq!(under, [inside]);
+    drop(busy);
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}

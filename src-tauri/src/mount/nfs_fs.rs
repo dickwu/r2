@@ -3782,6 +3782,21 @@ impl S3NfsFs {
                 .map(|(&id, handle)| (id, handle.clone()))
                 .collect()
         };
+        // A stage is created from its inode's key and rekeyed with it inside
+        // the rename fence the caller holds, so one whose inode lies outside
+        // `prefix` is skipped unlocked: it may stay locked for a whole
+        // download. A stage without an inode is checked to be safe.
+        let staged: Vec<_> = match self.inner.inodes.read() {
+            Ok(inodes) => staged
+                .into_iter()
+                .filter(|(id, _)| {
+                    inodes
+                        .get(*id)
+                        .is_none_or(|inode| inode.key.starts_with(prefix))
+                })
+                .collect(),
+            Err(_) => staged,
+        };
 
         let mut under = Vec::new();
         for (id, handle) in staged {
