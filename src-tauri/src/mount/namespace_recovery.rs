@@ -184,6 +184,14 @@ impl S3NfsFs {
         self.apply_namespace_intent(&path, &intent).await
     }
 
+    /// Runs `intent` to completion: the conditional remote operation unless
+    /// it already happened, the durable discard of the key's stage, then the
+    /// journal at `path` goes. It stops at the first failure with the journal
+    /// in place: the key stays refused (`ensure_key_settled`), writes to the
+    /// file and the flusher refuse it too, health reports the change as
+    /// retained for recovery, and the next start's recovery takes the intent
+    /// from where it stopped. A stage the discard could not settle stays
+    /// whole and readable until then.
     async fn apply_namespace_intent(
         &self,
         path: &Path,
@@ -257,8 +265,13 @@ impl S3NfsFs {
             .get(&intent.key)
             .copied();
         if let Some(id) = id {
-            self.discard_stage(id).await;
+            // Cached chunks belong to the object just deleted or replaced,
+            // whatever becomes of the stage.
             self.inner.read_cache.forget_file(id);
+            // The client hears that the old content is gone only once the
+            // stage's discard is durable; until then the intent stays on
+            // disk and the stage is retained whole.
+            self.discard_stage_durably(id).await?;
         }
         tokio::fs::remove_file(path)
             .await

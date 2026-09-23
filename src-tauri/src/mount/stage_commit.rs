@@ -7,6 +7,13 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::sync::oneshot;
 
+/// Idle window the worker waits before each batch, so requests arriving
+/// together share one fsync. Measured against no window (draining only what
+/// queued during the previous fsync) with `wal_ack_latency_matrix`: at one
+/// writer the window costs a few milliseconds of a 15–65 ms first-write
+/// acknowledgement, while without it 100 concurrent 4 KiB writes took
+/// 56–65 batches instead of 5–7 and their p95 doubled. Kept, per NEXT-05's
+/// 5–20 ms allowance; not a promise any client should rely on.
 const COMMIT_DELAY: Duration = Duration::from_millis(5);
 static COORDINATOR: OnceLock<Arc<CommitCoordinator>> = OnceLock::new();
 static SYNC_BATCHES: AtomicU64 = AtomicU64::new(0);

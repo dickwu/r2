@@ -456,7 +456,8 @@ struct FlushJob {
 
 #[derive(Default)]
 struct KeyLifecycle {
-    // Lock order: namespace -> lifecycle -> publication -> stage -> registry.
+    // Lock order: namespace -> fence -> lifecycle -> publication -> stage
+    // -> registry.
     // Writes share the lifecycle permit with uploads, but use the stage mutex
     // only while changing data. Destructive operations wait for publication.
     access: AsyncRwLock<()>,
@@ -610,7 +611,7 @@ pub struct FsInner {
     /// Cancel flag of every storage request this mount makes. Set only by a
     /// forced abort: the unmount drain still has to publish staged files after
     /// `accepting_writes` is cleared.
-    shutdown: AtomicBool,
+    aborted: AtomicBool,
     directory_generation: AtomicU64,
     directory_cookies: RwLock<HashMap<(fileid3, fileid3), DirectoryCookie>>,
     directory_flights: AsyncMutex<DirectoryFlights>,
@@ -670,7 +671,7 @@ impl S3NfsFs {
                 namespace: AsyncRwLock::new(()),
                 key_lifecycles: std::sync::Mutex::new(HashMap::new()),
                 accepting_writes: AtomicBool::new(true),
-                shutdown: AtomicBool::new(false),
+                aborted: AtomicBool::new(false),
                 directory_generation: AtomicU64::new(1),
                 directory_cookies: RwLock::new(HashMap::new()),
                 directory_flights: AsyncMutex::new(HashMap::new()),
@@ -919,7 +920,7 @@ impl S3NfsFs {
             scope,
             identity,
             tokio::time::Instant::now() + budget,
-            &self.inner.shutdown,
+            &self.inner.aborted,
         )
     }
 
@@ -934,7 +935,7 @@ impl S3NfsFs {
     /// requests at their next check. Nothing is lost — unpublished content
     /// stays staged for the next session — but no drain can publish after it.
     pub fn abort_storage_operations(&self) {
-        self.inner.shutdown.store(true, Ordering::SeqCst);
+        self.inner.aborted.store(true, Ordering::SeqCst);
     }
 
     pub async fn wait_for_mutations(&self) {
@@ -2356,7 +2357,7 @@ impl S3NfsFs {
                             endpoint: self.storage_endpoint().to_string(),
                             scope: self.storage_scope(&object.to),
                         },
-                        &self.inner.shutdown,
+                        &self.inner.aborted,
                         &paused,
                     )
                     .await
@@ -2942,6 +2943,10 @@ impl S3NfsFs {
     /// told the old content is gone only once that is durable, so a stage
     /// whose removal cannot be recorded stays published and whole, and the
     /// call fails.
+    ///
+    /// What else the failure leaves behind is the caller's: the intent
+    /// journal `apply_namespace_intent` keeps, or nothing at all for a
+    /// `remove` of a file the bucket lacks.
     async fn discard_stage_durably(&self, id: fileid3) -> Result<(), nfsstat3> {
         let Some(mut guard) = self.stage_guard(id).await else {
             return Ok(());
@@ -3064,7 +3069,7 @@ impl S3NfsFs {
             if journal.precondition.is_none() {
                 match self.object_head(key).await.map_err(|e| UploadFailure {
                     message: format!("Unable to establish publication identity: {e:?}"),
-                    retryable: matches!(e, nfsstat3::NFS3ERR_IO | nfsstat3::NFS3ERR_JUKEBOX),
+                    retryable: matches!(e, nfsstat3::NFS3ERR_IO),
                     uncertain: false,
                 })? {
                     None => journal.precondition = Some(PublicationGuard::Absent),
@@ -4365,8 +4370,8 @@ impl NFSFileSystem for S3NfsFs {
         self.put_empty_object(&key, truncating).await?;
 
         let id = self.intern_child(&key, dirid, EntryKind::File, 0, now_secs())?;
-        // Whatever was staged or cached belonged to the content just replaced.
-        self.discard_stage_durably(id).await?;
+        // Whatever was staged or cached belonged to the content just replaced;
+        // `put_empty_object` discarded the stage durably before it returned.
         self.inner.read_cache.forget_file(id);
         self.invalidate_dir(dirid);
 
@@ -4453,7 +4458,13 @@ impl NFSFileSystem for S3NfsFs {
             EntryKind::File => {
                 self.delete_object(&target.key).await?;
                 // Deleting the file is an explicit instruction to throw the
-                // unuploaded content away, cached reads included.
+                // unuploaded content away, cached reads included. A file the
+                // bucket holds had its stage discarded durably inside
+                // `delete_object`; one the bucket lacks never reached that
+                // path and is discarded here, under the same rule. Should
+                // that fail, nothing has changed: the file stays visible with
+                // its stage, which the flusher may still publish, and a retry
+                // discards it.
                 self.discard_stage_durably(id).await?;
                 self.inner.read_cache.forget_file(id);
             }
