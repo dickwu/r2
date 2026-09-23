@@ -21,7 +21,12 @@ jobs:
   native-behavior:
     # A separate runtime gate from the preview-image compile/prerequisite lane.
     # No loader failure, reboot request, empty test run or skipped mount passes.
-    runs-on: windows-2022
+    strategy:
+      matrix:
+        # Defined once: the evidence records this label and the acceptance
+        # gate checks it, so it can never disagree with runs-on.
+        runner: [windows-2022]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
@@ -83,6 +88,7 @@ jobs:
           'C:\ProgramData\chocolatey\lib\SQLite\tools' | Out-File $env:GITHUB_PATH -Append -Encoding utf8
 
       - name: Prepare frontend assets
+        shell: pwsh
         run: |
           bun install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -96,6 +102,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Prepare disposable Windows NFS client
+        shell: pwsh
         run: ./scripts/prepare-windows-nfs.ps1
 
       - name: Execute native mount read write rename unmount
@@ -114,10 +121,12 @@ jobs:
         # native_nfs.write_read_rename_unmount are derived from the actual step
         # outcomes below, never hardcoded to a passing value, so a loader
         # failure, reboot, empty run or skipped mount cannot read as a pass.
+        # runner is the job's own runs-on label from the matrix, not a literal.
         if: always()
         shell: pwsh
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          R2_RUNNER_LABEL: ${{ matrix.runner }}
         run: |
           $binaries = @(Get-ChildItem "$env:CARGO_TARGET_DIR\debug\deps\r2_lib-*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
             @{ path = $_.FullName; sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
@@ -137,8 +146,9 @@ jobs:
             source_commit = (git rev-parse HEAD)
             source_tree = (git rev-parse 'HEAD^{tree}')
             pr_head_sha = $env:PR_HEAD_SHA
-            runner = 'windows-2022'
+            runner = $env:R2_RUNNER_LABEL
             runner_image = $env:ImageVersion
+            image_os = $env:ImageOS
             platform = [System.Environment]::OSVersion.VersionString
             sdk = $env:R2_NATIVE_SDK
             mode = 'native_behavior'
