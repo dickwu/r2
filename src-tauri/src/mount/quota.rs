@@ -135,6 +135,9 @@ mod tests {
         let from_file = available_space(&file).unwrap();
         assert!(from_folder > 0);
         assert!(from_file > 0);
+        // Windows walks to the nearest existing folder; statvfs needs the path.
+        #[cfg(windows)]
+        assert!(available_space(&root.join("not-created-yet.data")).unwrap() > 0);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -43,9 +43,13 @@ fn main() {
     // binary bound the legacy comctl32 5.82 and failed to load with
     // 0xc0000139. Embed the same manifest through the linker for every
     // target — app and test harnesses alike — and not a second time here.
+    // Only when building on Windows: `link.exe` merges the input itself,
+    // while a cross build's `lld-link` (cargo-xwin, see README) would need an
+    // external `mt.exe`, and its test binaries cannot run on that host anyway,
+    // so cross builds keep tauri-build's own manifest. (`cfg!` is the host.)
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    if target_os == "windows" && target_env == "msvc" {
+    if cfg!(windows) && target_os == "windows" && target_env == "msvc" {
         let manifest = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
             .join("windows-app-manifest.xml");
         println!("cargo:rerun-if-changed={}", manifest.display());
@@ -56,7 +60,14 @@ fn main() {
     }
     // `tauri_build::build()` with the attributes above.
     if let Err(error) = tauri_build::try_build(attributes) {
-        println!("{error:#}");
+        let error = format!("{error:#}");
+        println!("{error}");
+        if error.starts_with("unknown field") {
+            print!("found an unknown configuration field. This usually means that you are using a CLI version that is newer than `tauri-build` and is incompatible. ");
+            println!(
+                "Please try updating the Rust crates by running `cargo update` in the Tauri app folder."
+            );
+        }
         std::process::exit(1);
     }
 }
