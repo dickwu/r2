@@ -841,9 +841,12 @@ pub const DAMAGED_WAL_PREFIX: &str = ".stage.wal.damaged-";
 /// Damaged acknowledged records never block the folder: the stages the
 /// damage may affect are quarantined in their manifests, every other stage
 /// is replayed as usual, and the WAL is renamed aside (kept for export) so
-/// new writes start a fresh one.
+/// new writes start a fresh one — unless a replay failed. Then the WAL is
+/// the only copy of that stage's acknowledged records and stays where it is:
+/// `recovery_entries` reports the stage as `replay_pending` from it, restore
+/// quarantines it with its replay error, and the next restore tries again.
 pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
-    let mut errors = Vec::new();
+    let mut errors: Vec<(PathBuf, String)> = Vec::new();
     let index = read_root_wal(root).await.map_err(|e| e.to_string())?;
     let set_aside = (!index.damage.is_empty()).then(|| {
         root.join(format!(
@@ -911,14 +914,19 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     if set_aside.is_none() && dead_bytes > 0 {
         note_reclaimable(&root_wal_path(root), dead_bytes).await;
     }
+    // Every error above is a stage whose records were not folded into its
+    // manifest; they stay only in this WAL, so it must not be set aside yet.
+    let replayed_all = errors.is_empty();
     if let Some(target) = set_aside {
-        set_aside_wal(root, &target, max_lsn)
-            .await
-            .map_err(|e| e.to_string())?;
-        errors.push((
-            target,
-            "Damaged staging WAL kept for export and review".into(),
-        ));
+        if replayed_all {
+            set_aside_wal(root, &target, max_lsn)
+                .await
+                .map_err(|e| e.to_string())?;
+            errors.push((
+                target,
+                "Damaged staging WAL kept for export and review".into(),
+            ));
+        }
     }
     Ok(errors)
 }
