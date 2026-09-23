@@ -2,7 +2,7 @@
 //! Publications (PUT/Copy/Complete/Delete) deliberately have no operation kind:
 //! their uncertain results require reconciliation against a durable receipt.
 
-use super::s3_client::{s3_error_class, StorageErrorClass};
+use super::s3_client::{describe_s3_error, s3_error_class, StorageErrorClass};
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use serde::Serialize;
@@ -167,7 +167,10 @@ impl AttemptError {
         self
     }
 
-    pub fn from_sdk<E: ProvideErrorMetadata>(error: &SdkError<E, HttpResponse>) -> Self {
+    pub fn from_sdk<E>(error: &SdkError<E, HttpResponse>) -> Self
+    where
+        E: std::error::Error + ProvideErrorMetadata + 'static,
+    {
         let retry_after = error
             .raw_response()
             .and_then(|r| r.headers().get("retry-after"))
@@ -175,11 +178,15 @@ impl AttemptError {
             .unwrap_or_default();
         // Service codes are useful diagnostics without serializing request
         // internals, headers, URLs or credentials into persisted task errors.
-        Self::new(
-            s3_error_class(error, false),
-            error.code().unwrap_or("Storage request failed"),
-        )
-        .with_retry_after(retry_after)
+        // Anything else (a dropped connection, a timeout, an unreadable
+        // response) keeps the cause chain describe_s3_error walks, which is
+        // what names the failure; connector errors carry no credentials.
+        let message = match (error.code(), error) {
+            (Some(code), _) => code.to_owned(),
+            (None, SdkError::ServiceError(_)) => "Storage request failed".to_owned(),
+            (None, _) => describe_s3_error(error),
+        };
+        Self::new(s3_error_class(error, false), message).with_retry_after(retry_after)
     }
 }
 
@@ -554,6 +561,72 @@ mod tests {
         .unwrap_err();
         assert_eq!(result.class(), StorageErrorClass::Permanent);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_connection_keeps_its_description_in_the_attempt_error() {
+        use super::super::s3_client::describe_s3_error;
+        use aws_sdk_s3::error::{ConnectorError, ErrorMetadata};
+        use aws_sdk_s3::operation::get_object::GetObjectError;
+        use aws_sdk_s3::primitives::SdkBody;
+        type GetError = SdkError<GetObjectError, HttpResponse>;
+        let reset: GetError =
+            SdkError::dispatch_failure(ConnectorError::io("connection reset by peer".into()));
+        let cancelled = AtomicBool::new(false);
+        let ctx = context("connection-reset", &cancelled);
+        let calls = AtomicUsize::new(0);
+        let error = execute::<(), _, _>(&ctx, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(AttemptError::from_sdk(&reset))
+        })
+        .await
+        .unwrap_err();
+        // A dropped connection is retried, and what the task finally shows
+        // names the failure rather than a placeholder.
+        assert_eq!(error.class(), StorageErrorClass::Transient);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        let text = error.to_string();
+        assert_eq!(
+            text,
+            format!(
+                "transient: {} (after 3 attempts)",
+                describe_s3_error(&reset)
+            )
+        );
+        assert!(text.contains("connection reset by peer"), "{text}");
+
+        let timed_out: GetError = SdkError::timeout_error("connect took too long");
+        let attempt = AttemptError::from_sdk(&timed_out);
+        assert_eq!(attempt.class, StorageErrorClass::Transient);
+        assert_eq!(attempt.message, describe_s3_error(&timed_out));
+        assert!(attempt.message.contains("connect took too long"));
+
+        // A service error keeps only its code: the message could carry
+        // request internals into persisted task errors.
+        let service = |status: u16, metadata: ErrorMetadata| -> GetError {
+            SdkError::service_error(
+                GetObjectError::generic(metadata),
+                HttpResponse::new(status.try_into().unwrap(), SdkBody::empty()),
+            )
+        };
+        let denied = service(
+            403,
+            ErrorMetadata::builder()
+                .code("AccessDenied")
+                .message("Access Denied")
+                .build(),
+        );
+        assert_eq!(AttemptError::from_sdk(&denied).message, "AccessDenied");
+        // A code-less service error (a CDN's bare 520) has nothing to name.
+        let bare = service(520, ErrorMetadata::builder().build());
+        assert_eq!(
+            AttemptError::from_sdk(&bare).class,
+            StorageErrorClass::Transient
+        );
+        assert_eq!(
+            AttemptError::from_sdk(&bare).message,
+            "Storage request failed"
+        );
     }
 
     #[tokio::test(start_paused = true)]
