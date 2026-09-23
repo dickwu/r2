@@ -413,6 +413,10 @@ use directory_listing::{DirListing, DirectoryCookie};
 #[derive(Debug, Clone)]
 struct NegativeLookup {
     generation: u64,
+    /// The directory key the miss was probed under. A lookup that raced a
+    /// rename of the directory may probe its old path; that miss says
+    /// nothing about the new one.
+    dir_key: String,
     stored_at: Instant,
 }
 
@@ -1445,26 +1449,34 @@ impl S3NfsFs {
         }
     }
 
-    fn negative_lookup_hit(&self, dirid: fileid3, name: &str, generation: u64) -> bool {
+    fn negative_lookup_hit(
+        &self,
+        dirid: fileid3,
+        dir_key: &str,
+        name: &str,
+        generation: u64,
+    ) -> bool {
         self.inner
             .negative_lookups
             .read()
             .map(|cache| {
                 cache.get(&(dirid, name.to_string())).is_some_and(|entry| {
                     entry.generation == generation
+                        && entry.dir_key == dir_key
                         && entry.stored_at.elapsed() < NEGATIVE_LOOKUP_TTL
                 })
             })
             .unwrap_or(false)
     }
 
-    fn remember_negative_lookup(&self, dirid: fileid3, name: &str, generation: u64) {
+    fn remember_negative_lookup(&self, dirid: fileid3, dir_key: &str, name: &str, generation: u64) {
         if let Ok(mut cache) = self.inner.negative_lookups.write() {
             cache.retain(|_, entry| entry.stored_at.elapsed() < NEGATIVE_LOOKUP_TTL);
             cache.insert(
                 (dirid, name.to_string()),
                 NegativeLookup {
                     generation,
+                    dir_key: dir_key.to_string(),
                     stored_at: Instant::now(),
                 },
             );
@@ -1621,7 +1633,7 @@ impl S3NfsFs {
         // recorded under it can predate the page that returned the name.
         // Once any page has, only a fresh probe may say the name is gone.
         if !self.cached_listing_mentions(dirid, dir_key, name)
-            && self.negative_lookup_hit(dirid, name, generation)
+            && self.negative_lookup_hit(dirid, dir_key, name, generation)
         {
             return Ok(None);
         }
@@ -1641,7 +1653,7 @@ impl S3NfsFs {
                 Ok(Some((id, self.inode(id)?)))
             }
             None => {
-                self.remember_negative_lookup(dirid, name, generation);
+                self.remember_negative_lookup(dirid, dir_key, name, generation);
                 Ok(None)
             }
         }

@@ -3942,3 +3942,37 @@ async fn a_miss_probed_before_a_later_page_does_not_hide_a_held_back_name() {
         "the page that returned `x` is newer than the miss"
     );
 }
+
+/// A lookup that built its directory key before `mv A C` finished probes
+/// A/x after the rename and misses; its retry under C/ reads the same
+/// generation, and must not be answered by a miss recorded for the old path.
+#[tokio::test]
+async fn a_miss_recorded_for_a_directorys_old_path_never_answers_for_its_new_one() {
+    let fixture = serve(|request| async move {
+        if request.method == "GET" && request.path.contains("list-type") {
+            return directory_response(&[], &[], None);
+        }
+        if request.method == "HEAD" && request.path.starts_with("/photos/C/x") {
+            return Response::empty(200)
+                .header("content-length", 1)
+                .header("etag", "\"x\"");
+        }
+        Response::empty(404)
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "old-path-miss");
+    let a = fs
+        .intern_child("C/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let stale = tokio::time::timeout(Duration::from_secs(3), fs.lookup_child(a, "A/", "x"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stale.is_none());
+    let found = tokio::time::timeout(Duration::from_secs(3), fs.lookup_child(a, "C/", "x"))
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, inode) = found.expect("the miss was recorded for A/x, not C/x");
+    assert_eq!(inode.key, "C/x");
+}
