@@ -3824,21 +3824,33 @@ impl S3NfsFs {
         };
         // A stage is created from its inode's key and rekeyed with it inside
         // the rename fence the caller holds, so one whose inode lies outside
-        // `prefix` is skipped unlocked: it may stay locked for a whole
+        // `prefix` is not waited for: it may stay locked for a whole
         // download. A stage without an inode is checked to be safe.
-        let staged: Vec<_> = match self.inner.inodes.read() {
-            Ok(inodes) => staged
-                .into_iter()
-                .filter(|(id, _)| {
-                    inodes
-                        .get(*id)
-                        .is_none_or(|inode| inode.key.starts_with(prefix))
-                })
-                .collect(),
-            Err(_) => staged,
+        let (staged, elsewhere): (Vec<_>, Vec<_>) = match self.inner.inodes.read() {
+            Ok(inodes) => staged.into_iter().partition(|(id, _)| {
+                inodes
+                    .get(*id)
+                    .is_none_or(|inode| inode.key.starts_with(prefix))
+            }),
+            Err(_) => (staged, Vec::new()),
         };
 
         let mut under = Vec::new();
+        // Should a stage's key ever disagree with its inode's, one keyed under
+        // `prefix` must not be left to publish under the old path: any of them
+        // that can be checked without waiting still is.
+        for (id, handle) in elsewhere {
+            if let Ok(guard) = handle.try_lock() {
+                if !guard.evicted && guard.key.starts_with(prefix) {
+                    log::warn!(
+                        "mount: staged file \"{}\" is keyed apart from its inode; including it in the rename of \"{}\"",
+                        guard.key,
+                        prefix
+                    );
+                    under.push(id);
+                }
+            }
+        }
         for (id, handle) in staged {
             // Locked outside the map so a file that is mid-write is waited for
             // rather than missed — this decides what a rename copies.

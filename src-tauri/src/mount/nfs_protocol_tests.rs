@@ -3976,3 +3976,27 @@ async fn a_miss_recorded_for_a_directorys_old_path_never_answers_for_its_new_one
     let (_, inode) = found.expect("the miss was recorded for A/x, not C/x");
     assert_eq!(inode.key, "C/x");
 }
+
+/// Finding the stages under a prefix skips those whose inode lies outside
+/// it, relying on a stage's key matching its inode's. Should the two ever
+/// disagree, a stage keyed under the prefix must still be found when it can
+/// be checked without waiting: missed by a directory rename, it would
+/// later publish under the old path.
+#[tokio::test]
+async fn a_stage_keyed_under_the_prefix_is_found_even_if_its_inode_is_not() {
+    let fixture = serve(|_| async { Response::empty(404) }).await;
+    let fs = filesystem(fixture.client.clone(), "stage-key-guard");
+    let b = fs
+        .intern_child("B/", ROOT_ID, EntryKind::Dir, DIR_SIZE, 0)
+        .unwrap();
+    let id = fs.intern_child("B/y", b, EntryKind::File, 0, 0).unwrap();
+    let mut stage = fs.reset_stage(id, &fs.inode(id).unwrap()).await.unwrap();
+    stage.key = "A/y".into();
+    drop(stage);
+
+    let under = tokio::time::timeout(Duration::from_secs(1), fs.stages_under("A/"))
+        .await
+        .unwrap();
+    assert_eq!(under, [id]);
+    let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
