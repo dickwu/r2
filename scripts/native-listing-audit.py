@@ -35,6 +35,20 @@ from xml.sax.saxutils import escape
 
 REPO = Path(__file__).resolve().parents[1]
 
+
+def stream_sha256(stream):
+    # Chunked rather than hashlib.file_digest, which needs Python >= 3.11.
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1 << 20), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def file_sha256(path):
+    with Path(path).open("rb") as stream:
+        return stream_sha256(stream)
+
+
 SIZES = (10_000, 100_000)
 ACCEPTANCE_TRIALS_PER_CASE = 30
 LOCAL_FIXTURE_FIRST_PAGE_BUDGET_MS = {
@@ -435,7 +449,7 @@ class NativeAudit:
             "binary_path": str(args.binary),
             "declared_build_profile": getattr(args, "build_profile", "unspecified"),
             "percentile_method": "Nearest rank: sorted_values[ceil(n * fraction) - 1]",
-            "binary_sha256": hashlib.file_digest(args.binary.open("rb"), "sha256").hexdigest(),
+            "binary_sha256": file_sha256(args.binary),
             "host": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
             "fixture": {"endpoint": fixture.endpoint, "bucket": fixture.bucket, "page_size": 1000, "http_keep_alive": True,
                 "cold_definition": "No folder snapshot in SQLite or React Query; native process/client pool may already be warm",
@@ -955,7 +969,7 @@ class NativeAudit:
                 self.cancel_trial(total)
         self.summarize()
         with self.args.binary.open("rb") as executable:
-            assert hashlib.file_digest(executable, "sha256").hexdigest() == self.evidence["binary_sha256"], "Frozen executable changed during measurements"
+            assert stream_sha256(executable) == self.evidence["binary_sha256"], "Frozen executable changed during measurements"
         expected_samples = self.args.trials * len(SIZES) * len(SAMPLE_MODES)
         assert len(self.evidence["samples"]) == expected_samples
         assert len(self.evidence["cancellations"]) == len(SIZES)
@@ -1128,7 +1142,7 @@ def main():
         parser.error("trials must be positive")
     if args.expected_sha256:
         with args.binary.open("rb") as executable:
-            if hashlib.file_digest(executable, "sha256").hexdigest() != args.expected_sha256:
+            if stream_sha256(executable) != args.expected_sha256:
                 parser.error("Executable SHA256 differs from the frozen binary supplied by the build owner")
     with args.binary.open("rb") as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as binary:
         if binary.find(args.app_id.encode()) < 0:

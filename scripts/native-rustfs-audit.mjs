@@ -98,7 +98,7 @@ assert.equal(await fileSha(archive), expectedArchiveSha, 'RustFS archive SHA256 
 // Check extracted bytes against the verified archive before executing them.
 await run('python3', [
   '-c',
-  'import hashlib,sys,zipfile\nwith zipfile.ZipFile(sys.argv[1]) as z:\n expected=hashlib.sha256(z.read("rustfs")).digest()\nwith open(sys.argv[2],"rb") as f:\n actual=hashlib.file_digest(f,"sha256").digest()\nassert actual==expected,"extracted RustFS differs from verified archive"',
+  'import hashlib,sys,zipfile\nwith zipfile.ZipFile(sys.argv[1]) as z:\n expected=hashlib.sha256(z.read("rustfs")).digest()\nactual=hashlib.sha256()\nwith open(sys.argv[2],"rb") as f:\n for chunk in iter(lambda: f.read(1<<20), b""): actual.update(chunk)\nassert actual.digest()==expected,"extracted RustFS differs from verified archive"',
   archive,
   binary,
 ]);

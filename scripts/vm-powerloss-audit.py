@@ -16,6 +16,7 @@ import selectors
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -24,8 +25,13 @@ RECOVER = "mount::nfs_fs::native_smoke_tests::vm_powercut_tests::vm_nfs_powercut
 
 
 def sha256(path):
+    # Chunked rather than hashlib.file_digest, which needs Python >= 3.11;
+    # ubuntu-22.04 runners ship 3.10.
+    digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def command(runtime, name, *args, timeout=30):
@@ -151,7 +157,12 @@ def self_test():
         else:
             raise AssertionError(f"Broken recovery was accepted: {change}")
     assert all(1 <= case["cut_after"] <= len(case["mutations"]) for case in cases())
-    print("VM acceptance guards: 9 checks passed; no VM operations performed")
+    with tempfile.TemporaryDirectory() as scratch:
+        sample = Path(scratch) / "sample.bin"
+        data = bytes(range(256)) * 4097  # crosses the 1 MiB chunk boundary
+        sample.write_bytes(data)
+        assert sha256(sample) == hashlib.sha256(data).hexdigest()
+    print("VM acceptance guards: 10 checks passed; no VM operations performed")
 
 
 def main():
