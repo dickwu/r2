@@ -102,6 +102,8 @@ pub fn record_file_sync_bytes(bytes: u64) {
     SYNC_BYTES.fetch_add(bytes, Ordering::Relaxed);
 }
 
+/// Directories are synced only on Unix (`sync_parent_blocking`, `stage::sync_parent`).
+#[cfg(unix)]
 pub fn record_parent_sync() {
     SYNC_PARENTS.fetch_add(1, Ordering::Relaxed);
 }
