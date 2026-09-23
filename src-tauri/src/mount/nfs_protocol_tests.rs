@@ -3498,3 +3498,87 @@ async fn retiring_a_changed_handle_never_holds_inodes_while_waiting_for_dirs() {
         Err(nfsstat3::NFS3ERR_STALE)
     ));
 }
+
+/// A root whose name `x` is missing until `created` is set — by another
+/// client, so nothing on this mount invalidates the directory. Its first
+/// listing page is partial and already shows `x`: `z` is held back as the
+/// lookahead for the page after it.
+async fn externally_created_child_fixture(created: Arc<AtomicBool>) -> crate::test_s3::Fixture {
+    serve(move |request| {
+        let created = created.clone();
+        async move {
+            if request.method == "GET" && request.path.contains("list-type") {
+                if request.path.contains("prefix=x%2F") {
+                    return directory_response(&[], &[], None);
+                }
+                return directory_response(&["a", "x", "z"], &[], Some("next"));
+            }
+            if request.method == "HEAD"
+                && request.path.starts_with("/photos/x")
+                && created.load(Ordering::SeqCst)
+            {
+                return Response::empty(200)
+                    .header("content-length", 1)
+                    .header("etag", "\"x\"");
+            }
+            Response::empty(404)
+        }
+    })
+    .await
+}
+
+/// LOOKUP cached `x` as missing while the directory had no listing; `x` was
+/// then created elsewhere and a READDIR listed it. That listing was given the
+/// generation the miss had been recorded under, so the next LOOKUP answered
+/// NOENT for a name the client had just been shown.
+#[tokio::test]
+async fn a_listing_made_after_a_cached_miss_is_not_contradicted_by_it() {
+    let created = Arc::new(AtomicBool::new(false));
+    let fixture = externally_created_child_fixture(created.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "listing-after-miss");
+    assert!(fs.lookup_child(ROOT_ID, "", "x").await.unwrap().is_none());
+    created.store(true, Ordering::SeqCst);
+
+    let page = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+    assert_eq!(directory_names(&page), ["a", "x"]);
+    assert!(!page.end);
+    assert!(
+        fs.lookup_child(ROOT_ID, "", "x").await.unwrap().is_some(),
+        "the listing that shows `x` is newer than the cached miss"
+    );
+}
+
+/// The same miss must not answer a LOOKUP that began before the listing
+/// existed but waited — here behind a fence on `x` — until after it was
+/// made: whatever that LOOKUP checks or records belongs to the listing's
+/// generation, not the older one it started with.
+#[tokio::test]
+async fn a_lookup_that_waited_out_a_new_listing_does_not_answer_from_an_older_miss() {
+    let created = Arc::new(AtomicBool::new(false));
+    let fixture = externally_created_child_fixture(created.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "lookup-across-listing");
+    assert!(fs.lookup_child(ROOT_ID, "", "x").await.unwrap().is_none());
+    created.store(true, Ordering::SeqCst);
+
+    let held = fs.fence_exact_key("x").await;
+    let mut lookup = tokio::spawn({
+        let fs = fs.clone();
+        async move { fs.lookup_child(ROOT_ID, "", "x").await }
+    });
+    // The lookup reads its generation, then parks on the fence.
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut lookup)
+        .await
+        .is_err());
+    let page = fs.readdir(ROOT_ID, 0, 100).await.unwrap();
+    assert_eq!(directory_names(&page), ["a", "x"]);
+    drop(held);
+    let found = tokio::time::timeout(Duration::from_secs(3), lookup)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        found.is_some(),
+        "a listing that shows `x` outranks the older miss"
+    );
+}

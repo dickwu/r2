@@ -1559,6 +1559,7 @@ impl S3NfsFs {
             None
         };
 
+        let mut generation = generation;
         if let Some((child, complete, current_generation)) =
             self.cached_directory_child(dirid, dir_key, name)?
         {
@@ -1577,10 +1578,11 @@ impl S3NfsFs {
             if complete {
                 return Ok(None);
             }
-            if current_generation == generation && self.negative_lookup_hit(dirid, name, generation)
-            {
-                return Ok(None);
-            }
+            // A cache entry holds only for the generation that recorded it.
+            // A listing made while this lookup waited is newer than anything
+            // recorded under the generation it began with, so the lookup
+            // checks, and records what it observes, under the listing's.
+            generation = current_generation;
         }
 
         if let Some(fileid) = self.positive_lookup_hit(dirid, name, generation) {

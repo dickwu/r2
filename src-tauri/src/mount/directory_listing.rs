@@ -243,10 +243,14 @@ impl S3NfsFs {
                     if expected_generation.is_some() {
                         return Err(nfsstat3::NFS3ERR_BAD_COOKIE);
                     }
+                    // Strictly newer than any generation a lookup has read so
+                    // far, so a cache entry recorded before this listing
+                    // existed can never pass for one of its own.
                     let generation = self
                         .inner
                         .directory_generation
-                        .fetch_add(1, Ordering::SeqCst);
+                        .fetch_add(1, Ordering::SeqCst)
+                        + 1;
                     dirs.insert(dirid, DirListing::new(dir_key, generation));
                     self.inner
                         .directory_cookies
