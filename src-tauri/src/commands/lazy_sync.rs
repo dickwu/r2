@@ -815,44 +815,6 @@ fn emit_folder_page(
     Ok(elapsed_ms(started))
 }
 
-#[allow(dead_code)]
-fn emit_cached_pages(
-    app: &tauri::AppHandle,
-    cache: &LazyListResult,
-    consumer_started: tokio::time::Instant,
-) -> Result<f64, String> {
-    let total = cache.files.len() + cache.folders.len();
-    let page_count = total.max(1).div_ceil(1000);
-    let mut emit_ms = 0.0;
-    for index in 0..page_count {
-        let start = index * 1000;
-        let end = ((index + 1) * 1000).min(total);
-        let folders_start = start.min(cache.folders.len());
-        let folders_end = end.min(cache.folders.len());
-        let files_start = start.saturating_sub(cache.folders.len());
-        let files_end = end.saturating_sub(cache.folders.len());
-        let complete = index + 1 == page_count;
-        emit_ms += emit_folder_page(
-            app,
-            FolderPage {
-                scope: cache.scope.clone(),
-                page: ListPage {
-                    timing: cache.timing.clone(),
-                    files: cache.files[files_start..files_end].to_vec(),
-                    folders: cache.folders[folders_start..folders_end].to_vec(),
-                    page_index: index,
-                    next_cursor: (!complete).then(|| format!("cache:{}", index + 1)),
-                    complete,
-                    from_cache: true,
-                    freshness: cache.freshness,
-                },
-            },
-            consumer_started,
-        )?;
-    }
-    Ok(emit_ms)
-}
-
 /// Compatibility command for callers requiring a complete aggregate.
 #[tauri::command]
 pub async fn list_prefix(
@@ -1050,50 +1012,6 @@ fn is_background_run_active(run_id: u64) -> bool {
 }
 
 // ============ Unlistable Prefixes ============
-
-/// Where a completed sync records the prefixes it could not read.
-#[allow(dead_code)]
-fn skipped_prefixes_key(bucket: &str, account_id: &str) -> String {
-    format!("skipped_prefixes:{account_id}:{bucket}")
-}
-
-/// Records what a completed sync skipped, clearing the note when it skipped
-/// nothing — so a bucket heals itself once the provider is fixed.
-#[allow(dead_code)]
-async fn store_skipped_prefixes(bucket: &str, account_id: &str, skipped: &[String]) {
-    let key = skipped_prefixes_key(bucket, account_id);
-    if skipped.is_empty() {
-        let _ = db::app_state::delete_app_state(&key).await;
-        return;
-    }
-    // A write that fails here is the one case the fail-closed read cannot
-    // catch: no row is stored, so the next read returns a confident "nothing
-    // was skipped" and the authoritative cache serves the skipped folder as
-    // empty. Rather than leave that claim standing, retract it — the bucket
-    // keeps its rows but stops asserting it holds everything, so browsing
-    // lists live until a later sync gets the record written.
-    let recorded = match serde_json::to_string(skipped) {
-        Ok(value) => db::app_state::set_app_state(&key, &value).await.is_ok(),
-        Err(_) => false,
-    };
-    if !recorded {
-        eprintln!(
-            "Could not record {} unlistable prefix(es) for {bucket}; \
-             dropping the full-sync marker so browsing re-lists instead",
-            skipped.len()
-        );
-        let _ = db::clear_full_sync_marker(bucket, account_id).await;
-    }
-
-    // `finish_sync` has just dropped every live row for this bucket, including
-    // any a skipped folder still had from an earlier successful listing, but
-    // that folder's freshness record lives in another table and would outlive
-    // them. Left alone, a folder browsed moments before the sync skipped it
-    // would read as fresh and serve nothing. Clearing the records costs
-    // nothing here: a completed sync makes the cache authoritative, so the
-    // freshness path is only consulted for the skipped folders themselves.
-    let _ = db::prefix_sync::clear_prefix_sync_times(bucket, account_id).await;
-}
 
 /// Whether `prefix` is the folder a sync could not read, or sits under one.
 ///

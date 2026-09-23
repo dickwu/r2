@@ -462,18 +462,7 @@ pub async fn validate_app_state_on(conn: &Connection, key: &str, mutation: bool)
     Ok(())
 }
 
-#[allow(dead_code)]
-pub struct PrefixSnapshot {
-    pub prefix_time: Option<i64>,
-    pub full_sync: bool,
-    pub skipped_prefixes: Option<Vec<String>>,
-    pub contents: super::file_cache::FolderContents,
-}
-
-#[allow(dead_code)]
 pub struct PrefixPageSnapshot {
-    pub prefix_time: Option<i64>,
-    pub full_time: Option<i64>,
     /// The folder's own complete snapshot: a listing no local write
     /// overlapped published its rows, and every local write since was applied
     /// to them. Served first even once a write has zeroed the marker; the
@@ -483,9 +472,16 @@ pub struct PrefixPageSnapshot {
     /// after it was listed: neither its marker nor the full index vouch then.
     pub freshness_time: Option<i64>,
     pub full_sync: bool,
-    pub snapshot_token: Option<String>,
     pub skipped_prefixes: Option<Vec<String>>,
     pub page: super::file_cache::CachedFolderPage,
+    // The marker, index and snapshot token behind the fields above, which
+    // tests read to pin exactly where a page came from.
+    #[cfg(test)]
+    pub prefix_time: Option<i64>,
+    #[cfg(test)]
+    pub full_time: Option<i64>,
+    #[cfg(test)]
+    pub snapshot_token: Option<String>,
 }
 
 /// Capture the folder's mutation generation before a listing's first request.
@@ -498,53 +494,6 @@ pub async fn capture_prefix_generation(
     validate_on(&conn, scope).await?;
     super::prefix_sync::capture_mutation_generation_on(&conn, bucket, &scope.account_id, prefix)
         .await
-}
-
-#[allow(dead_code)]
-pub async fn read_prefix_snapshot(
-    scope: &CacheScope,
-    bucket: &str,
-    prefix: &str,
-) -> DbResult<PrefixSnapshot> {
-    let conn = get_connection()?.lock().await;
-    read_prefix_snapshot_on(&conn, scope, bucket, prefix).await
-}
-
-#[allow(dead_code)]
-async fn read_prefix_snapshot_on(
-    conn: &Connection,
-    scope: &CacheScope,
-    bucket: &str,
-    prefix: &str,
-) -> DbResult<PrefixSnapshot> {
-    validate_on(conn, scope).await?;
-    let mut rows = conn.query("SELECT last_synced_at FROM prefix_sync_times WHERE bucket=?1 AND account_id=?2 AND prefix=?3", turso::params![bucket, scope.account_id.as_str(), prefix]).await?;
-    let prefix_time = rows.next().await?.map(|row| row.get(0)).transpose()?;
-    let mut rows = conn
-        .query(
-            "SELECT file_count FROM sync_meta WHERE bucket=?1 AND account_id=?2",
-            turso::params![bucket, scope.account_id.as_str()],
-        )
-        .await?;
-    let full_sync = rows.next().await?.is_some();
-    let mut rows = conn
-        .query(
-            "SELECT value FROM app_state WHERE key=?1",
-            turso::params![format!("skipped_prefixes:{}:{bucket}", scope.account_id)],
-        )
-        .await?;
-    let skipped_prefixes = match rows.next().await? {
-        None => Some(Vec::new()),
-        Some(row) => serde_json::from_str(&row.get::<String>(0)?).ok(),
-    };
-    let contents =
-        super::file_cache::folder_contents_on(conn, bucket, &scope.account_id, prefix).await?;
-    Ok(PrefixSnapshot {
-        prefix_time,
-        full_sync,
-        skipped_prefixes,
-        contents,
-    })
 }
 
 pub async fn read_prefix_page(
@@ -645,14 +594,17 @@ async fn read_prefix_page_on(
     )
     .await?;
     Ok(PrefixPageSnapshot {
-        prefix_time,
-        full_time,
         prefix_complete,
         freshness_time,
         full_sync,
-        snapshot_token,
         skipped_prefixes,
         page,
+        #[cfg(test)]
+        prefix_time,
+        #[cfg(test)]
+        full_time,
+        #[cfg(test)]
+        snapshot_token,
     })
 }
 
@@ -1341,14 +1293,14 @@ mod tests {
             .await
             .unwrap();
             assert!(capture_on(&conn, &config("a.example")).await.is_err());
-            assert!(read_prefix_snapshot_on(&conn, &scope_a, "bucket", "")
+            assert!(read_prefix_page_on(&conn, &scope_a, "bucket", "", None, 10)
                 .await
                 .is_err());
             let scope_b = capture_on(&conn, &config("b.example")).await.unwrap();
-            let empty = read_prefix_snapshot_on(&conn, &scope_b, "bucket", "")
+            let empty = read_prefix_page_on(&conn, &scope_b, "bucket", "", None, 10)
                 .await
                 .unwrap();
-            assert!(empty.contents.files.is_empty());
+            assert!(empty.page.files.is_empty());
             assert!(empty.prefix_time.is_none());
             assert!(!empty.full_sync);
             publish_on(&conn, scope_b.clone(), "from-b").await.unwrap();
@@ -1357,10 +1309,10 @@ mod tests {
         release_tx.send(()).unwrap();
         assert!(old_request.await.unwrap().is_err());
         let conn = shared.lock().await;
-        let snapshot = read_prefix_snapshot_on(&conn, &scope_b, "bucket", "")
+        let snapshot = read_prefix_page_on(&conn, &scope_b, "bucket", "", None, 10)
             .await
             .unwrap();
-        assert_eq!(snapshot.contents.files[0].key, "from-b");
+        assert_eq!(snapshot.page.files[0].key, "from-b");
         // An old A task also cannot regain authority after A -> B -> A.
         super::super::minio_accounts::update_minio_account_on(
             &conn,
@@ -1401,10 +1353,10 @@ mod tests {
             scope
         );
         assert_eq!(
-            read_prefix_snapshot_on(&conn, &scope, "bucket", "")
+            read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
                 .await
                 .unwrap()
-                .contents
+                .page
                 .files[0]
                 .key,
             "warm"
@@ -1469,10 +1421,10 @@ mod tests {
         conn.execute("INSERT INTO sync_meta(bucket,account_id,last_sync,file_count) VALUES ('bucket','account',1,1)", ()).await.unwrap();
         initialize_on(&conn).await.unwrap();
         let scope = capture_on(&conn, &config("a.example")).await.unwrap();
-        let snapshot = read_prefix_snapshot_on(&conn, &scope, "bucket", "")
+        let snapshot = read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
             .await
             .unwrap();
-        assert!(snapshot.contents.files.is_empty());
+        assert!(snapshot.page.files.is_empty());
         assert!(snapshot.prefix_time.is_none());
         assert!(!snapshot.full_sync);
         publish_on(&conn, scope.clone(), "proven").await.unwrap();
@@ -1489,10 +1441,10 @@ mod tests {
             scope
         );
         assert_eq!(
-            read_prefix_snapshot_on(&conn, &scope, "bucket", "")
+            read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
                 .await
                 .unwrap()
-                .contents
+                .page
                 .files[0]
                 .key,
             "proven"
@@ -1527,15 +1479,19 @@ mod tests {
         narrow.access_key_id = "narrow".into();
         narrow.secret_access_key = "narrow-secret".into();
         let scope_narrow = capture_on(&conn, &narrow).await.unwrap();
-        assert!(read_prefix_snapshot_on(&conn, &scope_wide, "bucket", "")
-            .await
-            .is_err());
-        assert!(read_prefix_snapshot_on(&conn, &scope_narrow, "bucket", "")
-            .await
-            .unwrap()
-            .contents
-            .files
-            .is_empty());
+        assert!(
+            read_prefix_page_on(&conn, &scope_wide, "bucket", "", None, 10)
+                .await
+                .is_err()
+        );
+        assert!(
+            read_prefix_page_on(&conn, &scope_narrow, "bucket", "", None, 10)
+                .await
+                .unwrap()
+                .page
+                .files
+                .is_empty()
+        );
         // A pending wide-token metadata read cannot run inside the new scope.
         assert!(
             in_scope(scope_wide, check_context_on(&conn, "account", false))
@@ -1575,7 +1531,7 @@ mod tests {
             stored_scope_on(&conn, "account").await.unwrap().as_ref(),
             Some(&scope)
         );
-        assert!(read_prefix_snapshot_on(&conn, &scope, "bucket", "")
+        assert!(read_prefix_page_on(&conn, &scope, "bucket", "", None, 10)
             .await
             .is_err());
         assert!(publish_on(&conn, scope, "after-delete").await.is_err());

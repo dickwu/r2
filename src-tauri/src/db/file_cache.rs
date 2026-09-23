@@ -1139,23 +1139,6 @@ pub async fn get_all_directory_nodes(
     Ok(nodes)
 }
 
-/// Stop a bucket's cache from claiming to be complete, without discarding it.
-///
-/// Browsing then falls back to per-prefix listing, which is slower but cannot
-/// present a folder as empty on the strength of a completeness claim the cache
-/// can no longer back up. The rows themselves are kept: they are still the
-/// best answer available until the next sync.
-#[allow(dead_code)]
-pub async fn clear_full_sync_marker(bucket: &str, account_id: &str) -> DbResult<()> {
-    let conn = super::cache_scope::clear_connection(account_id).await?;
-    conn.execute(
-        "DELETE FROM sync_meta WHERE bucket = ?1 AND account_id = ?2",
-        turso::params![bucket, account_id],
-    )
-    .await?;
-    Ok(())
-}
-
 /// Clear all cached data for a bucket
 pub async fn clear_file_cache(bucket: &str, account_id: &str) -> DbResult<()> {
     let conn = super::cache_scope::clear_connection(account_id).await?;
@@ -1706,14 +1689,6 @@ pub(crate) async fn store_file_batch_on(
 /// replace live data (except folders re-listed after the scan started) → rebuild
 /// tree, publish skipped-prefix metadata, clear older prefix markers, clean
 /// staging, and update the sync generation. If this fails, old data is intact.
-#[allow(dead_code)]
-pub async fn finish_sync(bucket: &str, account_id: &str, file_count: usize) -> DbResult<()> {
-    let conn = super::cache_scope::write_connection(account_id).await?;
-    let run_token = active_sync_run_on(&conn, bucket, account_id).await?;
-    drop(conn);
-    finish_sync_with_metadata(bucket, account_id, &run_token, file_count, &[], &[]).await
-}
-
 pub async fn finish_sync_with_metadata(
     bucket: &str,
     account_id: &str,
