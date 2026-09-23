@@ -853,10 +853,14 @@ pub const DAMAGED_WAL_PREFIX: &str = ".stage.wal.damaged-";
 /// Damaged acknowledged records never block the folder: the stages the
 /// damage may affect are quarantined in their manifests, every other stage
 /// is replayed as usual, and the WAL is renamed aside (kept for export) so
-/// new writes start a fresh one — unless a replay failed. Then the WAL is
-/// the only copy of that stage's acknowledged records and stays where it is:
-/// `recovery_entries` reports the stage as `replay_pending` from it, restore
-/// quarantines it with its replay error, and the next restore tries again.
+/// new writes start a fresh one — unless a replay into a data file that is
+/// still there failed. Then the WAL is the only copy of that stage's
+/// acknowledged records and stays where it is: `recovery_entries` reports
+/// the stage as `replay_pending` from it, restore quarantines it with its
+/// replay error, and the next restore tries again. A stage whose data file
+/// is gone never keeps the WAL: there is nothing to replay into. Evicted
+/// once uploaded, it simply left its records behind until compaction; with
+/// its manifest still there, it cannot be restored, and its error says so.
 pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     let mut errors: Vec<(PathBuf, String)> = Vec::new();
     let index = read_root_wal(root).await.map_err(|e| e.to_string())?;
@@ -873,6 +877,10 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     let truncated_tail = index.truncated_tail;
     let max_lsn = index.max_lsn;
     let mut dead_bytes = 0u64;
+    // Set by an error of a stage whose data file is still there: records it
+    // acknowledged were not folded into its manifest and exist only in this
+    // WAL. Without a data file there is nothing to replay into.
+    let mut unapplied = false;
     for (name, bucket) in index.buckets {
         if affected.contains(&name) {
             continue;
@@ -880,13 +888,24 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
         let data_path = root.join(&name);
         let manifest_path = data_path.with_extension("stage.json");
         let error_key = replay_error_key(&data_path);
+        let data_present = !matches!(
+            tokio::fs::symlink_metadata(&data_path).await,
+            Err(error) if error.kind() == ErrorKind::NotFound
+        );
         let existing = match read_manifest(&manifest_path).await {
             Ok(record) => record,
             Err(error) => {
                 errors.push((error_key, error.to_string()));
+                unapplied |= data_present;
                 continue;
             }
         };
+        if existing.is_none() && !data_present {
+            // Evicted once uploaded, or removed without a discard: nothing is
+            // left to replay into, and compaction drops the records.
+            dead_bytes = dead_bytes.saturating_add(bucket.bytes);
+            continue;
+        }
         let checkpoint_lsn = existing.as_ref().map_or(0, |record| record.checkpoint_lsn);
         let generation_floor = existing.as_ref().map_or(0, |record| record.generation);
         let bucket_bytes = bucket.bytes;
@@ -910,27 +929,33 @@ pub async fn replay_all(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
                     Ok(recovery) => recovery,
                     Err(error) => {
                         errors.push((error_key, error.to_string()));
+                        unapplied |= data_present;
                         continue;
                     }
                 };
                 match write_json_atomic(&manifest_path, &recovery).await {
                     // The manifest now checkpoints every record of the file.
                     Ok(()) => dead_bytes = dead_bytes.saturating_add(bucket_bytes),
-                    Err(error) => errors.push((error_key, error.to_string())),
+                    Err(error) => {
+                        errors.push((error_key, error.to_string()));
+                        unapplied |= data_present;
+                    }
                 }
             }
             Ok(None) => dead_bytes = dead_bytes.saturating_add(checkpointed_bytes),
-            Err(error) => errors.push((error_key, error.to_string())),
+            Err(error) => {
+                errors.push((error_key, error.to_string()));
+                unapplied |= data_present;
+            }
         }
     }
     if set_aside.is_none() && dead_bytes > 0 {
         note_reclaimable(&root_wal_path(root), dead_bytes).await;
     }
-    // Every error above is a stage whose records were not folded into its
-    // manifest; they stay only in this WAL, so it must not be set aside yet.
-    let replayed_all = errors.is_empty();
+    // Unapplied acknowledged records stay only in this WAL, so it must not
+    // be set aside yet.
     if let Some(target) = set_aside {
-        if replayed_all {
+        if !unapplied {
             set_aside_wal(root, &target, max_lsn)
                 .await
                 .map_err(|e| e.to_string())?;

@@ -2207,6 +2207,14 @@ mod tests {
         assert_eq!(tokio::fs::read(&wal).await.unwrap(), before);
         drop(stage);
         drop(other);
+        // Its records wait for compaction, but there is nothing to replay
+        // them into: the next restore has no error to report for it.
+        stage_wal::forget_append_state(&wal).await;
+        let errors = replay_write_intents(&root).await.unwrap();
+        assert!(
+            errors.is_empty(),
+            "an evicted stage has nothing to replay: {errors:?}"
+        );
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
@@ -2988,6 +2996,112 @@ mod tests {
             let mut stage = Stage::restore(entry.clone()).await.unwrap();
             assert_eq!(stage.read_at(0, 16).await.unwrap(), expected, "{key}");
         }
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_evicted_stage_never_keeps_a_damaged_wal_from_being_set_aside() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-damage-evicted-stage-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let a_path = root.join("a.data");
+        let b_path = root.join("b.data");
+        let wal = stage_wal::wal_path(&a_path);
+        let mut a = Stage::create(a_path.clone(), "a".into(), 1).await.unwrap();
+        a.write_durable(0, &[1u8; 4096], 1).await.unwrap();
+        drop(a);
+        // Behind a's record, b: written, uploaded, and evicted once clean, the
+        // usual end of an uploaded stage. Its data file and manifest go, its
+        // records stay in the WAL until compaction.
+        let mut b = Stage::create(b_path.clone(), "b".into(), 1).await.unwrap();
+        b.write_durable(0, b"bbbb", 1).await.unwrap();
+        b.checkpoint_durable().await.unwrap();
+        b.dirty = false;
+        b.remove_files().await;
+        drop(b);
+        // Media damage inside a's acknowledged record, which b's records
+        // behind it prove durable.
+        let mut bytes = tokio::fs::read(&wal).await.unwrap();
+        bytes[1024] ^= 0xff;
+        tokio::fs::write(&wal, &bytes).await.unwrap();
+        stage_wal::forget_append_state(&wal).await;
+
+        let errors = replay_write_intents(&root).await.unwrap();
+        let set_aside = damaged_wal_copies(&root).await;
+        assert_eq!(
+            set_aside.len(),
+            1,
+            "an evicted stage has nothing to replay and must not keep the damaged WAL in place"
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|(path, _)| *path == b_path.with_extension("write.json")),
+            "nothing to replay is not a replay error: {errors:?}"
+        );
+        let entries = recovery_entries(&root).await.unwrap();
+        assert!(entries.iter().all(|entry| entry.key != "b"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.path == set_aside[0] && entry.state == "unreadable"));
+        let a_entry = entries.iter().find(|entry| entry.key == "a").unwrap();
+        assert_eq!(a_entry.state, "unreadable");
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stage_missing_its_data_file_is_reported_but_never_pins_a_damaged_wal() {
+        let root = std::env::temp_dir().join(format!(
+            "r2-damage-missing-data-file-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let a_path = root.join("a.data");
+        let b_path = root.join("b.data");
+        let wal = stage_wal::wal_path(&a_path);
+        let mut a = Stage::create(a_path.clone(), "a".into(), 1).await.unwrap();
+        let mut b = Stage::create(b_path.clone(), "b".into(), 1).await.unwrap();
+        a.write_durable(0, &[1u8; 4096], 1).await.unwrap();
+        b.write_durable(0, b"old!", 1).await.unwrap();
+        b.checkpoint_durable().await.unwrap();
+        b.write_durable(0, b"new!", 2).await.unwrap();
+        drop(a);
+        drop(b);
+        // Media damage inside a's acknowledged record...
+        let mut bytes = tokio::fs::read(&wal).await.unwrap();
+        bytes[1024] ^= 0xff;
+        tokio::fs::write(&wal, &bytes).await.unwrap();
+        // ...and b's data file is gone (a removal cut short between its two
+        // unlinks, or deleted behind the mount's back) while its manifest and
+        // its acknowledged overwrite in the WAL remain. It cannot be restored.
+        tokio::fs::remove_file(&b_path).await.unwrap();
+        stage_wal::forget_append_state(&wal).await;
+
+        let errors: std::collections::HashMap<_, _> = replay_write_intents(&root)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert!(
+            errors.contains_key(&b_path.with_extension("write.json")),
+            "the stage's replay error is still reported: {errors:?}"
+        );
+        let set_aside = damaged_wal_copies(&root).await;
+        assert_eq!(
+            set_aside.len(),
+            1,
+            "a stage that cannot be restored must not keep the damaged WAL in place"
+        );
+        let entries = recovery_entries(&root).await.unwrap();
+        let b_entry = entries.iter().find(|entry| entry.key == "b").unwrap();
+        assert_eq!(b_entry.state, "unreadable", "{:?}", b_entry.error);
+        assert!(entries
+            .iter()
+            .any(|entry| entry.path == set_aside[0] && entry.state == "unreadable"));
+        let a_entry = entries.iter().find(|entry| entry.key == "a").unwrap();
+        assert_eq!(a_entry.state, "unreadable");
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
