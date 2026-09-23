@@ -1,16 +1,17 @@
 {
   "schema_version": 1,
-  "captured_at": "2026-09-22T18:26:36.057Z",
+  "captured_at": "2026-09-23T20:52:48.244Z",
   "git": {
-    "commit": "8bfb0b1826cb2c35a102c726c26ff30b2c54f350",
-    "tree": "1a9b23f17610eb1eb2e0dae80df8707f5508621a",
-    "dirty": true
+    "commit": "23b23d93908589d5ec59f162f465f2c0aab4c89f",
+    "tree": "532ae7b97d7b94b8020df625c3599c31d7601181",
+    "dirty": false,
+    "dirty_paths": []
   },
   "source_fingerprint": {
     "schema_version": 1,
     "algorithm": "sha256-production-inputs-v1",
-    "production_source_sha256": "7d88e04078af972e578105eaf8b1428f58421d62f297775c114ca73ab34c898b",
-    "file_count": 277,
+    "production_source_sha256": "dfbfc224516e0622d9e031bd6dc7cfdeda7c9c481285e10b879a57f2b9a472e0",
+    "file_count": 278,
     "includes_untracked_nonignored": true,
     "excludes": [
       "docs/",
@@ -98,6 +99,7 @@
       "src-tauri/src/db/rustfs_accounts.rs",
       "src-tauri/src/db/rustfs_buckets.rs",
       "src-tauri/src/db/sessions.rs",
+      "src-tauri/src/db/testdata/v0.3.5-schema.sql",
       "src-tauri/src/db/tokens.rs",
       "src-tauri/src/download/commands.rs",
       "src-tauri/src/download/mod.rs",
@@ -307,26 +309,29 @@
   },
   "manifest": {
     "file": "docs/engineering/r2-audit/acceptance-manifest.json",
-    "sha256": "dea58efee31f677cab8609086751a3a0cc0d9adb751ca9c8efd1a86c3400e2ab"
+    "sha256": "956ff642333e4e634629d47de9544c409780a0593866b2f4f9d0f396cedc7cc2"
   },
   "harnesses": {
     ".github/workflows/windows-native.yml": {
-      "sha256": "8903f9c06763a0822de268e097c19df56767e0582be9e6d06770a1002a779d10"
+      "sha256": "66108ca6a402a3aadf8129eaa971705a3dbdc2ee1d819ee3216d6d87434e9c73"
     },
     "scripts/aws-s3-protocol-audit.mjs": {
-      "sha256": "929d4d51c86b45d22d5c0cc541808636cd82f3792f78f4f1dd0eafb3e2d9c6a1"
+      "sha256": "fd7e501ea193e911e033b5af079a116ba2ea4c063c78358742c9736959a2a50f"
     },
     "scripts/native-minio-audit.mjs": {
-      "sha256": "da47d1b156149545bab2162d87b055cdfa1a362fcbbc8d4f20501d1518e53091"
+      "sha256": "2df98b981db3555ea666e915597ad4a6891e8498aa9dea9af69aee6f259ab41d"
     },
     "scripts/native-rustfs-audit.mjs": {
-      "sha256": "7445ff31e27a0bdc7b98c31121986fda6ddb156cbab385b8f3892a61b36c87b9"
+      "sha256": "5152aa20f628086435823f40f8e8040ae9aa94d588a35365587c0022f94e1fa3"
+    },
+    "scripts/native-rustfs-report.mjs": {
+      "sha256": "2d60ca051c6cf08ee4a453b6eb0fed64e491096f80d807fc0a5761a10afe8554"
     },
     "scripts/provider-fault-audit.mjs": {
       "sha256": "524f9681e9085bce6a77f5959ca466705ad3844e6aa936b508239c373d6a2450"
     },
     "scripts/r2-protocol-audit.mjs": {
-      "sha256": "e4f62dc3d87c4d5c2bedc880594553dc2256769fa2be92e520ac9782778c9efc"
+      "sha256": "d6de076e1f3c14949ca36d3380ab7a5e834694aa4988c25667d9ac196d4b3abf"
     },
     "scripts/run-native-nfs-test.py": {
       "sha256": "7b21b3693bd99bf108cd9affd66baab07e78d8dbbe074705137e92b57fcff6fd"
@@ -335,7 +340,7 @@
       "sha256": "d8e73c1cd4b17e38d7fb3b4fc2f37328b864bd3c4a5d05a444f9978e28f8b5c7"
     },
     "scripts/vm-powerloss-audit.py": {
-      "sha256": "13376718fe542f86009434c6a057486be202c7fe22de92bf1ca66e6c9cd44af7"
+      "sha256": "54b3d6ba02cb0f6f01ebcafec2d66b2aa023be576e10043f25e6c7039426d959"
     },
     "scripts/vm-powerloss-runner.swift": {
       "sha256": "c2eab893d84722a10fef8869ce188385127bffa1da89c4d4310ac2134b8a25aa"
@@ -347,7 +352,8 @@
   "summary": {
     "passed": 0,
     "historical_pass": 2,
-    "limited": 1,
+    "limited": 0,
+    "historical_limited": 1,
     "prepared_not_executed": 4,
     "not_executed": 0,
     "not_implemented": 1,
@@ -393,7 +399,7 @@
         "file": "real-rustfs-protocol.json",
         "sha256": "f37d0c282e691f6fd738518f74b9d97c41f6a9e1b62be7d432ea4dc0a5e49ccf"
       },
-      "reason": "evidence is not bound to current git commit/tree (8bfb0b1826cb2c35a102c726c26ff30b2c54f350 / 1a9b23f17610eb1eb2e0dae80df8707f5508621a)",
+      "reason": "evidence records no git commit/tree",
       "provider_version": "1.0.0-rc.6",
       "provider_commit": "5cd58319ed6148ed7f09f2a4d0b4e46e429f043a",
       "provider_binary_sha256": "734160c42de3b82656449e5060fdd941d30ec5ddba27f3535398e4956a3ab167",
@@ -459,7 +465,7 @@
       "title": "MinIO native Tauri Move and macOS NFS compatibility limits",
       "category": "provider_os",
       "mode": "real_loopback_native",
-      "status": "limited",
+      "status": "historical_limited",
       "checks": [
         {
           "pointer": "/moves/0/status",
@@ -487,6 +493,7 @@
         "file": "real-minio.json",
         "sha256": "e12a679b58f5e0bd37409350c89beffb54a04b6a9b4505434b26d2eac539c5ff"
       },
+      "reason": "evidence is missing production source fingerprint; limited by /moves/0/status = \"needs_action\"",
       "provider_commit": "7aac2a2c5b7c882e68c1ce017d8256be2feea27f",
       "app_id": "com.lifefarmer.r2.audit-01a096c3-20260912",
       "captured_at": "2026-09-12T22:29:29.722Z"
