@@ -123,6 +123,38 @@ async fn capability_confirmed(
     true
 }
 
+/// The plan a Move runs: the planner's, with a single server-side copy on an
+/// endpoint that is neither native AWS nor R2 only once its conditions are
+/// confirmed. Large objects on such endpoints relay, as in v0.3.5: multipart
+/// copy there must first be validated on the exact deployment (review NEXT-02).
+async fn execution_plan(
+    session: &MoveSession,
+    source_config: &MoveConfig,
+    dest_config: &MoveConfig,
+    size: u64,
+) -> Result<TransferPlan, String> {
+    let plan = plan_transfer(
+        source_config,
+        dest_config,
+        &session.source_key,
+        &session.dest_key,
+        size,
+    )?;
+    if plan == TransferPlan::SingleCopy
+        && !super::planner::native_aws(dest_config)
+        && !matches!(dest_config, MoveConfig::R2(_))
+        && !capability_confirmed(
+            &session.id,
+            dest_config,
+            &[Condition::CopyCreate, Condition::CopySource],
+        )
+        .await
+    {
+        return Ok(TransferPlan::Relay);
+    }
+    Ok(plan)
+}
+
 /// Older builds downgraded a missing completion to transferring. A saved
 /// MPU and our marker identify a candidate only; bytes still must be verified.
 #[allow(clippy::too_many_arguments)]
@@ -346,38 +378,7 @@ async fn move_file_internal(
     save_move_journal(&journal)
         .await
         .map_err(|e| format!("Cannot persist source identity: {e}"))?;
-    let mut plan = plan_transfer(
-        source_config,
-        dest_config,
-        &session.source_key,
-        &session.dest_key,
-        journal.source.size,
-    )?;
-    if plan == TransferPlan::SingleCopy
-        && !super::planner::native_aws(dest_config)
-        && !matches!(dest_config, MoveConfig::R2(_))
-        && !capability_confirmed(
-            &session.id,
-            dest_config,
-            &[Condition::CopyCreate, Condition::CopySource],
-        )
-        .await
-    {
-        plan = TransferPlan::Relay;
-    }
-    if plan == TransferPlan::Relay
-        && journal.source.size > super::planner::SINGLE_COPY_LIMIT
-        && super::planner::compatible_multipart_copy_candidate(source_config, dest_config)
-        && source_scope == dest_scope
-        && capability_confirmed(
-            &session.id,
-            dest_config,
-            &[Condition::PartCopySource, Condition::CompleteCreate],
-        )
-        .await
-    {
-        plan = TransferPlan::MultipartCopy;
-    }
+    let plan = execution_plan(session, source_config, dest_config, journal.source.size).await?;
     let uploaded_size = match plan {
         TransferPlan::SingleCopy | TransferPlan::MultipartCopy => {
             super::server_copy::copy(
@@ -1206,5 +1207,99 @@ mod recovery_tests {
             request.headers.contains_key("x-amz-copy-source")
                 && !request.path.contains("/.r2-operation-checks/")
         }));
+    }
+
+    #[tokio::test]
+    async fn large_compatible_moves_relay_even_where_part_copy_conditions_hold() {
+        use super::*;
+        use crate::move_transfer::planner::SINGLE_COPY_LIMIT;
+        use crate::move_transfer::stream::tests::fixture_config;
+        use crate::test_s3::{serve, Response};
+        // An endpoint that enforces every condition the capability probes try.
+        let fixture = serve(|request| async move {
+            let refused = || {
+                Response::xml(
+                    412,
+                    "<Error><Code>PreconditionFailed</Code><Message>condition</Message></Error>",
+                )
+            };
+            let conditional = request.headers.contains_key("x-amz-copy-source")
+                || request.headers.contains_key("if-none-match");
+            match request.method.as_str() {
+                "PUT" if conditional => refused(),
+                "PUT" if request.path.contains("uploadId=") => {
+                    Response::empty(200).header("etag", "\"part\"")
+                }
+                "PUT" => Response::empty(200).header("etag", "\"probe\""),
+                "POST" if request.path.contains("uploadId=") => refused(),
+                "POST" => Response::xml(
+                    200,
+                    "<InitiateMultipartUploadResult><UploadId>probe-upload</UploadId></InitiateMultipartUploadResult>",
+                ),
+                "GET" => Response::xml(
+                    200,
+                    "<ListPartsResult><IsTruncated>false</IsTruncated></ListPartsResult>",
+                ),
+                "HEAD" => Response::empty(200)
+                    .header("etag", "\"probe\"")
+                    .header("content-length", 8),
+                _ => Response::empty(204),
+            }
+        })
+        .await;
+        let config = fixture_config(&fixture.endpoint);
+        let session = MoveSession {
+            id: "compatible-large-move".into(),
+            source_key: "source".into(),
+            dest_key: "destination".into(),
+            source_bucket: "bucket".into(),
+            source_account_id: "account".into(),
+            source_provider: "minio".into(),
+            dest_bucket: "bucket".into(),
+            dest_account_id: "account".into(),
+            dest_provider: "minio".into(),
+            delete_original: true,
+            file_size: 0,
+            progress: 0,
+            status: "pending".into(),
+            error: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        // Compatible multipart copy is not validated on any deployment yet
+        // (review NEXT-02), so a large object relays as in v0.3.5, without
+        // probing at all.
+        assert_eq!(
+            execution_plan(&session, &config, &config, SINGLE_COPY_LIMIT + 1)
+                .await
+                .unwrap(),
+            TransferPlan::Relay
+        );
+        assert!(fixture.requests.lock().unwrap().is_empty());
+        // A confirmed single conditional copy is still used.
+        assert_eq!(
+            execution_plan(&session, &config, &config, SINGLE_COPY_LIMIT)
+                .await
+                .unwrap(),
+            TransferPlan::SingleCopy
+        );
+        // Native AWS keeps its conditional multipart copy.
+        let aws = |bucket: &str| {
+            MoveConfig::Aws(crate::providers::aws::AwsConfig {
+                bucket: bucket.into(),
+                access_key_id: "a".into(),
+                secret_access_key: "s".into(),
+                region: "us-east-1".into(),
+                endpoint_scheme: None,
+                endpoint_host: None,
+                force_path_style: false,
+            })
+        };
+        assert_eq!(
+            execution_plan(&session, &aws("a"), &aws("b"), SINGLE_COPY_LIMIT + 1)
+                .await
+                .unwrap(),
+            TransferPlan::MultipartCopy
+        );
     }
 }

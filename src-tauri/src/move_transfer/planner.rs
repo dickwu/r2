@@ -119,15 +119,9 @@ pub(crate) fn native_aws(config: &MoveConfig) -> bool {
     matches!(config, MoveConfig::Aws(cfg) if cfg.endpoint_host.as_deref().is_none_or(|s| s.trim().is_empty()))
 }
 
-pub(crate) fn general_purpose_copy_bucket(config: &MoveConfig) -> bool {
+fn general_purpose_copy_bucket(config: &MoveConfig) -> bool {
     let bucket = config.bucket();
     !bucket.contains(':') && !bucket.ends_with("--x-s3")
-}
-
-pub(crate) fn compatible_multipart_copy_candidate(source: &MoveConfig, dest: &MoveConfig) -> bool {
-    !matches!(dest, MoveConfig::R2(_))
-        && general_purpose_copy_bucket(source)
-        && general_purpose_copy_bucket(dest)
 }
 
 pub(crate) fn plan_transfer(
@@ -155,7 +149,7 @@ pub(crate) fn plan_transfer(
     // S3 access points, directory buckets, and Outposts have additional routing
     // constraints. They do not use the general-purpose bucket copy plan. R2
     // stays eligible for a single conditional CopyObject; only its multipart
-    // copy is excluded (see compatible_multipart_copy_candidate).
+    // copy is excluded (below).
     if !general_purpose_copy_bucket(source) || !general_purpose_copy_bucket(dest) {
         return Ok(TransferPlan::Relay);
     }
@@ -848,10 +842,6 @@ mod tests {
                 .unwrap(),
                 TransferPlan::Relay
             );
-            assert!(!compatible_multipart_copy_candidate(
-                &aws("us-east-1", bucket),
-                &aws("us-east-1", "dest")
-            ));
         }
     }
 
@@ -869,7 +859,6 @@ mod tests {
             plan_transfer(&r2("a"), &r2("b"), "x", "x", SINGLE_COPY_LIMIT + 1).unwrap(),
             TransferPlan::Relay
         );
-        assert!(!compatible_multipart_copy_candidate(&r2("a"), &r2("b")));
     }
 
     #[test]
