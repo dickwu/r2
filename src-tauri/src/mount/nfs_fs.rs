@@ -2942,6 +2942,10 @@ impl S3NfsFs {
     /// told the old content is gone only once that is durable, so a stage
     /// whose removal cannot be recorded stays published and whole, and the
     /// call fails.
+    ///
+    /// What else the failure leaves behind is the caller's: the intent
+    /// journal `apply_namespace_intent` keeps, or nothing at all for a
+    /// `remove` of a file the bucket lacks.
     async fn discard_stage_durably(&self, id: fileid3) -> Result<(), nfsstat3> {
         let Some(mut guard) = self.stage_guard(id).await else {
             return Ok(());
@@ -4365,8 +4369,8 @@ impl NFSFileSystem for S3NfsFs {
         self.put_empty_object(&key, truncating).await?;
 
         let id = self.intern_child(&key, dirid, EntryKind::File, 0, now_secs())?;
-        // Whatever was staged or cached belonged to the content just replaced.
-        self.discard_stage_durably(id).await?;
+        // Whatever was staged or cached belonged to the content just replaced;
+        // `put_empty_object` discarded the stage durably before it returned.
         self.inner.read_cache.forget_file(id);
         self.invalidate_dir(dirid);
 
@@ -4453,7 +4457,13 @@ impl NFSFileSystem for S3NfsFs {
             EntryKind::File => {
                 self.delete_object(&target.key).await?;
                 // Deleting the file is an explicit instruction to throw the
-                // unuploaded content away, cached reads included.
+                // unuploaded content away, cached reads included. A file the
+                // bucket holds had its stage discarded durably inside
+                // `delete_object`; one the bucket lacks never reached that
+                // path and is discarded here, under the same rule. Should
+                // that fail, nothing has changed: the file stays visible with
+                // its stage, which the flusher may still publish, and a retry
+                // discards it.
                 self.discard_stage_durably(id).await?;
                 self.inner.read_cache.forget_file(id);
             }

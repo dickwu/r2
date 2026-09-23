@@ -753,7 +753,7 @@ static FAILING_DISCARDS: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 #[cfg(test)]
-fn fail_next_discards(path: &Path, count: u32) {
+pub(super) fn fail_next_discards(path: &Path, count: u32) {
     *FAILING_DISCARDS
         .get_or_init(Default::default)
         .lock()
@@ -783,7 +783,7 @@ static FAILING_REMOVALS: std::sync::OnceLock<std::sync::Mutex<std::collections::
     std::sync::OnceLock::new();
 
 #[cfg(test)]
-fn fail_removal_of(path: &Path) {
+pub(super) fn fail_removal_of(path: &Path) {
     FAILING_REMOVALS
         .get_or_init(Default::default)
         .lock()

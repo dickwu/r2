@@ -1,3 +1,4 @@
+use super::super::stage_wal;
 use super::*;
 use crate::test_s3::{serve, Request, Response};
 
@@ -3999,4 +4000,191 @@ async fn a_stage_keyed_under_the_prefix_is_found_even_if_its_inode_is_not() {
         .unwrap();
     assert_eq!(under, [id]);
     let _ = tokio::fs::remove_dir_all(fs.staging_root()).await;
+}
+
+/// A fixture over `bucket` with nothing held back: every request is applied
+/// the moment it arrives.
+async fn model_fixture(bucket: Arc<std::sync::Mutex<ModelBucket>>) -> crate::test_s3::Fixture {
+    serve(move |request| {
+        let bucket = bucket.clone();
+        async move { bucket.lock().unwrap().respond(&request) }
+    })
+    .await
+}
+
+/// `note`, which the bucket holds, with content staged on top of it: written
+/// and uploaded, then written again. Returns its id and its stage's data
+/// path.
+async fn staged_over_uploaded(
+    fs: &S3NfsFs,
+    bucket: &Arc<std::sync::Mutex<ModelBucket>>,
+) -> (fileid3, PathBuf) {
+    let id = fs
+        .intern_child("note", ROOT_ID, EntryKind::File, 3, 0)
+        .unwrap();
+    fs.inner.dirs.write().unwrap().insert(
+        ROOT_ID,
+        DirListing::complete(Arc::new(vec![DirChild {
+            fileid: id,
+            name: "note".into(),
+        }])),
+    );
+    fs.write(id, 0, b"uploaded").await.unwrap();
+    assert_eq!(fs.drain(1, 1).await, 0);
+    assert_eq!(
+        bucket.lock().unwrap().body("note"),
+        Some(b"uploaded".as_slice())
+    );
+    fs.write(id, 0, b"staged, newer").await.unwrap();
+    let path = fs.stage_guard(id).await.unwrap().path().to_path_buf();
+    (id, path)
+}
+
+/// Uploads of a staged file to `key` so far: PUTs without the metadata that
+/// marks a namespace operation's empty object.
+fn stage_uploads_of(fixture: &crate::test_s3::Fixture, key: &str) -> usize {
+    let path = format!("/photos/{key}");
+    fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| {
+            request.method == "PUT"
+                && request.path.split('?').next() == Some(path.as_str())
+                && !request
+                    .headers
+                    .contains_key("x-amz-meta-r2-namespace-operation")
+        })
+        .count()
+}
+
+/// The mount as the next start rebuilds it from the same staging folder:
+/// the in-memory WAL state goes as a restart drops it, then recovery runs.
+async fn restarted(fs: S3NfsFs, client: Client, wal: &Path) -> S3NfsFs {
+    let root = fs.staging_root().to_path_buf();
+    let config = fs.inner.transfer_config.get().unwrap().clone();
+    drop(fs);
+    stage_wal::forget_append_state(wal).await;
+    let restored = S3NfsFs::new(client, "photos".into(), false, root);
+    restored.configure_transfer(config);
+    restored.restore_stages().await.unwrap();
+    restored
+}
+
+/// What must hold after a REMOVE or a truncating CREATE whose namespace
+/// operation went through but whose discard could not be recorded: the
+/// staged content is retained whole, nothing publishes it, and once the
+/// disk has room again the next start settles it without bringing the file
+/// back.
+async fn assert_retained_until_recovery_settles(
+    fs: S3NfsFs,
+    fixture: &crate::test_s3::Fixture,
+    bucket: &Arc<std::sync::Mutex<ModelBucket>>,
+    id: fileid3,
+    wal: &Path,
+    remote: Option<&[u8]>,
+) {
+    assert_eq!(bucket.lock().unwrap().body("note"), remote);
+    assert_eq!(fs.read(id, 0, 64).await.unwrap().0, b"staged, newer");
+    let journal = fs.namespace_journal_path("note");
+    assert!(
+        journal.exists(),
+        "the intent journal must outlive the failure"
+    );
+    // Two things are pending: the retained stage and the intent covering it.
+    let health = fs.health_snapshot().await;
+    assert_eq!(health.pending_uploads, 2);
+    assert_eq!(
+        health.last_error.as_deref(),
+        Some("Interrupted file changes are retained for recovery")
+    );
+    assert_eq!(fs.drain(1, 1).await, 2);
+    assert_eq!(stage_uploads_of(fixture, "note"), 1);
+    let root = fs.staging_root().to_path_buf();
+
+    // A restart while the disk is still full: the intent replays, its
+    // discard fails once more, and the file stays retained and unpublished.
+    let restored = restarted(fs, fixture.client.clone(), wal).await;
+    assert!(journal.exists());
+    assert!(restored.health_snapshot().await.last_error.is_some());
+    assert_eq!(restored.drain(1, 1).await, 2);
+    assert_eq!(stage_uploads_of(fixture, "note"), 1);
+    assert_eq!(bucket.lock().unwrap().body("note"), remote);
+
+    // Room again: the discard goes through and nothing is left to restore.
+    let restored = restarted(restored, fixture.client.clone(), wal).await;
+    assert!(!journal.exists());
+    assert_eq!(restored.pending_upload_count().await, 0);
+    assert!(
+        stage::recovery_entries(&root)
+            .await
+            .unwrap()
+            .iter()
+            .all(|entry| entry.key != "note"),
+        "the deleted content came back as a stage"
+    );
+    assert_eq!(restored.drain(1, 1).await, 0);
+    assert_eq!(stage_uploads_of(fixture, "note"), 1);
+    assert_eq!(bucket.lock().unwrap().body("note"), remote);
+    drop(restored);
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+/// REMOVE of a file the bucket holds deletes the object and then discards
+/// the stage. The client may be told the file is gone only once that
+/// discard is durable: acknowledged with the record unwritten and the data
+/// file still there, the deleted content would be restored at the next
+/// start.
+#[tokio::test]
+async fn a_remove_whose_discard_cannot_be_recorded_is_refused_and_never_resurrects_the_file() {
+    let bucket = ModelBucket::with(&[("note", b"old")]);
+    let fixture = model_fixture(bucket.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "remove-discard-not-durable");
+    let (id, data) = staged_over_uploaded(&fs, &bucket).await;
+    let wal = stage_wal::wal_path(&data);
+    // A full disk: no discard record can be written — not by the durable
+    // attempt, not by a best-effort retry — and the data file the WAL
+    // replays into cannot be unlinked either.
+    stage::fail_next_discards(&data, 2);
+    stage::fail_removal_of(&data);
+
+    let removed = fs.remove(ROOT_ID, &b"note".as_slice().into()).await;
+    assert!(
+        matches!(removed, Err(nfsstat3::NFS3ERR_IO)),
+        "a REMOVE whose discard could not be recorded was acknowledged: {removed:?}"
+    );
+    assert_retained_until_recovery_settles(fs, &fixture, &bucket, id, &wal, None).await;
+}
+
+/// A truncating CREATE over a file the bucket holds replaces the object
+/// with an empty one and then discards the stage, under the same rule as
+/// REMOVE: the old content is reported gone only once the discard is
+/// durable.
+#[tokio::test]
+async fn a_truncating_create_whose_discard_cannot_be_recorded_is_refused_and_never_resurrects_the_file(
+) {
+    let bucket = ModelBucket::with(&[("note", b"old")]);
+    let fixture = model_fixture(bucket.clone()).await;
+    let fs = filesystem(fixture.client.clone(), "truncate-discard-not-durable");
+    let (id, data) = staged_over_uploaded(&fs, &bucket).await;
+    let wal = stage_wal::wal_path(&data);
+    stage::fail_next_discards(&data, 2);
+    stage::fail_removal_of(&data);
+
+    let created = fs
+        .create(
+            ROOT_ID,
+            &b"note".as_slice().into(),
+            sattr3 {
+                size: set_size3::size(0),
+                ..sattr3::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(created, Err(nfsstat3::NFS3ERR_IO)),
+        "a truncating CREATE whose discard could not be recorded was acknowledged: {created:?}"
+    );
+    assert_retained_until_recovery_settles(fs, &fixture, &bucket, id, &wal, Some(b"")).await;
 }
