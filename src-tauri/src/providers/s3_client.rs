@@ -192,6 +192,10 @@ fn client_key(config: &S3ClientConfig<'_>) -> [u8; 32] {
 /// win when there is one; that is the part a user can act on. Otherwise the
 /// cause chain is walked, which is where a connection failure keeps its
 /// explanation.
+///
+/// On macOS an unreachable host leads with [`LOCAL_NETWORK_HINT`]: Local
+/// Network privacy refuses a LAN connection with the same EHOSTUNREACH as a
+/// host that is down, and the sync banner truncates the tail.
 pub fn describe_s3_error<E, R>(error: &SdkError<E, R>) -> String
 where
     E: std::error::Error + ProvideErrorMetadata + 'static,
@@ -205,14 +209,26 @@ where
     }
 
     let mut description = error.to_string();
+    let mut host_unreachable = false;
     let mut source = std::error::Error::source(error);
     while let Some(cause) = source {
+        host_unreachable |= cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::HostUnreachable);
         description.push_str(": ");
         description.push_str(&cause.to_string());
         source = cause.source();
     }
+    if host_unreachable && cfg!(target_os = "macos") {
+        return format!("{LOCAL_NETWORK_HINT} ({description})");
+    }
     description
 }
+
+/// What to change when macOS answers "No route to host" (os error 65). Since
+/// macOS 15 an app needs the Local Network privilege to reach a LAN endpoint —
+/// a self-hosted RustFS or MinIO — and a denial surfaces as that errno.
+const LOCAL_NETWORK_HINT: &str = "no route to host; if this endpoint is on your local network, allow r2 in System Settings > Privacy & Security > Local Network";
 
 /// Error codes that mean "try again later" even when the status does not say
 /// so — AWS, for one, sends `RequestTimeout` as a 400.
@@ -236,6 +252,7 @@ const TRANSIENT_ERROR_CODES: &[&str] = &[
 mod tests {
     use super::{
         create_s3_client, describe_s3_error, s3_error_class, S3ClientConfig, StorageErrorClass,
+        LOCAL_NETWORK_HINT,
     };
     use aws_sdk_s3::config::http::HttpResponse;
     use aws_sdk_s3::error::{ConnectorError, ErrorMetadata, SdkError};
@@ -298,6 +315,61 @@ mod tests {
             describe_s3_error(&error),
             "request has timed out: connect took too long"
         );
+    }
+
+    /// hyper's "tcp connect error", which carries the OS error as its source.
+    #[derive(Debug)]
+    struct ConnectFailed(std::io::Error);
+
+    impl std::fmt::Display for ConnectFailed {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("tcp connect error")
+        }
+    }
+
+    impl std::error::Error for ConnectFailed {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    fn connect_failure(cause: std::io::Error) -> ListError {
+        SdkError::dispatch_failure(ConnectorError::io(Box::new(ConnectFailed(cause))))
+    }
+
+    /// What macOS returns when Local Network privacy denies the connection.
+    #[cfg(unix)]
+    fn host_unreachable() -> std::io::Error {
+        std::io::Error::from_raw_os_error(libc::EHOSTUNREACH)
+    }
+
+    #[cfg(not(unix))]
+    fn host_unreachable() -> std::io::Error {
+        std::io::ErrorKind::HostUnreachable.into()
+    }
+
+    #[test]
+    fn an_unreachable_host_leads_with_the_macos_local_network_setting() {
+        let cause = host_unreachable().to_string();
+        let chain = format!("dispatch failure: io error: tcp connect error: {cause}");
+        let description = describe_s3_error(&connect_failure(host_unreachable()));
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(description, format!("{LOCAL_NETWORK_HINT} ({chain})"));
+        } else {
+            assert_eq!(description, chain);
+        }
+        // Still retried: the privilege prompt may deny the first attempt.
+        assert!(is_transient(&connect_failure(host_unreachable())));
+    }
+
+    #[test]
+    fn other_connect_failures_get_no_local_network_hint() {
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        let description = describe_s3_error(&connect_failure(refused));
+
+        assert!(description.starts_with("dispatch failure: io error: tcp connect error: "));
+        assert!(!description.contains("Local Network"));
     }
 
     #[test]

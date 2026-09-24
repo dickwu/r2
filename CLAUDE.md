@@ -108,6 +108,7 @@ tauri-connector state        # App metadata
 - **Tests**: colocated `*.test.ts` files run by `bun test` (Bun's built-in runner — don't add vitest/jest); Rust tests are inline `#[cfg(test)]` plus `crates/range-dl/tests/`
 - **Static export outputs to `dist/`** (`distDir` in next.config.ts); Tauri consumes `../dist` — there is no `out/`
 - **`src-tauri/capabilities/connector.json` is generated** by build.rs under the connector feature and gitignored — never hand-edit
+- **macOS Local Network privacy**: `src-tauri/Info.plist` (Tauri merges it into the bundle and embeds it in dev builds) declares `NSLocalNetworkUsageDescription`; without it macOS 15+ silently refuses LAN endpoints (self-hosted RustFS/MinIO) with "No route to host" (os error 65), and `describe_s3_error` leads that failure with the System Settings path
 - **AGENTS.md**: gitignored near-copy of this file for Codex — mirror CLAUDE.md edits into it
 
 <!-- BEGIN:nextjs-agent-rules -->
