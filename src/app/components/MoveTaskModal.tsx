@@ -3,6 +3,7 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { Modal, Button, Empty, App, Tabs, Badge, Popconfirm } from 'antd';
 import { invoke } from '@tauri-apps/api/core';
+import { useAntdModalFocusable } from '@/app/hooks/useAntdModalFocusable';
 import { Virtuoso } from 'react-virtuoso';
 import {
   useMoveStore,
@@ -37,6 +38,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
   const modalOpen = useMoveStore((state) => state.modalOpen);
   const setModalOpen = useMoveStore((state) => state.setModalOpen);
   const loadFromDatabase = useMoveStore((state) => state.loadFromDatabase);
+  const focusable = useAntdModalFocusable();
 
   const pendingCount = useMoveStore(selectPendingCount);
   const activeCount = useMoveStore(selectActiveCount);
@@ -558,6 +560,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       open={modalOpen}
       onCancel={handleClose}
       destroyOnHidden={false}
+      focusable={focusable}
       footer={
         tasks.length > 0 ? (
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>

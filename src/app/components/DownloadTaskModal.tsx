@@ -3,6 +3,7 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { Modal, Button, Empty, App, Tabs, Badge, Popconfirm } from 'antd';
 import { invoke } from '@tauri-apps/api/core';
+import { useAntdModalFocusable } from '@/app/hooks/useAntdModalFocusable';
 import { Virtuoso } from 'react-virtuoso';
 import {
   useDownloadStore,
@@ -27,6 +28,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
   const modalOpen = useDownloadStore((state) => state.modalOpen);
   const setModalOpen = useDownloadStore((state) => state.setModalOpen);
   const loadFromDatabase = useDownloadStore((state) => state.loadFromDatabase);
+  const focusable = useAntdModalFocusable();
 
   const pendingCount = useDownloadStore(selectPendingCount);
   const downloadingCount = useDownloadStore(selectDownloadingCount);
@@ -319,6 +321,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
       open={modalOpen}
       onCancel={handleClose}
       destroyOnHidden={false}
+      focusable={focusable}
       footer={
         tasks.length > 0 ? (
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>

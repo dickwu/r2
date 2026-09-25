@@ -14,7 +14,7 @@ export default function ReportProblemButton() {
         type="text"
         size="small"
         icon={<BugOutlined />}
-        onClick={open}
+        onClick={() => open()}
         aria-label="Report a problem"
       />
     </Tooltip>

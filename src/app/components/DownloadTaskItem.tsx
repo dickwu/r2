@@ -16,6 +16,8 @@ import {
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import { type DownloadTask, type DownloadChunk } from '@/app/stores/downloadStore';
+import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
+import { downloadFailure } from '@/app/lib/taskFailures';
 import { formatBytes, formatSpeed, formatTimeLeft } from '@/app/utils/formatBytes';
 import Sparkline from '@/app/components/Sparkline';
 
@@ -331,6 +333,11 @@ function StatusIcon({ status }: { status: DownloadTask['status'] }) {
   }
 }
 
+// The row never renders the error text: "Show error" opens the failure modal on it
+function showDownloadFailure(task: DownloadTask) {
+  useTransferErrorStore.getState().show(downloadFailure(task));
+}
+
 function TaskDescription({ task }: { task: DownloadTask }) {
   switch (task.status) {
     case 'downloading': {
@@ -386,9 +393,16 @@ function TaskDescription({ task }: { task: DownloadTask }) {
     }
     case 'error':
       return (
-        <Text style={{ fontSize: 12, color: 'var(--color-error, #ff4d4f)' }}>
-          {task.error || 'Download failed'}
-        </Text>
+        <span className="task-failed">
+          Failed
+          <button
+            type="button"
+            className="btn btn-sm btn-danger-ghost"
+            onClick={() => showDownloadFailure(task)}
+          >
+            Show error
+          </button>
+        </span>
       );
     case 'success':
       return (

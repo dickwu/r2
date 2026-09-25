@@ -45,6 +45,7 @@ import { useGlobalShortcuts } from '@/app/hooks/useGlobalShortcuts';
 import type { CommandAction } from '@/app/components/CommandPalette';
 import { useMoveStore, setupGlobalMoveListeners, loadAllActiveMoves } from '@/app/stores/moveStore';
 import { useReportStore } from '@/app/stores/reportStore';
+import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
 import TransferDock from '@/app/components/TransferDock';
 import Toast from '@/app/components/Toast';
 import { useToastStore } from '@/app/stores/toastStore';
@@ -66,6 +67,9 @@ const MoveTaskModal = dynamic(() => import('@/app/components/MoveTaskModal'), { 
 const MountModal = dynamic(() => import('@/app/components/MountModal'), { ssr: false });
 const CommandPalette = dynamic(() => import('@/app/components/CommandPalette'), { ssr: false });
 const ReportProblemModal = dynamic(() => import('@/app/components/report/ReportProblemModal'), {
+  ssr: false,
+});
+const TransferErrorModal = dynamic(() => import('@/app/components/TransferErrorModal'), {
   ssr: false,
 });
 
@@ -155,6 +159,7 @@ export default function Home() {
   const moveTaskModalOpen = useMoveStore((s) => s.modalOpen);
   const downloadTaskModalOpen = useDownloadStore((s) => s.modalOpen);
   const reportOpen = useReportStore((s) => s.isOpen);
+  const transferErrorOpen = useTransferErrorStore((s) => s.isOpen);
 
   const config = useMemo<StorageConfig | null>(
     () => toStorageConfig(),
@@ -965,6 +970,8 @@ export default function Home() {
           setSettingsOpen(true);
         } else if (action.value === 'report') {
           useReportStore.getState().open();
+        } else if (action.value === 'failures') {
+          useTransferErrorStore.getState().open();
         }
         // 'dock' — TransferDock auto-shows when tasks are running; no extra state needed
       } else if (action.type === 'refresh') {
@@ -1379,6 +1386,10 @@ export default function Home() {
 
       {/* Report a problem — portal to body, opened from the status bar or the palette */}
       {reportOpen && <ReportProblemModal />}
+
+      {/* Transfer failures — portal to body. After the batch modals and the report
+          dialog, so it stacks above a delete modal that reports into it */}
+      {transferErrorOpen && <TransferErrorModal />}
 
       {/* Command palette — portal to body */}
       {paletteOpen && (

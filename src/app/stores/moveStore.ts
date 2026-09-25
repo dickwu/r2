@@ -2,6 +2,9 @@ import { create } from 'zustand';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { createProgressBatcher, smoothSpeed } from '@/app/lib/progressThrottle';
+import { moveFailure } from '@/app/lib/taskFailures';
+import type { TransferFailure } from '@/app/lib/transferFailure';
+import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
 
 export const MAX_CONCURRENT_MOVES = 5;
 
@@ -181,6 +184,61 @@ export const MOVE_RECOVERY_LABELS: Record<string, string> = {
   needs_action: 'Copy or cleanup needs review; the recovery record is retained',
 };
 
+/**
+ * The failure modal follows a move's step INTO the terminal 'error', whichever
+ * path carried it — a status event or a database reload. Only that step
+ * reports: the recovery statuses wait on the person and never open the modal,
+ * a repeated error event changes nothing, and a failure restored at startup
+ * has no earlier step to compare with.
+ */
+function reportFailureStep(before: MoveTask | undefined, after: MoveTask | undefined): void {
+  if (!before || !after) return;
+  if (before.status !== 'error' && after.status === 'error') {
+    useTransferErrorStore.getState().report(moveFailure(after));
+  }
+}
+
+/**
+ * A move that left its failure (a retry goes back to pending) ends its record,
+ * so failing again is a new event; one that stopped waiting on the person ends
+ * its recovery note. Only a status event says so: a database reload may carry
+ * a snapshot taken before the failure was written, and must not erase it.
+ */
+function forgetFailureStep(before: MoveTask | undefined, after: MoveTask | undefined): void {
+  if (!before || !after) return;
+  const errors = useTransferErrorStore.getState();
+  if (before.status === 'error' && after.status !== 'error') errors.forget(`move:${after.id}`);
+  if (isMoveAwaitingAction(before.status) && !isMoveAwaitingAction(after.status)) {
+    errors.forget(`move-recovery:${after.id}`);
+  }
+}
+
+/** "photos/2026/IMG_2214.CR2" → "IMG_2214.CR2". */
+const baseName = (key: string): string => key.split('/').filter(Boolean).pop() ?? key;
+
+/**
+ * The record for a move the store first meets through its failure event. The
+ * event carries the keys and buckets; the bytes are unknown, so there is no
+ * fault line. A reload could not supply it: the active-tasks query leaves
+ * failed moves out.
+ */
+export function moveFailureFromEvent(
+  event: MoveStatusChangedEvent,
+  now: number = Date.now()
+): TransferFailure {
+  const sourceKey = event.source_key ?? '';
+  const destKey = event.dest_key ?? '';
+  return {
+    id: `move:${event.task_id}`,
+    kind: 'move',
+    name: baseName(sourceKey) || 'Move',
+    message: event.error || 'Move failed',
+    occurredAt: now,
+    key: sourceKey && destKey ? `${sourceKey} → ${destKey}` : sourceKey || undefined,
+    bucket: event.dest_bucket,
+  };
+}
+
 function isFinishedStatus(status: MoveStatus): boolean {
   return status === 'success' || status === 'error' || status === 'cancelled';
 }
@@ -269,6 +327,15 @@ export const useMoveStore = create<MoveStore>((set, get) => {
         };
       });
       set({ tasks });
+      // A reload can land between the worker's SQLite write and its status
+      // event, so a known task's step into failure can show here first. A
+      // startup restore knows no task yet and stays quiet.
+      for (const task of tasks) {
+        reportFailureStep(
+          currentTasks.find((t) => t.id === task.id),
+          task
+        );
+      }
     },
 
     clearAllTasks: () => {
@@ -299,11 +366,18 @@ export const useMoveStore = create<MoveStore>((set, get) => {
 
     handleStatusChanged: (event) => {
       const newStatus = mapStatus(event.status);
-      const taskExists = useMoveStore.getState().tasks.some((t) => t.id === event.task_id);
+      const previous = get().tasks.find((t) => t.id === event.task_id);
+
+      // A failure the store first hears of here has no task to update: the event
+      // itself is the record's source (a reload would not bring the task either)
+      if (!previous && newStatus === 'error') {
+        useTransferErrorStore.getState().report(moveFailureFromEvent(event));
+        return;
+      }
 
       // If task doesn't exist in store (new task started from queue), reload from database
       if (
-        !taskExists &&
+        !previous &&
         (newStatus === 'downloading' ||
           newStatus === 'uploading' ||
           isMoveAwaitingAction(newStatus))
@@ -349,6 +423,10 @@ export const useMoveStore = create<MoveStore>((set, get) => {
           };
         }),
       }));
+
+      const next = get().tasks.find((t) => t.id === event.task_id);
+      reportFailureStep(previous, next);
+      forgetFailureStep(previous, next);
     },
 
     handleTaskDeleted: (event) => {

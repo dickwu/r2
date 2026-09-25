@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { batchMoveObjects, BatchMoveResult, MoveOperation, StorageConfig } from '@/app/lib/r2cache';
+import type { TransferFailure } from '@/app/lib/transferFailure';
+import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
 
 // Global listener state - persists across component unmounts
 let globalListenersSetup = false;
@@ -31,6 +33,7 @@ export interface RenameBatch {
   opsPerSec: number;
   etaMs: number;
   status: RenameBatchStatus;
+  /** Why the batch failed: every reason the backend sent, one per line. */
   error?: string;
   startedAt: number;
 }
@@ -52,7 +55,44 @@ function isFinished(status: RenameBatchStatus): boolean {
   return status !== 'running';
 }
 
-export const useRenameStore = create<RenameStore>((set) => ({
+/**
+ * Every failed rename's reason, one per line, as the backend reported them;
+ * a count stands in when it sent none.
+ */
+export function renameFailureMessage(result: BatchMoveResult): string {
+  const reasons = result.errors.join('\n');
+  if (reasons.trim() !== '') return reasons;
+  return `${result.failed} ${result.failed === 1 ? 'file' : 'files'} could not be renamed`;
+}
+
+/**
+ * The failure record for a batch that ended in error or partly, or null while
+ * it runs and after it succeeds. The store reports it when the batch ends and
+ * the transfer dock shows it, so both build the identical record.
+ */
+export function renameFailureRecord(
+  batch: RenameBatch,
+  now: number = Date.now()
+): TransferFailure | null {
+  if (batch.status !== 'error' && batch.status !== 'partial') return null;
+  return {
+    id: `rename:${batch.id}`,
+    kind: 'rename',
+    name: batch.label,
+    message: batch.error?.trim() ? batch.error : 'Rename failed',
+    occurredAt: now,
+    // Files renamed, not files attempted: `completed` counts the failures too.
+    progress: { done: Math.max(0, batch.completed - batch.failed), total: batch.total },
+  };
+}
+
+/** Report a batch that just ended in error or partly; a successful one reports nothing. */
+function reportRenameFailure(batch: RenameBatch | undefined): void {
+  const failure = batch ? renameFailureRecord(batch) : null;
+  if (failure) useTransferErrorStore.getState().report(failure);
+}
+
+export const useRenameStore = create<RenameStore>((set, get) => ({
   batches: [],
   lastCompletedAt: 0,
 
@@ -102,10 +142,11 @@ export const useRenameStore = create<RenameStore>((set) => ({
           opsPerSec: 0,
           etaMs: 0,
           status,
-          error: result.errors[0],
+          error: status === 'success' ? undefined : renameFailureMessage(result),
         };
       }),
     }));
+    reportRenameFailure(get().batches.find((b) => b.id === id));
   },
 
   failBatch: (id, error) => {
@@ -115,6 +156,7 @@ export const useRenameStore = create<RenameStore>((set) => ({
         b.id === id ? { ...b, status: 'error' as const, error, opsPerSec: 0, etaMs: 0 } : b
       ),
     }));
+    reportRenameFailure(get().batches.find((b) => b.id === id));
   },
 
   removeBatch: (id) => {

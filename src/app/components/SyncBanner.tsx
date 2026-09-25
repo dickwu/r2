@@ -8,7 +8,8 @@ import {
   CheckCircleOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
-import { useSyncStore, type SyncPhase } from '@/app/stores/syncStore';
+import { useSyncStore, syncFailureRecord, type SyncPhase } from '@/app/stores/syncStore';
+import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
 
 // How long the banner lingers after sync ends, showing the "Synced" state
 // before it auto-hides. Matches the TransferDock auto-dismiss for consistency.
@@ -171,6 +172,7 @@ export default function SyncBanner({ onShowDetails }: SyncBannerProps) {
         <span className="sync-banner-phase">{view.title}</span>
         {view.detail && <span className="sync-banner-detail">{view.detail}</span>}
       </span>
+      {view.action}
 
       {onShowDetails && (
         <button
@@ -190,8 +192,16 @@ export default function SyncBanner({ onShowDetails }: SyncBannerProps) {
 interface BannerView {
   title: string;
   detail: string | null;
+  /** A control after the text: the failed state's "Show error" button. */
+  action?: React.ReactNode;
   icon: React.ReactNode;
   tone: 'progress' | 'error';
+}
+
+/** Opens the failure modal on the record `failBackgroundSync` reported. */
+function showSyncFailure() {
+  const failure = syncFailureRecord(useSyncStore.getState());
+  if (failure) useTransferErrorStore.getState().show(failure);
 }
 
 function formatRate(ratePerSec: number): string {
@@ -247,11 +257,17 @@ function computeBannerView(args: {
     };
   }
 
-  // Error trumps everything.
+  // Error trumps everything. The pill never shows the reason; its button
+  // opens the failure modal, which does.
   if (backgroundSync.error) {
     return {
       title: 'Sync failed',
-      detail: backgroundSync.error,
+      detail: null,
+      action: (
+        <button type="button" className="sync-banner-link" onClick={showSyncFailure}>
+          Show error
+        </button>
+      ),
       icon: <WarningOutlined />,
       tone: 'error',
     };

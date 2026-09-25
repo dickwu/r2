@@ -65,10 +65,13 @@ const {
   pruneDeadMountTransfers,
   TRANSFER_RETAIN_MS,
   MAX_TRANSFER_ROWS,
+  mountFailureRecord,
+  enteredMountFailure,
 } = mountModule;
 type MountTransferEvent = import('./mountStore').MountTransferEvent;
 type MountTransfer = import('./mountStore').MountTransfer;
 const { useToastStore } = await import('./toastStore');
+const { useTransferErrorStore } = await import('./transferErrorStore');
 
 function payload(overrides: Record<string, unknown> = {}) {
   return {
@@ -823,5 +826,93 @@ describe('transfer progress', () => {
 
     useMountStore.getState().clearFinishedTransfers();
     expect(useMountStore.getState().transfers.length).toBe(0);
+  });
+
+  describe('failures', () => {
+    const failed = (overrides: Partial<MountTransferEvent> = {}) =>
+      transferEvent({
+        state: 'error',
+        bytes_done: 40,
+        speed: 0,
+        error: 'AccessDenied: Access Denied',
+        ...overrides,
+      });
+    const row = (event: MountTransferEvent) => applyTransferEvent([], event, 5_000)[0];
+
+    test('a row that failed with a message becomes a mount failure record', () => {
+      expect(mountFailureRecord(row(failed()))).toEqual({
+        id: 'mount:m-1:42:up',
+        kind: 'mount',
+        name: 'beach.jpg',
+        message: 'AccessDenied: Access Denied',
+        occurredAt: 5_000,
+        key: 'trips/2024/beach.jpg',
+        bucket: 'photos',
+        progress: { done: 40, total: 100 },
+      });
+    });
+
+    test('a row that did not fail, or failed without a message, has no record', () => {
+      expect(mountFailureRecord(row(transferEvent()))).toBeNull();
+      expect(mountFailureRecord(row(failed({ error: null })))).toBeNull();
+      expect(mountFailureRecord(row(failed({ error: '  ' })))).toBeNull();
+    });
+
+    test('only entering the failed state, or failing differently, is a new failure', () => {
+      const active = row(transferEvent());
+      const denied = row(failed());
+
+      expect(enteredMountFailure(undefined, denied)).toBe(true);
+      expect(enteredMountFailure(active, denied)).toBe(true);
+      expect(enteredMountFailure(denied, row(failed()))).toBe(false);
+      expect(
+        enteredMountFailure(denied, row(failed({ error: 'SlowDown: Reduce your rate.' })))
+      ).toBe(true);
+      expect(enteredMountFailure(active, row(failed({ error: null })))).toBe(false);
+      expect(enteredMountFailure(denied, active)).toBe(false);
+      expect(enteredMountFailure(denied, undefined)).toBe(false);
+    });
+
+    test('the store reports a failing transfer once, however often the row is re-sent', async () => {
+      await setupGlobalMountListeners();
+      const handler = eventHandlers['mount-transfer'];
+      useTransferErrorStore.getState().clear();
+      let reports = 0;
+      const unsubscribe = useTransferErrorStore.subscribe((state, prev) => {
+        if (state.failures !== prev.failures) reports += 1;
+      });
+
+      try {
+        handler({ payload: transferEvent({ state: 'active' }) });
+        handler({ payload: failed() });
+        handler({ payload: failed() });
+
+        expect(reports).toBe(1);
+        const { failures, isOpen } = useTransferErrorStore.getState();
+        expect(failures).toHaveLength(1);
+        expect(failures[0].id).toBe('mount:m-1:42:up');
+        expect(failures[0].message).toBe('AccessDenied: Access Denied');
+        expect(isOpen).toBe(true);
+
+        // The write-back retries by itself, announcing waiting before failing
+        // again: the record stays, so a transient failure repeating the same way
+        // cannot reopen the modal under the reader every cycle.
+        useTransferErrorStore.getState().close();
+        handler({ payload: transferEvent({ state: 'waiting', bytes_done: 0 }) });
+        handler({ payload: failed() });
+        expect(reports).toBe(2);
+        expect(useTransferErrorStore.getState().failures).toHaveLength(1);
+        expect(useTransferErrorStore.getState().isOpen).toBe(false);
+
+        // A retry that gets through ends the record: the next failure is news again.
+        handler({ payload: transferEvent({ state: 'done', bytes_done: 100 }) });
+        expect(useTransferErrorStore.getState().failures).toHaveLength(0);
+        handler({ payload: failed() });
+        expect(useTransferErrorStore.getState().failures).toHaveLength(1);
+        expect(useTransferErrorStore.getState().isOpen).toBe(true);
+      } finally {
+        unsubscribe();
+      }
+    });
   });
 });

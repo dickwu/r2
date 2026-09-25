@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { Modal } from 'antd';
+import { useAntdModalFocusable } from '@/app/hooks/useAntdModalFocusable';
 import { DatabaseOutlined, SwapOutlined } from '@ant-design/icons';
 import { useSyncStore } from '@/app/stores/syncStore';
 import { useUploadStore } from '@/app/stores/uploadStore';
@@ -45,6 +46,7 @@ export default function StatusBar({
   selectedCount = 0,
 }: StatusBarProps) {
   const [syncDetailsOpen, setSyncDetailsOpen] = useState(false);
+  const focusable = useAntdModalFocusable();
 
   // Sync state
   const isSyncing = useSyncStore((s) => s.isSyncing);
@@ -183,6 +185,7 @@ export default function StatusBar({
         footer={null}
         width={520}
         destroyOnHidden={false}
+        focusable={focusable}
       >
         <SyncOverlay />
       </Modal>

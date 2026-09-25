@@ -15,12 +15,21 @@ import {
   PauseOutlined,
   CaretRightOutlined,
   ShrinkOutlined,
+  InfoCircleOutlined,
 } from '@ant-design/icons';
 import { useUploadStore } from '@/app/stores/uploadStore';
 import { useDownloadStore } from '@/app/stores/downloadStore';
 import { useMoveStore, isMoveAwaitingAction } from '@/app/stores/moveStore';
-import { useRenameStore } from '@/app/stores/renameStore';
-import { useMountStore } from '@/app/stores/mountStore';
+import { useRenameStore, renameFailureRecord } from '@/app/stores/renameStore';
+import { useMountStore, mountFailureRecord } from '@/app/stores/mountStore';
+import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
+import type { TransferFailure } from '@/app/lib/transferFailure';
+import {
+  downloadFailure,
+  moveFailure,
+  preferRecorded,
+  uploadFailure,
+} from '@/app/lib/taskFailures';
 import { formatBytes, formatSpeed, formatEta } from '@/app/utils/formatBytes';
 import { etaSeconds } from '@/app/lib/progressThrottle';
 
@@ -53,6 +62,12 @@ interface DockTask {
   canResume: boolean;
   canCancel: boolean;
   needsReview?: boolean;
+  /**
+   * What "Show error" opens: set only for a task that failed, never for a
+   * cancelled one, under the id its own row and store report. The dock never
+   * renders the message itself.
+   */
+  failure?: TransferFailure;
 }
 
 function uploadState(status: string): TaskState {
@@ -83,6 +98,21 @@ const MOVE_PHASE_LABEL: Record<string, string> = {
   deleting: 'CLEAN',
 };
 
+// ── Failure records ───────────────────────────────────────────────────────────
+// Every dock task builds its record with the same builder its row or store
+// reports with, so the dock and the row open the same record.
+
+/**
+ * Shows a dock task's failure. Its store has usually reported a richer record
+ * already (an upload's key and account are not on the task); while that one
+ * describes the same failure it is shown as it is, so a click in the dock
+ * never trims facts off it.
+ */
+function showDockFailure(failure: TransferFailure): void {
+  const store = useTransferErrorStore.getState();
+  store.show(preferRecorded(failure, store.failures));
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function TransferDock() {
@@ -105,6 +135,7 @@ export default function TransferDock() {
 
   const dockTasks = useMemo<DockTask[]>(() => {
     const out: DockTask[] = [];
+    const now = Date.now();
 
     for (const t of uploadTasks) {
       const state = uploadState(t.status);
@@ -122,6 +153,7 @@ export default function TransferDock() {
         canPause: false,
         canResume: false,
         canCancel: state === 'active',
+        failure: t.status === 'error' ? uploadFailure(t, { occurredAt: now }) : undefined,
       });
     }
     for (const t of downloadTasks) {
@@ -139,6 +171,7 @@ export default function TransferDock() {
         canPause: t.status === 'downloading',
         canResume: t.status === 'paused',
         canCancel: t.status === 'downloading' || t.status === 'paused' || t.status === 'pending',
+        failure: t.status === 'error' ? downloadFailure(t, { occurredAt: now }) : undefined,
       });
     }
     for (const t of moveTasks) {
@@ -164,6 +197,7 @@ export default function TransferDock() {
         canPause: transferring,
         canResume: t.status === 'paused',
         canCancel: transferring || t.status === 'paused' || t.status === 'pending',
+        failure: t.status === 'error' ? moveFailure(t, { occurredAt: now }) : undefined,
       });
     }
     for (const b of renameBatches) {
@@ -186,6 +220,7 @@ export default function TransferDock() {
         canPause: false,
         canResume: false,
         canCancel: false,
+        failure: renameFailureRecord(b, now) ?? undefined,
       });
     }
     // Mounted-folder transfers: staged uploads on their way to the bucket and
@@ -209,6 +244,7 @@ export default function TransferDock() {
         canPause: false,
         canResume: false,
         canCancel: false,
+        failure: mountFailureRecord(t) ?? undefined,
       });
     }
 
@@ -408,6 +444,7 @@ const KIND_ICON: Record<TaskKind, React.ReactNode> = {
 
 function DockTaskRow({ task }: { task: DockTask }) {
   const removeUpload = useUploadStore((s) => s.removeTask);
+  const failure = task.state === 'error' ? task.failure : undefined;
 
   const stateClass =
     task.state === 'done'
@@ -482,6 +519,17 @@ function DockTaskRow({ task }: { task: DockTask }) {
         {task.phase && <span className="dock-chip">{task.phase}</span>}
         <span className="dock-task-pct">{stateIcon ?? `${Math.round(task.progress)}%`}</span>
         <span className="dock-actions">
+          {failure && (
+            <button
+              type="button"
+              className="dock-act"
+              onClick={() => showDockFailure(failure)}
+              title="Show error"
+              aria-label="Show error"
+            >
+              <InfoCircleOutlined style={{ fontSize: 10 }} />
+            </button>
+          )}
           {task.canPause && (
             <button className="dock-act" onClick={handlePause} title="Pause">
               <PauseOutlined style={{ fontSize: 10 }} />

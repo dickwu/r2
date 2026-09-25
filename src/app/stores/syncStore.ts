@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import type { TransferFailure } from '@/app/lib/transferFailure';
+import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
 
 export type SyncPhase = 'idle' | 'fetching' | 'storing' | 'indexing' | 'complete';
 export type FolderLoadPhase = 'idle' | 'loading' | 'complete';
@@ -38,6 +40,49 @@ const initialBackgroundSync: BackgroundSyncState = {
 // Key format: "accountId:bucket"
 function makeBucketKey(accountId: string, bucket: string): string {
   return `${accountId}:${bucket}`;
+}
+
+// The account half may itself hold colons (useFilesSync keys accounts as
+// "provider:account:namespace"); bucket names never do, so the last one splits.
+function splitBucketKey(key: string | null): { accountId: string; bucket: string } | null {
+  const at = key ? key.lastIndexOf(':') : -1;
+  if (!key || at <= 0 || at === key.length - 1) return null;
+  return { accountId: key.slice(0, at), bucket: key.slice(at + 1) };
+}
+
+/** The failure record id of a bucket's sync: one record per bucket, however often it fails. */
+export function syncFailureId(currentBucketKey: string | null): string {
+  const scope = splitBucketKey(currentBucketKey);
+  return scope ? `sync:${scope.accountId}/${scope.bucket}` : 'sync:current';
+}
+
+/** What a sync failure record is built from: the bucket being synced and why it stopped. */
+export interface SyncFailureSource {
+  currentBucketKey: string | null;
+  backgroundSync: Pick<BackgroundSyncState, 'error'>;
+}
+
+/**
+ * The failure record for the current bucket's background sync, or null while
+ * it has not failed. `failBackgroundSync` reports it and the sync pill's
+ * "Show error" shows it, so both build the identical record. The id is per
+ * bucket: a sync that keeps failing the same way keeps one record.
+ */
+export function syncFailureRecord(
+  source: SyncFailureSource,
+  now: number = Date.now()
+): TransferFailure | null {
+  const { error } = source.backgroundSync;
+  if (!error) return null;
+  const scope = splitBucketKey(source.currentBucketKey);
+  return {
+    id: syncFailureId(source.currentBucketKey),
+    kind: 'sync',
+    name: scope?.bucket ?? 'Bucket sync',
+    message: error.trim() === '' ? 'Sync failed' : error,
+    occurredAt: now,
+    bucket: scope?.bucket,
+  };
 }
 
 interface SyncStore {
@@ -236,6 +281,8 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
         error: null,
       },
     }));
+    // The failure is over too: if the next run fails the same way, that is news.
+    useTransferErrorStore.getState().forget(syncFailureId(get().currentBucketKey));
   },
 
   failBackgroundSync: (error) => {
@@ -246,6 +293,9 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
         error,
       },
     }));
+    // The sync pill only says "Sync failed"; the reason goes to the failure modal.
+    const failure = syncFailureRecord(get());
+    if (failure) useTransferErrorStore.getState().report(failure);
   },
 
   resetBackgroundSync: () => {

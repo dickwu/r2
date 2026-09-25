@@ -15,6 +15,8 @@ import {
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import { isMoveAwaitingAction, MOVE_RECOVERY_LABELS, type MoveTask } from '@/app/stores/moveStore';
+import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
+import { moveFailure } from '@/app/lib/taskFailures';
 import { formatBytes } from '@/app/utils/formatBytes';
 
 const { Text } = Typography;
@@ -288,6 +290,12 @@ function StatusIcon({ status, progress }: { status: MoveTask['status']; progress
   }
 }
 
+// The row never renders the error text: the button opens the failure modal on it.
+// `stage` is the recovery label of a move that waits on the person.
+function showMoveFailure(task: MoveTask, stage?: string) {
+  useTransferErrorStore.getState().show(moveFailure(task, { stage }));
+}
+
 function TaskDescription({ task }: { task: MoveTask }) {
   if (isMoveAwaitingAction(task.status))
     return (
@@ -296,9 +304,17 @@ function TaskDescription({ task }: { task: MoveTask }) {
           {MOVE_RECOVERY_LABELS[task.status]}
         </Text>
         {task.error && (
-          <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
-            {task.error}
-          </Text>
+          <div style={{ marginTop: 4 }}>
+            <span className="task-failed">
+              <button
+                type="button"
+                className="btn btn-sm btn-danger-ghost"
+                onClick={() => showMoveFailure(task, MOVE_RECOVERY_LABELS[task.status])}
+              >
+                Show details
+              </button>
+            </span>
+          </div>
         )}
       </div>
     );
@@ -359,9 +375,16 @@ function TaskDescription({ task }: { task: MoveTask }) {
       );
     case 'error':
       return (
-        <Text type="danger" style={{ fontSize: 12 }}>
-          {task.error || 'Move failed'}
-        </Text>
+        <span className="task-failed">
+          Failed
+          <button
+            type="button"
+            className="btn btn-sm btn-danger-ghost"
+            onClick={() => showMoveFailure(task)}
+          >
+            Show error
+          </button>
+        </span>
       );
     case 'success':
       return (

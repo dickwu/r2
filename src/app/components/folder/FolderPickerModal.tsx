@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { Modal } from 'antd';
+import { useAntdModalFocusable } from '@/app/hooks/useAntdModalFocusable';
 import FolderTreePicker from '@/app/components/folder/FolderTreePicker';
 
 export interface FolderPickerModalProps {
@@ -20,6 +21,7 @@ export default function FolderPickerModal({
   title = 'Select Folder',
 }: FolderPickerModalProps) {
   const [tempPath, setTempPath] = useState(selectedPath);
+  const focusable = useAntdModalFocusable();
 
   const handleOk = () => {
     onConfirm(tempPath);
@@ -42,6 +44,7 @@ export default function FolderPickerModal({
       width="90%"
       style={{ top: '3%' }}
       destroyOnHidden
+      focusable={focusable}
     >
       <div style={{ height: '70vh', overflow: 'auto' }} className="select-none">
         <FolderTreePicker selectedPath={tempPath} onSelect={setTempPath} />

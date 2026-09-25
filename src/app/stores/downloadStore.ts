@@ -2,6 +2,9 @@ import { create } from 'zustand';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { createProgressBatcher, smoothSpeed } from '@/app/lib/progressThrottle';
+import { downloadFailure } from '@/app/lib/taskFailures';
+import { useAccountStore } from '@/app/stores/accountStore';
+import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
 
 // Maximum concurrent downloads
 export const MAX_CONCURRENT_DOWNLOADS = 5;
@@ -76,6 +79,8 @@ export interface DownloadTask {
   fileName: string;
   fileSize: number;
   localPath: string; // Destination path
+  // Bucket the object comes from: stamped when queued, restored from the session
+  bucket?: string;
   status: DownloadStatus;
   progress: number;
   downloadedBytes: number;
@@ -176,6 +181,43 @@ function mapStatus(dbStatus: string): DownloadStatus {
   }
 }
 
+// The store holds the browsed bucket's downloads: the page queues them from that
+// bucket and reloads the list whenever it changes.
+function browsedBucket(): string | undefined {
+  return useAccountStore.getState().currentConfig?.bucket || undefined;
+}
+
+// A download that just failed opens the failure modal with its record
+function reportDownloadFailure(task: DownloadTask | undefined): void {
+  if (task) useTransferErrorStore.getState().report(downloadFailure(task));
+}
+
+// A download that left its failure (retried, cancelled) ends its record
+function forgetDownloadFailure(taskId: string): void {
+  useTransferErrorStore.getState().forget(`download:${taskId}`);
+}
+
+// The failure modal follows a download's step INTO 'error', whichever path
+// carried it — a status event or a database reload
+function reportFailureStep(
+  before: DownloadTask | undefined,
+  after: DownloadTask | undefined
+): void {
+  if (!before || !after) return;
+  if (before.status !== 'error' && after.status === 'error') reportDownloadFailure(after);
+}
+
+// A download that left its failure (retried, cancelled) ends its record. Only a
+// status event says so: a reload may carry a snapshot taken before the failure
+// was written, and must not erase it
+function forgetFailureStep(
+  before: DownloadTask | undefined,
+  after: DownloadTask | undefined
+): void {
+  if (!before || !after) return;
+  if (before.status === 'error' && after.status !== 'error') forgetDownloadFailure(after.id);
+}
+
 // Apply chunk progress update to a task (shared between immediate and throttled paths)
 function applyChunkUpdate(t: DownloadTask, evt: DownloadChunkProgressEvent): DownloadTask {
   const chunks: DownloadChunk[] = evt.chunks.map((c) => ({
@@ -243,6 +285,7 @@ export const useDownloadStore = create<DownloadStore>((set, get) => {
     addTask: (task) => {
       const newTask: DownloadTask = {
         ...task,
+        bucket: task.bucket ?? browsedBucket(),
         status: 'pending',
         progress: 0,
         downloadedBytes: 0,
@@ -255,8 +298,10 @@ export const useDownloadStore = create<DownloadStore>((set, get) => {
     },
 
     addTasks: (tasks) => {
+      const bucket = browsedBucket();
       const newTasks: DownloadTask[] = tasks.map((task) => ({
         ...task,
+        bucket: task.bucket ?? bucket,
         status: 'pending',
         progress: 0,
         downloadedBytes: 0,
@@ -318,6 +363,7 @@ export const useDownloadStore = create<DownloadStore>((set, get) => {
           fileName: session.file_name,
           fileSize: dbFileSize,
           localPath: session.local_path,
+          bucket: session.bucket || undefined,
           status: dbStatus,
           // For active downloads, use existing real-time data; otherwise use DB values
           progress: isActiveDownload && existing ? existing.progress : dbProgress,
@@ -332,6 +378,15 @@ export const useDownloadStore = create<DownloadStore>((set, get) => {
         };
       });
       set({ tasks });
+      // A reload can land between the worker's SQLite write and its status
+      // event, so a known task's step into failure can show here first. A
+      // startup restore knows no task yet and stays quiet.
+      for (const task of tasks) {
+        reportFailureStep(
+          currentTasks.find((t) => t.id === task.id),
+          task
+        );
+      }
     },
 
     // Event handler for progress updates - coalesced to prevent excessive re-renders
@@ -345,7 +400,9 @@ export const useDownloadStore = create<DownloadStore>((set, get) => {
       chunkBatcher.push(event.task_id, event);
     },
 
-    // Event handler for status changes (bails early if nothing changed to prevent loops)
+    // Event handler for status changes (bails early if nothing changed to prevent loops).
+    // Only the step INTO a failure reports it: a repeated error event, or a failure
+    // restored by loadFromDatabase, never opens the failure modal again.
     handleStatusChanged: (event) => {
       const newStatus = mapStatus(event.status);
       const current = get().tasks.find((t) => t.id === event.task_id);
@@ -365,6 +422,9 @@ export const useDownloadStore = create<DownloadStore>((set, get) => {
             : t
         ),
       }));
+      const next = get().tasks.find((t) => t.id === event.task_id);
+      reportFailureStep(current, next);
+      forgetFailureStep(current, next);
     },
 
     // Event handler for task deletion

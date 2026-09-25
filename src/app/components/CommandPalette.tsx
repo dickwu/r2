@@ -14,15 +14,17 @@ import {
   FolderOutlined,
   SwitcherOutlined,
   BugOutlined,
+  CloseCircleOutlined,
 } from '@ant-design/icons';
 import { useAccountStore } from '@/app/stores/accountStore';
+import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
 import { useCurrentPathStore } from '@/app/stores/currentPathStore';
 
 // ── Action types ──────────────────────────────────────────────────────────────
 
 export type CommandAction =
   | { type: 'bucket'; provider: string; accountId: string; bucket: string; tokenId?: number }
-  | { type: 'open'; value: 'upload' | 'settings' | 'dock' | 'report' }
+  | { type: 'open'; value: 'upload' | 'settings' | 'dock' | 'report' | 'failures' }
   | { type: 'refresh' }
   | { type: 'theme' }
   | { type: 'view' }
@@ -95,7 +97,17 @@ const STATIC_ACTIONS: Omit<PaletteItem, 'id'>[] = [
     action: { type: 'open', value: 'report' },
     section: 'Actions',
   },
+  {
+    label: 'Show transfer failures',
+    icon: <CloseCircleOutlined />,
+    action: { type: 'open', value: 'failures' },
+    section: 'Actions',
+  },
 ];
+
+// Listed only while there is a failure on record to show.
+const showsFailures = (item: Omit<PaletteItem, 'id'>): boolean =>
+  item.action.type === 'open' && item.action.value === 'failures';
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -107,6 +119,7 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
 
   const accounts = useAccountStore((s) => s.accounts);
   const currentPath = useCurrentPathStore((s) => s.currentPath);
+  const hasFailures = useTransferErrorStore((s) => s.failures.length > 0);
 
   // Reset state when palette opens
   useEffect(() => {
@@ -225,9 +238,12 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
 
   // All items merged
   const allItems = useMemo<PaletteItem[]>(() => {
-    const actions = STATIC_ACTIONS.map((a, i) => ({ ...a, id: `action-${i}` }));
+    const actions = STATIC_ACTIONS.filter((a) => hasFailures || !showsFailures(a)).map((a, i) => ({
+      ...a,
+      id: `action-${i}`,
+    }));
     return [...bucketItems, ...actions, ...navigateItems];
-  }, [bucketItems, navigateItems]);
+  }, [bucketItems, navigateItems, hasFailures]);
 
   // Filtered items
   const filtered = useMemo(() => {

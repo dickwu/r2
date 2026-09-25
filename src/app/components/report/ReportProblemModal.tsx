@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { App } from 'antd';
 import { BugOutlined } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import Modal from '@/app/components/ui/Modal';
+import Modal, { ABOVE_ANTD_MODALS_Z_INDEX } from '@/app/components/ui/Modal';
 import SessionLogPanel from '@/app/components/report/SessionLogPanel';
 import { recentSessionLog, type SessionLogSnapshot } from '@/app/lib/diagnostics/sessionLog';
 import { buildIssueUrl, type IssueUrlResult } from '@/app/lib/report/issueUrl';
@@ -15,7 +15,7 @@ import {
   type ReportContext,
 } from '@/app/lib/report/reportInfo';
 import { useAccountStore } from '@/app/stores/accountStore';
-import { useReportStore } from '@/app/stores/reportStore';
+import { appendPrefillText, clampPrefillText, useReportStore } from '@/app/stores/reportStore';
 import { useThemeStore } from '@/app/stores/themeStore';
 
 const TITLE_MAX = 120;
@@ -74,12 +74,28 @@ const currentContext = (): ReportContext => ({
 function ReportProblemDialog() {
   const { message } = App.useApp();
   const close = useReportStore((s) => s.close);
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
+  const prefill = useReportStore((s) => s.prefill);
+  const [title, setTitle] = useState(() => clampPrefillText(prefill?.title, TITLE_MAX));
+  const [description, setDescription] = useState(() =>
+    clampPrefillText(prefill?.description, DESCRIPTION_MAX)
+  );
   const [includeLog, setIncludeLog] = useState(true);
   const [info, setInfo] = useState<AppReportInfo | null>(null);
   const [log, setLog] = useState<SessionLogSnapshot | null>(null);
   const [opening, setOpening] = useState(false);
+
+  // A prefill that arrives while the dialog is already open (Report a problem
+  // on a failed transfer): a blank title takes it, and the details land below
+  // whatever the reporter has written — a draft is never replaced.
+  const seededPrefill = useRef(prefill);
+  useEffect(() => {
+    if (!prefill || prefill === seededPrefill.current) return;
+    seededPrefill.current = prefill;
+    setTitle((current) =>
+      current.trim() === '' ? clampPrefillText(prefill.title, TITLE_MAX) : current
+    );
+    setDescription((current) => appendPrefillText(current, prefill.description, DESCRIPTION_MAX));
+  }, [prefill]);
 
   // Evidence is captured the moment the dialog opens, not when the reporter
   // finishes typing. Snapshotting is pure, so StrictMode's double effect is harmless.
@@ -139,6 +155,7 @@ function ReportProblemDialog() {
       subtitle="Opens a GitHub issue draft pre-filled with the details below. Review it there — nothing is filed until you press Submit."
       icon={<BugOutlined style={{ fontSize: 18 }} />}
       width={600}
+      zIndex={ABOVE_ANTD_MODALS_Z_INDEX}
       footer={
         <>
           <span style={{ marginRight: 'auto', fontSize: 11.5, color: 'var(--text-subtle)' }}>

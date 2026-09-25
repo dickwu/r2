@@ -10,7 +10,15 @@ import {
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { uploadFile } from '@/app/lib/r2cache';
+import { uploadFile, type StorageConfig } from '@/app/lib/r2cache';
+import {
+  accountDisplayName,
+  preferRecorded,
+  uploadFailure,
+  type UploadFailureContext,
+} from '@/app/lib/taskFailures';
+import { useAccountStore } from '@/app/stores/accountStore';
+import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
 import { useUploadStore, type UploadTask } from '@/app/stores/uploadStore';
 
 const { Text } = Typography;
@@ -50,12 +58,13 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
 
     isUploadingRef.current = true;
 
-    const normalizedPath = uploadPath
-      ? uploadPath.endsWith('/')
-        ? uploadPath
-        : uploadPath + '/'
-      : '';
-    const key = normalizedPath + (task.renamedFileName ?? task.fileName);
+    const key = uploadKey(uploadPath, task);
+    // A failed upload is recorded on the task and reported to the failure modal,
+    // with the destination this upload used
+    const fail = (error: string) => {
+      updateTask(task.id, { status: 'error', error, speed: 0 });
+      reportUploadFailure(task.id, uploadContext(config, key));
+    };
 
     // Listen for progress events
     listen<UploadProgress>('upload-progress', (event) => {
@@ -82,11 +91,7 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
           if (result.error?.includes('cancelled')) {
             updateTask(task.id, { status: 'cancelled', speed: 0 });
           } else {
-            updateTask(task.id, {
-              status: 'error',
-              error: result.error || 'Upload failed',
-              speed: 0,
-            });
+            fail(result.error || 'Upload failed');
           }
         }
       })
@@ -95,7 +100,7 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
         if (errorMsg.includes('cancelled')) {
           updateTask(task.id, { status: 'cancelled', speed: 0 });
         } else {
-          updateTask(task.id, { status: 'error', error: errorMsg, speed: 0 });
+          fail(errorMsg);
         }
       })
       .finally(() => {
@@ -175,6 +180,40 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
   );
 }
 
+// The object key an upload writes: the destination folder, then the file's
+// (possibly auto-renamed) name
+function uploadKey(uploadPath: string, task: UploadTask): string {
+  const folder = uploadPath && !uploadPath.endsWith('/') ? `${uploadPath}/` : uploadPath;
+  return folder + (task.renamedFileName ?? task.fileName);
+}
+
+// Where an upload is going, as its failure record names it
+function uploadContext(config: StorageConfig | null, key: string): UploadFailureContext {
+  if (!config) return { key };
+  const { accounts } = useAccountStore.getState();
+  return {
+    key,
+    bucket: config.bucket,
+    account: accountDisplayName(accounts, config.provider, config.accountId),
+  };
+}
+
+// Report the upload that just failed, read back from the store so the record
+// carries the last progress the row showed
+function reportUploadFailure(taskId: string, context: UploadFailureContext) {
+  const failed = useUploadStore.getState().tasks.find((t) => t.id === taskId);
+  if (failed) useTransferErrorStore.getState().report(uploadFailure(failed, context));
+}
+
+// "Show error" re-opens the reported record, which holds the destination the
+// upload used; it rebuilds one only after the failure modal's list was cleared
+function showUploadFailure(task: UploadTask) {
+  const { config, uploadPath } = useUploadStore.getState();
+  const fresh = uploadFailure(task, uploadContext(config, uploadKey(uploadPath, task)));
+  const { failures, show } = useTransferErrorStore.getState();
+  show(preferRecorded(fresh, failures));
+}
+
 function StatusIcon({ status }: { status: UploadTask['status'] }) {
   switch (status) {
     case 'success':
@@ -215,9 +254,16 @@ function TaskDescription({ task }: { task: UploadTask }) {
     }
     case 'error':
       return (
-        <Text type="danger" style={{ fontSize: 12 }}>
-          {task.error}
-        </Text>
+        <span className="task-failed">
+          Failed
+          <button
+            type="button"
+            className="btn btn-sm btn-danger-ghost"
+            onClick={() => showUploadFailure(task)}
+          >
+            Show error
+          </button>
+        </span>
       );
     case 'success':
       return (

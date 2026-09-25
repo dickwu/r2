@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { readTextFile } from '@tauri-apps/plugin-fs';
 import { Form, Input, Button, Modal, App, Space, Divider, Tag, Select, Switch } from 'antd';
+import { useAntdModalFocusable } from '@/app/hooks/useAntdModalFocusable';
 import {
   ReloadOutlined,
   PlusOutlined,
@@ -67,6 +68,7 @@ export default function ConfigModal({
   parentAccountId,
 }: ConfigModalProps) {
   const [saving, setSaving] = useState(false);
+  const focusable = useAntdModalFocusable();
   const [loadingBuckets, setLoadingBuckets] = useState(false);
   const [buckets, setBuckets] = useState<BucketConfig[]>([]);
   const [addingBucket, setAddingBucket] = useState(false);
@@ -945,6 +947,7 @@ export default function ConfigModal({
       width={480}
       centered
       destroyOnHidden
+      focusable={focusable}
     >
       <div style={{ textAlign: 'center', marginBottom: 16 }}>
         {getIcon()}

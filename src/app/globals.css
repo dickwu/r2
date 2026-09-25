@@ -63,11 +63,16 @@
 
   --mount-live: #1f9d55;
   --mount-live-soft: rgba(31, 157, 85, 0.16);
+
+  --danger: #d4493a;
+  --danger-soft: rgba(212, 73, 58, 0.12);
 }
 
 [data-theme='dark'] {
   --mount-live: #4ade80;
   --mount-live-soft: rgba(74, 222, 128, 0.18);
+  --danger: #e0574a;
+  --danger-soft: rgba(224, 87, 74, 0.16);
   --bg-app: #0e0d0c;
   --bg-panel: #17171a;
   --bg-sunken: #0a0a0a;
@@ -771,6 +776,14 @@ body {
 .sync-banner-link:hover {
   color: var(--accent);
   background: var(--bg-hover);
+}
+.sync-banner.error .sync-banner-link {
+  color: var(--danger);
+  font-weight: 500;
+}
+.sync-banner.error .sync-banner-link:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 /* ── Grid View ──────────────────────────────────────────────────── */
@@ -4930,6 +4943,17 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
 .batch-progress-stats .bp-failed {
   color: #d4493a;
 }
+/* The count keeps the strip's mono red text; the underline marks it clickable. */
+.batch-progress-stats .bp-failed-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .dock-task-fill,
@@ -5489,4 +5513,218 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
 }
 .report-log-msg.warn {
   color: #e0a300;
+}
+
+/* ── Transfer failure modal ── */
+/* Takes focus on open so keystrokes land nowhere; a focus ring on a whole body is noise. */
+.fault-body {
+  outline: none;
+}
+.fault-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+.fault-list {
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+.fault-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.fault-row:last-child {
+  border-bottom: 0;
+}
+.fault-row:hover {
+  background: var(--bg-hover);
+}
+.fault-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.fault-row.selected {
+  background: var(--bg-row-selected);
+}
+.fault-row-kind {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.fault-row-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.fault-row-msg {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.fault-row-time {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+.fault-line {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.fault-line-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+.fault-line-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--danger);
+  transition: width 320ms ease;
+}
+.fault-line-caption {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.fault-line-pct {
+  color: var(--danger);
+  font-weight: 600;
+}
+.fault-line-pct em {
+  font-style: normal;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+  margin-right: 6px;
+}
+
+.fault-msg {
+  margin-bottom: 14px;
+  padding: 10px 12px 10px 14px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--danger);
+  border-radius: 7px;
+  max-height: 220px;
+  overflow-y: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.fault-code {
+  display: inline-block;
+  margin-bottom: 6px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.fault-text {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.fault-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 14px;
+  margin: 0;
+  font-size: 12px;
+}
+.fault-facts dt {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+  padding-top: 3px;
+}
+.fault-facts dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+.fault-facts dd.mono {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+/* Compact failed state for a task row — the only thing a row shows about an error */
+.task-failed {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--danger);
+}
+.task-failed .btn {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fault-line-fill {
+    transition: none;
+  }
 }

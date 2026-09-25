@@ -2,7 +2,9 @@ import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { useToastStore } from '@/app/stores/toastStore';
+import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
 import type { ProviderAccount } from '@/app/stores/accountStore';
+import type { TransferFailure } from '@/app/lib/transferFailure';
 
 // Global listener state - persists across component unmounts
 let globalListenersSetup = false;
@@ -394,6 +396,53 @@ export function pruneDeadMountTransfers(
   return transfers.filter((t) => alive.has(t.mountId) || t.state === 'done' || t.state === 'error');
 }
 
+/**
+ * The failure record for a transfer that failed with a message, or null. The
+ * store reports it when the transfer fails and the transfer dock shows it, so
+ * both build the identical record.
+ */
+export function mountFailureRecord(transfer: MountTransfer): TransferFailure | null {
+  if (transfer.state !== 'error' || !transfer.error?.trim()) return null;
+  return {
+    id: `mount:${transfer.id}`,
+    kind: 'mount',
+    name: transfer.name,
+    message: transfer.error,
+    occurredAt: transfer.updatedAt,
+    key: transfer.key,
+    bucket: transfer.bucket,
+    progress: { done: transfer.bytesDone, total: transfer.bytesTotal },
+  };
+}
+
+/**
+ * Whether an event just made this transfer fail. The backend re-sends a
+ * failed row, so only a row that was not already failing with the same
+ * message has anything new to report.
+ */
+export function enteredMountFailure(
+  previous: MountTransfer | undefined,
+  next: MountTransfer | undefined
+): boolean {
+  if (!next || mountFailureRecord(next) === null) return false;
+  return previous?.state !== 'error' || previous.error !== next.error;
+}
+
+/**
+ * Keep the failure modal in step with a transfer: report the failure it just
+ * entered, and end its record once it gets through, so the next failure is
+ * news again. Only `done` ends it: the write-back retries itself after a
+ * cooldown and announces waiting and active frames on the way, and a transient
+ * failure repeating through those frames must not reopen the modal under the
+ * reader every cycle.
+ */
+function trackMountFailure(previous: MountTransfer | undefined, next: MountTransfer | undefined) {
+  const errors = useTransferErrorStore.getState();
+  const failure = next && enteredMountFailure(previous, next) ? mountFailureRecord(next) : null;
+  if (failure) errors.report(failure);
+  else if (next?.state === 'done') errors.forget(`mount:${next.id}`);
+}
+
 function errorMessage(e: unknown): string {
   if (typeof e === 'string') return e;
   if (e instanceof Error) return e.message;
@@ -509,8 +558,12 @@ export const useMountStore = create<MountStore>((set, get) => ({
       transfers: pruneDeadMountTransfers(state.transfers, mounts),
     })),
 
-  applyTransfer: (event) =>
-    set((state) => ({ transfers: applyTransferEvent(state.transfers, event, Date.now()) })),
+  applyTransfer: (event) => {
+    const row = (transfers: MountTransfer[]) => transfers.find((t) => t.id === event.transfer_id);
+    const previous = row(get().transfers);
+    set((state) => ({ transfers: applyTransferEvent(state.transfers, event, Date.now()) }));
+    trackMountFailure(previous, row(get().transfers));
+  },
 
   clearFinishedTransfers: () =>
     set((state) => ({
