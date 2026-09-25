@@ -11,3 +11,5 @@ package-lock.json
 src-tauri/target
 # Canonical machine-generated acceptance data; formatting would change recorded hashes.
 docs/engineering/r2-audit/**/*.json
+# Agent-notes folder written by the superpowers plugin; never committed, never formatted.
+.superpowers
