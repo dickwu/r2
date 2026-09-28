@@ -24,7 +24,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-os = "2"
-tauri-plugin-http = { version = "2", features = ["unsafe-headers"] }
+tauri-plugin-http = { version = "2.7.0", features = ["unsafe-headers"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-dialog = "2"
@@ -32,7 +32,7 @@ tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Upload dependencies
-reqwest = { version = "0.13.4", features = ["stream", "multipart"] }
+reqwest = { version = "0.13.5", features = ["stream", "multipart"] }
 tokio = { version = "1", features = [
     "fs",
     "io-util",
@@ -51,12 +51,12 @@ base64 = "0.22"
 chrono = "0.4"
 urlencoding = "2"
 lazy_static = "1.4"
-turso = "0.7.0-pre"
+turso = "0.8.0-pre"
 log = "0.4"
 tauri-plugin-video-thumbnail = { git = "https://github.com/dickwu/tauri-plugin-video-thumbnail" }
 # AWS S3 SDK for R2 operations
 aws-config = "1.8"
-aws-sdk-s3 = { version = "1.135.0", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.149.0", features = ["behavior-version-latest"] }
 aws-credential-types = "1.2"
 futures-util = "0.3"
 # Multi-threaded download engine with Range-based parallel chunk acceleration
