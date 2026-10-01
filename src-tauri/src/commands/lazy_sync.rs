@@ -674,7 +674,7 @@ where
     if let Some(flight) = flights.get(&key).and_then(Weak::upgrade).filter(|flight| {
         flight
             .consumers
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                 if count == 0 {
                     None
                 } else {
