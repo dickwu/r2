@@ -13,3 +13,5 @@ src-tauri/target
 docs/engineering/r2-audit/**/*.json
 # Agent-notes folder written by the superpowers plugin; never committed, never formatted.
 .superpowers
+# file-viewer runtime payload staged by scripts/copy-file-viewer-assets.mjs
+public/file-viewer

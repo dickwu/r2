@@ -26,17 +26,18 @@ import {
   StorageConfig,
 } from '@/app/lib/r2cache';
 import { TEXT_EXTENSIONS } from '@/app/components/preview/TextViewer';
+import { getFileExtension, getPreviewKind } from '@/app/components/preview/previewKind';
 import { useVideoThumbnail } from '@/app/hooks/useVideoThumbnail';
 import { usePreviewStore } from '@/app/stores/previewStore';
 import Modal from '@/app/components/ui/Modal';
 
-const PDFViewer = dynamic(() => import('@/app/components/preview/PDFViewer'), { ssr: false });
 const TextViewer = dynamic(() => import('@/app/components/preview/TextViewer'), { ssr: false });
-
-const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
-const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogv', 'mov', 'm4v'];
-const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac', 'opus'];
-const PDF_EXTENSIONS = ['pdf'];
+// The viewer bundles every renderer preset (Office, PDF, CAD, archives, …), so
+// it is only pulled in when a file actually needs it.
+const FileViewerPane = dynamic(() => import('@/app/components/preview/FileViewerPane'), {
+  ssr: false,
+  loading: () => <Spin />,
+});
 
 const TEXT_CONTENT_TYPES: Record<string, string> = {
   js: 'application/javascript',
@@ -65,37 +66,36 @@ const TEXT_CONTENT_TYPES: Record<string, string> = {
   env: 'text/plain',
 };
 
-function getExt(filename: string): string {
-  return filename.split('.').pop()?.toLowerCase() || '';
-}
-
 function getContentType(filename: string): string {
-  return TEXT_CONTENT_TYPES[getExt(filename)] || 'text/plain';
+  return TEXT_CONTENT_TYPES[getFileExtension(filename)] || 'text/plain';
 }
 
-function isImageFile(f: string) {
-  return IMAGE_EXTENSIONS.includes(getExt(f));
-}
-function isVideoFile(f: string) {
-  return VIDEO_EXTENSIONS.includes(getExt(f));
-}
-function isAudioFile(f: string) {
-  return AUDIO_EXTENSIONS.includes(getExt(f));
-}
-function isPdfFile(f: string) {
-  return PDF_EXTENSIONS.includes(getExt(f));
-}
-function isTextFile(f: string) {
-  return TEXT_EXTENSIONS.includes(getExt(f));
+function previewKindOf(filename: string) {
+  return getPreviewKind(filename, TEXT_EXTENSIONS);
 }
 
 function fileTypeIcon(filename: string, size = 18): React.ReactNode {
-  if (isImageFile(filename)) return <FileImageOutlined style={{ fontSize: size }} />;
-  if (isVideoFile(filename)) return <PlaySquareOutlined style={{ fontSize: size }} />;
-  if (isAudioFile(filename)) return <SoundOutlined style={{ fontSize: size }} />;
-  if (isPdfFile(filename)) return <FilePdfOutlined style={{ fontSize: size }} />;
-  if (isTextFile(filename)) return <FileTextOutlined style={{ fontSize: size }} />;
-  return <FileOutlined style={{ fontSize: size }} />;
+  const style = { fontSize: size };
+  switch (previewKindOf(filename)) {
+    case 'image':
+      return <FileImageOutlined style={style} />;
+    case 'video':
+      return <PlaySquareOutlined style={style} />;
+    case 'audio':
+      return <SoundOutlined style={style} />;
+    case 'text':
+      return <FileTextOutlined style={style} />;
+    default:
+      return getFileExtension(filename) === 'pdf' ? (
+        <FilePdfOutlined style={style} />
+      ) : (
+        <FileOutlined style={style} />
+      );
+  }
+}
+
+function placeholderIcon(filename: string) {
+  return fileTypeIcon(filename, 40);
 }
 
 interface FilePreviewModalProps {
@@ -203,11 +203,11 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   if (!file) return null;
 
   const fileUrl = signedUrl;
-  const isImage = isImageFile(file.name);
-  const isVideo = isVideoFile(file.name);
-  const isAudio = isAudioFile(file.name);
-  const isPdf = isPdfFile(file.name);
-  const isText = isTextFile(file.name);
+  const kind = previewKindOf(file.name);
+  const isImage = kind === 'image';
+  const isVideo = kind === 'video';
+  const isAudio = kind === 'audio';
+  const isText = kind === 'text';
   const { thumbnailSrc: videoPoster } = useVideoThumbnail(isVideo ? fileUrl : null);
 
   const getModalWidth = () => {
@@ -342,8 +342,6 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
           />
         ) : isAudio && fileUrl ? (
           <audio src={fileUrl} controls style={{ width: '100%' }} />
-        ) : isPdf && fileUrl ? (
-          <PDFViewer url={fileUrl} showControls maxHeight={getPreviewMaxHeight()} />
         ) : isText && fileUrl ? (
           <TextViewer
             url={fileUrl}
@@ -352,18 +350,10 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
             editable={canEdit}
             onSave={handleSaveContent}
           />
-        ) : isImage ? (
-          <FileImageOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
-        ) : isVideo ? (
-          <PlaySquareOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
-        ) : isAudio ? (
-          <SoundOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
-        ) : isPdf ? (
-          <FilePdfOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
-        ) : isText ? (
-          <FileTextOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
+        ) : kind === 'viewer' && fileUrl ? (
+          <FileViewerPane url={fileUrl} filename={file.name} height={getPreviewMaxHeight()} />
         ) : (
-          <FileOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
+          <span style={{ color: 'var(--accent)' }}>{placeholderIcon(file.name)}</span>
         )}
       </div>
 

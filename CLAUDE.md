@@ -13,6 +13,7 @@ bun install              # Install dependencies
 bun run dev              # Next.js dev server (port 3000, turbopack)
 bun run tauri dev        # Full Tauri desktop app in dev mode
 bun run tauri build      # Production build
+bun run assets:file-viewer  # Stage the file-viewer Worker/WASM/font payload into public/file-viewer (dev/build run it)
 bun run check            # format:check + typecheck + bun test — the frontend CI gate
 bun test                 # Frontend unit tests (Bun's runner; no vitest/jest)
 bun run typecheck        # tsc --noEmit
@@ -36,6 +37,7 @@ cargo clippy --workspace --all-targets -- -D warnings  # CI gate
 - `.github/workflows/windows-native.yml` is the separate Windows behavioral gate (`workflow_dispatch`, or PRs touching `src-tauri/**` or its scripts): a `windows-2022` runner with SDK 10.0.19041.0 runs the full Rust suite plus three real NFS mount/write/read/rename/unmount iterations and uploads `windows-native-nfs-behavior.json`; `docs/engineering/r2-audit/verification.md` says how to land that artifact as acceptance evidence
 - Release: `./publish.sh <patch|minor|major|x.y.z>` (requires a clean tree) bumps versions in `package.json`, `src-tauri/tauri.conf.json`, `Cargo.toml`, `Cargo.lock`, commits, tags `v*`, and pushes; `release.yml` then builds and drafts the GitHub release — the `/r2-release` skill guides the full flow
 - Gotcha: `bun install` and builds churn `bun.lock`, `Cargo.lock`, and `package.json` — revert unintended churn before committing
+- Gotcha: `public/file-viewer/` (~200 MB, gitignored) is staged by `scripts/copy-file-viewer-assets.mjs` from the `file-viewer-copy-assets` package that `@file-viewer/react-full` pins; `dev` and `build` run it first and skip when the manifest version already matches, so the exported `dist/` and every Tauri bundle carry it
 
 ## Architecture
 
@@ -55,6 +57,7 @@ Key directories:
 - `components/report/` — "Report a problem" status-bar button + modal (also reachable from the command palette via `reportStore`); it opens the prefilled issue in the browser, nothing is posted from the app
 - `providers/` — per-provider frontend sync adapters (`r2/`, `aws/`, `minio/`, `rustfs/`); distinct from `providers.tsx` (React context providers)
 - `components/` — Feature-specific modals and views (ConfigModal, BatchMoveModal, FilePreviewModal, etc.)
+- `components/preview/` — `previewKind.ts` routes a file by extension: browser-native images/video/audio stream from the object URL, text goes to the Monaco `TextViewer` (editable, saves back to the bucket), everything else goes to `FileViewerPane`, which wraps [`@file-viewer/react-full`](https://github.com/flyfish-dev/file-viewer) (PDF, Office, archives, e-books, e-mail, CAD, 3D, design files… ~250 extensions; read-only). Previews download through `fetchPreviewBytes.ts` (Tauri HTTP plugin, so signed R2/S3 URLs are not blocked by webview CORS) and hand the viewer a named `File`; the pane pins the asset base to `<origin>/file-viewer/`
 - `utils/` — Helpers (`formatBytes`, `fileIcon`)
 
 ### Backend (`src-tauri/src/`)

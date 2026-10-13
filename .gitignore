@@ -70,3 +70,6 @@ docs/superpowers/
 
 # Python bytecode from the audit/test harness scripts
 __pycache__/
+
+# file-viewer runtime payload staged by scripts/copy-file-viewer-assets.mjs (bun run assets:file-viewer)
+public/file-viewer/
