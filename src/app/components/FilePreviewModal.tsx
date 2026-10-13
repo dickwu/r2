@@ -131,8 +131,14 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   useEffect(() => {
     if (!isOpen || previewableFiles.length <= 1) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      // The file viewer renders inside a shadow root, which retargets
+      // `e.target` to its host; the composed path still reaches the real
+      // element (its search box, the scrolled document) through the boundary.
+      const path = (e.composedPath?.() ?? [e.target]).filter(
+        (node): node is HTMLElement => node instanceof HTMLElement
+      );
+      const tag = path[0]?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || path[0]?.isContentEditable) return;
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
         navigate('prev');
@@ -140,10 +146,10 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
         e.preventDefault();
         navigate('next');
       } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-        const isScrollable =
-          tag === 'PRE' ||
-          tag === 'CODE' ||
-          (e.target as HTMLElement)?.closest?.('[data-scrollable]');
+        const isScrollable = path.some(
+          (el) =>
+            el.tagName === 'PRE' || el.tagName === 'CODE' || el.hasAttribute('data-scrollable')
+        );
         if (!isScrollable) {
           e.preventDefault();
           navigate(e.key === 'ArrowUp' ? 'prev' : 'next');
@@ -351,7 +357,12 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
             onSave={handleSaveContent}
           />
         ) : kind === 'viewer' && fileUrl ? (
-          <FileViewerPane url={fileUrl} filename={file.name} height={getPreviewMaxHeight()} />
+          <FileViewerPane
+            url={fileUrl}
+            filename={file.name}
+            size={file.size}
+            height={getPreviewMaxHeight()}
+          />
         ) : (
           <span style={{ color: 'var(--accent)' }}>{placeholderIcon(file.name)}</span>
         )}

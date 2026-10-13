@@ -1,8 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Typography } from 'antd';
-import { FileOutlined } from '@ant-design/icons';
+import { Button, Typography } from 'antd';
+import { CloudDownloadOutlined, FileOutlined } from '@ant-design/icons';
 import FileViewer, {
   fileViewerFullPreset,
   setDefaultFullAssetBaseUrl,
@@ -16,6 +16,7 @@ import {
 } from '@/app/components/preview/fetchPreviewBytes';
 import { getFileExtension } from '@/app/components/preview/previewKind';
 import { useThemeStore } from '@/app/stores/themeStore';
+import { formatBytes } from '@/app/utils/formatBytes';
 
 const { Text } = Typography;
 
@@ -42,22 +43,35 @@ export function isFileViewerSupported(filename: string): boolean {
   return SUPPORTED_EXTENSIONS.has(getFileExtension(filename));
 }
 
+/**
+ * The viewer needs the whole object in memory, so objects above this size
+ * (archives, disk images, design files…) wait for an explicit click instead
+ * of downloading the moment they are opened or stepped onto with the arrow keys.
+ */
+export const AUTO_LOAD_LIMIT_BYTES = 100 * 1024 * 1024;
+
 interface FileViewerPaneProps {
   url: string;
   filename: string;
+  /** Object size in bytes when the listing knows it. */
+  size?: number;
   /** CSS height of the viewer; the library needs an explicit one. */
   height: string;
 }
 
-export default function FileViewerPane({ url, filename, height }: FileViewerPaneProps) {
+export default function FileViewerPane({ url, filename, size, height }: FileViewerPaneProps) {
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<PreviewDownloadProgress>({ loaded: 0, total: null });
+  // The URL the user confirmed a large download for; cleared by moving to another file.
+  const [confirmedUrl, setConfirmedUrl] = useState<string | null>(null);
   const appTheme = useThemeStore((s) => s.theme);
   const supported = isFileViewerSupported(filename);
+  const isLarge = (size ?? 0) > AUTO_LOAD_LIMIT_BYTES;
+  const shouldLoad = supported && (!isLarge || confirmedUrl === url);
 
   useEffect(() => {
-    if (!supported) return;
+    if (!shouldLoad) return;
     const controller = new AbortController();
     setFile(null);
     setError(null);
@@ -76,7 +90,7 @@ export default function FileViewerPane({ url, filename, height }: FileViewerPane
       });
 
     return () => controller.abort();
-  }, [url, filename, supported]);
+  }, [url, filename, shouldLoad]);
 
   // The component reloads whenever this object's identity changes.
   const options = useMemo<ViewerOptions>(
@@ -98,6 +112,20 @@ export default function FileViewerPane({ url, filename, height }: FileViewerPane
     );
   }
 
+  if (!shouldLoad) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 py-10">
+        <FileOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
+        <Text type="secondary" style={{ fontSize: 12.5 }}>
+          Previewing downloads the whole file ({formatBytes(size ?? 0)}) into memory
+        </Text>
+        <Button icon={<CloudDownloadOutlined />} onClick={() => setConfirmedUrl(url)}>
+          Load preview
+        </Button>
+      </div>
+    );
+  }
+
   if (error) {
     return (
       <div className="flex h-96 w-full items-center justify-center">
@@ -111,7 +139,11 @@ export default function FileViewerPane({ url, filename, height }: FileViewerPane
   }
 
   return (
-    <div style={{ height, textAlign: 'left' }} className="overflow-hidden rounded-lg">
+    <div
+      data-scrollable
+      style={{ height, textAlign: 'left' }}
+      className="overflow-hidden rounded-lg"
+    >
       <FileViewer file={file} filename={filename} size={file.size} options={options} />
     </div>
   );
