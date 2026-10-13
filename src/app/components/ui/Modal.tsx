@@ -34,11 +34,17 @@ const closeTopModal = (event: KeyboardEvent) => {
   if (event.key !== 'Escape') return;
   const top = openModals[openModals.length - 1];
   if (!top) return;
-  top.close.current();
   // antd keeps its own Escape stack on window, which runs after this document
   // listener and would close the antd modal beneath as well. A modal raised
   // above antd's layer is the one on screen, so the key stops here.
   if (top.elevated) event.stopPropagation();
+  // Overlays inside the body (the file viewer's lightboxes, slideshow and
+  // password prompt) listen on document too, registered after this listener,
+  // and claim the key with preventDefault. Decide once the dispatch is over
+  // so Escape peels off the overlay first and the modal on the next press.
+  setTimeout(() => {
+    if (!event.defaultPrevented) top.close.current();
+  }, 0);
 };
 
 export interface ModalProps {

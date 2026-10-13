@@ -38,3 +38,12 @@ export function getPreviewKind(filename: string, textExtensions: readonly string
   if (textExtensions.includes(ext)) return 'text';
   return 'viewer';
 }
+
+/**
+ * The viewer derives the format from the filename and truncates it at the
+ * first `?` or `#` (URL semantics), so "Invoice #3.pdf" would lose its
+ * extension. Hand it a name without those characters.
+ */
+export function toViewerFilename(filename: string): string {
+  return filename.replace(/[?#]/g, '_');
+}

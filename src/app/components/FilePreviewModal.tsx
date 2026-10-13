@@ -131,6 +131,9 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   useEffect(() => {
     if (!isOpen || previewableFiles.length <= 1) return;
     const handleKeyDown = (e: KeyboardEvent) => {
+      // A renderer that owns the key (slideshow, comic pages, media seek)
+      // has already called preventDefault by the time it reaches window.
+      if (e.defaultPrevented) return;
       // The file viewer renders inside a shadow root, which retargets
       // `e.target` to its host; the composed path still reaches the real
       // element (its search box, the scrolled document) through the boundary.

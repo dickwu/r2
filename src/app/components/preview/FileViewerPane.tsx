@@ -3,18 +3,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button, Typography } from 'antd';
 import { CloudDownloadOutlined, FileOutlined } from '@ant-design/icons';
-import FileViewer, {
-  fileViewerFullPreset,
-  setDefaultFullAssetBaseUrl,
-  type ViewerOptions,
-} from '@file-viewer/react-full';
+import FileViewer, { fileViewerFullPreset, type ViewerOptions } from '@file-viewer/react-full';
 import DownloadProgress from '@/app/components/preview/DownloadProgress';
 import {
   fetchPreviewBytes,
   PreviewFetchAbortedError,
   type PreviewDownloadProgress,
 } from '@/app/components/preview/fetchPreviewBytes';
-import { getFileExtension } from '@/app/components/preview/previewKind';
+import { configureFileViewerAssetBase } from '@/app/components/preview/fileViewerAssets';
+import { getFileExtension, toViewerFilename } from '@/app/components/preview/previewKind';
 import { useThemeStore } from '@/app/stores/themeStore';
 import { formatBytes } from '@/app/utils/formatBytes';
 
@@ -25,7 +22,7 @@ const { Text } = Typography;
 // Pin the base explicitly: the library's inference reads script URLs, and
 // Next's /_next/static/chunks layout is not one it recognises.
 if (typeof window !== 'undefined') {
-  setDefaultFullAssetBaseUrl(new URL('/file-viewer/', window.location.href).href);
+  configureFileViewerAssetBase(window.location.href);
 }
 
 /** Every extension the bundled full preset can actually render. */
@@ -71,17 +68,18 @@ export default function FileViewerPane({ url, filename, size, height }: FileView
   const shouldLoad = supported && (!isLarge || confirmedUrl === url);
 
   useEffect(() => {
-    if (!shouldLoad) return;
-    const controller = new AbortController();
+    // Drop the previous object's bytes even when this one is not loaded, so a
+    // prompt or placeholder never sits on top of stale state.
     setFile(null);
     setError(null);
     setProgress({ loaded: 0, total: null });
+    if (!shouldLoad) return;
+    const controller = new AbortController();
 
     fetchPreviewBytes(url, { signal: controller.signal, onProgress: setProgress })
       .then((bytes) => {
         if (controller.signal.aborted) return;
-        // A named File lets the viewer detect the format from the extension.
-        setFile(new File([bytes as BlobPart], filename));
+        setFile(new File([bytes as BlobPart], toViewerFilename(filename)));
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted || err instanceof PreviewFetchAbortedError) return;
@@ -96,7 +94,11 @@ export default function FileViewerPane({ url, filename, size, height }: FileView
   const options = useMemo<ViewerOptions>(
     () => ({
       theme: appTheme === 'dark' ? 'dark' : 'light',
-      toolbar: { position: 'bottom-right', download: false },
+      // Download, print and HTML export go through <a download> and
+      // window.open(), which the Tauri webview has no handler for: the click
+      // would do nothing or throw. The modal's Open/Copy URL covers downloads.
+      toolbar: { position: 'bottom-right', download: false, print: false, exportHtml: false },
+      archive: { entryActions: { download: false } },
     }),
     [appTheme]
   );
@@ -144,7 +146,13 @@ export default function FileViewerPane({ url, filename, size, height }: FileView
       style={{ height, textAlign: 'left' }}
       className="overflow-hidden rounded-lg"
     >
-      <FileViewer file={file} filename={filename} size={file.size} options={options} />
+      <FileViewer
+        file={file}
+        filename={file.name}
+        type={getFileExtension(filename)}
+        size={file.size}
+        options={options}
+      />
     </div>
   );
 }

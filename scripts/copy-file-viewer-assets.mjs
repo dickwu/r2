@@ -3,7 +3,7 @@
 // into public/file-viewer so Next's static export ships it in dist/ and the
 // Tauri bundle serves it at <origin>/file-viewer/. The copy is ~200 MB, so it
 // is skipped when the manifest already matches the installed CLI version.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 
@@ -24,8 +24,12 @@ if (existsSync(manifestPath)) {
   }
 }
 
+// Replace a stale payload ourselves: the CLI's own clean mode moves the old
+// tree into os.tmpdir() with rename(), which fails with EXDEV (and leaves the
+// target deleted) whenever the temp dir is on another filesystem.
+rmSync(targetDir, { recursive: true, force: true });
 const { copyFileViewerAssets } = await import('file-viewer-copy-assets');
-const result = await copyFileViewerAssets({ targetDir, clean: true, confirmClean: true });
+const result = await copyFileViewerAssets({ targetDir });
 if (result.validation.missingOptional.length) {
   console.warn(
     `[file-viewer-assets] optional assets missing: ${result.validation.missingOptional

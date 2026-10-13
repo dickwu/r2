@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { getFileExtension, getPreviewKind } from './previewKind';
+import { getFileExtension, getPreviewKind, toViewerFilename } from './previewKind';
 
 const TEXT = ['txt', 'md', 'json', 'csv'];
 
@@ -38,5 +38,13 @@ describe('getPreviewKind', () => {
   test('routes unknown and extension-less files to the file viewer', () => {
     expect(getPreviewKind('blob.xyz123', TEXT)).toBe('viewer');
     expect(getPreviewKind('Makefile', TEXT)).toBe('viewer');
+  });
+});
+
+describe('toViewerFilename', () => {
+  test('replaces the characters the viewer treats as URL delimiters', () => {
+    expect(toViewerFilename('Invoice #123.pdf')).toBe('Invoice _123.pdf');
+    expect(toViewerFilename('What?.docx')).toBe('What_.docx');
+    expect(toViewerFilename('plain.xlsx')).toBe('plain.xlsx');
   });
 });
