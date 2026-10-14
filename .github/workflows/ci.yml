@@ -172,6 +172,15 @@ jobs:
       - name: Build frontend
         run: bun run build
 
+      # Tauri serves index.html (200) for any missing bundled path, so a payload
+      # that failed to stage would surface only as broken previews in the app.
+      - name: Check file-viewer runtime payload in dist
+        shell: bash
+        run: |
+          test -f dist/file-viewer/flyfish-viewer-assets.json
+          test -f dist/file-viewer/vendor/pdf/pdf.worker.mjs
+          test -f dist/file-viewer/vendor/docx/docx.worker.js
+
       - name: Debug - Check signing key
         run: echo "TAURI_SIGNING_PRIVATE_KEY length is ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && 'SET' || 'EMPTY' }}"
 

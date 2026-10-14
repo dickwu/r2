@@ -10,6 +10,14 @@ NC='\033[0m'
 # Get current version from package.json
 CURRENT_VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*: "\(.*\)".*/\1/')
 
+# In-place sed differs between BSD/macOS (`sed -i ''`) and GNU/Linux (`sed -i`);
+# `sed -i ''` on GNU sed treats '' as the script and fails with "can't read s/...".
+if sed --version >/dev/null 2>&1; then
+    sed_inplace() { sed -i "$@"; }
+else
+    sed_inplace() { sed -i '' "$@"; }
+fi
+
 usage() {
     echo "Usage: $0 <version>"
     echo ""
@@ -57,19 +65,19 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 # Update package.json
-sed -i '' 's/"version": "[0-9]*\.[0-9]*\.[0-9]*"/"version": "'"$NEW_VERSION"'"/' package.json
+sed_inplace 's/"version": "[0-9]*\.[0-9]*\.[0-9]*"/"version": "'"$NEW_VERSION"'"/' package.json
 echo -e "${GREEN}✓ Updated package.json${NC}"
 
 # Update src-tauri/tauri.conf.json (use regex pattern to match any version)
-sed -i '' 's/"version": "[0-9]*\.[0-9]*\.[0-9]*"/"version": "'"$NEW_VERSION"'"/' src-tauri/tauri.conf.json
+sed_inplace 's/"version": "[0-9]*\.[0-9]*\.[0-9]*"/"version": "'"$NEW_VERSION"'"/' src-tauri/tauri.conf.json
 echo -e "${GREEN}✓ Updated src-tauri/tauri.conf.json${NC}"
 
 # Update src-tauri/Cargo.toml (use regex pattern to match any version on version line)
-sed -i '' 's/^version = "[0-9]*\.[0-9]*\.[0-9]*"/version = "'"$NEW_VERSION"'"/' src-tauri/Cargo.toml
+sed_inplace 's/^version = "[0-9]*\.[0-9]*\.[0-9]*"/version = "'"$NEW_VERSION"'"/' src-tauri/Cargo.toml
 echo -e "${GREEN}✓ Updated src-tauri/Cargo.toml${NC}"
 
 # Update src-tauri/Cargo.lock (version is on line after 'name = "r2"')
-sed -i '' '/^name = "r2"$/{n;s/^version = ".*"/version = "'"$NEW_VERSION"'"/;}' src-tauri/Cargo.lock
+sed_inplace '/^name = "r2"$/{n;s/^version = ".*"/version = "'"$NEW_VERSION"'"/;}' src-tauri/Cargo.lock
 echo -e "${GREEN}✓ Updated src-tauri/Cargo.lock${NC}"
 
 # Git commit
