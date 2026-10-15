@@ -73,3 +73,4 @@ __pycache__/
 
 # file-viewer runtime payload staged by scripts/copy-file-viewer-assets.mjs (bun run assets:file-viewer)
 public/file-viewer/
+.build/
