@@ -3,11 +3,11 @@
 import { useEffect, useState } from 'react';
 import { detectObjectType } from '@/app/components/preview/fetchPreviewBytes';
 import {
+  contradictsName,
   getContentTypePreview,
   getDetectedPreview,
   getExtensionPreview,
   getFileExtension,
-  isSameRendering,
   type PreviewTarget,
 } from '@/app/components/preview/previewKind';
 
@@ -45,12 +45,16 @@ interface Lookup {
 
 const loadViewerFormats = () => import('@/app/components/preview/fileViewerFormats');
 
+/** Whether the webview's player may play a media type ('' is a no). */
+const canPlayType = (mimeType: string) =>
+  document.createElement('video').canPlayType(mimeType) !== '';
+
 /**
  * Picks where to preview an object. Its content is identified in the
  * background (the first bytes, sniffed by the backend) whatever its name:
  *
  * - a name whose format renders shows at once, as before; when the content
- *   calls for a different rendering, both are offered and the name's stays
+ *   contradicts it (`contradictsName`), both are offered and the name's stays
  *   selected until the user switches;
  * - otherwise (no extension, as with the UUID keys some backends store
  *   uploads under, or one nothing renders) the content decides.
@@ -103,7 +107,7 @@ export function usePreviewTarget(
         const isViewerFormat = mayNeedViewer
           ? (await loadViewerFormats()).isFileViewerFormat
           : () => false;
-        const target = getDetectedPreview(detected, textExtensions, isViewerFormat);
+        const target = getDetectedPreview(detected, textExtensions, isViewerFormat, canPlayType);
         update({ content: { target, name: detected.name } });
       } catch (err) {
         console.warn('Failed to identify the object for preview:', err);
@@ -137,7 +141,7 @@ export function usePreviewTarget(
 
   const content = current?.content?.target ?? null;
   if (nameRenders) {
-    if (!content || isSameRendering(byName, content)) return resolution({});
+    if (!content || !contradictsName(byName, content)) return resolution({});
     const choices = { name: byName, content, contentName: current?.content?.name ?? '' };
     return chosenSource === 'content'
       ? resolution({ target: content, choices, source: 'content' })

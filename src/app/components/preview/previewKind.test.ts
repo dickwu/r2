@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  contradictsName,
   getContentTypePreview,
   getDetectedPreview,
   getExtensionPreview,
@@ -163,6 +164,23 @@ describe('getDetectedPreview', () => {
     expect(detectedRouteOf(detected('image/x-canon-cr2', 'cr2'))).toBeNull();
   });
 
+  test('sends media no listed format stands for to the player only if it may play it', () => {
+    const asked: string[] = [];
+    const route = (detection: DetectedType, canPlay: boolean) => {
+      const canPlayType = (mimeType: string) => (asked.push(mimeType), canPlay);
+      const target = getDetectedPreview(detection, TEXT, isViewerFormat, canPlayType);
+      return target && `${target.kind}:${target.extension}`;
+    };
+    const mkv = detected('video/x-matroska', 'mkv', 'video/x-matroska; foo=1');
+    expect(route(mkv, false)).toBeNull();
+    expect(route(mkv, true)).toBe('video:');
+    expect(asked).toEqual(['video/x-matroska', 'video/x-matroska']);
+    expect(route(detected('audio/x-aiff', 'aiff', 'audio/x-aiff'), false)).toBeNull();
+    // Listed formats play without asking.
+    expect(route(detected('video/mp4', 'mp4'), false)).toBe('video:mp4');
+    expect(asked).toHaveLength(3);
+  });
+
   test('keeps the stored type for saving, or else the detected one, and the detected type', () => {
     expect(
       getDetectedPreview(detected('application/json', 'json', 'text/plain'), TEXT, isViewerFormat)
@@ -224,6 +242,41 @@ describe('isSameRendering', () => {
   test('a different surface is a different rendering', () => {
     expect(isSameRendering(preview('jpg'), preview('heic'))).toBe(false);
     expect(isSameRendering(preview('pdf'), preview('html'))).toBe(false);
+  });
+});
+
+describe('contradictsName', () => {
+  const name = (extension: string) => getExtensionPreview(extension, TEXT);
+  const content = (mime: string, extension: string) =>
+    getDetectedPreview(detected(mime, extension), TEXT, () => true)!;
+  const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+  test('a specific identification that renders differently contradicts the name', () => {
+    expect(contradictsName(name('pdf'), content('image/jpeg', 'jpg'))).toBe(true);
+    expect(contradictsName(name('pdf'), content(DOCX, 'docx'))).toBe(true);
+    expect(contradictsName(name('jpg'), content('image/heic', 'heic'))).toBe(true);
+    expect(contradictsName(name('txt'), content('image/png', 'png'))).toBe(true);
+    expect(contradictsName(name('kml'), content('application/geo+json', 'geojson'))).toBe(true);
+  });
+
+  test('text contradicts only a name the native players open', () => {
+    const plain = 'text/plain; charset=utf-8';
+    expect(contradictsName(name('jpg'), content(plain, 'txt'))).toBe(true);
+    expect(contradictsName(name('kt'), content(plain, 'txt'))).toBe(false);
+    expect(contradictsName(name('h'), content('text/x-c', 'c'))).toBe(false);
+    expect(contradictsName(name('ipynb'), content('text/x-typescript', 'ts'))).toBe(false);
+    expect(contradictsName(name('geojson'), content('application/json', 'json'))).toBe(false);
+    expect(contradictsName(name('md'), content('text/x-c', 'c'))).toBe(false);
+  });
+
+  test('a bare container contradicts only a name the viewer does not open', () => {
+    expect(contradictsName(name('cbz'), content('application/zip', 'zip'))).toBe(false);
+    expect(contradictsName(name('txt'), content('application/zip', 'zip'))).toBe(true);
+  });
+
+  test('the same rendering is no contradiction', () => {
+    expect(contradictsName(name('jpg'), content('image/png', 'png'))).toBe(false);
+    expect(contradictsName(name('pdf'), content('application/pdf', 'pdf'))).toBe(false);
   });
 });
 

@@ -280,14 +280,21 @@ export function getContentTypePreview(
  * like a correct file name; when the bytes only name a family or container,
  * the stored Content-Type may refine them. The target keeps the stored type
  * (or else the detected one) for saving edits back, and the detected type.
+ * A video or audio type no listed format stands for (Matroska, AVI, …) only
+ * goes to the native player if `canPlayType` says it may play it.
  */
 export function getDetectedPreview(
   detected: DetectedType,
   textExtensions: readonly string[],
-  isViewerFormat: (extension: string) => boolean
+  isViewerFormat: (extension: string) => boolean,
+  canPlayType: (mimeType: string) => boolean = () => true
 ): PreviewTarget | null {
-  const renders = (target: PreviewTarget | null) =>
-    target && (target.kind !== 'viewer' || isViewerFormat(target.extension)) ? target : null;
+  const renders = (target: PreviewTarget | null) => {
+    if (!target) return null;
+    if (target.kind === 'viewer') return isViewerFormat(target.extension) ? target : null;
+    const unlisted = !target.extension && (target.kind === 'video' || target.kind === 'audio');
+    return unlisted && !canPlayType(getMimeEssence(target.contentType ?? '')) ? null : target;
+  };
   const fromBytes = renders(getExtensionPreview(detected.extension, textExtensions));
   const generic = GENERIC_DETECTIONS.includes(getMimeEssence(detected.mime));
   const target =
@@ -324,6 +331,25 @@ export function isSameRendering(a: PreviewTarget, b: PreviewTarget): boolean {
   if (a.kind !== b.kind) return false;
   const format = (extension: string) => FORMAT_ALIASES[extension] ?? extension;
   return a.kind !== 'viewer' || format(a.extension) === format(b.extension);
+}
+
+/** Containers the first bytes name only as such: CBZ is a ZIP file, MSG an OLE one. */
+const CONTAINER_DETECTIONS = ['application/zip', 'application/x-ole-storage'];
+
+/**
+ * Whether what the content was identified as contradicts a name whose format
+ * renders, which is when the user gets to choose. Sniffing can't tell apart
+ * formats built on text or on a container, so text (whatever language the
+ * detector guesses: a notebook reads as TypeScript) never contradicts a name
+ * the editor or the viewer opens (code, notebooks, OBJ, TSV, draw.io, …), and
+ * a bare ZIP or OLE container never contradicts one the viewer opens.
+ */
+export function contradictsName(name: PreviewTarget, content: PreviewTarget): boolean {
+  if (isSameRendering(name, content)) return false;
+  const detected = getMimeEssence(content.detectedType ?? '');
+  const text = content.kind === 'text' || detected.startsWith('text/');
+  if (text && (name.kind === 'text' || name.kind === 'viewer')) return false;
+  return !(CONTAINER_DETECTIONS.includes(detected) && name.kind === 'viewer');
 }
 
 /**

@@ -344,11 +344,23 @@ pub struct DetectedType {
 /// The most the detector reads; asking for more would only cost bandwidth.
 const DETECT_BYTES: usize = 3072;
 
-fn detect_client() -> &'static reqwest::Client {
+fn detect_client() -> Result<&'static reqwest::Client, String> {
     // Shared so the grid, which asks once per extension-less tile, reuses
     // connections instead of opening (and handshaking) one per object.
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    // Bounded, so a stalled endpoint fails the preview instead of leaving it
+    // waiting on the identification.
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(20))
+                .build()
+                .map_err(|e| format!("Cannot create HTTP client: {e}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 /// Identify the object at `url` from its first bytes: one ranged GET for at
@@ -358,7 +370,7 @@ fn detect_client() -> &'static reqwest::Client {
 /// others).
 #[tauri::command]
 pub async fn detect_url_type(url: String) -> Result<DetectedType, String> {
-    let mut response = detect_client()
+    let mut response = detect_client()?
         .get(&url)
         .header(
             reqwest::header::RANGE,
@@ -392,6 +404,13 @@ pub async fn detect_url_type(url: String) -> Result<DetectedType, String> {
             }
         }
         head.truncate(DETECT_BYTES);
+        // The cut may land inside a multi-byte character, and the detector
+        // only takes text that is valid UTF-8 to its last byte.
+        if let Err(err) = std::str::from_utf8(&head) {
+            if head.len() == DETECT_BYTES && err.error_len().is_none() {
+                head.truncate(err.valid_up_to());
+            }
+        }
         content_type
     } else {
         return Err(format!(
@@ -471,6 +490,26 @@ mod tests {
             "{request}"
         );
         assert!(request.contains("\r\nrange: bytes=0-3071\r\n"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn text_cut_inside_a_character_by_the_range_is_still_text() {
+        // Three-byte characters after one ASCII byte: the range ends inside one.
+        let text = format!(
+            "a{}",
+            "存储桶中的对象没有扩展名时也应该可以预览。".repeat(100)
+        );
+        let body = text.as_bytes()[..DETECT_BYTES].to_vec();
+        assert!(std::str::from_utf8(&body).is_err());
+        let (url, server) = serve_once(
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\n\
+             Content-Range: bytes 0-3071/6301\r\nContent-Length: 3072\r\n\r\n",
+            body,
+        )
+        .await;
+        let detected = detect_url_type(url).await.unwrap();
+        assert!(detected.mime.starts_with("text/plain"), "{}", detected.mime);
+        server.await.unwrap();
     }
 
     #[tokio::test]
