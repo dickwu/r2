@@ -10,6 +10,7 @@ import {
   fetchPreviewBytes,
   PreviewFetchAbortedError,
 } from '@/app/components/preview/fetchPreviewBytes';
+import { getFileExtension } from '@/app/components/preview/previewKind';
 import { useThemeStore } from '@/app/stores/themeStore';
 
 const { Text } = Typography;
@@ -17,6 +18,8 @@ const { Text } = Typography;
 interface TextViewerProps {
   url: string;
   filename?: string;
+  /** Format to highlight the text as; defaults to the name's extension. */
+  extension?: string;
   maxHeight?: string;
   editable?: boolean;
   onLoadSuccess?: () => void;
@@ -39,8 +42,7 @@ export const TEXT_EXTENSIONS = [
   ...DATA_EXTENSIONS,
 ];
 
-function getLanguageFromExtension(filename: string): string {
-  const ext = filename.split('.').pop()?.toLowerCase() || '';
+function getLanguageFromExtension(ext: string): string {
   const langMap: Record<string, string> = {
     js: 'javascript',
     ts: 'typescript',
@@ -82,6 +84,7 @@ function getLanguageFromExtension(filename: string): string {
 export default function TextViewer({
   url,
   filename = '',
+  extension,
   maxHeight = '700px',
   editable = false,
   onLoadSuccess,
@@ -101,7 +104,7 @@ export default function TextViewer({
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
 
-  const language = getLanguageFromExtension(filename);
+  const language = getLanguageFromExtension(extension ?? getFileExtension(filename));
   const appTheme = useThemeStore((s) => s.theme);
   const monacoTheme = appTheme === 'dark' ? 'vs-dark' : 'light';
 

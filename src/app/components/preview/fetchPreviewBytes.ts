@@ -1,5 +1,6 @@
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { invoke } from '@tauri-apps/api/core';
+import type { DetectedType } from '@/app/components/preview/previewKind';
 
 export interface PreviewDownloadProgress {
   loaded: number;
@@ -36,6 +37,15 @@ function base64ToBytes(base64: string): Uint8Array {
 async function fetchViaBackend(url: string): Promise<Uint8Array> {
   const base64Data = await invoke<string>('fetch_url_bytes', { url });
   return base64ToBytes(base64Data);
+}
+
+/**
+ * Identifies an object from its content: the backend fetches the first bytes
+ * with one ranged GET and sniffs them with `mimetype-detector`, returning the
+ * stored Content-Type alongside.
+ */
+export function detectObjectType(url: string): Promise<DetectedType> {
+  return invoke<DetectedType>('detect_url_type', { url });
 }
 
 /**

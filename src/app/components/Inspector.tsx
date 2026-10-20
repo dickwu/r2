@@ -20,6 +20,7 @@ import {
   type StorageConfig,
 } from '@/app/lib/r2cache';
 import { formatBytes } from '@/app/utils/formatBytes';
+import { useListedObjectType } from '@/app/hooks/useListedObjectType';
 import dayjs from 'dayjs';
 
 interface InspectorProps {
@@ -31,9 +32,8 @@ interface InspectorProps {
   onDownload?: (item: FileItem) => void;
 }
 
-function itemType(item: FileItem): string {
+function itemType(item: FileItem, ext: string): string {
   if (item.isFolder) return 'folder';
-  const ext = item.name.toLowerCase().split('.').pop() || '';
   if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'].includes(ext)) return 'image';
   if (['mp4', 'avi', 'mkv', 'mov', 'wmv', 'flv', 'webm', 'm4v'].includes(ext)) return 'video';
   if (
@@ -140,7 +140,12 @@ export default function Inspector({
   onDownload,
 }: InspectorProps) {
   const { message } = App.useApp();
-  const type = itemType(item);
+  const listedType = useListedObjectType(storageConfig, item);
+  // An extension-less object is shown as what its Content-Type says it is.
+  const type =
+    listedType?.kind === 'image' || listedType?.kind === 'video'
+      ? listedType.kind
+      : itemType(item, listedType?.extension || item.name.toLowerCase().split('.').pop() || '');
 
   const sizeLabel = item.isFolder ? '—' : formatBytes(item.size || 0);
   const modLabel = item.lastModified ? dayjs(item.lastModified).format('YYYY-MM-DD HH:mm') : '—';

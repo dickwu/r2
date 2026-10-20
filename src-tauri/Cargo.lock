@@ -4283,6 +4283,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mimetype-detector"
+version = "0.3.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e4fc4acc63dc55c62fb8531c8cc422705f3a587132a1d3de1ded7c4c2964029"
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5631,6 +5637,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
+ "mimetype-detector",
  "nfsserve",
  "range-dl",
  "reqwest 0.13.5",

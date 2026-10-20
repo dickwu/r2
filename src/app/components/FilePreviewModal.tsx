@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Image, Spin, App } from 'antd';
+import { Image, Segmented, Spin, App } from 'antd';
 import {
   LinkOutlined,
   CopyOutlined,
@@ -26,7 +26,13 @@ import {
   StorageConfig,
 } from '@/app/lib/r2cache';
 import { TEXT_EXTENSIONS } from '@/app/components/preview/TextViewer';
-import { getFileExtension, getPreviewKind } from '@/app/components/preview/previewKind';
+import BlobImage from '@/app/components/preview/BlobImage';
+import {
+  getFileExtension,
+  getImageBlobType,
+  type PreviewTarget,
+} from '@/app/components/preview/previewKind';
+import { usePreviewTarget, type PreviewSource } from '@/app/components/preview/usePreviewTarget';
 import { useVideoThumbnail } from '@/app/hooks/useVideoThumbnail';
 import { usePreviewStore } from '@/app/stores/previewStore';
 import Modal from '@/app/components/ui/Modal';
@@ -70,13 +76,9 @@ function getContentType(filename: string): string {
   return TEXT_CONTENT_TYPES[getFileExtension(filename)] || 'text/plain';
 }
 
-function previewKindOf(filename: string) {
-  return getPreviewKind(filename, TEXT_EXTENSIONS);
-}
-
-function fileTypeIcon(filename: string, size = 18): React.ReactNode {
+function fileTypeIcon({ kind, extension }: PreviewTarget, size = 18): React.ReactNode {
   const style = { fontSize: size };
-  switch (previewKindOf(filename)) {
+  switch (kind) {
     case 'image':
       return <FileImageOutlined style={style} />;
     case 'video':
@@ -86,7 +88,7 @@ function fileTypeIcon(filename: string, size = 18): React.ReactNode {
     case 'text':
       return <FileTextOutlined style={style} />;
     default:
-      return getFileExtension(filename) === 'pdf' ? (
+      return extension === 'pdf' ? (
         <FilePdfOutlined style={style} />
       ) : (
         <FileOutlined style={style} />
@@ -94,8 +96,21 @@ function fileTypeIcon(filename: string, size = 18): React.ReactNode {
   }
 }
 
-function placeholderIcon(filename: string) {
-  return fileTypeIcon(filename, 40);
+function placeholderIcon(target: PreviewTarget) {
+  return fileTypeIcon(target, 40);
+}
+
+const KIND_LABELS: Record<PreviewTarget['kind'], string> = {
+  image: 'Image',
+  video: 'Video',
+  audio: 'Audio',
+  text: 'Text',
+  viewer: 'File',
+};
+
+/** Short name of the format a preview renders, e.g. "PDF". */
+function formatLabel({ kind, extension }: PreviewTarget): string {
+  return extension ? extension.toUpperCase() : KIND_LABELS[kind];
 }
 
 interface FilePreviewModalProps {
@@ -108,7 +123,10 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   const { message } = App.useApp();
   const { file, files, close, navigate } = usePreviewStore();
   const isOpen = !!file;
-  const [signedUrl, setSignedUrl] = useState<string | null>(null);
+  // Kept with the key it was made for: while the next file's URL is being
+  // signed, that file must not preview (or probe) the previous one's URL.
+  const [objectUrl, setObjectUrl] = useState<{ key: string; url: string | null } | null>(null);
+  const signedUrl = file && objectUrl?.key === file.key ? objectUrl.url : null;
   const [loading, setLoading] = useState(false);
   const [windowSize, setWindowSize] = useState({ width: 0, height: 0 });
 
@@ -168,11 +186,20 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   const needsCredentials = !isPublic && !hasCredentials;
   const canEdit = !!(config?.bucket && hasCredentials);
 
+  const preview = usePreviewTarget(file, signedUrl, TEXT_EXTENSIONS);
+  // An object opened by its Content-Type keeps that type when saved.
+  const savedContentType = preview.target.contentType;
+
   const handleSaveContent = useCallback(
     async (content: string) => {
       if (!file || !config || !hasCredentials) throw new Error('Missing credentials or file info');
       try {
-        await uploadContent(config, file.key, content, getContentType(file.name));
+        await uploadContent(
+          config,
+          file.key,
+          content,
+          savedContentType ?? getContentType(file.name)
+        );
         message.success('File saved successfully');
         onFileUpdated?.();
       } catch (err) {
@@ -180,39 +207,52 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
         throw err;
       }
     },
-    [file, config, hasCredentials, message, onFileUpdated]
+    [file, config, hasCredentials, savedContentType, message, onFileUpdated]
   );
 
   useEffect(() => {
     if (!isOpen || !file) {
-      setSignedUrl(null);
+      setObjectUrl(null);
       return;
     }
+    const { key } = file;
 
     if (isPublic && config) {
       // Public bucket: reuse the provider's URL builder so the object key is
       // encoded consistently (spaces, unicode, reserved characters) — no signing.
-      setSignedUrl(buildPublicUrl(config, file.key));
+      setObjectUrl({ key, url: buildPublicUrl(config, key) });
       return;
     }
 
     if (config && hasCredentials) {
-      // Private bucket: auto-sign the URL for the preview.
+      // Private bucket: auto-sign the URL for the preview. A signature that
+      // lands after the user moved on is dropped.
+      let stale = false;
       setLoading(true);
-      generateSignedUrl(config, file.key)
-        .then(setSignedUrl)
-        .catch(() => setSignedUrl(null))
-        .finally(() => setLoading(false));
-      return;
+      generateSignedUrl(config, key)
+        .then((url) => {
+          if (!stale) setObjectUrl({ key, url });
+        })
+        .catch(() => {
+          if (!stale) setObjectUrl({ key, url: null });
+        })
+        .finally(() => {
+          if (!stale) setLoading(false);
+        });
+      return () => {
+        stale = true;
+        setLoading(false);
+      };
     }
 
-    setSignedUrl(null);
+    setObjectUrl(null);
   }, [isOpen, file, config, hasCredentials, isPublic]);
 
   if (!file) return null;
 
   const fileUrl = signedUrl;
-  const kind = previewKindOf(file.name);
+  const { target } = preview;
+  const { kind } = target;
   const isImage = kind === 'image';
   const isVideo = kind === 'video';
   const isAudio = kind === 'audio';
@@ -273,6 +313,13 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
     : null;
   const subtitle = [fileSizeStr, modifiedStr].filter(Boolean).join(' · ') || undefined;
 
+  const imageBlobType = getImageBlobType(target);
+  const imageStyle = {
+    maxHeight: getPreviewMaxHeight(),
+    maxWidth: '100%',
+    objectFit: 'contain',
+  } as const;
+
   // Navigation counter
   const navCounter =
     previewableFiles.length > 1 ? `${currentIndex + 1} / ${previewableFiles.length}` : undefined;
@@ -320,20 +367,54 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
       onClose={close}
       title={file.name}
       subtitle={subtitle}
-      icon={fileTypeIcon(file.name)}
+      icon={fileTypeIcon(target)}
       width={typeof modalWidth === 'number' ? modalWidth : undefined}
       footer={footer}
     >
+      {/* The name and the content disagree on how to render it: let the user pick. */}
+      {preview.choices && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexWrap: 'wrap',
+            gap: 10,
+            marginBottom: 12,
+            fontSize: 12.5,
+            color: 'var(--text-muted)',
+          }}
+        >
+          <span>
+            The content is {preview.choices.contentName}, but the name says{' '}
+            {formatLabel(preview.choices.name)}. Render as
+          </span>
+          <Segmented<PreviewSource>
+            size="small"
+            value={preview.source}
+            onChange={preview.setSource}
+            options={[
+              { value: 'name', label: `${formatLabel(preview.choices.name)} · name` },
+              { value: 'content', label: `${formatLabel(preview.choices.content)} · content` },
+            ]}
+          />
+        </div>
+      )}
+
       {/* Preview area */}
       <div style={{ textAlign: 'center', marginBottom: 16 }}>
-        {loading ? (
+        {loading || preview.pending ? (
           <Spin />
+        ) : preview.error ? (
+          <p style={{ fontSize: 12.5, color: 'var(--danger)', margin: 0 }}>
+            Error: {preview.error}
+          </p>
         ) : isImage && fileUrl ? (
-          <Image
-            src={fileUrl}
-            alt={file.name}
-            style={{ maxHeight: getPreviewMaxHeight(), maxWidth: '100%', objectFit: 'contain' }}
-          />
+          imageBlobType ? (
+            <BlobImage url={fileUrl} type={imageBlobType} filename={file.name} style={imageStyle} />
+          ) : (
+            <Image src={fileUrl} alt={file.name} style={imageStyle} />
+          )
         ) : isVideo && fileUrl ? (
           <video
             src={fileUrl}
@@ -355,6 +436,7 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
           <TextViewer
             url={fileUrl}
             filename={file.name}
+            extension={target.extension}
             maxHeight={getPreviewMaxHeight()}
             editable={canEdit}
             onSave={handleSaveContent}
@@ -363,11 +445,12 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
           <FileViewerPane
             url={fileUrl}
             filename={file.name}
+            extension={target.extension}
             size={file.size}
             height={getPreviewMaxHeight()}
           />
         ) : (
-          <span style={{ color: 'var(--accent)' }}>{placeholderIcon(file.name)}</span>
+          <span style={{ color: 'var(--accent)' }}>{placeholderIcon(target)}</span>
         )}
       </div>
 
