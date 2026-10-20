@@ -324,3 +324,126 @@ pub async fn fetch_url_bytes(url: String) -> Result<String, String> {
 
     Ok(BASE64.encode(&bytes))
 }
+
+/// Read a URL's Content-Type without downloading it: a one-byte ranged GET
+/// whose body is dropped unread. Like `fetch_url_bytes`, this is the preview's
+/// way past the HTTP plugin's URL scope, which only admits hosts on their
+/// default port (self-hosted MinIO/RustFS endpoints listen on others).
+#[tauri::command]
+pub async fn fetch_url_content_type(url: String) -> Result<Option<String>, String> {
+    let response = reqwest::Client::new()
+        .get(&url)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch URL: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "HTTP {}: {}",
+            response.status().as_u16(),
+            response
+                .status()
+                .canonical_reason()
+                .unwrap_or("Unknown error")
+        ));
+    }
+
+    Ok(response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fetch_url_content_type;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Answers one request with `response`, then waits for the client to hang
+    /// up; resolves to the request head, lower-cased.
+    async fn serve_once(response: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/bkt/6c4c4cb6?X-Amz-Signature=abc",
+            listener.local_addr().unwrap()
+        );
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.windows(4).any(|s| s == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).await.unwrap_or(0);
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let _ = socket.write_all(response.as_bytes()).await;
+            while socket.read(&mut buffer).await.unwrap_or(0) > 0 {}
+            String::from_utf8_lossy(&request).to_lowercase()
+        });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn reads_the_type_with_a_one_byte_ranged_get() {
+        let (url, server) = serve_once(
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: image/jpeg\r\n\
+             Content-Range: bytes 0-0/4096\r\nContent-Length: 1\r\n\r\nx",
+        )
+        .await;
+        let content_type = fetch_url_content_type(url).await.unwrap();
+        assert_eq!(content_type.as_deref(), Some("image/jpeg"));
+        let request = server.await.unwrap();
+        assert!(
+            request.starts_with("get /bkt/6c4c4cb6?x-amz-signature=abc "),
+            "{request}"
+        );
+        assert!(request.contains("\r\nrange: bytes=0-0\r\n"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn returns_none_when_the_object_has_no_type() {
+        let (url, server) = serve_once(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/2\r\n\
+             Content-Length: 1\r\n\r\nx",
+        )
+        .await;
+        assert_eq!(fetch_url_content_type(url).await.unwrap(), None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_an_error_status_instead_of_the_error_body_type() {
+        let (url, server) = serve_once(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/xml\r\n\
+             Content-Length: 8\r\n\r\n<Error/>",
+        )
+        .await;
+        assert_eq!(
+            fetch_url_content_type(url).await.unwrap_err(),
+            "HTTP 403: Forbidden"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn does_not_wait_for_the_body_when_the_range_is_ignored() {
+        // The server announces the whole object but never sends it.
+        let (url, server) = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\n\
+             Content-Length: 1000000000\r\n\r\npartial",
+        )
+        .await;
+        let content_type =
+            tokio::time::timeout(Duration::from_secs(10), fetch_url_content_type(url))
+                .await
+                .expect("returned without the body")
+                .unwrap();
+        assert_eq!(content_type.as_deref(), Some("video/mp4"));
+        server.await.unwrap();
+    }
+}

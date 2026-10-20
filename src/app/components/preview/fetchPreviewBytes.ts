@@ -43,10 +43,17 @@ async function fetchViaBackend(url: string): Promise<Uint8Array> {
  * the signature check of a presigned URL, which is signed for GET, so this
  * asks for the first byte instead, and cancels the body in case the server
  * ignores the range and sends it all. Resolves null when the response has no
- * type.
+ * type. Like `fetchPreviewBytes`, falls back to the backend when the plugin's
+ * URL scope rejects the host, as it does any host on a non-default port.
  */
 export async function fetchContentType(url: string, signal?: AbortSignal): Promise<string | null> {
-  const response = await tauriFetch(url, { headers: { Range: 'bytes=0-0' }, signal });
+  let response: Response;
+  try {
+    response = await tauriFetch(url, { headers: { Range: 'bytes=0-0' }, signal });
+  } catch (err) {
+    if (!isScopeError(err)) throw err;
+    return invoke<string | null>('fetch_url_content_type', { url });
+  }
   response.body?.cancel().catch(() => {});
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${response.statusText}`);

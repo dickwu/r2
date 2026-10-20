@@ -11,6 +11,16 @@ mock.module('@tauri-apps/plugin-http', () => ({
   },
 }));
 
+const tauriCore = await import('@tauri-apps/api/core');
+const invokeCalls: Array<{ command: string; args: unknown }> = [];
+mock.module('@tauri-apps/api/core', () => ({
+  ...tauriCore,
+  invoke: async (command: string, args: unknown) => {
+    invokeCalls.push({ command, args });
+    return 'image/jpeg';
+  },
+}));
+
 const { fetchContentType } = await import('./fetchPreviewBytes');
 
 /** A body that records whether it was cancelled instead of read. */
@@ -62,5 +72,29 @@ describe('fetchContentType', () => {
       (err: Error) => err.message
     );
     expect(failure).toBe('HTTP 403: Forbidden');
+  });
+
+  test('asks the backend when the plugin scope rejects the host (non-default port)', async () => {
+    const url = 'http://127.0.0.1:9000/bkt/6c4c4cb6?X-Amz-Signature=abc';
+    respond = () => {
+      throw new Error(`url not allowed on the configured scope: ${url}`);
+    };
+    expect(await fetchContentType(url)).toBe('image/jpeg');
+    expect(invokeCalls[invokeCalls.length - 1]).toEqual({
+      command: 'fetch_url_content_type',
+      args: { url },
+    });
+  });
+
+  test('other request failures are not retried through the backend', async () => {
+    const calls = invokeCalls.length;
+    respond = () => {
+      throw new Error('error sending request: connection refused');
+    };
+    const failure = await fetchContentType('https://bucket.example/key').catch(
+      (err: Error) => err.message
+    );
+    expect(failure).toBe('error sending request: connection refused');
+    expect(invokeCalls.length).toBe(calls);
   });
 });
