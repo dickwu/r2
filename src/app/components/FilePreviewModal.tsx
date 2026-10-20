@@ -26,7 +26,12 @@ import {
   StorageConfig,
 } from '@/app/lib/r2cache';
 import { TEXT_EXTENSIONS } from '@/app/components/preview/TextViewer';
-import { getFileExtension, type PreviewTarget } from '@/app/components/preview/previewKind';
+import BlobImage from '@/app/components/preview/BlobImage';
+import {
+  getFileExtension,
+  getImageBlobType,
+  type PreviewTarget,
+} from '@/app/components/preview/previewKind';
 import { usePreviewTarget, type PreviewSource } from '@/app/components/preview/usePreviewTarget';
 import { useVideoThumbnail } from '@/app/hooks/useVideoThumbnail';
 import { usePreviewStore } from '@/app/stores/previewStore';
@@ -308,6 +313,13 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
     : null;
   const subtitle = [fileSizeStr, modifiedStr].filter(Boolean).join(' · ') || undefined;
 
+  const imageBlobType = getImageBlobType(target);
+  const imageStyle = {
+    maxHeight: getPreviewMaxHeight(),
+    maxWidth: '100%',
+    objectFit: 'contain',
+  } as const;
+
   // Navigation counter
   const navCounter =
     previewableFiles.length > 1 ? `${currentIndex + 1} / ${previewableFiles.length}` : undefined;
@@ -398,11 +410,11 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
             Error: {preview.error}
           </p>
         ) : isImage && fileUrl ? (
-          <Image
-            src={fileUrl}
-            alt={file.name}
-            style={{ maxHeight: getPreviewMaxHeight(), maxWidth: '100%', objectFit: 'contain' }}
-          />
+          imageBlobType ? (
+            <BlobImage url={fileUrl} type={imageBlobType} filename={file.name} style={imageStyle} />
+          ) : (
+            <Image src={fileUrl} alt={file.name} style={imageStyle} />
+          )
         ) : isVideo && fileUrl ? (
           <video
             src={fileUrl}

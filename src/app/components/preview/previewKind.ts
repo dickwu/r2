@@ -22,6 +22,8 @@ export interface PreviewTarget {
   extension: string;
   /** The object's Content-Type, set when its content (not the name) chose the preview. */
   contentType?: string;
+  /** The MIME type the content was identified as, set along with `contentType`. */
+  detectedType?: string;
 }
 
 /** What the backend identified an object as (`detect_url_type`). */
@@ -277,7 +279,7 @@ export function getContentTypePreview(
  * The detected type decides when it is specific, routed by its extension just
  * like a correct file name; when the bytes only name a family or container,
  * the stored Content-Type may refine them. The target keeps the stored type
- * (or else the detected one) for saving edits back.
+ * (or else the detected one) for saving edits back, and the detected type.
  */
 export function getDetectedPreview(
   detected: DetectedType,
@@ -292,7 +294,25 @@ export function getDetectedPreview(
     (!generic && fromBytes) ||
     renders(getContentTypePreview(detected.contentType, textExtensions)) ||
     fromBytes;
-  return target && { ...target, contentType: detected.contentType ?? detected.mime };
+  return (
+    target && {
+      ...target,
+      contentType: detected.contentType ?? detected.mime,
+      detectedType: detected.mime,
+    }
+  );
+}
+
+/**
+ * The type to show an image as from its downloaded bytes, or null when its URL
+ * will do. WebKit picks an <img>'s decoder by the type the object is served
+ * with: a JPEG stored as application/pdf takes the PDF path and shows blank,
+ * and SVG renders only as image/svg+xml. So an image identified by its content
+ * but stored under a non-image type is shown as what it was identified as.
+ */
+export function getImageBlobType(target: PreviewTarget): string | null {
+  if (target.kind !== 'image' || !target.detectedType) return null;
+  return /^image\//i.test(target.contentType ?? '') ? null : target.detectedType;
 }
 
 /**

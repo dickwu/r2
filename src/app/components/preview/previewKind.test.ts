@@ -4,6 +4,7 @@ import {
   getDetectedPreview,
   getExtensionPreview,
   getFileExtension,
+  getImageBlobType,
   getPreviewKind,
   isSameRendering,
   toViewerFilename,
@@ -162,7 +163,7 @@ describe('getDetectedPreview', () => {
     expect(detectedRouteOf(detected('image/x-canon-cr2', 'cr2'))).toBeNull();
   });
 
-  test('keeps the stored type for saving, or else the detected one', () => {
+  test('keeps the stored type for saving, or else the detected one, and the detected type', () => {
     expect(
       getDetectedPreview(detected('application/json', 'json', 'text/plain'), TEXT, isViewerFormat)
         ?.contentType
@@ -171,6 +172,36 @@ describe('getDetectedPreview', () => {
       getDetectedPreview(detected('application/json', 'json', null), TEXT, isViewerFormat)
         ?.contentType
     ).toBe('application/json');
+    expect(
+      getDetectedPreview(detected('application/json', 'json', 'text/plain'), TEXT, isViewerFormat)
+        ?.detectedType
+    ).toBe('application/json');
+  });
+});
+
+describe('getImageBlobType', () => {
+  const imageBlobType = (detection: DetectedType) => {
+    const target = getDetectedPreview(detection, TEXT, isViewerFormat);
+    return target && getImageBlobType(target);
+  };
+
+  test('shows an image stored under a non-image type from its bytes, as identified', () => {
+    expect(imageBlobType(detected('image/jpeg', 'jpg', 'application/pdf'))).toBe('image/jpeg');
+    expect(imageBlobType(detected('image/jpeg', 'jpg'))).toBe('image/jpeg');
+    expect(imageBlobType(detected('image/svg+xml', 'svg', 'text/plain'))).toBe('image/svg+xml');
+  });
+
+  test('keeps the URL for an image stored as one, or stored with no type', () => {
+    expect(imageBlobType(detected('image/jpeg', 'jpg', 'image/jpeg'))).toBeNull();
+    expect(imageBlobType(detected('image/png', 'png', 'IMAGE/JPEG'))).toBeNull();
+    expect(imageBlobType(detected('application/octet-stream', '', 'image/webp'))).toBeNull();
+    expect(imageBlobType(detected('image/png', 'png', null))).toBeNull();
+  });
+
+  test('leaves everything but content-identified images alone', () => {
+    expect(getImageBlobType(getExtensionPreview('jpg', TEXT))).toBeNull();
+    expect(imageBlobType(detected('application/pdf', 'pdf'))).toBeNull();
+    expect(imageBlobType(detected('video/mp4', 'mp4'))).toBeNull();
   });
 });
 
