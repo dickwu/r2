@@ -39,6 +39,22 @@ async function fetchViaBackend(url: string): Promise<Uint8Array> {
 }
 
 /**
+ * Reads an object's Content-Type without downloading it. A HEAD would fail
+ * the signature check of a presigned URL, which is signed for GET, so this
+ * asks for the first byte instead, and cancels the body in case the server
+ * ignores the range and sends it all. Resolves null when the response has no
+ * type.
+ */
+export async function fetchContentType(url: string, signal?: AbortSignal): Promise<string | null> {
+  const response = await tauriFetch(url, { headers: { Range: 'bytes=0-0' }, signal });
+  response.body?.cancel().catch(() => {});
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+  return response.headers.get('content-type');
+}
+
+/**
  * Downloads an object for in-app preview through Tauri's HTTP plugin, which
  * runs the request in Rust: the webview's own fetch would be blocked by CORS
  * on signed R2/S3 URLs. Streams the body so callers can show progress, and

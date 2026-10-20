@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button, Typography } from 'antd';
 import { CloudDownloadOutlined, FileOutlined } from '@ant-design/icons';
-import FileViewer, { fileViewerFullPreset, type ViewerOptions } from '@file-viewer/react-full';
+import FileViewer, { type ViewerOptions } from '@file-viewer/react-full';
 import DownloadProgress from '@/app/components/preview/DownloadProgress';
 import {
   fetchPreviewBytes,
@@ -11,6 +11,7 @@ import {
   type PreviewDownloadProgress,
 } from '@/app/components/preview/fetchPreviewBytes';
 import { configureFileViewerAssetBase } from '@/app/components/preview/fileViewerAssets';
+import { isFileViewerFormat } from '@/app/components/preview/fileViewerFormats';
 import { getFileExtension, toViewerFilename } from '@/app/components/preview/previewKind';
 import { useThemeStore } from '@/app/stores/themeStore';
 import { formatBytes } from '@/app/utils/formatBytes';
@@ -25,21 +26,6 @@ if (typeof window !== 'undefined') {
   configureFileViewerAssetBase(window.location.href);
 }
 
-/** Every extension the bundled full preset can actually render. */
-const SUPPORTED_EXTENSIONS: ReadonlySet<string> = (() => {
-  const extensions = new Set<string>();
-  for (const plugin of fileViewerFullPreset.renderers ?? []) {
-    for (const definition of plugin.definitions ?? []) {
-      for (const extension of definition.extensions) extensions.add(extension.toLowerCase());
-    }
-  }
-  return extensions;
-})();
-
-export function isFileViewerSupported(filename: string): boolean {
-  return SUPPORTED_EXTENSIONS.has(getFileExtension(filename));
-}
-
 /**
  * The viewer needs the whole object in memory, so objects above this size
  * (archives, disk images, design files…) wait for an explicit click instead
@@ -50,20 +36,29 @@ export const AUTO_LOAD_LIMIT_BYTES = 100 * 1024 * 1024;
 interface FileViewerPaneProps {
   url: string;
   filename: string;
+  /** Format to render the object as; defaults to the name's extension. */
+  extension?: string;
   /** Object size in bytes when the listing knows it. */
   size?: number;
   /** CSS height of the viewer; the library needs an explicit one. */
   height: string;
 }
 
-export default function FileViewerPane({ url, filename, size, height }: FileViewerPaneProps) {
+export default function FileViewerPane({
+  url,
+  filename,
+  extension,
+  size,
+  height,
+}: FileViewerPaneProps) {
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<PreviewDownloadProgress>({ loaded: 0, total: null });
   // The URL the user confirmed a large download for; cleared by moving to another file.
   const [confirmedUrl, setConfirmedUrl] = useState<string | null>(null);
   const appTheme = useThemeStore((s) => s.theme);
-  const supported = isFileViewerSupported(filename);
+  const format = extension ?? getFileExtension(filename);
+  const supported = isFileViewerFormat(format);
   const isLarge = (size ?? 0) > AUTO_LOAD_LIMIT_BYTES;
   const shouldLoad = supported && (!isLarge || confirmedUrl === url);
 
@@ -79,7 +74,7 @@ export default function FileViewerPane({ url, filename, size, height }: FileView
     fetchPreviewBytes(url, { signal: controller.signal, onProgress: setProgress })
       .then((bytes) => {
         if (controller.signal.aborted) return;
-        setFile(new File([bytes as BlobPart], toViewerFilename(filename)));
+        setFile(new File([bytes as BlobPart], toViewerFilename(filename, format)));
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted || err instanceof PreviewFetchAbortedError) return;
@@ -88,7 +83,7 @@ export default function FileViewerPane({ url, filename, size, height }: FileView
       });
 
     return () => controller.abort();
-  }, [url, filename, shouldLoad]);
+  }, [url, filename, format, shouldLoad]);
 
   // The component reloads whenever this object's identity changes.
   const options = useMemo<ViewerOptions>(
@@ -149,7 +144,7 @@ export default function FileViewerPane({ url, filename, size, height }: FileView
       <FileViewer
         file={file}
         filename={file.name}
-        type={getFileExtension(filename)}
+        type={format}
         size={file.size}
         options={options}
       />
