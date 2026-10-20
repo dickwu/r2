@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Image, Spin, App } from 'antd';
+import { Image, Segmented, Spin, App } from 'antd';
 import {
   LinkOutlined,
   CopyOutlined,
@@ -27,7 +27,7 @@ import {
 } from '@/app/lib/r2cache';
 import { TEXT_EXTENSIONS } from '@/app/components/preview/TextViewer';
 import { getFileExtension, type PreviewTarget } from '@/app/components/preview/previewKind';
-import { usePreviewTarget } from '@/app/components/preview/usePreviewTarget';
+import { usePreviewTarget, type PreviewSource } from '@/app/components/preview/usePreviewTarget';
 import { useVideoThumbnail } from '@/app/hooks/useVideoThumbnail';
 import { usePreviewStore } from '@/app/stores/previewStore';
 import Modal from '@/app/components/ui/Modal';
@@ -93,6 +93,19 @@ function fileTypeIcon({ kind, extension }: PreviewTarget, size = 18): React.Reac
 
 function placeholderIcon(target: PreviewTarget) {
   return fileTypeIcon(target, 40);
+}
+
+const KIND_LABELS: Record<PreviewTarget['kind'], string> = {
+  image: 'Image',
+  video: 'Video',
+  audio: 'Audio',
+  text: 'Text',
+  viewer: 'File',
+};
+
+/** Short name of the format a preview renders, e.g. "PDF". */
+function formatLabel({ kind, extension }: PreviewTarget): string {
+  return extension ? extension.toUpperCase() : KIND_LABELS[kind];
 }
 
 interface FilePreviewModalProps {
@@ -168,7 +181,7 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   const needsCredentials = !isPublic && !hasCredentials;
   const canEdit = !!(config?.bucket && hasCredentials);
 
-  const preview = usePreviewTarget(file?.name ?? '', file?.size, signedUrl, TEXT_EXTENSIONS);
+  const preview = usePreviewTarget(file, signedUrl, TEXT_EXTENSIONS);
   // An object opened by its Content-Type keeps that type when saved.
   const savedContentType = preview.target.contentType;
 
@@ -346,6 +359,36 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
       width={typeof modalWidth === 'number' ? modalWidth : undefined}
       footer={footer}
     >
+      {/* The name and the content disagree on how to render it: let the user pick. */}
+      {preview.choices && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexWrap: 'wrap',
+            gap: 10,
+            marginBottom: 12,
+            fontSize: 12.5,
+            color: 'var(--text-muted)',
+          }}
+        >
+          <span>
+            The content is {preview.choices.contentName}, but the name says{' '}
+            {formatLabel(preview.choices.name)}. Render as
+          </span>
+          <Segmented<PreviewSource>
+            size="small"
+            value={preview.source}
+            onChange={preview.setSource}
+            options={[
+              { value: 'name', label: `${formatLabel(preview.choices.name)} · name` },
+              { value: 'content', label: `${formatLabel(preview.choices.content)} · content` },
+            ]}
+          />
+        </div>
+      )}
+
       {/* Preview area */}
       <div style={{ textAlign: 'center', marginBottom: 16 }}>
         {loading || preview.pending ? (

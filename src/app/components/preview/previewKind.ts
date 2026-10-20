@@ -1,6 +1,7 @@
 /**
- * Picks the preview surface for a file by extension, or by the object's
- * Content-Type when its name carries no extension a preview handles.
+ * Picks the preview surface for a file by extension, or by what its content
+ * is (sniffed by the backend) when its name carries no extension a preview
+ * handles.
  *
  * - `image` / `video` / `audio`: formats the webview plays natively, streamed
  *   straight from the object URL (no full download; large videos seek).
@@ -19,8 +20,20 @@ export interface PreviewTarget {
    * stands for. Empty when only the type's family (`image/*`, …) is known.
    */
   extension: string;
-  /** The object's Content-Type, set when it (not the name) chose the preview. */
+  /** The object's Content-Type, set when its content (not the name) chose the preview. */
   contentType?: string;
+}
+
+/** What the backend identified an object as (`detect_url_type`). */
+export interface DetectedType {
+  /** MIME type identified from the content's first bytes. */
+  mime: string;
+  /** Extension that type is stored under, without the dot ('' if unknown). */
+  extension: string;
+  /** Human-readable name of the type. */
+  name: string;
+  /** The Content-Type header the object was stored with. */
+  contentType: string | null;
 }
 
 /** Raster/vector formats every WebView renders in an <img>. */
@@ -39,9 +52,10 @@ export const NATIVE_VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogv', 'mov', 'm4v'];
 export const NATIVE_AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac', 'opus'];
 
 /**
- * The extension each Content-Type stands for, for objects stored under keys
- * without one (UUIDs, hashes). Every value is a format some preview handles;
- * types left out fall back on their family (`image/*`, `video/*`, …).
+ * The extension each Content-Type stands for, for when the stored type has to
+ * say what the content alone cannot (see `getDetectedPreview`). Every value is
+ * a format some preview handles; types left out fall back on their family
+ * (`image/*`, `video/*`, …).
  */
 export const CONTENT_TYPE_EXTENSIONS: Readonly<Record<string, string>> = {
   // Images: native first, then the ones only the file viewer decodes.
@@ -171,6 +185,32 @@ export const CONTENT_TYPE_EXTENSIONS: Readonly<Record<string, string>> = {
   'application/wasm': 'wasm',
 };
 
+/**
+ * Detections that only name a family or container (plain text, a ZIP or OLE
+ * file, unknown or empty data), which the stored Content-Type may refine.
+ */
+const GENERIC_DETECTIONS = [
+  'application/octet-stream',
+  'application/x-empty',
+  'text/plain',
+  'application/zip',
+  'application/x-ole-storage',
+];
+
+/** Extensions that name the same format. */
+const FORMAT_ALIASES: Readonly<Record<string, string>> = {
+  jpeg: 'jpg',
+  tif: 'tiff',
+  htm: 'html',
+  yml: 'yaml',
+  midi: 'mid',
+  markdown: 'md',
+};
+
+function getMimeEssence(type: string): string {
+  return type.split(';')[0].trim().toLowerCase();
+}
+
 export function getFileExtension(filename: string): string {
   const dot = filename.lastIndexOf('.');
   return dot === -1 ? '' : filename.slice(dot + 1).toLowerCase();
@@ -191,6 +231,14 @@ export function getPreviewKind(filename: string, textExtensions: readonly string
   return getExtensionPreviewKind(getFileExtension(filename), textExtensions);
 }
 
+/** The preview a format calls for, given as its extension. */
+export function getExtensionPreview(
+  extension: string,
+  textExtensions: readonly string[]
+): PreviewTarget {
+  return { kind: getExtensionPreviewKind(extension, textExtensions), extension };
+}
+
 /**
  * The preview an object's Content-Type calls for, or null when it names no
  * format a preview handles (`application/octet-stream`, a missing header, …).
@@ -202,7 +250,7 @@ export function getContentTypePreview(
   textExtensions: readonly string[]
 ): PreviewTarget | null {
   if (!contentType) return null;
-  const mimeType = contentType.split(';')[0].trim().toLowerCase();
+  const mimeType = getMimeEssence(contentType);
   const [family, subtype] = mimeType.split('/');
   if (!family || !subtype) return null;
 
@@ -222,6 +270,40 @@ export function getContentTypePreview(
     default:
       return null;
   }
+}
+
+/**
+ * The preview an object's content calls for, or null when nothing renders it.
+ * The detected type decides when it is specific, routed by its extension just
+ * like a correct file name; when the bytes only name a family or container,
+ * the stored Content-Type may refine them. The target keeps the stored type
+ * (or else the detected one) for saving edits back.
+ */
+export function getDetectedPreview(
+  detected: DetectedType,
+  textExtensions: readonly string[],
+  isViewerFormat: (extension: string) => boolean
+): PreviewTarget | null {
+  const renders = (target: PreviewTarget | null) =>
+    target && (target.kind !== 'viewer' || isViewerFormat(target.extension)) ? target : null;
+  const fromBytes = renders(getExtensionPreview(detected.extension, textExtensions));
+  const generic = GENERIC_DETECTIONS.includes(getMimeEssence(detected.mime));
+  const target =
+    (!generic && fromBytes) ||
+    renders(getContentTypePreview(detected.contentType, textExtensions)) ||
+    fromBytes;
+  return target && { ...target, contentType: detected.contentType ?? detected.mime };
+}
+
+/**
+ * Whether two previews render an object the same way: the native players and
+ * the editor take any format of their kind, the viewer renders the format it
+ * is told.
+ */
+export function isSameRendering(a: PreviewTarget, b: PreviewTarget): boolean {
+  if (a.kind !== b.kind) return false;
+  const format = (extension: string) => FORMAT_ALIASES[extension] ?? extension;
+  return a.kind !== 'viewer' || format(a.extension) === format(b.extension);
 }
 
 /**

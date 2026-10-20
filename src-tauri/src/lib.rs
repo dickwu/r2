@@ -414,7 +414,7 @@ pub fn run() {
             commands::clear_file_cache,
             commands::get_folder_contents,
             commands::fetch_url_bytes,
-            commands::fetch_url_content_type,
+            commands::detect_url_type,
             // Download commands
             download::commands::create_download_task,
             download::commands::create_download_tasks,

@@ -1,5 +1,6 @@
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { invoke } from '@tauri-apps/api/core';
+import type { DetectedType } from '@/app/components/preview/previewKind';
 
 export interface PreviewDownloadProgress {
   loaded: number;
@@ -39,26 +40,12 @@ async function fetchViaBackend(url: string): Promise<Uint8Array> {
 }
 
 /**
- * Reads an object's Content-Type without downloading it. A HEAD would fail
- * the signature check of a presigned URL, which is signed for GET, so this
- * asks for the first byte instead, and cancels the body in case the server
- * ignores the range and sends it all. Resolves null when the response has no
- * type. Like `fetchPreviewBytes`, falls back to the backend when the plugin's
- * URL scope rejects the host, as it does any host on a non-default port.
+ * Identifies an object from its content: the backend fetches the first bytes
+ * with one ranged GET and sniffs them with `mimetype-detector`, returning the
+ * stored Content-Type alongside.
  */
-export async function fetchContentType(url: string, signal?: AbortSignal): Promise<string | null> {
-  let response: Response;
-  try {
-    response = await tauriFetch(url, { headers: { Range: 'bytes=0-0' }, signal });
-  } catch (err) {
-    if (!isScopeError(err)) throw err;
-    return invoke<string | null>('fetch_url_content_type', { url });
-  }
-  response.body?.cancel().catch(() => {});
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-  }
-  return response.headers.get('content-type');
+export function detectObjectType(url: string): Promise<DetectedType> {
+  return invoke<DetectedType>('detect_url_type', { url });
 }
 
 /**

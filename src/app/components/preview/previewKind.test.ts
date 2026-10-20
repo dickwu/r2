@@ -1,9 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import {
   getContentTypePreview,
+  getDetectedPreview,
+  getExtensionPreview,
   getFileExtension,
   getPreviewKind,
+  isSameRendering,
   toViewerFilename,
+  type DetectedType,
 } from './previewKind';
 
 const TEXT = ['txt', 'md', 'json', 'xml', 'csv'];
@@ -102,6 +106,93 @@ describe('getContentTypePreview', () => {
     ]) {
       expect(routeOf(contentType)).toBeNull();
     }
+  });
+});
+
+const VIEWER = ['pdf', 'docx', 'zip', 'tiff', 'heic', 'gz'];
+const isViewerFormat = (extension: string) => VIEWER.includes(extension);
+
+function detected(
+  mime: string,
+  extension: string,
+  contentType: string | null = 'application/octet-stream'
+): DetectedType {
+  return { mime, extension, name: mime, contentType };
+}
+
+/** `kind:extension` of the preview a detection calls for, or null. */
+function detectedRouteOf(detection: DetectedType): string | null {
+  const target = getDetectedPreview(detection, TEXT, isViewerFormat);
+  return target && `${target.kind}:${target.extension}`;
+}
+
+describe('getDetectedPreview', () => {
+  test('routes a specific detection by its extension, whatever the stored type says', () => {
+    expect(detectedRouteOf(detected('image/jpeg', 'jpg'))).toBe('image:jpg');
+    expect(detectedRouteOf(detected('application/pdf', 'pdf', 'image/png'))).toBe('viewer:pdf');
+    expect(detectedRouteOf(detected('application/json', 'json', null))).toBe('text:json');
+  });
+
+  test('lets the stored type refine a detection that only names a family or container', () => {
+    expect(detectedRouteOf(detected('text/plain; charset=utf-8', 'txt', 'text/csv'))).toBe(
+      'text:csv'
+    );
+    expect(
+      detectedRouteOf(
+        detected(
+          'application/zip',
+          'zip',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        )
+      )
+    ).toBe('viewer:docx');
+    expect(detectedRouteOf(detected('application/octet-stream', '', 'image/png'))).toBe(
+      'image:png'
+    );
+  });
+
+  test('falls back on the generic detection when the stored type adds nothing', () => {
+    expect(detectedRouteOf(detected('text/plain; charset=utf-8', 'txt'))).toBe('text:txt');
+    expect(detectedRouteOf(detected('application/zip', 'zip', null))).toBe('viewer:zip');
+  });
+
+  test('returns null when nothing renders the content', () => {
+    expect(detectedRouteOf(detected('application/octet-stream', ''))).toBeNull();
+    expect(detectedRouteOf(detected('application/x-empty', 'empty', null))).toBeNull();
+    expect(detectedRouteOf(detected('image/x-canon-cr2', 'cr2'))).toBeNull();
+  });
+
+  test('keeps the stored type for saving, or else the detected one', () => {
+    expect(
+      getDetectedPreview(detected('application/json', 'json', 'text/plain'), TEXT, isViewerFormat)
+        ?.contentType
+    ).toBe('text/plain');
+    expect(
+      getDetectedPreview(detected('application/json', 'json', null), TEXT, isViewerFormat)
+        ?.contentType
+    ).toBe('application/json');
+  });
+});
+
+describe('isSameRendering', () => {
+  const preview = (extension: string) => getExtensionPreview(extension, TEXT);
+
+  test('native players and the editor take any format of their kind', () => {
+    expect(isSameRendering(preview('jpg'), preview('png'))).toBe(true);
+    expect(isSameRendering(preview('mp4'), preview('webm'))).toBe(true);
+    expect(isSameRendering(preview('txt'), preview('json'))).toBe(true);
+  });
+
+  test('the viewer renders the format it is told, so formats must match', () => {
+    expect(isSameRendering(preview('pdf'), preview('pdf'))).toBe(true);
+    expect(isSameRendering(preview('tif'), preview('tiff'))).toBe(true);
+    expect(isSameRendering(preview('tiff'), preview('heic'))).toBe(false);
+    expect(isSameRendering(preview('docx'), preview('zip'))).toBe(false);
+  });
+
+  test('a different surface is a different rendering', () => {
+    expect(isSameRendering(preview('jpg'), preview('heic'))).toBe(false);
+    expect(isSameRendering(preview('pdf'), preview('html'))).toBe(false);
   });
 });
 

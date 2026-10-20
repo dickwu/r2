@@ -325,46 +325,106 @@ pub async fn fetch_url_bytes(url: String) -> Result<String, String> {
     Ok(BASE64.encode(&bytes))
 }
 
-/// Read a URL's Content-Type without downloading it: a one-byte ranged GET
-/// whose body is dropped unread. Like `fetch_url_bytes`, this is the preview's
-/// way past the HTTP plugin's URL scope, which only admits hosts on their
-/// default port (self-hosted MinIO/RustFS endpoints listen on others).
+/// What an object is, going by its content: the type its first bytes
+/// identify, as `mimetype-detector` reads them, and the Content-Type it was
+/// stored with.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedType {
+    /// MIME type identified from the content.
+    pub mime: String,
+    /// Extension that type is stored under, without the dot ("" if unknown).
+    pub extension: String,
+    /// Human-readable name of the type.
+    pub name: String,
+    /// The Content-Type header the object was stored with.
+    pub content_type: Option<String>,
+}
+
+/// The most the detector reads; asking for more would only cost bandwidth.
+const DETECT_BYTES: usize = 3072;
+
+fn detect_client() -> &'static reqwest::Client {
+    // Shared so the grid, which asks once per extension-less tile, reuses
+    // connections instead of opening (and handshaking) one per object.
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
+/// Identify the object at `url` from its first bytes: one ranged GET for at
+/// most `DETECT_BYTES`, sniffed with `mimetype-detector`. It goes through
+/// reqwest like `fetch_url_bytes`, because the HTTP plugin's URL scope only
+/// admits hosts on their default port (self-hosted MinIO/RustFS listen on
+/// others).
 #[tauri::command]
-pub async fn fetch_url_content_type(url: String) -> Result<Option<String>, String> {
-    let response = reqwest::Client::new()
+pub async fn detect_url_type(url: String) -> Result<DetectedType, String> {
+    let mut response = detect_client()
         .get(&url)
-        .header(reqwest::header::RANGE, "bytes=0-0")
+        .header(
+            reqwest::header::RANGE,
+            format!("bytes=0-{}", DETECT_BYTES - 1),
+        )
         .send()
         .await
         .map_err(|e| format!("Failed to fetch URL: {}", e))?;
 
-    if !response.status().is_success() {
+    let status = response.status();
+    let mut head = Vec::with_capacity(DETECT_BYTES);
+    let content_type = if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        // Only an empty object has no first byte; the detector names it.
+        None
+    } else if status.is_success() {
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        // A server that ignores the range sends the whole object: stop at
+        // what the detector reads and drop the rest unread.
+        while head.len() < DETECT_BYTES {
+            match response
+                .chunk()
+                .await
+                .map_err(|e| format!("Failed to read response body: {}", e))?
+            {
+                Some(chunk) => head.extend_from_slice(&chunk),
+                None => break,
+            }
+        }
+        head.truncate(DETECT_BYTES);
+        content_type
+    } else {
         return Err(format!(
             "HTTP {}: {}",
-            response.status().as_u16(),
-            response
-                .status()
-                .canonical_reason()
-                .unwrap_or("Unknown error")
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown error")
         ));
-    }
+    };
 
-    Ok(response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned))
+    let detected = mimetype_detector::detect(&head);
+    Ok(DetectedType {
+        mime: detected.mime().to_owned(),
+        extension: detected.extension().trim_start_matches('.').to_owned(),
+        name: detected.name().to_owned(),
+        content_type,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fetch_url_content_type;
+    use super::{detect_url_type, DETECT_BYTES};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// Answers one request with `response`, then waits for the client to hang
-    /// up; resolves to the request head, lower-cased.
-    async fn serve_once(response: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+    const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
+    /// Answers one request with `head` then `body` and closes its side (the
+    /// shared client would otherwise pool the connection); resolves to the
+    /// request head, lower-cased.
+    async fn serve_once(
+        head: &'static str,
+        body: Vec<u8>,
+    ) -> (String, tokio::task::JoinHandle<String>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!(
             "http://{}/bkt/6c4c4cb6?X-Amz-Signature=abc",
@@ -381,7 +441,9 @@ mod tests {
                 }
                 request.extend_from_slice(&buffer[..count]);
             }
-            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&body).await;
+            let _ = socket.shutdown().await;
             while socket.read(&mut buffer).await.unwrap_or(0) > 0 {}
             String::from_utf8_lossy(&request).to_lowercase()
         });
@@ -389,61 +451,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_the_type_with_a_one_byte_ranged_get() {
+    async fn identifies_the_content_from_its_first_bytes() {
         let (url, server) = serve_once(
-            "HTTP/1.1 206 Partial Content\r\nContent-Type: image/jpeg\r\n\
-             Content-Range: bytes 0-0/4096\r\nContent-Length: 1\r\n\r\nx",
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\n\
+             Content-Range: bytes 0-15/4096\r\nContent-Length: 16\r\n\r\n",
+            PNG_SIGNATURE.to_vec(),
         )
         .await;
-        let content_type = fetch_url_content_type(url).await.unwrap();
-        assert_eq!(content_type.as_deref(), Some("image/jpeg"));
+        let detected = detect_url_type(url).await.unwrap();
+        assert_eq!(detected.mime, "image/png");
+        assert_eq!(detected.extension, "png");
+        assert_eq!(
+            detected.content_type.as_deref(),
+            Some("application/octet-stream")
+        );
         let request = server.await.unwrap();
         assert!(
             request.starts_with("get /bkt/6c4c4cb6?x-amz-signature=abc "),
             "{request}"
         );
-        assert!(request.contains("\r\nrange: bytes=0-0\r\n"), "{request}");
+        assert!(request.contains("\r\nrange: bytes=0-3071\r\n"), "{request}");
     }
 
     #[tokio::test]
-    async fn returns_none_when_the_object_has_no_type() {
+    async fn an_empty_object_is_detected_as_empty() {
         let (url, server) = serve_once(
-            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/2\r\n\
-             Content-Length: 1\r\n\r\nx",
+            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Type: application/xml\r\n\
+             Content-Length: 0\r\n\r\n",
+            Vec::new(),
         )
         .await;
-        assert_eq!(fetch_url_content_type(url).await.unwrap(), None);
+        let detected = detect_url_type(url).await.unwrap();
+        assert_eq!(detected.mime, "application/x-empty");
+        assert_eq!(detected.content_type, None);
         server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn reports_an_error_status_instead_of_the_error_body_type() {
+    async fn reports_an_error_status_instead_of_sniffing_the_error_body() {
         let (url, server) = serve_once(
             "HTTP/1.1 403 Forbidden\r\nContent-Type: application/xml\r\n\
-             Content-Length: 8\r\n\r\n<Error/>",
+             Content-Length: 8\r\n\r\n",
+            b"<Error/>".to_vec(),
         )
         .await;
         assert_eq!(
-            fetch_url_content_type(url).await.unwrap_err(),
+            detect_url_type(url).await.unwrap_err(),
             "HTTP 403: Forbidden"
         );
         server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn does_not_wait_for_the_body_when_the_range_is_ignored() {
-        // The server announces the whole object but never sends it.
+    async fn reads_no_further_than_the_detector_when_the_range_is_ignored() {
+        // The server announces the whole object but sends only part of it:
+        // reading past the detector's bytes would fail on the early close.
+        let mut body = PNG_SIGNATURE.to_vec();
+        body.resize(DETECT_BYTES * 4, 0);
         let (url, server) = serve_once(
-            "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\n\
-             Content-Length: 1000000000\r\n\r\npartial",
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n\
+             Content-Length: 1000000000\r\n\r\n",
+            body,
         )
         .await;
-        let content_type =
-            tokio::time::timeout(Duration::from_secs(10), fetch_url_content_type(url))
-                .await
-                .expect("returned without the body")
-                .unwrap();
-        assert_eq!(content_type.as_deref(), Some("video/mp4"));
+        let detected = tokio::time::timeout(Duration::from_secs(10), detect_url_type(url))
+            .await
+            .expect("returned without the rest of the body")
+            .unwrap();
+        assert_eq!(detected.mime, "image/png");
         server.await.unwrap();
     }
 }
