@@ -73,4 +73,6 @@ __pycache__/
 
 # file-viewer runtime payload staged by scripts/copy-file-viewer-assets.mjs (bun run assets:file-viewer)
 public/file-viewer/
+# Monaco AMD build staged by scripts/copy-monaco-assets.mjs (bun run assets:monaco)
+public/monaco-editor/
 .build/

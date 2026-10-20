@@ -10,10 +10,19 @@ import {
   fetchPreviewBytes,
   PreviewFetchAbortedError,
 } from '@/app/components/preview/fetchPreviewBytes';
+import { configureMonacoLoader } from '@/app/components/preview/monacoAssets';
 import { getFileExtension } from '@/app/components/preview/previewKind';
 import { useThemeStore } from '@/app/stores/themeStore';
 
 const { Text } = Typography;
+
+// Monaco's AMD build is staged by scripts/copy-monaco-assets.mjs into
+// public/monaco-editor, which Next's export ships at <origin>/monaco-editor/vs.
+// Configure the loader before any <Editor> mounts: unconfigured, it fetches a
+// different Monaco from jsdelivr and the editor never loads offline.
+if (typeof window !== 'undefined') {
+  configureMonacoLoader(window.location.href);
+}
 
 interface TextViewerProps {
   url: string;

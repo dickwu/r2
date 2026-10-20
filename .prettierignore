@@ -15,3 +15,5 @@ docs/engineering/r2-audit/**/*.json
 .superpowers
 # file-viewer runtime payload staged by scripts/copy-file-viewer-assets.mjs
 public/file-viewer
+# Monaco AMD build staged by scripts/copy-monaco-assets.mjs
+public/monaco-editor
