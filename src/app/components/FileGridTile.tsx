@@ -16,6 +16,7 @@ import VideoThumbnail from '@/app/components/VideoThumbnail';
 import FileContextMenu from '@/app/components/FileContextMenu';
 import { StorageConfig } from '@/app/lib/r2cache';
 import { usePreviewUrl } from '@/app/hooks/usePreviewUrl';
+import { useListedObjectType } from '@/app/hooks/useListedObjectType';
 import dayjs from 'dayjs';
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
@@ -25,16 +26,8 @@ function getExt(name: string) {
   return name.toLowerCase().split('.').pop() || '';
 }
 
-function isImage(name: string) {
-  return IMAGE_EXTENSIONS.includes(getExt(name));
-}
-function isVideo(name: string) {
-  return VIDEO_EXTENSIONS.includes(getExt(name));
-}
-
-function tileType(item: FileItem): string {
+function tileType(item: FileItem, ext: string): string {
   if (item.isFolder) return 'folder';
-  const ext = getExt(item.name);
   if (IMAGE_EXTENSIONS.includes(ext)) return 'image';
   if (VIDEO_EXTENSIONS.includes(ext)) return 'video';
   if (
@@ -88,61 +81,24 @@ function tileType(item: FileItem): string {
   return '';
 }
 
-function TileIcon({ item }: { item: FileItem }) {
-  if (item.isFolder) return <FolderOutlined style={{ fontSize: 36 }} />;
-  const ext = getExt(item.name);
-  if (IMAGE_EXTENSIONS.includes(ext)) return <FileImageOutlined style={{ fontSize: 36 }} />;
-  if (VIDEO_EXTENSIONS.includes(ext)) return <VideoCameraOutlined style={{ fontSize: 36 }} />;
-  if (
-    [
-      'js',
-      'jsx',
-      'ts',
-      'tsx',
-      'py',
-      'java',
-      'c',
-      'cpp',
-      'h',
-      'cs',
-      'php',
-      'rb',
-      'go',
-      'rs',
-      'swift',
-      'kt',
-      'html',
-      'htm',
-      'xml',
-      'json',
-      'yaml',
-      'yml',
-      'toml',
-      'ini',
-      'conf',
-    ].includes(ext)
-  )
-    return <CodeOutlined style={{ fontSize: 36 }} />;
-  if (
-    [
-      'pdf',
-      'doc',
-      'docx',
-      'xls',
-      'xlsx',
-      'csv',
-      'ppt',
-      'pptx',
-      'txt',
-      'log',
-      'md',
-      'markdown',
-    ].includes(ext)
-  )
-    return <FileTextOutlined style={{ fontSize: 36 }} />;
-  if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'].includes(ext))
-    return <FileZipOutlined style={{ fontSize: 36 }} />;
-  return <FileOutlined style={{ fontSize: 36 }} />;
+function TileIcon({ tone }: { tone: string }) {
+  const style = { fontSize: 36 };
+  switch (tone) {
+    case 'folder':
+      return <FolderOutlined style={style} />;
+    case 'image':
+      return <FileImageOutlined style={style} />;
+    case 'video':
+      return <VideoCameraOutlined style={style} />;
+    case 'code':
+      return <CodeOutlined style={style} />;
+    case 'doc':
+      return <FileTextOutlined style={style} />;
+    case 'archive':
+      return <FileZipOutlined style={style} />;
+    default:
+      return <FileOutlined style={style} />;
+  }
 }
 
 /**
@@ -211,9 +167,14 @@ const FileGridTile = memo(function FileGridTile({
   onFolderRename,
   onFocus,
 }: FileGridTileProps) {
-  const tone = tileType(item);
-  const hasImage = !item.isFolder && isImage(item.name);
-  const hasVideo = !item.isFolder && isVideo(item.name);
+  const listedType = useListedObjectType(storageConfig, item);
+  // An extension-less object is shown as what its Content-Type says it is.
+  const ext = listedType?.extension || getExt(item.name);
+  const hasImage =
+    !item.isFolder && (IMAGE_EXTENSIONS.includes(ext) || listedType?.kind === 'image');
+  const hasVideo =
+    !item.isFolder && (VIDEO_EXTENSIONS.includes(ext) || listedType?.kind === 'video');
+  const tone = hasImage ? 'image' : hasVideo ? 'video' : tileType(item, ext);
   const fileUrl = usePreviewUrl(storageConfig, item.key, hasImage || hasVideo);
 
   const handleClick = useCallback(() => {
@@ -270,12 +231,12 @@ const FileGridTile = memo(function FileGridTile({
               key={fileUrl}
               src={fileUrl}
               alt={item.name}
-              fallback={<TileIcon item={item} />}
+              fallback={<TileIcon tone={tone} />}
             />
           ) : fileUrl && hasVideo ? (
             <VideoThumbnail src={fileUrl} alt={item.name} />
           ) : (
-            <TileIcon item={item} />
+            <TileIcon tone={tone} />
           )}
         </div>
 
