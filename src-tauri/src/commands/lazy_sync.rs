@@ -3,8 +3,8 @@ use crate::db::{self, CachedFile};
 use crate::providers::aws;
 use crate::providers::minio;
 use crate::providers::operation::{
-    self, execute as execute_operation, AttemptError, Backoff, OperationContext, OperationError,
-    OperationKind,
+    execute as execute_operation, AttemptError, Backoff, OperationContext, OperationError,
+    OperationKind, OperationTimings,
 };
 use crate::providers::s3_client::{describe_s3_error, StorageErrorClass};
 use crate::r2;
@@ -165,18 +165,16 @@ pub struct ListTiming {
 
 #[derive(Default)]
 struct ListMeasurements {
-    queue_ns: AtomicU64,
-    network_ns: AtomicU64,
-    backoff_ns: AtomicU64,
+    operation: OperationTimings,
     db_ns: AtomicU64,
 }
 impl ListMeasurements {
     fn snapshot(&self) -> ListTiming {
         let ms = |value: &AtomicU64| value.load(Ordering::Relaxed) as f64 / 1_000_000.0;
         ListTiming {
-            queue_ms: ms(&self.queue_ns),
-            network_ms: ms(&self.network_ns),
-            backoff_ms: ms(&self.backoff_ns),
+            queue_ms: ms(&self.operation.queue_ns),
+            network_ms: ms(&self.operation.network_ns),
+            backoff_ms: ms(&self.operation.backoff_ns),
             db_ms: ms(&self.db_ns),
             ..ListTiming::default()
         }
@@ -1080,37 +1078,6 @@ impl std::fmt::Display for ListFailure {
     }
 }
 
-fn record_operation_delta(
-    before: operation::OperationMetrics,
-    measurements: Option<&ListMeasurements>,
-) {
-    let Some(measurements) = measurements else {
-        return;
-    };
-    let after = operation::metrics();
-    measurements.queue_ns.fetch_add(
-        after
-            .queue_us
-            .saturating_sub(before.queue_us)
-            .saturating_mul(1000),
-        Ordering::Relaxed,
-    );
-    measurements.network_ns.fetch_add(
-        after
-            .network_us
-            .saturating_sub(before.network_us)
-            .saturating_mul(1000),
-        Ordering::Relaxed,
-    );
-    measurements.backoff_ns.fetch_add(
-        after
-            .backoff_us
-            .saturating_sub(before.backoff_us)
-            .saturating_mul(1000),
-        Ordering::Relaxed,
-    );
-}
-
 fn list_failure_from_operation(error: OperationError) -> ListFailure {
     match error {
         OperationError::Cancelled | OperationError::Paused => ListFailure::Cancelled,
@@ -1151,10 +1118,9 @@ where
 {
     let cancelled = AtomicBool::new(false);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let before = operation::metrics();
     let operation = async {
         let _background = if background {
-            let queue_measure = measurements.map(|m| MeasureInterval::new(&m.queue_ns));
+            let queue_measure = measurements.map(|m| MeasureInterval::new(&m.operation.queue_ns));
             let permit = scheduler
                 .background
                 .acquire()
@@ -1165,7 +1131,7 @@ where
         } else {
             None
         };
-        let context = OperationContext::new(
+        let mut context = OperationContext::new(
             OperationKind::List,
             endpoint,
             scope,
@@ -1175,6 +1141,9 @@ where
         )
         .with_max_attempts(policy.max_attempts)
         .with_backoff(policy.backoff());
+        if let Some(measurements) = measurements {
+            context = context.with_timings(&measurements.operation);
+        }
         execute_operation(&context, || {
             let page = send_page();
             async move {
@@ -1208,7 +1177,6 @@ where
         _ = &mut cancel_probe => Err(OperationError::Cancelled),
         result = &mut operation => result,
     };
-    record_operation_delta(before, measurements);
     result.map_err(list_failure_from_operation)
 }
 
@@ -2166,7 +2134,7 @@ mod tests {
     async fn timing_records_partial_wait_when_cancellation_drops_the_future() {
         let measurements = ListMeasurements::default();
         let result = tokio::time::timeout(Duration::from_millis(125), async {
-            let _measure = MeasureInterval::new(&measurements.queue_ns);
+            let _measure = MeasureInterval::new(&measurements.operation.queue_ns);
             std::future::pending::<()>().await;
         })
         .await;
@@ -2189,11 +2157,11 @@ mod tests {
             consumers: AtomicUsize::new(2),
         };
         {
-            let _measure = MeasureInterval::new(&flight.measurements.queue_ns);
+            let _measure = MeasureInterval::new(&flight.measurements.operation.queue_ns);
             tokio::time::advance(Duration::from_millis(4)).await;
         }
         {
-            let _measure = MeasureInterval::new(&flight.measurements.network_ns);
+            let _measure = MeasureInterval::new(&flight.measurements.operation.network_ns);
             tokio::time::advance(Duration::from_millis(8)).await;
         }
         let page = ListPage {
@@ -2279,6 +2247,119 @@ mod tests {
             }
             assert!(started.elapsed() < Duration::from_secs(10), "listing hung");
             tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    async fn first_page(flight: &PrefixFlight) -> Arc<ListPage> {
+        let started = Instant::now();
+        loop {
+            let page = flight.state.lock().unwrap().pages.first().cloned();
+            if let Some(page) = page {
+                return page;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "first page hung"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn overlapping_flights_each_count_only_their_own_request_time() {
+        use crate::test_s3::{serve, Response};
+        use tokio::sync::Semaphore;
+        async fn arrival(requests: &Semaphore) {
+            tokio::time::timeout(Duration::from_secs(10), requests.acquire())
+                .await
+                .expect("the listing request never reached the fixture")
+                .unwrap()
+                .forget();
+        }
+        // The slow flight's request is in flight before the quick flight starts
+        // and finishes during the quick flight's own request. Process-wide
+        // totals would book all of it to the quick page as well.
+        const HELD: Duration = Duration::from_millis(150);
+        let arrived = Arc::new(Semaphore::new(0));
+        let release_slow = Arc::new(Semaphore::new(0));
+        let release_quick = Arc::new(Semaphore::new(0));
+        let fixture = {
+            let arrived = arrived.clone();
+            let release_slow = release_slow.clone();
+            let release_quick = release_quick.clone();
+            serve(move |request| {
+                let arrived = arrived.clone();
+                let release = if request.path.starts_with("/slow") {
+                    release_slow.clone()
+                } else {
+                    release_quick.clone()
+                };
+                async move {
+                    if request.path.contains("continuation-token=") {
+                        // Both flights are cancelled while listing page two.
+                        return std::future::pending().await;
+                    }
+                    arrived.add_permits(1);
+                    release.acquire().await.unwrap().forget();
+                    Response::xml(200, &list_page_xml(&["a.txt"], Some("page-2")))
+                }
+            })
+            .await
+        };
+        let host = fixture.endpoint.strip_prefix("http://").unwrap();
+        let start = |bucket: &str| {
+            let input = LazyListInput {
+                account_id: "overlap-fixture".into(),
+                bucket: bucket.into(),
+                access_key_id: "fixture".into(),
+                secret_access_key: "fixture-secret".into(),
+                prefix: String::new(),
+                provider: Some("minio".into()),
+                endpoint_scheme: Some("http".into()),
+                endpoint_host: Some(host.into()),
+                force_path_style: Some(true),
+                region: None,
+                force_refresh: Some(true),
+                request_id: None,
+                generation: None,
+                cache_cursor: None,
+                page_index: None,
+                run_id: None,
+            };
+            let key = prefix_flight_key(&input);
+            join_prefix_flight_with(input, key, |input, owner| async move {
+                fetch_prefix(input, &owner, 0).await
+            })
+        };
+
+        let slow = start("slow");
+        arrival(&arrived).await;
+        tokio::time::sleep(HELD).await;
+        let quick = start("quick");
+        arrival(&arrived).await;
+        release_slow.add_permits(1);
+        let slow_page = first_page(&slow.0).await;
+        release_quick.add_permits(1);
+        let quick_page = first_page(&quick.0).await;
+
+        assert!(slow_page.timing.network_ms >= HELD.as_secs_f64() * 1000.0);
+        for timing in [&slow_page.timing, &quick_page.timing] {
+            let elapsed = timing.page_ready_ms.unwrap();
+            assert!(timing.network_ms > 0.0, "{timing:?}");
+            assert!(timing.network_ms <= elapsed, "{timing:?}");
+            assert!(
+                timing.queue_ms + timing.network_ms + timing.backoff_ms <= elapsed,
+                "{timing:?}"
+            );
+        }
+        let flights = [slow.0.clone(), quick.0.clone()];
+        drop(slow);
+        drop(quick);
+        for flight in flights {
+            assert!(flight_result(&flight)
+                .await
+                .unwrap_err()
+                .contains("cancelled"));
         }
     }
 

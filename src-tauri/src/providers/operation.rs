@@ -80,6 +80,7 @@ pub struct OperationContext<'a> {
     pub peer_endpoint: Option<&'a str>,
     pub max_attempts: u32,
     pub backoff: Backoff,
+    pub timings: Option<&'a OperationTimings>,
 }
 
 impl<'a> OperationContext<'a> {
@@ -102,6 +103,7 @@ impl<'a> OperationContext<'a> {
             peer_endpoint: None,
             max_attempts: 3,
             backoff: Backoff::DEFAULT,
+            timings: None,
         }
     }
 
@@ -122,6 +124,11 @@ impl<'a> OperationContext<'a> {
 
     pub fn with_peer_endpoint(mut self, endpoint: &'a str) -> Self {
         self.peer_endpoint = Some(endpoint);
+        self
+    }
+
+    pub fn with_timings(mut self, timings: &'a OperationTimings) -> Self {
+        self.timings = Some(timings);
         self
     }
 
@@ -286,6 +293,9 @@ static QUEUE_US: AtomicU64 = AtomicU64::new(0);
 static NETWORK_US: AtomicU64 = AtomicU64::new(0);
 static BACKOFF_US: AtomicU64 = AtomicU64::new(0);
 
+/// Process-wide totals. Every concurrent operation adds to them, so the
+/// difference between two snapshots is not any one caller's time: a caller
+/// that needs its own passes `OperationTimings` to `with_timings`.
 pub fn metrics() -> OperationMetrics {
     OperationMetrics {
         attempts: ATTEMPTS.load(Ordering::Relaxed),
@@ -298,14 +308,29 @@ pub fn metrics() -> OperationMetrics {
     }
 }
 
-struct PhaseTimer {
+/// One caller's own queue, network and backoff time, in nanoseconds. An
+/// operation given these adds each phase here as well as to the process-wide
+/// totals, including a phase that cancellation cut short.
+#[derive(Debug, Default)]
+pub struct OperationTimings {
+    pub queue_ns: AtomicU64,
+    pub network_ns: AtomicU64,
+    pub backoff_ns: AtomicU64,
+}
+
+struct PhaseTimer<'a> {
     start: Instant,
     elapsed: &'static AtomicU64,
     gauge: Option<&'static AtomicU64>,
+    caller: Option<&'a AtomicU64>,
 }
 
-impl PhaseTimer {
-    fn new(elapsed: &'static AtomicU64, gauge: Option<&'static AtomicU64>) -> Self {
+impl<'a> PhaseTimer<'a> {
+    fn new(
+        elapsed: &'static AtomicU64,
+        gauge: Option<&'static AtomicU64>,
+        caller: Option<&'a AtomicU64>,
+    ) -> Self {
         if let Some(gauge) = gauge {
             gauge.fetch_add(1, Ordering::Relaxed);
         }
@@ -313,16 +338,24 @@ impl PhaseTimer {
             start: Instant::now(),
             elapsed,
             gauge,
+            caller,
         }
     }
 }
 
-impl Drop for PhaseTimer {
+impl Drop for PhaseTimer<'_> {
     fn drop(&mut self) {
+        let spent = self.start.elapsed();
         self.elapsed.fetch_add(
-            self.start.elapsed().as_micros().min(u64::MAX as u128) as u64,
+            spent.as_micros().min(u64::MAX as u128) as u64,
             Ordering::Relaxed,
         );
+        if let Some(caller) = self.caller {
+            caller.fetch_add(
+                spent.as_nanos().min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
+        }
         if let Some(gauge) = self.gauge {
             gauge.fetch_sub(1, Ordering::Relaxed);
         }
@@ -423,7 +456,11 @@ where
     let attempts = context.max_attempts.clamp(1, MAX_ATTEMPTS);
     for attempt in 0..attempts {
         context.check()?;
-        let queue = PhaseTimer::new(&QUEUE_US, Some(&QUEUED));
+        let queue = PhaseTimer::new(
+            &QUEUE_US,
+            Some(&QUEUED),
+            context.timings.map(|t| &t.queue_ns),
+        );
         let permits = acquire_operation_permits(context, attempt).await?;
         drop(queue);
         // A ready permit must not win a race with cancellation/deadline and
@@ -433,7 +470,11 @@ where
         if attempt > 0 {
             RETRIES.fetch_add(1, Ordering::Relaxed);
         }
-        let network = PhaseTimer::new(&NETWORK_US, Some(&ACTIVE));
+        let network = PhaseTimer::new(
+            &NETWORK_US,
+            Some(&ACTIVE),
+            context.timings.map(|t| &t.network_ns),
+        );
         let result = bounded(context, send()).await;
         drop(network);
         drop(permits);
@@ -460,7 +501,8 @@ where
                 {
                     return Err(OperationError::Deadline { last: Some(error) });
                 }
-                let backoff = PhaseTimer::new(&BACKOFF_US, None);
+                let backoff =
+                    PhaseTimer::new(&BACKOFF_US, None, context.timings.map(|t| &t.backoff_ns));
                 bounded(context, tokio::time::sleep(wait)).await?;
                 drop(backoff);
                 context.check()?;
@@ -931,5 +973,65 @@ mod tests {
         assert!(matches!(result, Err(OperationError::Cancelled)));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(first.data.available_permits(), DATA_LIMIT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn caller_timings_hold_each_phase_of_only_their_own_operation() {
+        let cancelled = AtomicBool::new(false);
+        let own = OperationTimings::default();
+        let other = OperationTimings::default();
+        // No jitter: the wait is exactly the provider's Retry-After.
+        let ctx = context("caller-timings", &cancelled)
+            .with_backoff(Backoff {
+                initial: Duration::ZERO,
+                max: Duration::ZERO,
+            })
+            .with_timings(&own);
+        let other_ctx = context("caller-timings-other", &cancelled).with_timings(&other);
+        let budget = endpoint_budget(ctx.endpoint);
+        let held = budget.data.acquire_many(DATA_LIMIT as u32).await.unwrap();
+        let before = metrics();
+        // Queued 15 ms, a 10 ms attempt, a 200 ms Retry-After, a 20 ms attempt;
+        // the unrelated operation's 100 ms request runs in the middle of them.
+        let calls = AtomicUsize::new(0);
+        let operation = execute(&ctx, || async {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Err(AttemptError::transient("503").with_retry_after(Duration::from_millis(200)))
+            } else {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(())
+            }
+        });
+        let unrelated = execute(&other_ctx, || async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(())
+        });
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            drop(held);
+        };
+        let (own_result, other_result, ()) = tokio::join!(operation, unrelated, release);
+        own_result.unwrap();
+        other_result.unwrap();
+        let spent = |counter: &AtomicU64| Duration::from_nanos(counter.load(Ordering::Relaxed));
+        assert_eq!(spent(&own.queue_ns), Duration::from_millis(15));
+        assert_eq!(spent(&own.network_ns), Duration::from_millis(30));
+        assert_eq!(spent(&own.backoff_ns), Duration::from_millis(200));
+        assert_eq!(spent(&other.network_ns), Duration::from_millis(100));
+        // The process-wide totals that mounts report still hold both.
+        assert!(metrics().network_us - before.network_us >= 130_000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn caller_timings_keep_the_time_of_a_request_dropped_in_flight() {
+        let cancelled = AtomicBool::new(false);
+        let timings = OperationTimings::default();
+        let ctx = context("caller-timings-dropped", &cancelled).with_timings(&timings);
+        let operation = execute::<(), _, _>(&ctx, || async { std::future::pending().await });
+        assert!(tokio::time::timeout(Duration::from_millis(25), operation)
+            .await
+            .is_err());
+        assert_eq!(timings.network_ns.load(Ordering::Relaxed), 25_000_000);
     }
 }
