@@ -549,42 +549,62 @@ async fn native_nfs_write_read_rename_unmount() {
             "file + 中文.txt"
         };
         let result = tokio::time::timeout(Duration::from_secs(30), async {
-            let file = target.join(name);
-            let renamed = target.join("renamed.txt");
-            tokio::fs::write(&file, b"native NFS bytes").await?;
-            if tokio::fs::read(&file).await? != b"native NFS bytes" {
-                return Err(std::io::Error::other("Native write/read content mismatch"));
-            }
-            if !objects.lock().unwrap().contains_key(name) {
-                return Err(std::io::Error::other(
-                    "The native client did not preserve the exact object key",
-                ));
-            }
-            tokio::fs::rename(&file, &renamed).await?;
-            let cloud = objects
-                .lock()
-                .unwrap()
-                .get("renamed.txt")
-                .map(|object| object.data.clone());
-            if cloud.as_deref() != Some(b"native NFS bytes".as_slice()) {
-                return Err(std::io::Error::other(
-                    "Storage fixture did not receive the exact native write",
-                ));
-            }
-            if objects.lock().unwrap().contains_key(name) {
-                return Err(std::io::Error::other(
-                    "Rename did not delete the original storage object",
-                ));
-            }
-            if tokio::fs::read(&renamed).await? != b"native NFS bytes" {
-                return Err(std::io::Error::other("Native rename content mismatch"));
-            }
-            tokio::fs::remove_file(&renamed).await?;
-            if objects.lock().unwrap().contains_key("renamed.txt") {
-                return Err(std::io::Error::other(
-                    "Native delete left the storage object behind",
-                ));
-            }
+            // The basic cycle runs first, under the same limit as each probe
+            // below and named the same way. If it fails the mount is not
+            // usable, so the probes do not run.
+            probes::named("write/read/rename/delete cycle", async {
+                let file = target.join(name);
+                let renamed = target.join("renamed.txt");
+                tokio::fs::write(&file, b"native NFS bytes")
+                    .await
+                    .map_err(probes::doing("writing the file"))?;
+                let written = tokio::fs::read(&file)
+                    .await
+                    .map_err(probes::doing("reading the file"))?;
+                if written != b"native NFS bytes" {
+                    return Err(std::io::Error::other("Native write/read content mismatch"));
+                }
+                if !objects.lock().unwrap().contains_key(name) {
+                    return Err(std::io::Error::other(
+                        "The native client did not preserve the exact object key",
+                    ));
+                }
+                tokio::fs::rename(&file, &renamed)
+                    .await
+                    .map_err(probes::doing("renaming the file to renamed.txt"))?;
+                let cloud = objects
+                    .lock()
+                    .unwrap()
+                    .get("renamed.txt")
+                    .map(|object| object.data.clone());
+                if cloud.as_deref() != Some(b"native NFS bytes".as_slice()) {
+                    return Err(std::io::Error::other(
+                        "Storage fixture did not receive the exact native write",
+                    ));
+                }
+                if objects.lock().unwrap().contains_key(name) {
+                    return Err(std::io::Error::other(
+                        "Rename did not delete the original storage object",
+                    ));
+                }
+                let moved = tokio::fs::read(&renamed)
+                    .await
+                    .map_err(probes::doing("reading renamed.txt"))?;
+                if moved != b"native NFS bytes" {
+                    return Err(std::io::Error::other("Native rename content mismatch"));
+                }
+                tokio::fs::remove_file(&renamed)
+                    .await
+                    .map_err(probes::doing("deleting renamed.txt"))?;
+                if objects.lock().unwrap().contains_key("renamed.txt") {
+                    return Err(std::io::Error::other(
+                        "Native delete left the storage object behind",
+                    ));
+                }
+                Ok(())
+            })
+            .await
+            .map_err(std::io::Error::other)?;
             // Every probe runs whatever the ones before it found, each under
             // its own time limit, so that one run reports every failure and
             // which probe it came from. Beyond ASCII the outcome depends on

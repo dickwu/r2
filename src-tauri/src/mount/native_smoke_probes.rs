@@ -41,7 +41,9 @@ async fn never_stored_under_an_unexpected_key(
     );
     outcome.map_err(|problem| std::io::Error::other(format!("{name:?} was {problem}")))?;
     if let [key] = added.as_slice() {
-        tokio::fs::remove_file(target.join(name)).await?;
+        tokio::fs::remove_file(target.join(name))
+            .await
+            .map_err(doing(format!("deleting {name:?}")))?;
         if objects.lock().unwrap().contains_key(key) {
             return Err(std::io::Error::other(format!(
                 "Deleting {name:?} through the mount left {key:?} behind"
@@ -91,8 +93,10 @@ pub(super) fn all_passed<E: std::fmt::Display>(
     }
 }
 
-/// How long one probe may take: far longer than any took on the CI runners,
-/// and short enough that every probe fits the operations' own 30 s bound.
+/// How long the write/read/rename/delete cycle and each probe may take: far
+/// longer than any took on the CI runners (a few hundred milliseconds), and
+/// short enough that all of them, at most five limits or 25 s, fit the
+/// operations' own 30 s bound.
 const PROBE_LIMIT: Duration = Duration::from_secs(5);
 
 /// Runs `probe` for at most `PROBE_LIMIT` and names it in any failure. A soft
@@ -112,8 +116,8 @@ pub(super) async fn named(
     }
 }
 
-/// Names the step a raw I/O error from the mount came from.
-fn doing(step: &'static str) -> impl FnOnce(std::io::Error) -> std::io::Error {
+/// Names the step a raw I/O error from the mount came from, keeping its kind.
+pub(super) fn doing(step: impl std::fmt::Display) -> impl FnOnce(std::io::Error) -> std::io::Error {
     move |error| std::io::Error::new(error.kind(), format!("{step}: {error}"))
 }
 
@@ -328,4 +332,36 @@ pub(super) async fn a_folder_takes_a_file_and_goes_again(
         None,
         "Deleting moved.txt should remove it from storage",
     )
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_probe_that_never_answers_is_named_when_its_time_runs_out() {
+    let outcome = named("folder probe", std::future::pending()).await;
+    assert_eq!(
+        outcome,
+        Err("folder probe: no answer within 5 s".to_string())
+    );
+}
+
+#[tokio::test]
+async fn a_failing_probe_names_itself_and_the_step_and_keeps_the_kind() {
+    let error = doing("making folder")(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    let message = named("folder probe", async { Err(error) })
+        .await
+        .unwrap_err();
+    assert!(
+        message.starts_with("folder probe: making folder: "),
+        "{message}"
+    );
+}
+
+#[test]
+fn every_failure_is_reported_not_just_the_first() {
+    let outcomes: [Result<(), &str>; 3] = [Err("first"), Ok(()), Err("third")];
+    assert_eq!(
+        all_passed(outcomes).unwrap_err().to_string(),
+        "first; third"
+    );
+    assert!(all_passed::<&str>([]).is_ok());
 }
