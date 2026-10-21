@@ -10,6 +10,7 @@ declare module 'bun:test' {
     object: T,
     method: K
   ): {
+    mock: { calls: unknown[][] };
     mockImplementation(implementation: T[K]): { mockRestore(): void };
     mockRestore(): void;
   };

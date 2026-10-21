@@ -3,15 +3,23 @@
 // so Next's static export ships it in dist/ and the Tauri bundle serves it at
 // <origin>/monaco-editor/vs. Without it @monaco-editor/react's loader pulls its
 // own default Monaco from jsdelivr, which never loads offline and is not the
-// version package.json pins. The copy is skipped when the manifest already
-// matches the installed monaco-editor version.
-import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+// version package.json pins. The package's license files are staged beside
+// vs/. The copy is skipped when the manifest already matches the installed
+// monaco-editor version and this script's layout, and the loader and license
+// files are still in place.
+import { copyFileSync, cpSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 
 const require = createRequire(import.meta.url);
 const targetDir = resolve('public/monaco-editor');
 const manifestPath = resolve(targetDir, 'manifest.json');
+// Every installer redistributes Monaco (MIT, bundling TypeScript under
+// Apache-2.0 among others), but min/vs carries neither notice.
+const LICENSE_FILES = ['LICENSE', 'ThirdPartyNotices.txt'];
+// Bump whenever what this script stages changes: a manifest whose version
+// matches but whose layout does not is re-copied, not skipped.
+const LAYOUT = 2;
 
 // monaco-editor's exports map hides its package.json from require(), so find
 // the package directory the way Node's resolver walks node_modules.
@@ -27,7 +35,10 @@ const { version } = JSON.parse(readFileSync(resolve(packageDir, 'package.json'),
 if (existsSync(manifestPath)) {
   try {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-    if (manifest.version === version) {
+    const staged = ['vs/loader.js', ...LICENSE_FILES].every((file) =>
+      existsSync(resolve(targetDir, file))
+    );
+    if (manifest.version === version && manifest.layout === LAYOUT && staged) {
       console.log(`[monaco-assets] ${targetDir} already at ${version}, skipping copy`);
       process.exit(0);
     }
@@ -45,14 +56,28 @@ if (!existsSync(resolve(sourceDir, 'loader.js'))) {
       "@monaco-editor/react's loader needs min/vs/loader.js"
   );
 }
+const missingLicenses = LICENSE_FILES.filter((file) => !existsSync(resolve(packageDir, file)));
+if (missingLicenses.length) {
+  throw new Error(
+    `[monaco-assets] monaco-editor ${version} ships no ${missingLicenses.join(' or ')} ` +
+      `at ${packageDir}; the app bundles Monaco, so it must ship its license notices too`
+  );
+}
 
-rmSync(targetDir, { recursive: true, force: true });
+// maxRetries: on Windows, rmSync fails with EBUSY while next dev holds a staged
+// file open.
+rmSync(targetDir, { recursive: true, force: true, maxRetries: 3 });
 cpSync(sourceDir, resolve(targetDir, 'vs'), {
   recursive: true,
   // nls/lang/*.d.ts are never loaded at runtime, and tsc's **/*.ts include
   // would otherwise type-check them.
   filter: (source) => !source.endsWith('.d.ts'),
 });
+for (const file of LICENSE_FILES) {
+  copyFileSync(resolve(packageDir, file), resolve(targetDir, file));
+}
 // Written last, so an interrupted copy is redone on the next run.
-writeFileSync(manifestPath, `${JSON.stringify({ version }, null, 2)}\n`);
-console.log(`[monaco-assets] copied monaco-editor ${version} min/vs to ${targetDir}/vs`);
+writeFileSync(manifestPath, `${JSON.stringify({ version, layout: LAYOUT }, null, 2)}\n`);
+console.log(
+  `[monaco-assets] copied monaco-editor ${version} min/vs and license files to ${targetDir}`
+);
