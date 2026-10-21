@@ -2,7 +2,7 @@
 //! storage fixture; it is not evidence of AWS/R2/MinIO deployment compatibility.
 use super::*;
 use crate::test_s3::{serve, Request, Response};
-use nfsserve::tcp::{NFSTcp, NFSTcpListener};
+use nfsserve::tcp::NFSTcp;
 use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
@@ -291,7 +291,8 @@ fn trace_enabled() -> bool {
 }
 
 /// Streams nfsserve's own tracing (every accepted connection and every
-/// portmap, mount and NFS call) into the test's output, captured like `diag`.
+/// portmap, mount and NFS call) into the test's stderr, captured like `diag`
+/// and in order with it.
 fn install_nfs_trace() {
     use tracing_subscriber::{
         filter::{LevelFilter, Targets},
@@ -304,7 +305,7 @@ fn install_nfs_trace() {
     }
     let layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
-        .with_test_writer()
+        .with_writer(tracing_subscriber::fmt::TestWriter::with_stderr())
         .with_filter(Targets::new().with_target("nfsserve", LevelFilter::DEBUG));
     let _ = tracing_subscriber::registry().with(layer).try_init();
 }
@@ -320,15 +321,20 @@ fn diag(message: impl AsRef<str>) {
 
 type ToolRun = Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed>;
 
-/// How a tool run ended, one prefixed line per output line. NUL bytes are
-/// dropped so UTF-16 console output stays readable.
+/// A tool's console output as text. NUL bytes are dropped so UTF-16 console
+/// output stays readable.
+fn console_text(bytes: &[u8]) -> String {
+    let text: Vec<u8> = bytes.iter().copied().filter(|byte| *byte != 0).collect();
+    String::from_utf8_lossy(&text).into_owned()
+}
+
+/// How a tool run ended, one prefixed line per output line.
 fn render_tool_run(run: &ToolRun) -> String {
     match run {
         Ok(Ok(output)) => {
             let mut rendered = output.status.to_string();
             for (stream, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
-                let text: Vec<u8> = bytes.iter().copied().filter(|byte| *byte != 0).collect();
-                for line in String::from_utf8_lossy(&text)
+                for line in console_text(bytes)
                     .lines()
                     .filter(|line| !line.trim().is_empty())
                 {
@@ -381,39 +387,50 @@ async fn mount_state_probes(stage: &str) {
     }
 }
 
-/// Writes `name` through the mount and checks what holds on every Windows
-/// system, whatever its ANSI code page: the name is refused and storage gains
-/// no key, or (a UTF-8 code page) it is stored under exactly that key, which a
-/// delete through the mount removes again. No key may carry a `?` standing for
-/// a lost character.
+/// Writes `name` through the mount and checks the property the server must
+/// keep: no name is stored under a key the user did not write. Allowed: the
+/// name is refused and storage gains no key; it is stored under exactly its
+/// own key (a UTF-8 code page); or, only where `look_alike` names one, under
+/// that best-fit ASCII look-alike (`č` sent as `c`), which the server cannot
+/// tell from a real name. Whatever was stored must go again with a delete
+/// through the mount, and no key may carry a `?` standing for a lost
+/// character. The other known exception, code-page bytes that happen to spell
+/// valid UTF-8 (GBK `说`, `CB B5`, is stored as `˵`), the probe names avoid.
+/// The outcome is printed either way, as evidence in the CI log.
 #[cfg_attr(not(windows), allow(dead_code))]
-async fn never_stored_under_a_wrong_key(
+async fn never_stored_under_an_unexpected_key(
     target: &Path,
     objects: &std::sync::Mutex<HashMap<String, Object>>,
     name: &str,
+    look_alike: Option<&str>,
 ) -> std::io::Result<()> {
     let keys = || -> std::collections::BTreeSet<String> {
         objects.lock().unwrap().keys().cloned().collect()
     };
     let before = keys();
-    let written = tokio::fs::write(target.join(name), b"x").await.is_ok();
+    let write = tokio::fs::write(target.join(name), b"x").await;
     let added: Vec<String> = keys().difference(&before).cloned().collect();
-    if written {
-        if added != [name] {
-            return Err(std::io::Error::other(format!(
-                "{name:?} was stored as {added:?}"
-            )));
+    let outcome = match (&write, added.as_slice()) {
+        (Err(error), []) => Ok(format!("refused ({error})")),
+        (Ok(()), [key]) if key == name => Ok("stored under its own key".to_string()),
+        (Ok(()), [key]) if look_alike == Some(key.as_str()) => {
+            Ok(format!("stored under the look-alike {key:?}"))
         }
+        (Ok(()), _) => Err(format!("stored as {added:?}")),
+        (Err(error), _) => Err(format!("refused ({error}) yet stored as {added:?}")),
+    };
+    eprintln!(
+        "Beyond-ASCII name {name:?}: {}",
+        outcome.as_ref().unwrap_or_else(|problem| problem)
+    );
+    outcome.map_err(|problem| std::io::Error::other(format!("{name:?} was {problem}")))?;
+    if let [key] = added.as_slice() {
         tokio::fs::remove_file(target.join(name)).await?;
-        if objects.lock().unwrap().contains_key(name) {
+        if objects.lock().unwrap().contains_key(key) {
             return Err(std::io::Error::other(format!(
-                "Native delete left {name:?} behind"
+                "Deleting {name:?} through the mount left {key:?} behind"
             )));
         }
-    } else if !added.is_empty() {
-        return Err(std::io::Error::other(format!(
-            "The refused name {name:?} still reached storage as {added:?}"
-        )));
     }
     if let Some(key) = keys().into_iter().find(|key| key.contains('?')) {
         return Err(std::io::Error::other(format!(
@@ -421,6 +438,321 @@ async fn never_stored_under_a_wrong_key(
         )));
     }
     Ok(())
+}
+
+/// Every beyond-ASCII probe, each run even after an earlier one failed so the
+/// log records all their outcomes; the error names each one that failed.
+#[cfg_attr(not(windows), allow(dead_code))]
+async fn beyond_ascii_names_keep_their_keys(
+    target: &Path,
+    objects: &std::sync::Mutex<HashMap<String, Object>>,
+) -> std::io::Result<()> {
+    let mut failed = Vec::new();
+    for (name, look_alike) in [
+        ("caf\u{e9}.txt", None),
+        ("\u{4e2d}\u{6587}.txt", None),
+        ("\u{010d}as.txt", Some("cas.txt")),
+        ("\u{0142}.txt", Some("l.txt")),
+    ] {
+        if let Err(error) =
+            never_stored_under_an_unexpected_key(target, objects, name, look_alike).await
+        {
+            failed.push(error.to_string());
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(failed.join("; ")))
+    }
+}
+
+/// Seeded before mounting, so the case probe's `case.txt` is written next to
+/// a name that differs from it only in case.
+const CASE_SEED_KEY: &str = "Case.txt";
+const CASE_SEED_DATA: &[u8] = b"original case";
+
+/// Fails naming `expectation` unless storage holds exactly `wanted` under
+/// `key` (`None`: no such key).
+fn expect_stored(
+    objects: &std::sync::Mutex<HashMap<String, Object>>,
+    key: &str,
+    wanted: Option<&[u8]>,
+    expectation: &str,
+) -> std::io::Result<()> {
+    let held = objects
+        .lock()
+        .unwrap()
+        .get(key)
+        .map(|object| object.data.clone());
+    if held.as_deref() == wanted {
+        return Ok(());
+    }
+    let found = match held {
+        Some(data) => format!("holds {key} as {:?}", String::from_utf8_lossy(&data)),
+        None => format!("has no {key}"),
+    };
+    Err(std::io::Error::other(format!(
+        "{expectation}, but storage {found}"
+    )))
+}
+
+/// Writes `case.txt` through the mount next to the seeded `Case.txt` and
+/// checks that the two stay two objects. A client that folds case would open
+/// `Case.txt` for the write instead and truncate it.
+async fn case_variants_stay_apart(
+    fs: &S3NfsFs,
+    target: &Path,
+    objects: &std::sync::Mutex<HashMap<String, Object>>,
+) -> std::io::Result<()> {
+    let lower: &[u8] = b"lower case";
+    tokio::fs::write(target.join("case.txt"), lower).await?;
+    // Staged bytes reach storage only when published, and this test runs no
+    // flusher: publish them as an unmount's pre-drain would.
+    let unpublished = fs.drain(1, stage::UPLOAD_ATTEMPTS).await;
+    if unpublished != 0 {
+        return Err(std::io::Error::other(format!(
+            "Publishing case.txt left {unpublished} staged file(s) unpublished"
+        )));
+    }
+    expect_stored(
+        objects,
+        "case.txt",
+        Some(lower),
+        "case.txt should be stored under its own key with the bytes written",
+    )?;
+    expect_stored(
+        objects,
+        CASE_SEED_KEY,
+        Some(CASE_SEED_DATA),
+        "Writing case.txt should leave Case.txt as seeded",
+    )?;
+    if tokio::fs::read(target.join(CASE_SEED_KEY)).await? != CASE_SEED_DATA {
+        return Err(std::io::Error::other(
+            "Case.txt should still read back as seeded after case.txt was written",
+        ));
+    }
+    tokio::fs::remove_file(target.join("case.txt")).await?;
+    expect_stored(
+        objects,
+        "case.txt",
+        None,
+        "Deleting case.txt should remove it from storage",
+    )?;
+    expect_stored(
+        objects,
+        CASE_SEED_KEY,
+        Some(CASE_SEED_DATA),
+        "Deleting case.txt should leave Case.txt as seeded",
+    )
+}
+
+/// The properties `mount.exe` lists for `drive` (`Z:`): its row and the
+/// indented lines under it, up to the next row, as `key=value` pairs; the
+/// remote path and anything else without a `=` is skipped. `None` when the
+/// drive is not listed.
+fn listed_mount_properties(listing: &str, drive: &str) -> Option<BTreeMap<String, String>> {
+    let continues_row = |line: &&str| line.starts_with(char::is_whitespace);
+    let mut lines = listing.lines().skip_while(|line| {
+        continues_row(line)
+            || !line
+                .split_whitespace()
+                .next()
+                .is_some_and(|local| local.eq_ignore_ascii_case(drive))
+    });
+    let row = lines.next()?;
+    let properties = std::iter::once(row)
+        .chain(lines.take_while(continues_row))
+        .flat_map(|line| line.split(|c: char| c == ',' || c.is_whitespace()))
+        .filter_map(|token| token.split_once('='))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    Some(properties)
+}
+
+/// What the mount asks for (`platform::mount_argv`), as `mount.exe` lists it.
+const REQUESTED_MOUNT_PROPERTIES: [(&str, &str); 6] = [
+    ("UID", "-2"),     // anon
+    ("locking", "no"), // nolock
+    ("timeout", "60"),
+    ("retry", "2"),
+    ("casesensitive", "yes"),
+    ("mount", "soft"), // mtype=soft
+];
+
+/// How the listed properties differ from what the mount asks for, one entry
+/// per property; empty when every option took effect. A drive that is not
+/// listed is a failure too, never a clean result.
+fn mount_option_mismatches(properties: Option<&BTreeMap<String, String>>) -> Vec<String> {
+    let Some(properties) = properties else {
+        return vec!["the drive is not listed".to_string()];
+    };
+    REQUESTED_MOUNT_PROPERTIES
+        .iter()
+        .filter_map(|&(key, wanted)| match properties.get(key) {
+            Some(listed) if listed_value_matches(key, listed, wanted) => None,
+            Some(listed) => Some(format!("{key}={listed} (wanted {wanted})")),
+            None => Some(format!("no {key} (wanted {wanted})")),
+        })
+        .collect()
+}
+
+/// `timeout` is in seconds and may be listed as `60` or `60.0`; every other
+/// value compares as text, ignoring ASCII case.
+fn listed_value_matches(key: &str, listed: &str, wanted: &str) -> bool {
+    if key == "timeout" {
+        matches!(
+            (listed.parse::<f64>(), wanted.parse::<f64>()),
+            (Ok(listed), Ok(wanted)) if listed == wanted
+        )
+    } else {
+        listed.eq_ignore_ascii_case(wanted)
+    }
+}
+
+/// Checks `mount.exe`'s listing for `drive` against what the mount asks for:
+/// the tool mounts even when it ignored some of the options. The drive's
+/// properties are printed either way, as evidence in the CI log.
+#[cfg_attr(not(windows), allow(dead_code))]
+async fn mount_options_took_effect(drive: &str) -> Result<(), String> {
+    let program = windows_nfs_tool("mount.exe")?;
+    let run = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new(&program)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let listing = match &run {
+        Ok(Ok(output)) if output.status.success() => console_text(&output.stdout),
+        _ => {
+            return Err(format!(
+                "mount.exe could not list the mounts: {}",
+                render_tool_run(&run)
+            ))
+        }
+    };
+    let properties = listed_mount_properties(&listing, drive);
+    match &properties {
+        Some(properties) => eprintln!("mount.exe lists {drive} with {properties:?}"),
+        None => eprintln!("mount.exe does not list {drive}: {listing:?}"),
+    }
+    let mismatches = mount_option_mismatches(properties.as_ref());
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "mount.exe's listing for {drive} differs from what the mount asked for: {}",
+            mismatches.join(", ")
+        ))
+    }
+}
+
+/// `mount.exe`'s listing on the windows-2022 runner after a mount with
+/// nfsserve's option recipe (`...,fileaccess=6,casesensitive,...`), verbatim.
+const RECIPE_MOUNT_LISTING: &str = r"Local    Remote                                 Properties
+-------------------------------------------------------------------------------
+Z:       \\127.88.0.1\!                         UID=-2, GID=-2
+                                                rsize=1048576, wsize=1048576
+                                                mount=soft, timeout=0.8
+                                                retry=1, locking=no
+                                                fileaccess=755, lang=ANSI
+                                                casesensitive=no
+                                                sec=sys
+";
+
+fn property_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
+#[test]
+fn the_mount_listing_yields_each_drives_own_properties() {
+    let recipe = property_map(&[
+        ("UID", "-2"),
+        ("GID", "-2"),
+        ("rsize", "1048576"),
+        ("wsize", "1048576"),
+        ("mount", "soft"),
+        ("timeout", "0.8"),
+        ("retry", "1"),
+        ("locking", "no"),
+        ("fileaccess", "755"),
+        ("lang", "ANSI"),
+        ("casesensitive", "no"),
+        ("sec", "sys"),
+    ]);
+    assert_eq!(
+        listed_mount_properties(RECIPE_MOUNT_LISTING, "Z:"),
+        Some(recipe.clone())
+    );
+    assert_eq!(listed_mount_properties(RECIPE_MOUNT_LISTING, "Y:"), None);
+
+    // Another drive's rows right above and right below must stay out of Z:'s
+    // block, and Z:'s out of theirs.
+    let other = r"Y:       \\10.0.0.5\share                       UID=1000, GID=1000
+                                                casesensitive=yes, timeout=60
+                                                retry=2
+";
+    let (header, rows) = RECIPE_MOUNT_LISTING.split_at(RECIPE_MOUNT_LISTING.find("Z:").unwrap());
+    let listing = format!("{header}{other}{rows}{}", other.replace("Y:", "X:"));
+    let neighbour = property_map(&[
+        ("UID", "1000"),
+        ("GID", "1000"),
+        ("casesensitive", "yes"),
+        ("timeout", "60"),
+        ("retry", "2"),
+    ]);
+    assert_eq!(listed_mount_properties(&listing, "Z:"), Some(recipe));
+    assert_eq!(
+        listed_mount_properties(&listing, "Y:"),
+        Some(neighbour.clone())
+    );
+    // Drive letters match whatever their case.
+    assert_eq!(listed_mount_properties(&listing, "x:"), Some(neighbour));
+    assert_eq!(listed_mount_properties(&listing, "W:"), None);
+}
+
+#[test]
+fn the_mount_listing_shows_which_requested_options_took_effect() {
+    // With nfsserve's recipe every option from `fileaccess=6` on kept its
+    // default, `anon`, `nolock` and the default soft mount aside.
+    let recipe = listed_mount_properties(RECIPE_MOUNT_LISTING, "Z:");
+    assert_eq!(
+        mount_option_mismatches(recipe.as_ref()),
+        [
+            "timeout=0.8 (wanted 60)",
+            "retry=1 (wanted 2)",
+            "casesensitive=no (wanted yes)",
+        ]
+    );
+    // What the mount asks for now, whichever way the timeout is printed.
+    for timeout in ["60", "60.0"] {
+        let listing = RECIPE_MOUNT_LISTING
+            .replace("timeout=0.8", &format!("timeout={timeout}"))
+            .replace("retry=1", "retry=2")
+            .replace("casesensitive=no", "casesensitive=yes");
+        let mismatches = mount_option_mismatches(listed_mount_properties(&listing, "Z:").as_ref());
+        assert!(mismatches.is_empty(), "timeout={timeout}: {mismatches:?}");
+    }
+    // A drive the listing lacks fails; it is not a listing with no mismatch.
+    let absent = listed_mount_properties(RECIPE_MOUNT_LISTING, "Y:");
+    assert_eq!(
+        mount_option_mismatches(absent.as_ref()),
+        ["the drive is not listed"]
+    );
+    // So does a property the listing lacks.
+    let without_retry = RECIPE_MOUNT_LISTING.replace("retry=1, ", "");
+    assert_eq!(
+        mount_option_mismatches(listed_mount_properties(&without_retry, "Z:").as_ref()),
+        [
+            "timeout=0.8 (wanted 60)",
+            "no retry (wanted 2)",
+            "casesensitive=no (wanted yes)",
+        ]
+    );
 }
 
 #[test]
@@ -461,7 +793,13 @@ async fn native_nfs_write_read_rename_unmount() {
         let unmount = windows_nfs_tool("umount.exe").expect("Windows Client for NFS unmount tool");
         (drive, mount, unmount)
     };
-    let objects = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let objects = Arc::new(std::sync::Mutex::new(HashMap::from([(
+        CASE_SEED_KEY.to_string(),
+        Object {
+            data: CASE_SEED_DATA.to_vec(),
+            meta: HashMap::new(),
+        },
+    )])));
     let fixture = serve({
         let objects = objects.clone();
         move |request| {
@@ -501,14 +839,12 @@ async fn native_nfs_write_read_rename_unmount() {
             force_path_style: true,
         },
     ));
-    let bind_address = if cfg!(windows) {
-        "auto:111"
-    } else {
-        "127.0.0.1:0"
-    };
-    let listener = NFSTcpListener::bind(bind_address, fs.clone())
-        .await
-        .unwrap();
+    // The product's own bind: on Windows a loopback address of its own,
+    // never reused within a run.
+    let listener =
+        super::super::manager::bind_nfs_server(super::super::platform::MountPlatform::CURRENT, &fs)
+            .await
+            .unwrap();
     let port = listener.get_listen_port();
     let server_ip = listener.get_listen_ip().to_string();
     let server = tokio::spawn(async move { listener.handle_forever().await });
@@ -554,11 +890,14 @@ async fn native_nfs_write_read_rename_unmount() {
     };
     if mounted {
         // The Windows client sends names in the system ANSI code page (the
-        // mount asks for lang=ansi): a character outside it arrives as "?",
-        // which the server refuses, and unless that code page is UTF-8 one
-        // inside it arrives as code-page bytes, refused unless they happen to
-        // be valid UTF-8. So only ASCII names round-trip on every Windows
-        // system.
+        // mount asks for lang=ansi). A character outside it arrives as "?",
+        // which the server refuses, or, where Windows' best-fit tables have
+        // an ASCII look-alike for it and the client applies them, as that
+        // look-alike (`č` as `c`), which the server cannot tell from a real
+        // name; the beyond-ASCII probes below record which. Unless the code
+        // page is UTF-8, a character inside it arrives as code-page bytes,
+        // refused unless they happen to be valid UTF-8. So only ASCII names
+        // round-trip on every Windows system.
         let name = if cfg!(windows) {
             "file + plus.txt"
         } else {
@@ -601,19 +940,34 @@ async fn native_nfs_write_read_rename_unmount() {
                     "Native delete left the storage object behind",
                 ));
             }
-            // Beyond ASCII the outcome depends on the code page; what must
-            // hold on every one is that no name is stored under a wrong key.
+            let probes = case_variants_stay_apart(&fs, &target, &objects).await;
+            // Beyond ASCII the outcome depends on the code page and on
+            // best-fit; what the server must keep is that no name is stored
+            // under a key other than its own or its documented look-alike.
+            // These run whatever the case probe found, so that one Windows
+            // run prints every outcome; its failure is reported first.
             #[cfg(windows)]
-            for beyond_ascii in ["caf\u{e9}.txt", "\u{4e2d}\u{6587}.txt"] {
-                never_stored_under_a_wrong_key(&target, &objects, beyond_ascii).await?;
-            }
-            Ok::<_, std::io::Error>(())
+            let probes = {
+                let beyond_ascii = beyond_ascii_names_keep_their_keys(&target, &objects).await;
+                probes.and(beyond_ascii)
+            };
+            probes
         })
         .await;
         if !matches!(result, Ok(Ok(()))) {
             failure = Some(format!("Native NFS operations failed: {result:?}"));
             #[cfg(windows)]
             mount_state_probes("after the operations failed").await;
+        }
+        // Only now, so the operations above ran with the client exactly as
+        // users get it: mount.exe mounts even when it ignored some options,
+        // and its listing is what shows which took effect.
+        #[cfg(windows)]
+        if let Err(error) = mount_options_took_effect(&drive).await {
+            failure = Some(match failure {
+                Some(operations) => format!("{operations}; {error}"),
+                None => error,
+            });
         }
     }
     // Only a successful mount command establishes ownership. A failed or

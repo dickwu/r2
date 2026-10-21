@@ -125,15 +125,17 @@ fn child_key(dir_key: &str, name: &str, is_dir: bool) -> String {
 /// cannot be trusted to name the file the user meant.
 ///
 /// Windows' Client for NFS sends names in the system ANSI code page (the mount
-/// asks for `lang=ansi`) and replaces each character outside it with `?`: on a
-/// Western system `file + 中文.txt` arrived as `file + ??.txt`. Different names
-/// then arrive as the same one — two Chinese `.pdf` names can both become
-/// `??.pdf`, and the second CREATE would truncate the first file. `?` is
-/// illegal in a Windows file name, so from that client it always means a lost
-/// character: such a name never becomes a key and never resolves to an object
-/// that merely carries the mangled key. macOS and Linux clients send `?` as
-/// itself, a legal POSIX name, so the rule is the Windows client's alone; the
-/// client is a parameter so that every platform's tests cover both sides.
+/// asks for `lang=ansi`) and replaces a character outside it with `?`: on a
+/// Western system `file + 中文.txt` arrived as `file + ??.txt`. (A character
+/// with a best-fit ASCII look-alike, `č` as `c`, may arrive as that instead,
+/// which no server can detect.) Different names then arrive as the same one —
+/// two Chinese `.pdf` names can both become `??.pdf`, and the second CREATE
+/// would truncate the first file. `?` is illegal in a Windows file name, so
+/// from that client it always means a lost character: such a name never
+/// becomes a key and never resolves to an object that merely carries the
+/// mangled key. macOS and Linux clients send `?` as itself, a legal POSIX
+/// name, so the rule is the Windows client's alone; the client is a parameter
+/// so that every platform's tests cover both sides.
 fn lost_in_code_page(name: &str, windows_client: bool) -> bool {
     windows_client && name.contains('?')
 }
@@ -4160,22 +4162,24 @@ impl NFSFileSystem for S3NfsFs {
         }
     }
 
-    /// Resolves a handle issued by this filesystem. One from an earlier
-    /// filesystem is NFS3ERR_STALE (a later one's NFS3ERR_BADHANDLE): ids
-    /// restart in every filesystem (`InodeTable`), so a handle from an earlier
-    /// mount, even in this process, may name another file now. The root's
-    /// handle is the exception, valid under any generation. The root is the
-    /// same directory in every mount, and Windows' Client for NFS counts on
-    /// that: the server binds the same loopback address each time
-    /// (`auto:111`), so after a restart or a remount the client reconnects the
-    /// same `\\ip\!` without a MOUNT call and goes on with the root handle it
-    /// cached. Refused, that handle fails every path with "The handle is
-    /// invalid" (error 6), and the client does not re-mount to fetch a new
-    /// one. The LOOKUPs under the root hand out this filesystem's handles.
+    /// Resolves a handle issued by this filesystem, and only by it: one from
+    /// an earlier filesystem is NFS3ERR_STALE and one from a later filesystem
+    /// NFS3ERR_BADHANDLE, the root's included. Ids restart in every filesystem
+    /// (`InodeTable`), so an earlier mount's handle, even in this process, may
+    /// name another file now, and its root may be another bucket's. Windows'
+    /// Client for NFS keeps a server's root handle past a successful `umount`
+    /// and reconnects a share it knows without a MOUNT call, so with the root
+    /// exempt a drive letter a crash left mapped would show, and write to,
+    /// whichever bucket the next mount at its address serves. Instead every
+    /// Windows mount listens on an address no earlier mount of its run used
+    /// (`manager::bind_nfs_server`), and an older mount's handle fails closed
+    /// wherever it turns up: a drive letter a crash left mapped finds nothing
+    /// listening on its address, and on a rare reuse across runs every handle
+    /// the client cached is refused here.
     fn fh_to_id(&self, handle: &nfs_fh3) -> Result<fileid3, nfsstat3> {
         let (generation, id) = split_handle(handle).ok_or(nfsstat3::NFS3ERR_BADHANDLE)?;
         let current = self.inner.handle_generation;
-        if generation == current || id == ROOT_ID {
+        if generation == current {
             Ok(id)
         } else if generation < current {
             Err(nfsstat3::NFS3ERR_STALE)

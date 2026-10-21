@@ -1,6 +1,7 @@
 //! Mount lifecycle: one localhost NFS server plus one OS mount per bucket.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,6 +44,8 @@ const MOUNT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const UNMOUNT_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const INTERACTIVE_UNMOUNT_BUDGET: Duration = Duration::from_secs(45);
 const PRE_DRAIN_BUDGET: Duration = Duration::from_secs(10);
+/// Loopback addresses a Windows mount's server tries before giving up.
+const WINDOWS_BIND_ATTEMPTS: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -303,17 +306,10 @@ impl MountManager {
             fs.restore_stages().await?;
         }
 
-        // The Windows NFS client cannot be pointed at a port: it asks the
-        // portmapper on port 111 of the host it mounts. So on Windows the
-        // server takes port 111 on a private loopback IP of its own
-        // (127.88.x.y, nfsserve's "auto" mode) — which also lets every mount
-        // keep its own server. Unix clients accept a port option, so there an
-        // ephemeral port on 127.0.0.1 does.
-        let bind_addr = match platform {
-            MountPlatform::Windows => "auto:111",
-            _ => "127.0.0.1:0",
-        };
-        let listener = NFSTcpListener::bind(bind_addr, fs.clone())
+        // Port 111 on a loopback address of its own for every Windows mount,
+        // never reused within a run; an ephemeral port elsewhere. See
+        // `bind_nfs_server`.
+        let listener = bind_nfs_server(platform, &fs)
             .await
             .map_err(|e| match platform {
                 MountPlatform::Windows => format!(
@@ -1140,6 +1136,59 @@ async fn run_with_timeout(
     }
 }
 
+/// Starts listening for the NFS server that serves `fs`.
+///
+/// The Windows NFS client cannot be pointed at a port: it asks the portmapper
+/// on port 111 of the host it mounts. So on Windows the server takes port 111
+/// on a loopback address of its own (127.88.x.y, see
+/// [`platform::windows_server_ip`]), which also lets every mount keep its own
+/// server. The client may keep a server's root handle for the rest of the
+/// Windows session (it outlived `umount` in CI) and reconnects a share it
+/// knows without a MOUNT call, while the filesystem refuses every handle
+/// another mount issued, the root's included (`S3NfsFs::fh_to_id`): a mount
+/// that meets an earlier mount's address fails closed, as does a drive letter
+/// a crash left mapped. A fresh random address per mount would meet an
+/// earlier one with a birthday-bound chance that grows with every mount
+/// (about 7% over 100 mounts); stepping from a random start
+/// ([`next_windows_server_seed`]) never reuses one within a run. Unix clients
+/// accept a port option, so there an ephemeral port on 127.0.0.1 does.
+pub(crate) async fn bind_nfs_server(
+    platform: MountPlatform,
+    fs: &S3NfsFs,
+) -> std::io::Result<NFSTcpListener<S3NfsFs>> {
+    if platform != MountPlatform::Windows {
+        return NFSTcpListener::bind("127.0.0.1:0", fs.clone()).await;
+    }
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let ip = platform::windows_server_ip(next_windows_server_seed());
+        let result = NFSTcpListener::bind(&format!("{ip}:111"), fs.clone()).await;
+        if result.is_ok() || attempt == WINDOWS_BIND_ATTEMPTS {
+            return result;
+        }
+    }
+}
+
+/// The run's sequence of Windows server address seeds; see
+/// [`next_windows_server_seed`].
+static WINDOWS_SERVER_SEEDS: OnceLock<AtomicU64> = OnceLock::new();
+
+/// The seed for the next Windows server address of this run. Every bind
+/// attempt takes one, so a failed attempt skips its address rather than
+/// retrying it, and no address repeats until all
+/// [`platform::WINDOWS_SERVER_IPS`] have been used. The sequence starts at a
+/// random point, drawn on first use, so separate runs start independently.
+fn next_windows_server_seed() -> u64 {
+    WINDOWS_SERVER_SEEDS
+        .get_or_init(|| {
+            // Every `RandomState` is keyed at random, so its hash of a
+            // constant is a random start without a `rand` dependency.
+            AtomicU64::new(RandomState::new().hash_one(()) % platform::WINDOWS_SERVER_IPS)
+        })
+        .fetch_add(1, Ordering::Relaxed)
+}
+
 async fn run_mount_command(
     platform: MountPlatform,
     server_ip: &str,
@@ -1285,6 +1334,17 @@ mod tests {
             with_task_health(info, true, false).health,
             MountHealth::Offline
         );
+    }
+
+    #[test]
+    fn consecutive_windows_binds_never_meet_an_address_twice() {
+        const DRAWS: usize = 1000;
+        // Other tests may take seeds from the same run-wide sequence at the
+        // same time, so only distinctness is asserted, not adjacency.
+        let addresses: std::collections::HashSet<_> = (0..DRAWS)
+            .map(|_| platform::windows_server_ip(next_windows_server_seed()))
+            .collect();
+        assert_eq!(addresses.len(), DRAWS);
     }
 
     #[test]

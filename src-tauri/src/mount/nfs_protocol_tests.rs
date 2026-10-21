@@ -183,7 +183,7 @@ async fn an_external_version_change_retires_the_old_nfs_handle() {
 }
 
 #[tokio::test]
-async fn only_the_root_handle_outlives_the_mount_that_issued_it() {
+async fn no_handle_outlives_the_mount_that_issued_it() {
     let fixture = serve(|_| async { Response::empty(404) }).await;
     let fs = filesystem(fixture.client.clone(), "handles");
     let child = fs
@@ -198,23 +198,22 @@ async fn only_the_root_handle_outlives_the_mount_that_issued_it() {
     for id in [ROOT_ID, child] {
         assert!(matches!(fs.fh_to_id(&fs.id_to_fh(id)), Ok(found) if found == id));
     }
-    // A Windows client that reconnects without a MOUNT call goes on with the
-    // root handle of an earlier mount, or of a later one after a clock step.
-    for generation in [current - 1, current + 1] {
+    // Ids are handed out per mount, so an earlier mount's handle may name
+    // another file now and its root another bucket's root. A Windows drive
+    // letter a crash left mapped sends exactly such a cached root handle,
+    // without a MOUNT call, should a later mount reuse its address. None is
+    // accepted, the root's included; one from a later mount (after a clock
+    // step) is no handle.
+    for id in [ROOT_ID, child] {
         assert!(matches!(
-            fs.fh_to_id(&handle(generation, ROOT_ID)),
-            Ok(ROOT_ID)
+            fs.fh_to_id(&handle(current - 1, id)),
+            Err(nfsstat3::NFS3ERR_STALE)
+        ));
+        assert!(matches!(
+            fs.fh_to_id(&handle(current + 1, id)),
+            Err(nfsstat3::NFS3ERR_BADHANDLE)
         ));
     }
-    // Any other id is handed out per mount and may name another file now.
-    assert!(matches!(
-        fs.fh_to_id(&handle(current - 1, child)),
-        Err(nfsstat3::NFS3ERR_STALE)
-    ));
-    assert!(matches!(
-        fs.fh_to_id(&handle(current + 1, child)),
-        Err(nfsstat3::NFS3ERR_BADHANDLE)
-    ));
     // Only the 16-byte layout is a handle, however much of the root's it shares.
     let root = fs.id_to_fh(ROOT_ID).data;
     for data in [
@@ -231,7 +230,7 @@ async fn only_the_root_handle_outlives_the_mount_that_issued_it() {
 }
 
 #[tokio::test]
-async fn a_later_mount_in_the_same_process_refuses_an_earlier_ones_handles_but_the_root() {
+async fn a_later_mount_in_the_same_process_refuses_every_handle_of_an_earlier_one() {
     let fixture = serve(|_| async { Response::empty(404) }).await;
     let earlier = filesystem(fixture.client.clone(), "handles-earlier");
     let later = filesystem(fixture.client.clone(), "handles-later");
@@ -246,19 +245,46 @@ async fn a_later_mount_in_the_same_process_refuses_an_earlier_ones_handles_but_t
         child
     );
 
-    assert!(matches!(
-        later.fh_to_id(&earlier.id_to_fh(child)),
-        Err(nfsstat3::NFS3ERR_STALE)
-    ));
-    assert!(matches!(
-        later.fh_to_id(&earlier.id_to_fh(ROOT_ID)),
-        Ok(ROOT_ID)
-    ));
+    // The root's handle as much as the file's: the earlier root may be
+    // another bucket's.
     for id in [ROOT_ID, child] {
+        assert!(matches!(
+            later.fh_to_id(&earlier.id_to_fh(id)),
+            Err(nfsstat3::NFS3ERR_STALE)
+        ));
         assert!(matches!(later.fh_to_id(&later.id_to_fh(id)), Ok(found) if found == id));
     }
     // Each mount has a generation of its own, later than any before it.
     assert!(u64::from_le_bytes(earlier.serverid()) < u64::from_le_bytes(later.serverid()));
+}
+
+#[test]
+fn handle_generations_are_unique_and_increase_for_every_caller() {
+    const THREADS: usize = 8;
+    const CALLS: usize = 1000;
+    // The counter is process-wide and other tests advance it at the same
+    // time, so only what holds under that is asserted: no generation is
+    // handed out twice, and each caller's next one is larger than its last.
+    let callers: Vec<_> = (0..THREADS)
+        .map(|_| {
+            std::thread::spawn(|| {
+                (0..CALLS)
+                    .map(|_| next_handle_generation())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let sequences: Vec<Vec<u64>> = callers
+        .into_iter()
+        .map(|caller| caller.join().unwrap())
+        .collect();
+    for sequence in &sequences {
+        assert!(sequence.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+    let mut all = sequences.concat();
+    all.sort_unstable();
+    all.dedup();
+    assert_eq!(all.len(), THREADS * CALLS);
 }
 
 #[tokio::test]
