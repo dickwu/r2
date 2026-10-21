@@ -5,9 +5,17 @@
 // own default Monaco from jsdelivr, which never loads offline and is not the
 // version package.json pins. The package's license files are staged beside
 // vs/. The copy is skipped when the manifest already matches the installed
-// monaco-editor version and this script's layout, and the loader and license
-// files are still in place.
-import { copyFileSync, cpSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+// monaco-editor version and this script's layout, and the loader, the license
+// files and the vs/assets/<label>.worker-*.js worker bundles are still in place.
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 
@@ -20,6 +28,9 @@ const LICENSE_FILES = ['LICENSE', 'ThirdPartyNotices.txt'];
 // Bump whenever what this script stages changes: a manifest whose version
 // matches but whose layout does not is re-copied, not skipped.
 const LAYOUT = 2;
+// editor.main starts its Workers from the hashed vs/assets/<label>.worker-*.js
+// bundles; the CI payload check lists the same labels.
+const WORKER_LABELS = ['editor', 'css', 'html', 'json', 'ts'];
 
 // monaco-editor's exports map hides its package.json from require(), so find
 // the package directory the way Node's resolver walks node_modules.
@@ -38,12 +49,17 @@ if (existsSync(manifestPath)) {
     const staged = ['vs/loader.js', ...LICENSE_FILES].every((file) =>
       existsSync(resolve(targetDir, file))
     );
-    if (manifest.version === version && manifest.layout === LAYOUT && staged) {
+    // The bundle names carry a content hash, so match on label and extension.
+    const assets = readdirSync(resolve(targetDir, 'vs/assets'));
+    const workersStaged = WORKER_LABELS.every((label) =>
+      assets.some((name) => name.startsWith(`${label}.worker-`) && name.endsWith('.js'))
+    );
+    if (manifest.version === version && manifest.layout === LAYOUT && staged && workersStaged) {
       console.log(`[monaco-assets] ${targetDir} already at ${version}, skipping copy`);
       process.exit(0);
     }
   } catch {
-    // Unreadable manifest: fall through and recopy.
+    // Unreadable manifest, or a missing or unreadable assets folder: fall through and recopy.
   }
 }
 
