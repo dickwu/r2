@@ -2,6 +2,7 @@
 //! then cuts VM power; a later boot runs production recovery independently.
 //! These tests never stop the VM themselves and cannot run on the host Mac.
 use super::*;
+use nfsserve::tcp::NFSTcpListener;
 use std::io::{Seek, Write};
 
 const KEY: &str = "VM + 持久写入.bin";

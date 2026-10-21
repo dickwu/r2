@@ -35,8 +35,8 @@ use crate::providers::resources::{ByteLease, ResourceKind};
 use crate::providers::s3_client::{describe_s3_error, StorageErrorClass};
 use futures_util::{stream, StreamExt};
 use nfsserve::nfs::{
-    fattr3, fileid3, filename3, ftype3, nfspath3, nfsstat3, nfstime3, sattr3, set_atime, set_mtime,
-    set_size3, specdata3,
+    cookieverf3, fattr3, fileid3, filename3, ftype3, nfs_fh3, nfspath3, nfsstat3, nfstime3, sattr3,
+    set_atime, set_mtime, set_size3, specdata3,
 };
 use nfsserve::vfs::{DirEntry, NFSFileSystem, ReadDirResult, VFSCapabilities};
 use serde::{Deserialize, Serialize};
@@ -61,8 +61,25 @@ const LIST_PAGE_SIZE: i32 = 1000;
 const WAITING_REPORT_STEP: u64 = 8 * 1024 * 1024;
 /// Synthetic size reported for directories, matching a typical unix filesystem.
 const DIR_SIZE: u64 = 4096;
-const DIR_MODE: u32 = 0o755;
-const FILE_MODE: u32 = 0o644;
+
+/// The permission bits reported for a directory and for a file.
+///
+/// Unix clients own what they mount (`current_uid`) and ask the server before
+/// a write (ACCESS), so they get the usual 0755/0644. Windows' Client for NFS
+/// checks the bits itself, against the identity it mounts as: `anon`, UID and
+/// GID -2, which never owns a file. With 0644 it created new files but opened
+/// no existing one for writing ("Access is denied"), so it gets 0777/0666, or
+/// 0555/0444 on a read-only mount. The bits are only a hint to the client: the
+/// server reads none of them and refuses every write to a read-only mount
+/// itself. The client is a parameter so that every platform's tests cover
+/// both sides.
+fn permission_modes(windows_client: bool, read_only: bool) -> (u32, u32) {
+    match (windows_client, read_only) {
+        (false, _) => (0o755, 0o644),
+        (true, false) => (0o777, 0o666),
+        (true, true) => (0o555, 0o444),
+    }
+}
 
 /// Objects a directory rename may move. An NFS RENAME has to finish inside the
 /// client's retransmission window, and a bigger move belongs in the app's Batch
@@ -119,6 +136,25 @@ fn child_key(dir_key: &str, name: &str, is_dir: bool) -> String {
         key.push('/');
     }
     key
+}
+
+/// Whether `name` may have lost characters on its way from the client, so it
+/// cannot be trusted to name the file the user meant.
+///
+/// Windows' Client for NFS sends names in the system ANSI code page (the mount
+/// asks for `lang=ansi`) and replaces a character outside it with `?`: on a
+/// Western system `file + 中文.txt` arrived as `file + ??.txt`. (A character
+/// with a best-fit ASCII look-alike arrives as that instead, which no server
+/// can detect: `čas.txt` was stored as `cas.txt`.) Different names then arrive
+/// as the same one — two Chinese `.pdf` names can both become `??.pdf`, and the
+/// second CREATE would truncate the first file. `?` is illegal in a Windows
+/// file name, so from that client it always means a lost character: such a name
+/// never becomes a key and never resolves to an object that merely carries the
+/// mangled key. macOS and Linux clients send `?` as itself, a legal POSIX name,
+/// so the rule is the Windows client's alone; the client is a parameter so that
+/// every platform's tests cover both sides.
+fn lost_in_code_page(name: &str, windows_client: bool) -> bool {
+    windows_client && name.contains('?')
 }
 
 /// New key for `key` when the directory `from_prefix` is renamed to `to_prefix`,
@@ -630,6 +666,8 @@ pub struct FsInner {
     uid: u32,
     gid: u32,
     fsid: u64,
+    /// Stamped into every file handle this filesystem issues; see `fh_to_id`.
+    handle_generation: u64,
     transfer_config: OnceLock<crate::move_transfer::config::MoveConfig>,
     quota: AsyncMutex<super::quota::StageQuota>,
     pending_renames: RwLock<HashMap<PathBuf, (String, String)>>,
@@ -686,6 +724,7 @@ impl S3NfsFs {
                 uid: current_uid(),
                 gid: current_gid(),
                 fsid,
+                handle_generation: next_handle_generation(),
                 transfer_config: OnceLock::new(),
                 quota: AsyncMutex::new(super::quota::StageQuota::default()),
                 pending_renames: RwLock::new(HashMap::new()),
@@ -1307,11 +1346,54 @@ impl S3NfsFs {
     /// A name carrying a slash would compose a key outside the directory it was
     /// sent for, so it is refused rather than normalized.
     fn child_name(&self, filename: &filename3) -> Result<String, nfsstat3> {
+        Self::child_name_with(filename, cfg!(windows))
+    }
+
+    /// [`Self::child_name`] for a client that does or does not lose characters
+    /// of a name ([`lost_in_code_page`]).
+    fn child_name_with(filename: &filename3, windows_client: bool) -> Result<String, nfsstat3> {
         let name = std::str::from_utf8(filename).map_err(|_| nfsstat3::NFS3ERR_INVAL)?;
-        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains('/')
+            || lost_in_code_page(name, windows_client)
+        {
             return Err(nfsstat3::NFS3ERR_INVAL);
         }
         Ok(name.to_string())
+    }
+
+    /// LOOKUP for a client that does or does not lose characters of a name: a
+    /// name it may have mangled ([`lost_in_code_page`]) names nothing.
+    async fn lookup_with(
+        &self,
+        dirid: fileid3,
+        filename: &filename3,
+        windows_client: bool,
+    ) -> Result<fileid3, nfsstat3> {
+        let dir = self.dir_inode(dirid)?;
+        let name = std::str::from_utf8(filename).map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
+        if lost_in_code_page(name, windows_client) {
+            return Err(nfsstat3::NFS3ERR_NOENT);
+        }
+
+        if name.is_empty() || name == "." {
+            return Ok(dirid);
+        }
+        if name == ".." {
+            return Ok(dir.parent);
+        }
+
+        for _ in 0..FENCED_KEY_ATTEMPTS {
+            let dir_key = normalize_dir_key(&self.dir_inode(dirid)?.key);
+            if let Some((id, _)) = self.resolve_child_in(dirid, &dir_key, name).await? {
+                return Ok(id);
+            }
+        }
+        Err(fenced_key_kept_moving(format_args!(
+            "directory {dirid} (looking up \"{name}\")"
+        )))
     }
 
     fn intern_child(
@@ -1401,9 +1483,16 @@ impl S3NfsFs {
     }
 
     fn attr_of(&self, id: fileid3, inode: &Inode) -> fattr3 {
+        self.attr_of_with(id, inode, cfg!(windows))
+    }
+
+    /// [`Self::attr_of`] for a client that does or does not check the mode
+    /// bits itself ([`permission_modes`]).
+    fn attr_of_with(&self, id: fileid3, inode: &Inode, windows_client: bool) -> fattr3 {
+        let (dir_mode, file_mode) = permission_modes(windows_client, self.inner.read_only);
         let (ftype, mode, nlink, size) = match inode.kind {
-            EntryKind::Dir => (ftype3::NF3DIR, DIR_MODE, 2, DIR_SIZE),
-            EntryKind::File => (ftype3::NF3REG, FILE_MODE, 1, inode.size),
+            EntryKind::Dir => (ftype3::NF3DIR, dir_mode, 2, DIR_SIZE),
+            EntryKind::File => (ftype3::NF3REG, file_mode, 1, inode.size),
         };
         let time = nfstime3 {
             seconds: inode.mtime_secs,
@@ -4051,6 +4140,31 @@ fn current_gid() -> u32 {
     0
 }
 
+/// The lowest handle generation a new filesystem in this process can get.
+static NEXT_HANDLE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// A handle generation for a new filesystem: the time in Unix nanoseconds, or
+/// one more than the previous filesystem's when the clock has not passed it.
+/// Every filesystem in the process gets a larger one than any before it, and a
+/// later process normally a larger one still.
+fn next_handle_generation() -> u64 {
+    let now = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .and_then(|nanos| u64::try_from(nanos).ok())
+        .unwrap_or(0);
+    NEXT_HANDLE_GENERATION.fetch_max(now, Ordering::SeqCst);
+    NEXT_HANDLE_GENERATION.fetch_add(1, Ordering::SeqCst)
+}
+
+/// The generation and file id a handle carries, in the layout `id_to_fh`
+/// writes: 8 little-endian bytes each. `None` for any other length.
+fn split_handle(handle: &nfs_fh3) -> Option<(u64, fileid3)> {
+    let ([generation, id], []) = handle.data.as_chunks::<8>() else {
+        return None;
+    };
+    Some((u64::from_le_bytes(*generation), u64::from_le_bytes(*id)))
+}
+
 #[async_trait]
 impl NFSFileSystem for S3NfsFs {
     fn capabilities(&self) -> VFSCapabilities {
@@ -4065,26 +4179,47 @@ impl NFSFileSystem for S3NfsFs {
         ROOT_ID
     }
 
+    /// nfsserve's layout with this filesystem's generation, not the process's.
+    fn id_to_fh(&self, id: fileid3) -> nfs_fh3 {
+        nfs_fh3 {
+            data: [self.inner.handle_generation.to_le_bytes(), id.to_le_bytes()].concat(),
+        }
+    }
+
+    /// Resolves a handle issued by this filesystem, and only by it: one from
+    /// an earlier filesystem is NFS3ERR_STALE and one from a later filesystem
+    /// NFS3ERR_BADHANDLE, the root's included. Ids restart in every filesystem
+    /// (`InodeTable`), so an earlier mount's handle, even in this process, may
+    /// name another file now, and its root may be another bucket's. Windows'
+    /// Client for NFS keeps a server's root handle past a successful `umount`
+    /// and reconnects a share it knows without a MOUNT call, so with the root
+    /// exempt a drive letter a crash left mapped would show, and write to,
+    /// whichever bucket the next mount at its address serves. Instead every
+    /// Windows mount listens on an address no earlier mount of its run used
+    /// (`manager::bind_nfs_server`), and an older mount's handle fails closed
+    /// wherever it turns up: a drive letter a crash left mapped finds nothing
+    /// listening on its address, and on a rare reuse across runs every handle
+    /// the client cached is refused here.
+    fn fh_to_id(&self, handle: &nfs_fh3) -> Result<fileid3, nfsstat3> {
+        let (generation, id) = split_handle(handle).ok_or(nfsstat3::NFS3ERR_BADHANDLE)?;
+        let current = self.inner.handle_generation;
+        if generation == current {
+            Ok(id)
+        } else if generation < current {
+            Err(nfsstat3::NFS3ERR_STALE)
+        } else {
+            Err(nfsstat3::NFS3ERR_BADHANDLE)
+        }
+    }
+
+    /// The WRITE verifier, nfsserve's only use of this: each mount answers as
+    /// a freshly started server.
+    fn serverid(&self) -> cookieverf3 {
+        self.inner.handle_generation.to_le_bytes()
+    }
+
     async fn lookup(&self, dirid: fileid3, filename: &filename3) -> Result<fileid3, nfsstat3> {
-        let dir = self.dir_inode(dirid)?;
-        let name = std::str::from_utf8(filename).map_err(|_| nfsstat3::NFS3ERR_NOENT)?;
-
-        if name.is_empty() || name == "." {
-            return Ok(dirid);
-        }
-        if name == ".." {
-            return Ok(dir.parent);
-        }
-
-        for _ in 0..FENCED_KEY_ATTEMPTS {
-            let dir_key = normalize_dir_key(&self.dir_inode(dirid)?.key);
-            if let Some((id, _)) = self.resolve_child_in(dirid, &dir_key, name).await? {
-                return Ok(id);
-            }
-        }
-        Err(fenced_key_kept_moving(format_args!(
-            "directory {dirid} (looking up \"{name}\")"
-        )))
+        self.lookup_with(dirid, filename, cfg!(windows)).await
     }
 
     async fn getattr(&self, id: fileid3) -> Result<fattr3, nfsstat3> {
@@ -5330,6 +5465,53 @@ mod tests {
             fs.mkdir(ROOT_ID, &name).await,
             Err(nfsstat3::NFS3ERR_ROFS)
         ));
+    }
+
+    #[tokio::test]
+    async fn each_client_is_told_mode_bits_it_can_act_on() {
+        // Windows' Client for NFS checks the bits itself, as UID -2, so only
+        // the world bits count for it: they let it write unless the mount is
+        // read-only. Unix clients own the files and ask the server.
+        for (fs, read_only) in [(writable_fs(), false), (read_only_fs(), true)] {
+            let file = fs
+                .intern_child("note.txt", ROOT_ID, EntryKind::File, 0, 0)
+                .unwrap();
+            let root = fs.inode(ROOT_ID).unwrap();
+            let note = fs.inode(file).unwrap();
+            for windows_client in [false, true] {
+                let wanted = match (windows_client, read_only) {
+                    (false, _) => (0o755, 0o644),
+                    (true, false) => (0o777, 0o666),
+                    (true, true) => (0o555, 0o444),
+                };
+                let reported = (
+                    fs.attr_of_with(ROOT_ID, &root, windows_client).mode,
+                    fs.attr_of_with(file, &note, windows_client).mode,
+                );
+                assert_eq!(
+                    reported, wanted,
+                    "windows_client={windows_client}, read_only={read_only}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mode_change_is_accepted_and_the_reported_bits_stay() {
+        // Object storage has nowhere to keep a mode, and refusing one breaks
+        // `cp -p`; nothing is listening on the endpoint, so this also shows
+        // that no request is made.
+        let fs = writable_fs();
+        let file = fs
+            .intern_child("note.txt", ROOT_ID, EntryKind::File, 0, 0)
+            .unwrap();
+        let chmod = sattr3 {
+            mode: nfsserve::nfs::set_mode3::mode(0o600),
+            ..sattr3::default()
+        };
+        let (dir_mode, file_mode) = permission_modes(cfg!(windows), false);
+        assert_eq!(fs.setattr(file, chmod).await.unwrap().mode, file_mode);
+        assert_eq!(fs.setattr(ROOT_ID, chmod).await.unwrap().mode, dir_mode);
     }
 
     #[tokio::test]

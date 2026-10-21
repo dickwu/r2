@@ -5,6 +5,8 @@
 //! Every command is built here as a pure `argv` vector so the exact flags are
 //! unit-testable for all three platforms regardless of the build host.
 
+use std::net::Ipv4Addr;
+
 /// Operating systems with a built-in NFSv3 client we can drive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountPlatform {
@@ -73,23 +75,80 @@ pub fn mount_argv(
         MountPlatform::Linux => vec![
             "mount.nfs".to_string(),
             "-o".to_string(),
-            format!("user,noacl,nolock,{}", unix_options(platform, port, read_only)),
+            format!(
+                "user,noacl,nolock,{}",
+                unix_options(platform, port, read_only)
+            ),
             format!("{}:/", server_ip),
             target.to_string(),
         ],
         // The Windows NFS client has no `port=` option — it resolves the
-        // server through the portmapper on port 111 of `server_ip`, which the
-        // manager binds for exactly this reason. The UNC hides the read-only
-        // flag too: the client has no `ro`, so the server enforces it alone.
-        // Options otherwise kept identical to the upstream nfsserve recipe.
-        MountPlatform::Windows => vec![
-            "mount.exe".to_string(),
-            "-o".to_string(),
-            "anon,nolock,mtype=soft,fileaccess=6,casesensitive,lang=ansi,rsize=128,wsize=128,timeout=60,retry=2".to_string(),
-            format!(r"\\{}\", server_ip),
-            target.to_string(),
-        ],
+        // server through the portmapper on `PORTMAPPER_PORT` of `server_ip`,
+        // which the manager binds for exactly this reason. It has no `ro`
+        // either, so the server enforces a read-only mount, and the mode bits
+        // it reports then carry no write bit (`nfs_fs::permission_modes`).
+        // The share name is `!`, the spelling Microsoft documents for an
+        // exported root "/": with an empty share (`\\ip\`) or `ip:/` the
+        // client maps the server itself, so every path under the drive is
+        // looked up as an export of its own (MNT "/<first component>") and
+        // fails with error 53 while the mount command still exits 0.
+        MountPlatform::Windows => {
+            let mut argv = vec!["mount.exe".to_string()];
+            for option in WINDOWS_MOUNT_OPTIONS {
+                argv.extend(["-o".to_string(), option.to_string()]);
+            }
+            argv.extend([format!(r"\\{}\!", server_ip), target.to_string()]);
+            argv
+        }
     }
+}
+
+/// `mount.exe`'s options, each passed with an `-o` of its own: the tool reads
+/// the value of a `key=value` option to the end of its argument, commas
+/// included (`-o retry=2,timeout=5` is an "Invalid retry value"), so a comma
+/// list applies at most its first option, and mounts all the same. That is
+/// how nfsserve's recipe (`-o anon,nolock,mtype=soft,…`) left lookups
+/// case-insensitive, a 0.8 s RPC timeout and one retry. (Microsoft's example
+/// puts several options after one `-o`, separated by spaces; one `-o` each is
+/// the form verified on windows-2022.) `casesensitive=yes` keeps `report.pdf`
+/// from resolving to `Report.pdf`; the bare `casesensitive` Microsoft
+/// documents is an "Invalid command line argument". `timeout=30` and
+/// `timeout=60` both list as 10.0, so the mount asks for 10, and `retry=10` is
+/// the most retries a soft mount takes; how long a RENAME (a copy, then a
+/// delete) may then run before the client gives up was not measured. `anon`,
+/// `nolock`, `mtype=soft` and `lang=ansi` match the CI runner's defaults,
+/// which Microsoft documents differently for locking. `fileaccess` (the
+/// server reads no requested mode) and `rsize`/`wsize` (documented only up to
+/// 32 KB; the client's default is 1 MB) are left out. The native smoke test
+/// asserts the listing `mount.exe` prints.
+pub const WINDOWS_MOUNT_OPTIONS: [&str; 7] = [
+    "anon",
+    "nolock",
+    "casesensitive=yes",
+    "timeout=10",
+    "retry=10",
+    "mtype=soft",
+    "lang=ansi",
+];
+
+/// The portmapper's port, where the Windows NFS client looks for a server:
+/// it takes no other, so a Windows mount's server listens on it.
+pub const PORTMAPPER_PORT: u16 = 111;
+
+/// How many loopback addresses a Windows mount's server can listen on: 254
+/// hosts (never .0 or .255) in each of the 256 subnets of 127.88.0.0/16.
+pub const WINDOWS_SERVER_IPS: u64 = 256 * 254;
+
+/// The loopback address a Windows mount's server listens on, named by
+/// `seed`: 127.88.x.y, never ending in .0 or .255. Seeds
+/// 0..`WINDOWS_SERVER_IPS` name each address once, in order, and larger ones
+/// wrap. The manager steps through the seeds from a random start rather than
+/// drawing a fresh one per mount, so no address repeats within a run (see
+/// `manager::bind_nfs_server`).
+pub fn windows_server_ip(seed: u64) -> Ipv4Addr {
+    const HOSTS: u64 = 254;
+    let index = seed % WINDOWS_SERVER_IPS;
+    Ipv4Addr::new(127, 88, (index / HOSTS) as u8, 1 + (index % HOSTS) as u8)
 }
 
 /// Unmount commands to try in order; the first one that exits 0 wins.
@@ -289,18 +348,61 @@ mod tests {
     #[test]
     fn windows_mount_targets_the_server_unc_share() {
         // The UNC host is the per-mount loopback IP whose port 111 the server
-        // bound; the portmapper there answers with its own port.
-        let argv = mount_argv(MountPlatform::Windows, "127.88.0.1", 111, "Z:", false);
+        // bound; the portmapper there answers with its own port. The share
+        // name is `!`, the documented spelling for the exported root "/":
+        // `\\ip\` and `ip:/` map the server itself, so every path under the
+        // drive is then looked up as an export of its own. Every option has
+        // an `-o` of its own: in a comma list `mount.exe` applies at most the
+        // first.
+        let argv = mount_argv(MountPlatform::Windows, "127.88.41.7", 111, "Z:", false);
         assert_eq!(
             argv,
             vec![
                 "mount.exe",
                 "-o",
-                "anon,nolock,mtype=soft,fileaccess=6,casesensitive,lang=ansi,rsize=128,wsize=128,timeout=60,retry=2",
-                r"\\127.88.0.1\",
+                "anon",
+                "-o",
+                "nolock",
+                "-o",
+                "casesensitive=yes",
+                "-o",
+                "timeout=10",
+                "-o",
+                "retry=10",
+                "-o",
+                "mtype=soft",
+                "-o",
+                "lang=ansi",
+                r"\\127.88.41.7\!",
                 "Z:",
             ]
         );
+    }
+
+    #[test]
+    fn every_seed_names_a_usable_windows_loopback_address() {
+        let domain = 0..WINDOWS_SERVER_IPS;
+        // Each of 127.88.0.1 ..= 127.88.255.254 once, none ending in .0 or
+        // .255, and the same seed always the same address.
+        let addresses: Vec<Ipv4Addr> = domain.clone().map(windows_server_ip).collect();
+        let distinct: std::collections::BTreeSet<&Ipv4Addr> = addresses.iter().collect();
+        assert_eq!(distinct.len(), addresses.len());
+        assert_eq!(addresses[0], Ipv4Addr::new(127, 88, 0, 1));
+        assert_eq!(addresses[1], Ipv4Addr::new(127, 88, 0, 2));
+        assert_eq!(addresses[254], Ipv4Addr::new(127, 88, 1, 1));
+        assert_eq!(
+            addresses[addresses.len() - 1],
+            Ipv4Addr::new(127, 88, 255, 254)
+        );
+        for seed in domain.chain([u64::MAX, u64::MAX / 3, 1 << 40]) {
+            let address = windows_server_ip(seed);
+            let [a, b, _, host] = address.octets();
+            assert_eq!((a, b), (127, 88), "{seed}");
+            assert!((1..=254).contains(&host), "{seed}: {address}");
+            assert_eq!(windows_server_ip(seed), address);
+        }
+        // Larger seeds wrap onto the same addresses.
+        assert_eq!(windows_server_ip(WINDOWS_SERVER_IPS), addresses[0]);
     }
 
     #[test]

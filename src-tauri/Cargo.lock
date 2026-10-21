@@ -5676,6 +5676,7 @@ dependencies = [
  "tauri-plugin-video-thumbnail",
  "tokio",
  "tokio-util",
+ "tracing-subscriber",
  "turso",
  "urlencoding",
 ]

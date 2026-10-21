@@ -108,6 +108,10 @@ jobs:
       - name: Execute native mount read write rename unmount
         id: nfs
         shell: pwsh
+        env:
+          # Streams the server's RPC trace and the mount state into the log: a
+          # client that mounts and then fails is otherwise just "error 53".
+          R2_NFS_TRACE: '1'
         run: |
           for ($iteration = 1; $iteration -le 3; $iteration++) {
             python scripts/run-native-nfs-test.py 2>&1 | Tee-Object -FilePath "windows-nfs-$iteration.log"
