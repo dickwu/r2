@@ -81,12 +81,17 @@ pub fn mount_argv(
         // server through the portmapper on port 111 of `server_ip`, which the
         // manager binds for exactly this reason. The UNC hides the read-only
         // flag too: the client has no `ro`, so the server enforces it alone.
+        // The share name is `!`, the spelling Client for NFS requires for an
+        // exported root "/": with an empty share (`\\ip\`) or `ip:/` the
+        // client maps the server itself, so every path under the drive is
+        // looked up as an export of its own (MNT "/<first component>") and
+        // fails with error 53 while the mount command still exits 0.
         // Options otherwise kept identical to the upstream nfsserve recipe.
         MountPlatform::Windows => vec![
             "mount.exe".to_string(),
             "-o".to_string(),
             "anon,nolock,mtype=soft,fileaccess=6,casesensitive,lang=ansi,rsize=128,wsize=128,timeout=60,retry=2".to_string(),
-            format!(r"\\{}\", server_ip),
+            format!(r"\\{}\!", server_ip),
             target.to_string(),
         ],
     }
@@ -289,7 +294,10 @@ mod tests {
     #[test]
     fn windows_mount_targets_the_server_unc_share() {
         // The UNC host is the per-mount loopback IP whose port 111 the server
-        // bound; the portmapper there answers with its own port.
+        // bound; the portmapper there answers with its own port. The share
+        // name must be `!`: the exported root "/" cannot be mounted as
+        // `\\ip\` or `ip:/`, which map the server itself, so every path under
+        // the drive is then looked up as an export of its own.
         let argv = mount_argv(MountPlatform::Windows, "127.88.0.1", 111, "Z:", false);
         assert_eq!(
             argv,
@@ -297,7 +305,7 @@ mod tests {
                 "mount.exe",
                 "-o",
                 "anon,nolock,mtype=soft,fileaccess=6,casesensitive,lang=ansi,rsize=128,wsize=128,timeout=60,retry=2",
-                r"\\127.88.0.1\",
+                r"\\127.88.0.1\!",
                 "Z:",
             ]
         );
