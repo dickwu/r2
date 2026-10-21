@@ -24,7 +24,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-os = "2"
-tauri-plugin-http = { version = "2.7.0", features = ["unsafe-headers"] }
+tauri-plugin-http = { version = "2.8.0", features = ["unsafe-headers"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-dialog = "2"
@@ -52,18 +52,18 @@ base64 = "0.22"
 chrono = "0.4"
 urlencoding = "2"
 lazy_static = "1.4"
-turso = "0.8.0-pre"
+turso = "0.9.0-pre"
 log = "0.4"
 tauri-plugin-video-thumbnail = { git = "https://github.com/dickwu/tauri-plugin-video-thumbnail" }
 # AWS S3 SDK for R2 operations
 aws-config = "1.8"
-aws-sdk-s3 = { version = "1.149.0", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.153.0", features = ["behavior-version-latest"] }
 aws-credential-types = "1.2"
 futures-util = "0.3"
 # Multi-threaded download engine with Range-based parallel chunk acceleration
 range-dl = { path = "crates/range-dl" }
 # Dev-only: connector for AI-assisted testing (opt-in via --features connector)
-tauri-plugin-connector = { version = "0.9", optional = true }
+tauri-plugin-connector = { version = "0.16", optional = true }
 # Localhost NFSv3 server backing the "mount bucket as local drive" feature
 nfsserve = "0.11"
 async-trait = "0.1"
