@@ -32,6 +32,16 @@ const LAYOUT = 2;
 // bundles; the CI payload check lists the same labels.
 const WORKER_LABELS = ['editor', 'css', 'html', 'json', 'ts'];
 
+// The WORKER_LABELS with no <label>.worker-*.js bundle in assetsDir. The names
+// carry a content hash, so they match on label and extension; a missing
+// folder lacks every one.
+function missingWorkers(assetsDir) {
+  const assets = existsSync(assetsDir) ? readdirSync(assetsDir) : [];
+  return WORKER_LABELS.filter(
+    (label) => !assets.some((name) => name.startsWith(`${label}.worker-`) && name.endsWith('.js'))
+  );
+}
+
 // monaco-editor's exports map hides its package.json from require(), so find
 // the package directory the way Node's resolver walks node_modules.
 const packageDir = require.resolve
@@ -49,17 +59,13 @@ if (existsSync(manifestPath)) {
     const staged = ['vs/loader.js', ...LICENSE_FILES].every((file) =>
       existsSync(resolve(targetDir, file))
     );
-    // The bundle names carry a content hash, so match on label and extension.
-    const assets = readdirSync(resolve(targetDir, 'vs/assets'));
-    const workersStaged = WORKER_LABELS.every((label) =>
-      assets.some((name) => name.startsWith(`${label}.worker-`) && name.endsWith('.js'))
-    );
+    const workersStaged = missingWorkers(resolve(targetDir, 'vs/assets')).length === 0;
     if (manifest.version === version && manifest.layout === LAYOUT && staged && workersStaged) {
       console.log(`[monaco-assets] ${targetDir} already at ${version}, skipping copy`);
       process.exit(0);
     }
   } catch {
-    // Unreadable manifest, or a missing or unreadable assets folder: fall through and recopy.
+    // Unreadable manifest or assets folder: fall through and recopy.
   }
 }
 
@@ -70,6 +76,16 @@ if (!existsSync(resolve(sourceDir, 'loader.js'))) {
   throw new Error(
     `[monaco-assets] monaco-editor ${version} ships no AMD build at ${sourceDir}; ` +
       "@monaco-editor/react's loader needs min/vs/loader.js"
+  );
+}
+// A Monaco that renames or drops a worker would otherwise be staged without it
+// on every run, and release.yml checks no payload.
+const sourceAssetsDir = resolve(sourceDir, 'assets');
+const missingSourceWorkers = missingWorkers(sourceAssetsDir);
+if (missingSourceWorkers.length) {
+  throw new Error(
+    `[monaco-assets] monaco-editor ${version} ships no ${missingSourceWorkers.join(', ')} ` +
+      `worker bundle in ${sourceAssetsDir}; editor.main starts its Workers from them`
   );
 }
 const missingLicenses = LICENSE_FILES.filter((file) => !existsSync(resolve(packageDir, file)));
