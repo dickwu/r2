@@ -5,8 +5,9 @@
 // own default Monaco from jsdelivr, which never loads offline and is not the
 // version package.json pins. The package's license files are staged beside
 // vs/. The copy is skipped when the manifest already matches the installed
-// monaco-editor version and this script's layout, and the loader, the license
-// files and the vs/assets/<label>.worker-*.js worker bundles are still in place.
+// monaco-editor version and this script's layout, and the loader, editor.main,
+// the license files and the vs/assets/<label>.worker-*.js worker bundles are
+// still in place.
 import {
   copyFileSync,
   cpSync,
@@ -28,15 +29,22 @@ const LICENSE_FILES = ['LICENSE', 'ThirdPartyNotices.txt'];
 // Bump whenever what this script stages changes: a manifest whose version
 // matches but whose layout does not is re-copied, not skipped.
 const LAYOUT = 2;
+// The loader requires editor.main.js, which links editor.main.css.
+const EDITOR_MAIN_FILES = ['editor/editor.main.js', 'editor/editor.main.css'];
 // editor.main starts its Workers from the hashed vs/assets/<label>.worker-*.js
 // bundles; the CI payload check lists the same labels.
 const WORKER_LABELS = ['editor', 'css', 'html', 'json', 'ts'];
 
 // The WORKER_LABELS with no <label>.worker-*.js bundle in assetsDir. The names
-// carry a content hash, so they match on label and extension; a missing
-// folder lacks every one.
+// carry a content hash, so they match on label and extension; a path that is
+// not a readable folder lacks every one.
 function missingWorkers(assetsDir) {
-  const assets = existsSync(assetsDir) ? readdirSync(assetsDir) : [];
+  let assets;
+  try {
+    assets = readdirSync(assetsDir);
+  } catch {
+    return [...WORKER_LABELS];
+  }
   return WORKER_LABELS.filter(
     (label) => !assets.some((name) => name.startsWith(`${label}.worker-`) && name.endsWith('.js'))
   );
@@ -56,16 +64,18 @@ const { version } = JSON.parse(readFileSync(resolve(packageDir, 'package.json'),
 if (existsSync(manifestPath)) {
   try {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-    const staged = ['vs/loader.js', ...LICENSE_FILES].every((file) =>
-      existsSync(resolve(targetDir, file))
-    );
+    const staged = [
+      'vs/loader.js',
+      ...EDITOR_MAIN_FILES.map((file) => `vs/${file}`),
+      ...LICENSE_FILES,
+    ].every((file) => existsSync(resolve(targetDir, file)));
     const workersStaged = missingWorkers(resolve(targetDir, 'vs/assets')).length === 0;
     if (manifest.version === version && manifest.layout === LAYOUT && staged && workersStaged) {
       console.log(`[monaco-assets] ${targetDir} already at ${version}, skipping copy`);
       process.exit(0);
     }
   } catch {
-    // Unreadable manifest or assets folder: fall through and recopy.
+    // Unreadable manifest: fall through and recopy.
   }
 }
 
@@ -78,14 +88,25 @@ if (!existsSync(resolve(sourceDir, 'loader.js'))) {
       "@monaco-editor/react's loader needs min/vs/loader.js"
   );
 }
+// CI's dist check requires both, but release.yml checks no payload.
+const missingEditorFiles = EDITOR_MAIN_FILES.filter(
+  (file) => !existsSync(resolve(sourceDir, file))
+);
+if (missingEditorFiles.length) {
+  throw new Error(
+    `[monaco-assets] monaco-editor ${version} ships no ${missingEditorFiles.join(' or ')} ` +
+      `at ${sourceDir}; the editor starts from editor.main.js, which links editor.main.css`
+  );
+}
 // A Monaco that renames or drops a worker would otherwise be staged without it
 // on every run, and release.yml checks no payload.
 const sourceAssetsDir = resolve(sourceDir, 'assets');
 const missingSourceWorkers = missingWorkers(sourceAssetsDir);
 if (missingSourceWorkers.length) {
   throw new Error(
-    `[monaco-assets] monaco-editor ${version} ships no ${missingSourceWorkers.join(', ')} ` +
-      `worker bundle in ${sourceAssetsDir}; editor.main starts its Workers from them`
+    `[monaco-assets] monaco-editor ${version} ships no worker bundle for ` +
+      `${missingSourceWorkers.join(', ')} in ${sourceAssetsDir}; ` +
+      'editor.main starts its Workers from them'
   );
 }
 const missingLicenses = LICENSE_FILES.filter((file) => !existsSync(resolve(packageDir, file)));
