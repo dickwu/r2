@@ -75,6 +75,9 @@ libc = "0.2"
 [dev-dependencies]
 # Paused-clock tests (`#[tokio::test(start_paused = true)]`) for the list retry backoff
 tokio = { version = "1", features = ["test-util"] }
+# Streams nfsserve's RPC-level tracing from the native NFS smoke test (R2_NFS_TRACE);
+# already in the build graph through turso, so it adds no crate
+tracing-subscriber = "0.3"
 
 [features]
 default = []

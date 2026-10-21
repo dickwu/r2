@@ -278,6 +278,113 @@ fn windows_nfs_tool(name: &str) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+// Opt-in diagnostics (R2_NFS_TRACE). They only observe and never change what
+// the test asserts. A native client that mounts and then fails on its first
+// file operation is otherwise opaque; this shows which RPC it stopped at.
+
+fn trace_enabled() -> bool {
+    std::env::var_os("R2_NFS_TRACE").is_some()
+}
+
+/// Streams nfsserve's own tracing (every accepted connection and every
+/// portmap, mount and NFS call) to stderr.
+fn install_nfs_trace() {
+    use tracing_subscriber::{
+        filter::{LevelFilter, Targets},
+        layer::SubscriberExt,
+        util::SubscriberInitExt,
+        Layer,
+    };
+    if !trace_enabled() {
+        return;
+    }
+    let layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .with_filter(Targets::new().with_target("nfsserve", LevelFilter::DEBUG));
+    let _ = tracing_subscriber::registry().with(layer).try_init();
+}
+
+/// One stderr line stamped like the tracing output, so tool output and the
+/// server trace interleave in time order.
+fn diag(message: impl AsRef<str>) {
+    if trace_enabled() {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        eprintln!("[diag {now}] {}", message.as_ref());
+    }
+}
+
+type ToolRun = Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed>;
+
+/// How a tool run ended, one prefixed line per output line. NUL bytes are
+/// dropped so UTF-16 console output stays readable.
+fn render_tool_run(run: &ToolRun) -> String {
+    match run {
+        Ok(Ok(output)) => {
+            let mut rendered = format!("exit: {}", output.status);
+            for (stream, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+                let text: Vec<u8> = bytes.iter().copied().filter(|byte| *byte != 0).collect();
+                for line in String::from_utf8_lossy(&text)
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                {
+                    rendered.push_str(&format!("\n  {stream}| {line}"));
+                }
+            }
+            rendered
+        }
+        Ok(Err(error)) => format!("could not run: {error}"),
+        Err(_) => "timed out".to_string(),
+    }
+}
+
+/// Runs an external tool and prints how it ended. A missing tool, a hang or a
+/// failure is evidence too, so nothing here can fail the test.
+#[cfg_attr(not(windows), allow(dead_code))]
+async fn probe(stage: &str, program: &str, args: &[&str]) {
+    if !trace_enabled() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let run = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(program)
+            .args(args)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    diag(format!(
+        "{stage}: {program} {} ({} ms)\n{}",
+        args.join(" "),
+        started.elapsed().as_millis(),
+        render_tool_run(&run)
+    ));
+}
+
+/// A Windows NFS tool by absolute System32 path, or its bare name where
+/// SystemRoot is unset (the probe then reports that it could not run).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn nfs_tool(name: &str) -> String {
+    std::env::var_os("SystemRoot")
+        .map(|root| {
+            PathBuf::from(root)
+                .join("System32")
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| name.to_string())
+}
+
+/// What Windows believes about the mount. A drive listed as `Unavailable`
+/// right after a successful `mount.exe` is one whose every path will fail.
+#[cfg_attr(not(windows), allow(dead_code))]
+async fn mount_state_probes(stage: &str) {
+    probe(stage, &nfs_tool("mount.exe"), &[]).await;
+    probe(stage, "net.exe", &["use"]).await;
+}
+
 #[test]
 fn native_windows_smoke_requires_an_explicit_unused_drive() {
     let assigned = (1 << 2) | (1 << 25); // C: and Z: are in use.
@@ -303,6 +410,7 @@ fn native_windows_smoke_requires_an_explicit_unused_drive() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires the host NFS client and permission to create a temporary loopback mount"]
 async fn native_nfs_write_read_rename_unmount() {
+    install_nfs_trace();
     #[cfg(windows)]
     let (drive, mount_tool, unmount_tool) = {
         let value = std::env::var("R2_NFS_TEST_DRIVE").ok();
@@ -320,7 +428,13 @@ async fn native_nfs_write_read_rename_unmount() {
         let objects = objects.clone();
         move |request| {
             let objects = objects.clone();
-            async move { respond(request, &mut objects.lock().unwrap()) }
+            async move {
+                diag(format!(
+                    "storage fixture: {} {}",
+                    request.method, request.path
+                ));
+                respond(request, &mut objects.lock().unwrap())
+            }
         }
     })
     .await;
@@ -393,6 +507,7 @@ async fn native_nfs_write_read_rename_unmount() {
             .output(),
     )
     .await;
+    diag(format!("mount command: {}", render_tool_run(&mount)));
     let mounted = matches!(&mount,Ok(Ok(output)) if output.status.success());
     let mut failure = if mounted {
         None
@@ -400,16 +515,27 @@ async fn native_nfs_write_read_rename_unmount() {
         Some(format!("Native NFS mount unavailable: {mount:?}"))
     };
     if mounted {
+        #[cfg(windows)]
+        mount_state_probes("after mounting").await;
+        // The Windows client sends names in the system ANSI code page (the
+        // mount asks for lang=ansi). Beyond it a name arrives as "?" or as
+        // bytes that are not UTF-8, which the server refuses, so only ASCII
+        // names round-trip there.
+        let name = if cfg!(windows) {
+            "file + plus.txt"
+        } else {
+            "file + 中文.txt"
+        };
         let result = tokio::time::timeout(Duration::from_secs(30), async {
-            let file = target.join("file + 中文.txt");
+            let file = target.join(name);
             let renamed = target.join("renamed.txt");
             tokio::fs::write(&file, b"native NFS bytes").await?;
             if tokio::fs::read(&file).await? != b"native NFS bytes" {
                 return Err(std::io::Error::other("Native write/read content mismatch"));
             }
-            if !objects.lock().unwrap().contains_key("file + 中文.txt") {
+            if !objects.lock().unwrap().contains_key(name) {
                 return Err(std::io::Error::other(
-                    "The native client did not preserve the exact Unicode object key",
+                    "The native client did not preserve the exact object key",
                 ));
             }
             tokio::fs::rename(&file, &renamed).await?;
@@ -423,7 +549,7 @@ async fn native_nfs_write_read_rename_unmount() {
                     "Storage fixture did not receive the exact native write",
                 ));
             }
-            if objects.lock().unwrap().contains_key("file + 中文.txt") {
+            if objects.lock().unwrap().contains_key(name) {
                 return Err(std::io::Error::other(
                     "Rename did not delete the original storage object",
                 ));
@@ -437,11 +563,34 @@ async fn native_nfs_write_read_rename_unmount() {
                     "Native delete left the storage object behind",
                 ));
             }
+            #[cfg(windows)]
+            {
+                // A name beyond ASCII must be refused, never stored under a
+                // wrong key.
+                let beyond_ascii = target.join("caf\u{e9}.txt");
+                if tokio::fs::write(&beyond_ascii, b"x").await.is_ok() {
+                    return Err(std::io::Error::other(
+                        "A name beyond ASCII was accepted instead of refused",
+                    ));
+                }
+                if objects
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .any(|key| key.starts_with("caf"))
+                {
+                    return Err(std::io::Error::other(
+                        "A refused name still reached storage",
+                    ));
+                }
+            }
             Ok::<_, std::io::Error>(())
         })
         .await;
         if !matches!(result, Ok(Ok(()))) {
             failure = Some(format!("Native NFS operations failed: {result:?}"));
+            #[cfg(windows)]
+            mount_state_probes("after the operations failed").await;
         }
     }
     // Only a successful mount command establishes ownership. A failed or
