@@ -181,6 +181,23 @@ jobs:
           test -f dist/file-viewer/vendor/pdf/pdf.worker.mjs
           test -f dist/file-viewer/vendor/docx/docx.worker.js
 
+      # Same failure mode for the text editor: a missing loader.js resolves to
+      # index.html and the Monaco editor spins forever instead of erroring.
+      # editor.main starts its Workers from the hashed vs/assets/<label>.worker-*.js
+      # bundles, and the installers must carry Monaco's license notices. Each
+      # check exits on its own and names what is missing, so a failure neither
+      # leans on bash -e nor shows up as a bare "exit code 1".
+      - name: Check Monaco runtime payload in dist
+        shell: bash
+        run: |
+          for file in manifest.json LICENSE ThirdPartyNotices.txt vs/loader.js \
+              vs/editor/editor.main.js vs/editor/editor.main.css; do
+            test -f "dist/monaco-editor/$file" || { echo "::error::dist/monaco-editor/$file is missing"; exit 1; }
+          done
+          for worker in editor css html json ts; do
+            compgen -G "dist/monaco-editor/vs/assets/$worker.worker-*.js" > /dev/null || { echo "::error::no $worker worker bundle in dist/monaco-editor/vs/assets"; exit 1; }
+          done
+
       - name: Debug - Check signing key
         run: echo "TAURI_SIGNING_PRIVATE_KEY length is ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && 'SET' || 'EMPTY' }}"
 
