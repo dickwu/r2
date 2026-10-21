@@ -91,29 +91,41 @@ pub fn mount_argv(
         // client maps the server itself, so every path under the drive is
         // looked up as an export of its own (MNT "/<first component>") and
         // fails with error 53 while the mount command still exits 0.
-        //
-        // Every option is one Microsoft documents for `mount.exe`, in a form
-        // it documents. With nfsserve's recipe the listing `mount.exe` prints
-        // showed `anon` and `nolock` applied and every option from the
-        // invalid `fileaccess=6` (a mode is three digits) on at its default —
-        // case-insensitive lookups, a 0.8 s RPC timeout, one retry — so it
-        // evidently stops applying options at one it cannot parse, and mounts
-        // anyway. `casesensitive` keeps `report.pdf` from resolving to
-        // `Report.pdf`; `timeout=60,retry=2` give a RENAME (a copy, then a
-        // delete) the window `nfs_fs` assumes. `fileaccess` is gone (the
-        // server reads no requested mode), and so are `rsize`/`wsize`
-        // (documented only up to 32 KB; every run so far used the client's
-        // 1 MB default). The two proven options come first and the two that
-        // restate defaults last. The native smoke test asserts the listing.
-        MountPlatform::Windows => vec![
-            "mount.exe".to_string(),
-            "-o".to_string(),
-            "anon,nolock,timeout=60,retry=2,casesensitive,mtype=soft,lang=ansi".to_string(),
-            format!(r"\\{}\!", server_ip),
-            target.to_string(),
-        ],
+        MountPlatform::Windows => {
+            let mut argv = vec!["mount.exe".to_string()];
+            for option in WINDOWS_MOUNT_OPTIONS {
+                argv.extend(["-o".to_string(), option.to_string()]);
+            }
+            argv.extend([format!(r"\\{}\!", server_ip), target.to_string()]);
+            argv
+        }
     }
 }
+
+/// `mount.exe`'s options, each passed with an `-o` of its own: the tool reads
+/// the value of a `key=value` option to the end of its argument, commas
+/// included (`-o retry=2,timeout=5` is an "Invalid retry value"), so a comma
+/// list applies at most its first option, and mounts all the same. That is
+/// how nfsserve's recipe (`-o anon,nolock,mtype=soft,…`) left lookups
+/// case-insensitive, a 0.8 s RPC timeout and one retry. `casesensitive=yes`
+/// keeps `report.pdf` from resolving to `Report.pdf`; the bare
+/// `casesensitive` Microsoft documents is an "Invalid command line argument".
+/// `timeout` is capped at 10 s (60 lists as 10.0), so `retry=10`, the most it
+/// takes, gives a RENAME (a copy, then a delete) the longest window a soft
+/// mount has. `anon`, `nolock`, `mtype=soft` and `lang=ansi` match the CI
+/// runner's defaults, which Microsoft documents differently for locking.
+/// `fileaccess` (the server reads no requested mode) and `rsize`/`wsize`
+/// (documented only up to 32 KB; the client's default is 1 MB) are left out.
+/// The native smoke test asserts the listing `mount.exe` prints.
+pub const WINDOWS_MOUNT_OPTIONS: [&str; 7] = [
+    "anon",
+    "nolock",
+    "casesensitive=yes",
+    "timeout=10",
+    "retry=10",
+    "mtype=soft",
+    "lang=ansi",
+];
 
 /// How many loopback addresses a Windows mount's server can listen on: 254
 /// hosts (never .0 or .255) in each of the 256 subnets of 127.88.0.0/16.
@@ -331,16 +343,28 @@ mod tests {
         // bound; the portmapper there answers with its own port. The share
         // name is `!`, the documented spelling for the exported root "/":
         // `\\ip\` and `ip:/` map the server itself, so every path under the
-        // drive is then looked up as an export of its own. Only documented
-        // options: `mount.exe` ignores every one from the first it cannot
-        // parse on.
+        // drive is then looked up as an export of its own. Every option has
+        // an `-o` of its own: in a comma list `mount.exe` applies at most the
+        // first.
         let argv = mount_argv(MountPlatform::Windows, "127.88.41.7", 111, "Z:", false);
         assert_eq!(
             argv,
             vec![
                 "mount.exe",
                 "-o",
-                "anon,nolock,timeout=60,retry=2,casesensitive,mtype=soft,lang=ansi",
+                "anon",
+                "-o",
+                "nolock",
+                "-o",
+                "casesensitive=yes",
+                "-o",
+                "timeout=10",
+                "-o",
+                "retry=10",
+                "-o",
+                "mtype=soft",
+                "-o",
+                "lang=ansi",
                 r"\\127.88.41.7\!",
                 "Z:",
             ]

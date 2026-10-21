@@ -472,6 +472,26 @@ async fn beyond_ascii_names_keep_their_keys(
 const CASE_SEED_KEY: &str = "Case.txt";
 const CASE_SEED_DATA: &[u8] = b"original case";
 
+/// Seeded before mounting, so the overwrite probe rewrites a file the client
+/// did not create. Windows' Client for NFS creates a file whatever the mode
+/// bits, but opens an existing one for writing only if they let its anonymous
+/// identity write (`permission_modes`).
+const EXISTING_SEED_KEY: &str = "existing.txt";
+const EXISTING_SEED_DATA: &[u8] = b"seeded bytes";
+
+/// Publishes the staged bytes as an unmount's pre-drain would: they reach
+/// storage only when published, and this test runs no flusher.
+async fn publish_staged(fs: &S3NfsFs, written: &str) -> std::io::Result<()> {
+    let unpublished = fs.drain(1, stage::UPLOAD_ATTEMPTS).await;
+    if unpublished == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "Publishing {written} left {unpublished} staged file(s) unpublished"
+        )))
+    }
+}
+
 /// Fails naming `expectation` unless storage holds exactly `wanted` under
 /// `key` (`None`: no such key).
 fn expect_stored(
@@ -507,14 +527,7 @@ async fn case_variants_stay_apart(
 ) -> std::io::Result<()> {
     let lower: &[u8] = b"lower case";
     tokio::fs::write(target.join("case.txt"), lower).await?;
-    // Staged bytes reach storage only when published, and this test runs no
-    // flusher: publish them as an unmount's pre-drain would.
-    let unpublished = fs.drain(1, stage::UPLOAD_ATTEMPTS).await;
-    if unpublished != 0 {
-        return Err(std::io::Error::other(format!(
-            "Publishing case.txt left {unpublished} staged file(s) unpublished"
-        )));
-    }
+    publish_staged(fs, "case.txt").await?;
     expect_stored(
         objects,
         "case.txt",
@@ -547,6 +560,30 @@ async fn case_variants_stay_apart(
     )
 }
 
+/// Overwrites the seeded `existing.txt` through the mount with fewer bytes
+/// than it held, so a write that kept the old length would leave a stale tail.
+async fn an_existing_file_takes_new_bytes(
+    fs: &S3NfsFs,
+    target: &Path,
+    objects: &std::sync::Mutex<HashMap<String, Object>>,
+) -> std::io::Result<()> {
+    let replaced: &[u8] = b"new bytes";
+    tokio::fs::write(target.join(EXISTING_SEED_KEY), replaced).await?;
+    publish_staged(fs, EXISTING_SEED_KEY).await?;
+    expect_stored(
+        objects,
+        EXISTING_SEED_KEY,
+        Some(replaced),
+        "Overwriting existing.txt should store exactly the new bytes",
+    )?;
+    if tokio::fs::read(target.join(EXISTING_SEED_KEY)).await? != replaced {
+        return Err(std::io::Error::other(
+            "existing.txt should read back as exactly the new bytes",
+        ));
+    }
+    Ok(())
+}
+
 /// The properties `mount.exe` lists for `drive` (`Z:`): its row and the
 /// indented lines under it, up to the next row, as `key=value` pairs; the
 /// remote path and anything else without a `=` is skipped. `None` when the
@@ -570,14 +607,16 @@ fn listed_mount_properties(listing: &str, drive: &str) -> Option<BTreeMap<String
     Some(properties)
 }
 
-/// What the mount asks for (`platform::mount_argv`), as `mount.exe` lists it.
-const REQUESTED_MOUNT_PROPERTIES: [(&str, &str); 6] = [
+/// What the mount asks for (`platform::WINDOWS_MOUNT_OPTIONS`), as
+/// `mount.exe` lists it.
+const REQUESTED_MOUNT_PROPERTIES: [(&str, &str); 7] = [
     ("UID", "-2"),     // anon
     ("locking", "no"), // nolock
-    ("timeout", "60"),
-    ("retry", "2"),
     ("casesensitive", "yes"),
+    ("timeout", "10"),
+    ("retry", "10"),
     ("mount", "soft"), // mtype=soft
+    ("lang", "ansi"),
 ];
 
 /// How the listed properties differ from what the mount asks for, one entry
@@ -597,7 +636,7 @@ fn mount_option_mismatches(properties: Option<&BTreeMap<String, String>>) -> Vec
         .collect()
 }
 
-/// `timeout` is in seconds and may be listed as `60` or `60.0`; every other
+/// `timeout` is in seconds and may be listed as `10` or `10.0`; every other
 /// value compares as text, ignoring ASCII case.
 fn listed_value_matches(key: &str, listed: &str, wanted: &str) -> bool {
     if key == "timeout" {
@@ -716,23 +755,43 @@ fn the_mount_listing_yields_each_drives_own_properties() {
 }
 
 #[test]
+fn the_listing_check_wants_what_the_mount_asks_for() {
+    // How `mount.exe` lists each option it applied.
+    fn listed_as(option: &'static str) -> (&'static str, &'static str) {
+        match option.split_once('=') {
+            None if option == "anon" => ("UID", "-2"),
+            None if option == "nolock" => ("locking", "no"),
+            Some(("mtype", value)) => ("mount", value),
+            Some(pair) => pair,
+            None => panic!("no listing known for the option {option:?}"),
+        }
+    }
+    let asked: std::collections::BTreeSet<_> = super::super::platform::WINDOWS_MOUNT_OPTIONS
+        .into_iter()
+        .map(listed_as)
+        .collect();
+    let checked: std::collections::BTreeSet<_> = REQUESTED_MOUNT_PROPERTIES.into_iter().collect();
+    assert_eq!(checked, asked);
+}
+
+#[test]
 fn the_mount_listing_shows_which_requested_options_took_effect() {
-    // With nfsserve's recipe every option from `fileaccess=6` on kept its
-    // default, `anon`, `nolock` and the default soft mount aside.
+    // nfsserve's recipe, one comma list, showed nothing but this runner's
+    // defaults.
     let recipe = listed_mount_properties(RECIPE_MOUNT_LISTING, "Z:");
     assert_eq!(
         mount_option_mismatches(recipe.as_ref()),
         [
-            "timeout=0.8 (wanted 60)",
-            "retry=1 (wanted 2)",
             "casesensitive=no (wanted yes)",
+            "timeout=0.8 (wanted 10)",
+            "retry=1 (wanted 10)",
         ]
     );
     // What the mount asks for now, whichever way the timeout is printed.
-    for timeout in ["60", "60.0"] {
+    for timeout in ["10", "10.0"] {
         let listing = RECIPE_MOUNT_LISTING
             .replace("timeout=0.8", &format!("timeout={timeout}"))
-            .replace("retry=1", "retry=2")
+            .replace("retry=1", "retry=10")
             .replace("casesensitive=no", "casesensitive=yes");
         let mismatches = mount_option_mismatches(listed_mount_properties(&listing, "Z:").as_ref());
         assert!(mismatches.is_empty(), "timeout={timeout}: {mismatches:?}");
@@ -748,9 +807,9 @@ fn the_mount_listing_shows_which_requested_options_took_effect() {
     assert_eq!(
         mount_option_mismatches(listed_mount_properties(&without_retry, "Z:").as_ref()),
         [
-            "timeout=0.8 (wanted 60)",
-            "no retry (wanted 2)",
             "casesensitive=no (wanted yes)",
+            "timeout=0.8 (wanted 10)",
+            "no retry (wanted 10)",
         ]
     );
 }
@@ -793,13 +852,21 @@ async fn native_nfs_write_read_rename_unmount() {
         let unmount = windows_nfs_tool("umount.exe").expect("Windows Client for NFS unmount tool");
         (drive, mount, unmount)
     };
-    let objects = Arc::new(std::sync::Mutex::new(HashMap::from([(
-        CASE_SEED_KEY.to_string(),
-        Object {
-            data: CASE_SEED_DATA.to_vec(),
-            meta: HashMap::new(),
-        },
-    )])));
+    let objects = Arc::new(std::sync::Mutex::new(HashMap::from(
+        [
+            (CASE_SEED_KEY, CASE_SEED_DATA),
+            (EXISTING_SEED_KEY, EXISTING_SEED_DATA),
+        ]
+        .map(|(key, data)| {
+            (
+                key.to_string(),
+                Object {
+                    data: data.to_vec(),
+                    meta: HashMap::new(),
+                },
+            )
+        }),
+    )));
     let fixture = serve({
         let objects = objects.clone();
         move |request| {
@@ -892,9 +959,9 @@ async fn native_nfs_write_read_rename_unmount() {
         // The Windows client sends names in the system ANSI code page (the
         // mount asks for lang=ansi). A character outside it arrives as "?",
         // which the server refuses, or, where Windows' best-fit tables have
-        // an ASCII look-alike for it and the client applies them, as that
-        // look-alike (`č` as `c`), which the server cannot tell from a real
-        // name; the beyond-ASCII probes below record which. Unless the code
+        // an ASCII look-alike for it, as that look-alike (`čas.txt` was
+        // stored as `cas.txt`), which the server cannot tell from a real
+        // name; the beyond-ASCII probes below log each outcome. Unless the code
         // page is UTF-8, a character inside it arrives as code-page bytes,
         // refused unless they happen to be valid UTF-8. So only ASCII names
         // round-trip on every Windows system.
@@ -941,11 +1008,13 @@ async fn native_nfs_write_read_rename_unmount() {
                 ));
             }
             let probes = case_variants_stay_apart(&fs, &target, &objects).await;
+            let overwrite = an_existing_file_takes_new_bytes(&fs, &target, &objects).await;
+            let probes = probes.and(overwrite);
             // Beyond ASCII the outcome depends on the code page and on
             // best-fit; what the server must keep is that no name is stored
             // under a key other than its own or its documented look-alike.
-            // These run whatever the case probe found, so that one Windows
-            // run prints every outcome; its failure is reported first.
+            // Every probe runs whatever the ones before it found, so that one
+            // Windows run prints every outcome; the first failure is reported.
             #[cfg(windows)]
             let probes = {
                 let beyond_ascii = beyond_ascii_names_keep_their_keys(&target, &objects).await;

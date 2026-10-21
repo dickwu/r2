@@ -61,8 +61,24 @@ const LIST_PAGE_SIZE: i32 = 1000;
 const WAITING_REPORT_STEP: u64 = 8 * 1024 * 1024;
 /// Synthetic size reported for directories, matching a typical unix filesystem.
 const DIR_SIZE: u64 = 4096;
-const DIR_MODE: u32 = 0o755;
-const FILE_MODE: u32 = 0o644;
+
+/// The permission bits reported for a directory and for a file.
+///
+/// Unix clients own what they mount (`current_uid`) and ask the server before
+/// a write (ACCESS), so they get the usual 0755/0644. Windows' Client for NFS
+/// checks the bits itself, against the identity it mounts as: `anon`, UID and
+/// GID -2, which never owns a file. With 0644 it opens no existing file for
+/// writing ("Access is denied") while still creating new ones, so it gets
+/// 0777/0666, or 0555/0444 on a read-only mount, where it then refuses writes
+/// up front. The client is a parameter so that every platform's tests cover
+/// both sides.
+fn permission_modes(windows_client: bool, read_only: bool) -> (u32, u32) {
+    match (windows_client, read_only) {
+        (false, _) => (0o755, 0o644),
+        (true, false) => (0o777, 0o666),
+        (true, true) => (0o555, 0o444),
+    }
+}
 
 /// Objects a directory rename may move. An NFS RENAME has to finish inside the
 /// client's retransmission window, and a bigger move belongs in the app's Batch
@@ -127,15 +143,15 @@ fn child_key(dir_key: &str, name: &str, is_dir: bool) -> String {
 /// Windows' Client for NFS sends names in the system ANSI code page (the mount
 /// asks for `lang=ansi`) and replaces a character outside it with `?`: on a
 /// Western system `file + 中文.txt` arrived as `file + ??.txt`. (A character
-/// with a best-fit ASCII look-alike, `č` as `c`, may arrive as that instead,
-/// which no server can detect.) Different names then arrive as the same one —
-/// two Chinese `.pdf` names can both become `??.pdf`, and the second CREATE
-/// would truncate the first file. `?` is illegal in a Windows file name, so
-/// from that client it always means a lost character: such a name never
-/// becomes a key and never resolves to an object that merely carries the
-/// mangled key. macOS and Linux clients send `?` as itself, a legal POSIX
-/// name, so the rule is the Windows client's alone; the client is a parameter
-/// so that every platform's tests cover both sides.
+/// with a best-fit ASCII look-alike arrives as that instead, which no server
+/// can detect: `čas.txt` was stored as `cas.txt`.) Different names then arrive
+/// as the same one — two Chinese `.pdf` names can both become `??.pdf`, and the
+/// second CREATE would truncate the first file. `?` is illegal in a Windows
+/// file name, so from that client it always means a lost character: such a name
+/// never becomes a key and never resolves to an object that merely carries the
+/// mangled key. macOS and Linux clients send `?` as itself, a legal POSIX name,
+/// so the rule is the Windows client's alone; the client is a parameter so that
+/// every platform's tests cover both sides.
 fn lost_in_code_page(name: &str, windows_client: bool) -> bool {
     windows_client && name.contains('?')
 }
@@ -1466,9 +1482,10 @@ impl S3NfsFs {
     }
 
     fn attr_of(&self, id: fileid3, inode: &Inode) -> fattr3 {
+        let (dir_mode, file_mode) = permission_modes(cfg!(windows), self.inner.read_only);
         let (ftype, mode, nlink, size) = match inode.kind {
-            EntryKind::Dir => (ftype3::NF3DIR, DIR_MODE, 2, DIR_SIZE),
-            EntryKind::File => (ftype3::NF3REG, FILE_MODE, 1, inode.size),
+            EntryKind::Dir => (ftype3::NF3DIR, dir_mode, 2, DIR_SIZE),
+            EntryKind::File => (ftype3::NF3REG, file_mode, 1, inode.size),
         };
         let time = nfstime3 {
             seconds: inode.mtime_secs,
