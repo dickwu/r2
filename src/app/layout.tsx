@@ -1,28 +1,8 @@
 import type { Metadata } from 'next';
-import { Inter, Inter_Tight, JetBrains_Mono } from 'next/font/google';
+import { preload } from 'react-dom';
 import Providers from '@/app/providers';
+import '@/app/fonts.css';
 import '@/app/globals.css';
-
-const inter = Inter({
-  subsets: ['latin'],
-  variable: '--font-inter',
-  display: 'swap',
-  weight: ['400', '500', '600', '700'],
-});
-
-const interTight = Inter_Tight({
-  subsets: ['latin'],
-  variable: '--font-inter-tight',
-  display: 'swap',
-  weight: ['500', '600', '700'],
-});
-
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ['latin'],
-  variable: '--font-jetbrains-mono',
-  display: 'swap',
-  weight: ['400', '500', '600'],
-});
 
 export const metadata: Metadata = {
   title: 'R2 Uploader',
@@ -30,12 +10,14 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  // Preload the latin subset of each self-hosted family (see fonts.css). preload() puts one
+  // <link rel="preload"> in <head>; a <link> element rendered here would be emitted twice.
+  preload('/fonts/inter-latin.woff2', { as: 'font', type: 'font/woff2' });
+  preload('/fonts/inter-tight-latin.woff2', { as: 'font', type: 'font/woff2' });
+  preload('/fonts/jetbrains-mono-latin.woff2', { as: 'font', type: 'font/woff2' });
+
   return (
-    <html
-      lang="en"
-      suppressHydrationWarning
-      className={`${inter.variable} ${interTight.variable} ${jetbrainsMono.variable}`}
-    >
+    <html lang="en" suppressHydrationWarning>
       <body>
         <Providers>{children}</Providers>
       </body>
