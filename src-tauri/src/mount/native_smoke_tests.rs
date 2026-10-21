@@ -261,7 +261,7 @@ fn assigned_windows_drives() -> Result<u32, String> {
     Ok(drives)
 }
 
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_nfs_tool(name: &str) -> Result<String, String> {
     let root = std::env::var_os("SystemRoot").ok_or("SystemRoot is missing")?;
     let root = PathBuf::from(root);
@@ -282,12 +282,16 @@ fn windows_nfs_tool(name: &str) -> Result<String, String> {
 // the test asserts. A native client that mounts and then fails on its first
 // file operation is otherwise opaque; this shows which RPC it stopped at.
 
+/// On unless `R2_NFS_TRACE` is unset, empty, `0` or `false`.
 fn trace_enabled() -> bool {
-    std::env::var_os("R2_NFS_TRACE").is_some()
+    std::env::var_os("R2_NFS_TRACE").is_some_and(|value| {
+        let value = value.to_string_lossy();
+        !(value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false"))
+    })
 }
 
 /// Streams nfsserve's own tracing (every accepted connection and every
-/// portmap, mount and NFS call) to stderr.
+/// portmap, mount and NFS call) into the test's output, captured like `diag`.
 fn install_nfs_trace() {
     use tracing_subscriber::{
         filter::{LevelFilter, Targets},
@@ -300,13 +304,13 @@ fn install_nfs_trace() {
     }
     let layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
-        .with_writer(std::io::stderr)
+        .with_test_writer()
         .with_filter(Targets::new().with_target("nfsserve", LevelFilter::DEBUG));
     let _ = tracing_subscriber::registry().with(layer).try_init();
 }
 
-/// One stderr line stamped like the tracing output, so tool output and the
-/// server trace interleave in time order.
+/// A stderr message whose first line is stamped like the tracing output, so
+/// tool output and the server trace read in time order.
 fn diag(message: impl AsRef<str>) {
     if trace_enabled() {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
@@ -321,7 +325,7 @@ type ToolRun = Result<std::io::Result<std::process::Output>, tokio::time::error:
 fn render_tool_run(run: &ToolRun) -> String {
     match run {
         Ok(Ok(output)) => {
-            let mut rendered = format!("exit: {}", output.status);
+            let mut rendered = output.status.to_string();
             for (stream, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
                 let text: Vec<u8> = bytes.iter().copied().filter(|byte| *byte != 0).collect();
                 for line in String::from_utf8_lossy(&text)
@@ -347,42 +351,76 @@ async fn probe(stage: &str, program: &str, args: &[&str]) {
     }
     let started = std::time::Instant::now();
     let run = tokio::time::timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(5),
         tokio::process::Command::new(program)
             .args(args)
             .kill_on_drop(true)
             .output(),
     )
     .await;
+    let command = std::iter::once(program)
+        .chain(args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ");
     diag(format!(
-        "{stage}: {program} {} ({} ms)\n{}",
-        args.join(" "),
+        "{stage}: {command} ({} ms)\n{}",
         started.elapsed().as_millis(),
         render_tool_run(&run)
     ));
 }
 
-/// A Windows NFS tool by absolute System32 path, or its bare name where
-/// SystemRoot is unset (the probe then reports that it could not run).
-#[cfg_attr(not(windows), allow(dead_code))]
-fn nfs_tool(name: &str) -> String {
-    std::env::var_os("SystemRoot")
-        .map(|root| {
-            PathBuf::from(root)
-                .join("System32")
-                .join(name)
-                .to_string_lossy()
-                .into_owned()
-        })
-        .unwrap_or_else(|| name.to_string())
-}
-
 /// What Windows believes about the mount. A drive listed as `Unavailable`
-/// right after a successful `mount.exe` is one whose every path will fail.
+/// despite a successful `mount.exe` is one whose every path fails.
 #[cfg_attr(not(windows), allow(dead_code))]
 async fn mount_state_probes(stage: &str) {
-    probe(stage, &nfs_tool("mount.exe"), &[]).await;
-    probe(stage, "net.exe", &["use"]).await;
+    for (tool, args) in [("mount.exe", &[][..]), ("net.exe", &["use"][..])] {
+        match windows_nfs_tool(tool) {
+            Ok(program) => probe(stage, &program, args).await,
+            Err(error) => diag(format!("{stage}: {tool} not run: {error}")),
+        }
+    }
+}
+
+/// Writes `name` through the mount and checks what holds on every Windows
+/// system, whatever its ANSI code page: the name is refused and storage gains
+/// no key, or (a UTF-8 code page) it is stored under exactly that key, which a
+/// delete through the mount removes again. No key may carry a `?` standing for
+/// a lost character.
+#[cfg_attr(not(windows), allow(dead_code))]
+async fn never_stored_under_a_wrong_key(
+    target: &Path,
+    objects: &std::sync::Mutex<HashMap<String, Object>>,
+    name: &str,
+) -> std::io::Result<()> {
+    let keys = || -> std::collections::BTreeSet<String> {
+        objects.lock().unwrap().keys().cloned().collect()
+    };
+    let before = keys();
+    let written = tokio::fs::write(target.join(name), b"x").await.is_ok();
+    let added: Vec<String> = keys().difference(&before).cloned().collect();
+    if written {
+        if added != [name] {
+            return Err(std::io::Error::other(format!(
+                "{name:?} was stored as {added:?}"
+            )));
+        }
+        tokio::fs::remove_file(target.join(name)).await?;
+        if objects.lock().unwrap().contains_key(name) {
+            return Err(std::io::Error::other(format!(
+                "Native delete left {name:?} behind"
+            )));
+        }
+    } else if !added.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "The refused name {name:?} still reached storage as {added:?}"
+        )));
+    }
+    if let Some(key) = keys().into_iter().find(|key| key.contains('?')) {
+        return Err(std::io::Error::other(format!(
+            "A lost character reached storage as {key:?}"
+        )));
+    }
+    Ok(())
 }
 
 #[test]
@@ -515,12 +553,12 @@ async fn native_nfs_write_read_rename_unmount() {
         Some(format!("Native NFS mount unavailable: {mount:?}"))
     };
     if mounted {
-        #[cfg(windows)]
-        mount_state_probes("after mounting").await;
         // The Windows client sends names in the system ANSI code page (the
-        // mount asks for lang=ansi). Beyond it a name arrives as "?" or as
-        // bytes that are not UTF-8, which the server refuses, so only ASCII
-        // names round-trip there.
+        // mount asks for lang=ansi): a character outside it arrives as "?",
+        // which the server refuses, and unless that code page is UTF-8 one
+        // inside it arrives as code-page bytes, refused unless they happen to
+        // be valid UTF-8. So only ASCII names round-trip on every Windows
+        // system.
         let name = if cfg!(windows) {
             "file + plus.txt"
         } else {
@@ -563,26 +601,11 @@ async fn native_nfs_write_read_rename_unmount() {
                     "Native delete left the storage object behind",
                 ));
             }
+            // Beyond ASCII the outcome depends on the code page; what must
+            // hold on every one is that no name is stored under a wrong key.
             #[cfg(windows)]
-            {
-                // A name beyond ASCII must be refused, never stored under a
-                // wrong key.
-                let beyond_ascii = target.join("caf\u{e9}.txt");
-                if tokio::fs::write(&beyond_ascii, b"x").await.is_ok() {
-                    return Err(std::io::Error::other(
-                        "A name beyond ASCII was accepted instead of refused",
-                    ));
-                }
-                if objects
-                    .lock()
-                    .unwrap()
-                    .keys()
-                    .any(|key| key.starts_with("caf"))
-                {
-                    return Err(std::io::Error::other(
-                        "A refused name still reached storage",
-                    ));
-                }
+            for beyond_ascii in ["caf\u{e9}.txt", "\u{4e2d}\u{6587}.txt"] {
+                never_stored_under_a_wrong_key(&target, &objects, beyond_ascii).await?;
             }
             Ok::<_, std::io::Error>(())
         })
