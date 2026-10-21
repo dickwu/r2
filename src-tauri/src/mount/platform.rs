@@ -81,7 +81,7 @@ pub fn mount_argv(
         // server through the portmapper on port 111 of `server_ip`, which the
         // manager binds for exactly this reason. The UNC hides the read-only
         // flag too: the client has no `ro`, so the server enforces it alone.
-        // The share name is `!`, the spelling Client for NFS requires for an
+        // The share name is `!`, the spelling Microsoft documents for an
         // exported root "/": with an empty share (`\\ip\`) or `ip:/` the
         // client maps the server itself, so every path under the drive is
         // looked up as an export of its own (MNT "/<first component>") and
@@ -295,9 +295,9 @@ mod tests {
     fn windows_mount_targets_the_server_unc_share() {
         // The UNC host is the per-mount loopback IP whose port 111 the server
         // bound; the portmapper there answers with its own port. The share
-        // name must be `!`: the exported root "/" cannot be mounted as
-        // `\\ip\` or `ip:/`, which map the server itself, so every path under
-        // the drive is then looked up as an export of its own.
+        // name is `!`, the documented spelling for the exported root "/":
+        // `\\ip\` and `ip:/` map the server itself, so every path under the
+        // drive is then looked up as an export of its own.
         let argv = mount_argv(MountPlatform::Windows, "127.88.0.1", 111, "Z:", false);
         assert_eq!(
             argv,

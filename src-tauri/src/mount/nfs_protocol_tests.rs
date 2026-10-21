@@ -183,6 +183,132 @@ async fn an_external_version_change_retires_the_old_nfs_handle() {
 }
 
 #[tokio::test]
+async fn only_the_root_handle_outlives_the_mount_that_issued_it() {
+    let fixture = serve(|_| async { Response::empty(404) }).await;
+    let fs = filesystem(fixture.client.clone(), "handles");
+    let child = fs
+        .intern_child("note", ROOT_ID, EntryKind::File, 0, 0)
+        .unwrap();
+    let current = u64::from_le_bytes(fs.serverid());
+    let handle = |generation: u64, id: fileid3| nfs_fh3 {
+        data: [generation.to_le_bytes(), id.to_le_bytes()].concat(),
+    };
+
+    // This mount's own handles round-trip.
+    for id in [ROOT_ID, child] {
+        assert!(matches!(fs.fh_to_id(&fs.id_to_fh(id)), Ok(found) if found == id));
+    }
+    // A Windows client that reconnects without a MOUNT call goes on with the
+    // root handle of an earlier mount, or of a later one after a clock step.
+    for generation in [current - 1, current + 1] {
+        assert!(matches!(
+            fs.fh_to_id(&handle(generation, ROOT_ID)),
+            Ok(ROOT_ID)
+        ));
+    }
+    // Any other id is handed out per mount and may name another file now.
+    assert!(matches!(
+        fs.fh_to_id(&handle(current - 1, child)),
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
+    assert!(matches!(
+        fs.fh_to_id(&handle(current + 1, child)),
+        Err(nfsstat3::NFS3ERR_BADHANDLE)
+    ));
+    // Only the 16-byte layout is a handle, however much of the root's it shares.
+    let root = fs.id_to_fh(ROOT_ID).data;
+    for data in [
+        root[..8].to_vec(),
+        root[..15].to_vec(),
+        root.iter().copied().chain([0]).collect(),
+        Vec::new(),
+    ] {
+        assert!(matches!(
+            fs.fh_to_id(&nfs_fh3 { data }),
+            Err(nfsstat3::NFS3ERR_BADHANDLE)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn a_later_mount_in_the_same_process_refuses_an_earlier_ones_handles_but_the_root() {
+    let fixture = serve(|_| async { Response::empty(404) }).await;
+    let earlier = filesystem(fixture.client.clone(), "handles-earlier");
+    let later = filesystem(fixture.client.clone(), "handles-later");
+    // Ids restart in every mount, so the same id names a different file in each.
+    let child = earlier
+        .intern_child("earlier.txt", ROOT_ID, EntryKind::File, 0, 0)
+        .unwrap();
+    assert_eq!(
+        later
+            .intern_child("later.txt", ROOT_ID, EntryKind::File, 0, 0)
+            .unwrap(),
+        child
+    );
+
+    assert!(matches!(
+        later.fh_to_id(&earlier.id_to_fh(child)),
+        Err(nfsstat3::NFS3ERR_STALE)
+    ));
+    assert!(matches!(
+        later.fh_to_id(&earlier.id_to_fh(ROOT_ID)),
+        Ok(ROOT_ID)
+    ));
+    for id in [ROOT_ID, child] {
+        assert!(matches!(later.fh_to_id(&later.id_to_fh(id)), Ok(found) if found == id));
+    }
+    // Each mount has a generation of its own, later than any before it.
+    assert!(u64::from_le_bytes(earlier.serverid()) < u64::from_le_bytes(later.serverid()));
+}
+
+#[tokio::test]
+async fn a_name_the_windows_client_may_have_mangled_names_nothing() {
+    // The bucket holds whatever is asked for, `??.pdf` included: a macOS or
+    // Linux client may name a file that.
+    let fixture = serve(|request| async move {
+        if request.method == "HEAD" {
+            Response::empty(200)
+                .header("content-length", 1)
+                .header("etag", "\"object\"")
+        } else {
+            directory_response(&[], &[], None)
+        }
+    })
+    .await;
+    let fs = filesystem(fixture.client.clone(), "mangled-names");
+    let mangled: filename3 = b"??.pdf".as_slice().into();
+    let intact: filename3 = b"note.pdf".as_slice().into();
+
+    // From the Windows client `?` stands for a lost character, so the name is
+    // neither stored nor even looked for.
+    assert!(matches!(
+        S3NfsFs::child_name_with(&mangled, true),
+        Err(nfsstat3::NFS3ERR_INVAL)
+    ));
+    assert!(matches!(
+        fs.lookup_with(ROOT_ID, &mangled, true).await,
+        Err(nfsstat3::NFS3ERR_NOENT)
+    ));
+    assert!(fixture.requests.lock().unwrap().is_empty());
+    // A name without one is unaffected.
+    assert_eq!(S3NfsFs::child_name_with(&intact, true).unwrap(), "note.pdf");
+    let note = fs.lookup_with(ROOT_ID, &intact, true).await.unwrap();
+    assert_eq!(fs.inode(note).unwrap().key, "note.pdf");
+    // From any other client `?` is an ordinary character.
+    assert_eq!(S3NfsFs::child_name_with(&mangled, false).unwrap(), "??.pdf");
+    let object = fs.lookup_with(ROOT_ID, &mangled, false).await.unwrap();
+    assert_eq!(fs.inode(object).unwrap().key, "??.pdf");
+    // Even with that object known, the Windows client's `??.pdf` is not it.
+    assert!(matches!(
+        fs.lookup_with(ROOT_ID, &mangled, true).await,
+        Err(nfsstat3::NFS3ERR_NOENT)
+    ));
+    // The filesystem serves the client of the platform it was built for.
+    assert_eq!(fs.child_name(&mangled).is_err(), cfg!(windows));
+    assert_eq!(fs.lookup(ROOT_ID, &mangled).await.is_err(), cfg!(windows));
+}
+
+#[tokio::test]
 async fn storage_health_recovers_after_successful_io() {
     let offline = Arc::new(AtomicBool::new(true));
     let fixture = serve({
