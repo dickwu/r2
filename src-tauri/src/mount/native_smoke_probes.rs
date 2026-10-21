@@ -77,8 +77,8 @@ pub(super) async fn beyond_ascii_names_keep_their_keys(
 }
 
 /// `Ok` when every outcome is; otherwise one error naming each failure.
-pub(super) fn all_passed(
-    outcomes: impl IntoIterator<Item = std::io::Result<()>>,
+pub(super) fn all_passed<E: std::fmt::Display>(
+    outcomes: impl IntoIterator<Item = Result<(), E>>,
 ) -> std::io::Result<()> {
     let failed: Vec<String> = outcomes
         .into_iter()
@@ -89,6 +89,32 @@ pub(super) fn all_passed(
     } else {
         Err(std::io::Error::other(failed.join("; ")))
     }
+}
+
+/// How long one probe may take: far longer than any took on the CI runners,
+/// and short enough that every probe fits the operations' own 30 s bound.
+const PROBE_LIMIT: Duration = Duration::from_secs(5);
+
+/// Runs `probe` for at most `PROBE_LIMIT` and names it in any failure. A soft
+/// mount can hold one call far longer than the whole test may wait, and an
+/// unnamed timeout would not say which probe hung.
+pub(super) async fn named(
+    name: &str,
+    probe: impl std::future::Future<Output = std::io::Result<()>>,
+) -> Result<(), String> {
+    match tokio::time::timeout(PROBE_LIMIT, probe).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("{name}: {error}")),
+        Err(_) => Err(format!(
+            "{name}: no answer within {} s",
+            PROBE_LIMIT.as_secs()
+        )),
+    }
+}
+
+/// Names the step a raw I/O error from the mount came from.
+fn doing(step: &'static str) -> impl FnOnce(std::io::Error) -> std::io::Error {
+    move |error| std::io::Error::new(error.kind(), format!("{step}: {error}"))
 }
 
 /// Seeded before mounting, so the case probe's `case.txt` is written next to
@@ -150,7 +176,9 @@ pub(super) async fn case_variants_stay_apart(
     objects: &std::sync::Mutex<HashMap<String, Object>>,
 ) -> std::io::Result<()> {
     let lower: &[u8] = b"lower case";
-    tokio::fs::write(target.join("case.txt"), lower).await?;
+    tokio::fs::write(target.join("case.txt"), lower)
+        .await
+        .map_err(doing("writing case.txt"))?;
     publish_staged(fs, "case.txt").await?;
     expect_stored(
         objects,
@@ -164,12 +192,17 @@ pub(super) async fn case_variants_stay_apart(
         Some(CASE_SEED_DATA),
         "Writing case.txt should leave Case.txt as seeded",
     )?;
-    if tokio::fs::read(target.join(CASE_SEED_KEY)).await? != CASE_SEED_DATA {
+    let seeded = tokio::fs::read(target.join(CASE_SEED_KEY))
+        .await
+        .map_err(doing("reading Case.txt"))?;
+    if seeded != CASE_SEED_DATA {
         return Err(std::io::Error::other(
             "Case.txt should still read back as seeded after case.txt was written",
         ));
     }
-    tokio::fs::remove_file(target.join("case.txt")).await?;
+    tokio::fs::remove_file(target.join("case.txt"))
+        .await
+        .map_err(doing("deleting case.txt"))?;
     expect_stored(
         objects,
         "case.txt",
@@ -192,7 +225,9 @@ pub(super) async fn an_existing_file_takes_new_bytes(
     objects: &std::sync::Mutex<HashMap<String, Object>>,
 ) -> std::io::Result<()> {
     let replaced: &[u8] = b"new bytes";
-    tokio::fs::write(target.join(EXISTING_SEED_KEY), replaced).await?;
+    tokio::fs::write(target.join(EXISTING_SEED_KEY), replaced)
+        .await
+        .map_err(doing("overwriting existing.txt"))?;
     publish_staged(fs, EXISTING_SEED_KEY).await?;
     expect_stored(
         objects,
@@ -200,7 +235,10 @@ pub(super) async fn an_existing_file_takes_new_bytes(
         Some(replaced),
         "Overwriting existing.txt should store exactly the new bytes",
     )?;
-    if tokio::fs::read(target.join(EXISTING_SEED_KEY)).await? != replaced {
+    let read_back = tokio::fs::read(target.join(EXISTING_SEED_KEY))
+        .await
+        .map_err(doing("reading existing.txt"))?;
+    if read_back != replaced {
         return Err(std::io::Error::other(
             "existing.txt should read back as exactly the new bytes",
         ));
@@ -211,7 +249,9 @@ pub(super) async fn an_existing_file_takes_new_bytes(
 /// Makes a folder through the mount, writes a file into it, moves the file
 /// out to the root and removes the folder, checking storage after each step.
 /// A folder is stored as its zero-byte `name/` marker, without which an empty
-/// one would not exist at all.
+/// one would not exist at all. The moved file is read back and the removed
+/// folder looked up through the mount too, so a move that lost track of the
+/// file or a listing that still served the folder would fail here.
 pub(super) async fn a_folder_takes_a_file_and_goes_again(
     fs: &S3NfsFs,
     target: &Path,
@@ -219,14 +259,18 @@ pub(super) async fn a_folder_takes_a_file_and_goes_again(
 ) -> std::io::Result<()> {
     let filed: &[u8] = b"filed bytes";
     let folder = target.join("folder");
-    tokio::fs::create_dir(&folder).await?;
+    tokio::fs::create_dir(&folder)
+        .await
+        .map_err(doing("making folder"))?;
     expect_stored(
         objects,
         "folder/",
         Some(b"".as_slice()),
         "Making folder should store its folder/ marker",
     )?;
-    tokio::fs::write(folder.join("inside.txt"), filed).await?;
+    tokio::fs::write(folder.join("inside.txt"), filed)
+        .await
+        .map_err(doing("writing folder/inside.txt"))?;
     publish_staged(fs, "folder/inside.txt").await?;
     expect_stored(
         objects,
@@ -234,7 +278,9 @@ pub(super) async fn a_folder_takes_a_file_and_goes_again(
         Some(filed),
         "folder/inside.txt should be stored with the bytes written",
     )?;
-    tokio::fs::rename(folder.join("inside.txt"), target.join("moved.txt")).await?;
+    tokio::fs::rename(folder.join("inside.txt"), target.join("moved.txt"))
+        .await
+        .map_err(doing("moving folder/inside.txt to moved.txt"))?;
     expect_stored(
         objects,
         "moved.txt",
@@ -247,14 +293,35 @@ pub(super) async fn a_folder_takes_a_file_and_goes_again(
         None,
         "Moving inside.txt out of folder should remove folder/inside.txt",
     )?;
-    tokio::fs::remove_dir(&folder).await?;
+    let moved = tokio::fs::read(target.join("moved.txt"))
+        .await
+        .map_err(doing("reading moved.txt"))?;
+    if moved != filed {
+        return Err(std::io::Error::other(
+            "moved.txt should read back as the bytes written into folder",
+        ));
+    }
+    tokio::fs::remove_dir(&folder)
+        .await
+        .map_err(doing("removing folder"))?;
     expect_stored(
         objects,
         "folder/",
         None,
         "Removing folder should delete its marker",
     )?;
-    tokio::fs::remove_file(target.join("moved.txt")).await?;
+    match tokio::fs::metadata(&folder).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(std::io::Error::other(
+                "folder should no longer be found through the mount once removed",
+            ))
+        }
+        Err(error) => return Err(doing("looking up the removed folder")(error)),
+    }
+    tokio::fs::remove_file(target.join("moved.txt"))
+        .await
+        .map_err(doing("deleting moved.txt"))?;
     expect_stored(
         objects,
         "moved.txt",

@@ -585,20 +585,35 @@ async fn native_nfs_write_read_rename_unmount() {
                     "Native delete left the storage object behind",
                 ));
             }
-            // Every probe runs whatever the ones before it found, so that one
-            // run reports every failure. Beyond ASCII the outcome depends on
+            // Every probe runs whatever the ones before it found, each under
+            // its own time limit, so that one run reports every failure and
+            // which probe it came from. Beyond ASCII the outcome depends on
             // the code page and on best-fit; what the server must keep is
             // that no name is stored under a key other than its own or its
             // documented look-alike.
             let outcomes = [
-                probes::case_variants_stay_apart(&fs, &target, &objects).await,
-                probes::an_existing_file_takes_new_bytes(&fs, &target, &objects).await,
-                probes::a_folder_takes_a_file_and_goes_again(&fs, &target, &objects).await,
+                probes::named(
+                    "case probe",
+                    probes::case_variants_stay_apart(&fs, &target, &objects),
+                )
+                .await,
+                probes::named(
+                    "overwrite probe",
+                    probes::an_existing_file_takes_new_bytes(&fs, &target, &objects),
+                )
+                .await,
+                probes::named(
+                    "folder probe",
+                    probes::a_folder_takes_a_file_and_goes_again(&fs, &target, &objects),
+                )
+                .await,
             ];
             #[cfg(windows)]
-            let outcomes = outcomes
-                .into_iter()
-                .chain([probes::beyond_ascii_names_keep_their_keys(&target, &objects).await]);
+            let outcomes = outcomes.into_iter().chain([probes::named(
+                "beyond-ASCII probes",
+                probes::beyond_ascii_names_keep_their_keys(&target, &objects),
+            )
+            .await]);
             probes::all_passed(outcomes)
         })
         .await;
