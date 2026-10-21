@@ -67,10 +67,11 @@ const DIR_SIZE: u64 = 4096;
 /// Unix clients own what they mount (`current_uid`) and ask the server before
 /// a write (ACCESS), so they get the usual 0755/0644. Windows' Client for NFS
 /// checks the bits itself, against the identity it mounts as: `anon`, UID and
-/// GID -2, which never owns a file. With 0644 it opens no existing file for
-/// writing ("Access is denied") while still creating new ones, so it gets
-/// 0777/0666, or 0555/0444 on a read-only mount, where it then refuses writes
-/// up front. The client is a parameter so that every platform's tests cover
+/// GID -2, which never owns a file. With 0644 it created new files but opened
+/// no existing one for writing ("Access is denied"), so it gets 0777/0666, or
+/// 0555/0444 on a read-only mount. The bits are only a hint to the client: the
+/// server reads none of them and refuses every write to a read-only mount
+/// itself. The client is a parameter so that every platform's tests cover
 /// both sides.
 fn permission_modes(windows_client: bool, read_only: bool) -> (u32, u32) {
     match (windows_client, read_only) {
@@ -1482,7 +1483,13 @@ impl S3NfsFs {
     }
 
     fn attr_of(&self, id: fileid3, inode: &Inode) -> fattr3 {
-        let (dir_mode, file_mode) = permission_modes(cfg!(windows), self.inner.read_only);
+        self.attr_of_with(id, inode, cfg!(windows))
+    }
+
+    /// [`Self::attr_of`] for a client that does or does not check the mode
+    /// bits itself ([`permission_modes`]).
+    fn attr_of_with(&self, id: fileid3, inode: &Inode, windows_client: bool) -> fattr3 {
+        let (dir_mode, file_mode) = permission_modes(windows_client, self.inner.read_only);
         let (ftype, mode, nlink, size) = match inode.kind {
             EntryKind::Dir => (ftype3::NF3DIR, dir_mode, 2, DIR_SIZE),
             EntryKind::File => (ftype3::NF3REG, file_mode, 1, inode.size),
@@ -5458,6 +5465,53 @@ mod tests {
             fs.mkdir(ROOT_ID, &name).await,
             Err(nfsstat3::NFS3ERR_ROFS)
         ));
+    }
+
+    #[tokio::test]
+    async fn each_client_is_told_mode_bits_it_can_act_on() {
+        // Windows' Client for NFS checks the bits itself, as UID -2, so only
+        // the world bits count for it: they let it write unless the mount is
+        // read-only. Unix clients own the files and ask the server.
+        for (fs, read_only) in [(writable_fs(), false), (read_only_fs(), true)] {
+            let file = fs
+                .intern_child("note.txt", ROOT_ID, EntryKind::File, 0, 0)
+                .unwrap();
+            let root = fs.inode(ROOT_ID).unwrap();
+            let note = fs.inode(file).unwrap();
+            for windows_client in [false, true] {
+                let wanted = match (windows_client, read_only) {
+                    (false, _) => (0o755, 0o644),
+                    (true, false) => (0o777, 0o666),
+                    (true, true) => (0o555, 0o444),
+                };
+                let reported = (
+                    fs.attr_of_with(ROOT_ID, &root, windows_client).mode,
+                    fs.attr_of_with(file, &note, windows_client).mode,
+                );
+                assert_eq!(
+                    reported, wanted,
+                    "windows_client={windows_client}, read_only={read_only}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mode_change_is_accepted_and_the_reported_bits_stay() {
+        // Object storage has nowhere to keep a mode, and refusing one breaks
+        // `cp -p`; nothing is listening on the endpoint, so this also shows
+        // that no request is made.
+        let fs = writable_fs();
+        let file = fs
+            .intern_child("note.txt", ROOT_ID, EntryKind::File, 0, 0)
+            .unwrap();
+        let chmod = sattr3 {
+            mode: nfsserve::nfs::set_mode3::mode(0o600),
+            ..sattr3::default()
+        };
+        let (dir_mode, file_mode) = permission_modes(cfg!(windows), false);
+        assert_eq!(fs.setattr(file, chmod).await.unwrap().mode, file_mode);
+        assert_eq!(fs.setattr(ROOT_ID, chmod).await.unwrap().mode, dir_mode);
     }
 
     #[tokio::test]

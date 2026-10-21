@@ -306,16 +306,13 @@ impl MountManager {
             fs.restore_stages().await?;
         }
 
-        // Port 111 on a loopback address of its own for every Windows mount,
-        // never reused within a run; an ephemeral port elsewhere. See
-        // `bind_nfs_server`.
+        // The portmapper's port on a loopback address of its own for every
+        // Windows mount, never reused within a run; an ephemeral port
+        // elsewhere. See `bind_nfs_server`.
         let listener = bind_nfs_server(platform, &fs)
             .await
             .map_err(|e| match platform {
-                MountPlatform::Windows => format!(
-                    "Failed to start the local NFS server on port 111: {}. Another NFS or portmapper service may be using it.",
-                    e
-                ),
+                MountPlatform::Windows => windows_bind_failure(&e),
                 _ => format!("Failed to start local NFS server: {}", e),
             })?;
         let port = listener.get_listen_port();
@@ -1136,22 +1133,32 @@ async fn run_with_timeout(
     }
 }
 
+/// What a failed command printed about the failure: its stderr, or its stdout
+/// when stderr is empty (`mount.exe` prints its errors there). `None` when it
+/// printed nothing.
+fn printed_failure(output: &std::process::Output) -> Option<String> {
+    [&output.stderr, &output.stdout]
+        .into_iter()
+        .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string())
+        .find(|text| !text.is_empty())
+}
+
 /// Starts listening for the NFS server that serves `fs`.
 ///
 /// The Windows NFS client cannot be pointed at a port: it asks the portmapper
-/// on port 111 of the host it mounts. So on Windows the server takes port 111
-/// on a loopback address of its own (127.88.x.y, see
-/// [`platform::windows_server_ip`]), which also lets every mount keep its own
-/// server. The client may keep a server's root handle for the rest of the
-/// Windows session (it outlived `umount` in CI) and reconnects a share it
-/// knows without a MOUNT call, while the filesystem refuses every handle
-/// another mount issued, the root's included (`S3NfsFs::fh_to_id`): a mount
-/// that meets an earlier mount's address fails closed, as does a drive letter
-/// a crash left mapped. A fresh random address per mount would meet an
-/// earlier one with a birthday-bound chance that grows with every mount
-/// (about 7% over 100 mounts); stepping from a random start
-/// ([`next_windows_server_seed`]) never reuses one within a run. Unix clients
-/// accept a port option, so there an ephemeral port on 127.0.0.1 does.
+/// on its port ([`platform::PORTMAPPER_PORT`]) of the host it mounts. So on
+/// Windows the server takes that port on a loopback address of its own
+/// (127.88.x.y, see [`platform::windows_server_ip`]), which also lets every
+/// mount keep its own server. The client keeps a server's root handle even
+/// past `umount` (seen in CI) and reconnects a share it knows without a MOUNT
+/// call, while the filesystem refuses every handle another mount issued, the
+/// root's included (`S3NfsFs::fh_to_id`): a mount that meets an earlier
+/// mount's address fails closed, as does a drive letter a crash left mapped.
+/// A fresh random address per mount would meet an earlier one with a
+/// birthday-bound chance that grows with every mount (about 7% over 100
+/// mounts); stepping from a random start ([`next_windows_server_seed`]) never
+/// reuses one within a run. Unix clients accept a port option, so there an
+/// ephemeral port on 127.0.0.1 does.
 pub(crate) async fn bind_nfs_server(
     platform: MountPlatform,
     fs: &S3NfsFs,
@@ -1159,15 +1166,60 @@ pub(crate) async fn bind_nfs_server(
     if platform != MountPlatform::Windows {
         return NFSTcpListener::bind("127.0.0.1:0", fs.clone()).await;
     }
-    let mut attempt = 0;
+    bind_on_fresh_addresses(
+        WINDOWS_BIND_ATTEMPTS,
+        next_windows_server_seed,
+        |address| async move { NFSTcpListener::bind(&address, fs.clone()).await },
+    )
+    .await
+}
+
+/// Calls `bind` with the Windows server address of a fresh seed until it
+/// succeeds or `attempts` calls have failed, and then returns the last error.
+/// A failed address is logged and never tried again: another process may
+/// hold just that one.
+async fn bind_on_fresh_addresses<T, Fut>(
+    attempts: u32,
+    mut next_seed: impl FnMut() -> u64,
+    mut bind: impl FnMut(String) -> Fut,
+) -> std::io::Result<T>
+where
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    let mut attempt = 1;
     loop {
-        attempt += 1;
-        let ip = platform::windows_server_ip(next_windows_server_seed());
-        let result = NFSTcpListener::bind(&format!("{ip}:111"), fs.clone()).await;
-        if result.is_ok() || attempt == WINDOWS_BIND_ATTEMPTS {
-            return result;
+        let address = format!(
+            "{}:{}",
+            platform::windows_server_ip(next_seed()),
+            platform::PORTMAPPER_PORT
+        );
+        match bind(address.clone()).await {
+            Err(e) if attempt < attempts => {
+                log::warn!("mount: cannot listen on {address}: {e}; trying another address");
+                attempt += 1;
+            }
+            result => return result,
         }
     }
+}
+
+/// What a Windows mount reports when no address could be bound, from the last
+/// attempt's error. Another service is named only when the port itself was
+/// refused.
+fn windows_bind_failure(error: &std::io::Error) -> String {
+    let hint = match error.kind() {
+        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied => {
+            " Another NFS or portmapper service may be using it."
+        }
+        _ => "",
+    };
+    format!(
+        "Failed to start the local NFS server on port {} (tried {} loopback addresses): {}.{}",
+        platform::PORTMAPPER_PORT,
+        WINDOWS_BIND_ATTEMPTS,
+        error,
+        hint
+    )
 }
 
 /// The run's sequence of Windows server address seeds; see
@@ -1201,12 +1253,8 @@ async fn run_mount_command(
     match run_with_timeout(&argv, MOUNT_COMMAND_TIMEOUT).await {
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let detail = if stderr.is_empty() {
-                format!("{} exited with {}", argv[0], output.status)
-            } else {
-                stderr
-            };
+            let detail = printed_failure(&output)
+                .unwrap_or_else(|| format!("{} exited with {}", argv[0], output.status));
             Err(mount_failure_message(
                 platform, server_ip, port, target, read_only, &detail,
             ))
@@ -1276,9 +1324,8 @@ async fn run_umount_command(platform: MountPlatform, target: &str) -> Result<(),
         match run_with_timeout(&argv, remaining).await {
             Ok(output) if output.status.success() => return Ok(()),
             Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                if !stderr.is_empty() {
-                    last_error = format!("Failed to unmount \"{}\": {}", target, stderr);
+                if let Some(detail) = printed_failure(&output) {
+                    last_error = format!("Failed to unmount \"{}\": {}", target, detail);
                 }
             }
             Err(CommandFailure::TimedOut) => {
@@ -1345,6 +1392,91 @@ mod tests {
             .map(|_| platform::windows_server_ip(next_windows_server_seed()))
             .collect();
         assert_eq!(addresses.len(), DRAWS);
+    }
+
+    #[tokio::test]
+    async fn a_failed_windows_bind_moves_on_to_a_fresh_address() {
+        let mut seeds = 40..;
+        let mut tried = Vec::new();
+        let bound = bind_on_fresh_addresses(
+            WINDOWS_BIND_ATTEMPTS,
+            || seeds.next().unwrap(),
+            |address| {
+                tried.push(address.clone());
+                let in_use = tried.len() < 3;
+                async move {
+                    if in_use {
+                        Err(std::io::Error::from(std::io::ErrorKind::AddrInUse))
+                    } else {
+                        Ok(address)
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+        let wanted: Vec<String> = (40..43)
+            .map(|seed| format!("{}:111", platform::windows_server_ip(seed)))
+            .collect();
+        assert_eq!(tried, wanted);
+        assert_eq!(bound, wanted[2]);
+    }
+
+    #[tokio::test]
+    async fn windows_binding_gives_up_after_its_last_attempt_with_that_error() {
+        let mut seeds = 0..;
+        let mut tried = 0;
+        let error = bind_on_fresh_addresses(
+            WINDOWS_BIND_ATTEMPTS,
+            || seeds.next().unwrap(),
+            |_| {
+                tried += 1;
+                let attempt = tried;
+                async move { Err::<(), _>(std::io::Error::other(format!("attempt {attempt}"))) }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(tried, WINDOWS_BIND_ATTEMPTS);
+        assert_eq!(
+            error.to_string(),
+            format!("attempt {WINDOWS_BIND_ATTEMPTS}")
+        );
+    }
+
+    #[test]
+    fn a_windows_bind_failure_names_another_service_only_when_the_port_was_refused() {
+        let blames = |kind: std::io::ErrorKind| {
+            let message = windows_bind_failure(&std::io::Error::from(kind));
+            assert!(message.contains("port 111 (tried 8 loopback addresses)"));
+            message.contains("Another NFS or portmapper service")
+        };
+        assert!(blames(std::io::ErrorKind::AddrInUse));
+        assert!(blames(std::io::ErrorKind::PermissionDenied));
+        assert!(!blames(std::io::ErrorKind::AddrNotAvailable));
+    }
+
+    #[test]
+    fn a_failed_command_is_described_by_what_it_printed() {
+        let output = |stdout: &str, stderr: &str| std::process::Output {
+            status: std::process::ExitStatus::default(),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        };
+        assert_eq!(
+            printed_failure(&output("", " bad option\n")).as_deref(),
+            Some("bad option")
+        );
+        assert_eq!(
+            printed_failure(&output("ignored", "stderr first")).as_deref(),
+            Some("stderr first")
+        );
+        // mount.exe prints its errors to stdout and leaves stderr empty.
+        assert_eq!(
+            printed_failure(&output("ERROR - Invalid retry value\n", "")).as_deref(),
+            Some("ERROR - Invalid retry value")
+        );
+        assert_eq!(printed_failure(&output(" \n", "")), None);
     }
 
     #[test]

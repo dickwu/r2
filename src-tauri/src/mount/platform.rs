@@ -83,9 +83,10 @@ pub fn mount_argv(
             target.to_string(),
         ],
         // The Windows NFS client has no `port=` option — it resolves the
-        // server through the portmapper on port 111 of `server_ip`, which the
-        // manager binds for exactly this reason. The UNC hides the read-only
-        // flag too: the client has no `ro`, so the server enforces it alone.
+        // server through the portmapper on `PORTMAPPER_PORT` of `server_ip`,
+        // which the manager binds for exactly this reason. It has no `ro`
+        // either, so the server enforces a read-only mount, and the mode bits
+        // it reports then carry no write bit (`nfs_fs::permission_modes`).
         // The share name is `!`, the spelling Microsoft documents for an
         // exported root "/": with an empty share (`\\ip\`) or `ip:/` the
         // client maps the server itself, so every path under the drive is
@@ -107,16 +108,19 @@ pub fn mount_argv(
 /// included (`-o retry=2,timeout=5` is an "Invalid retry value"), so a comma
 /// list applies at most its first option, and mounts all the same. That is
 /// how nfsserve's recipe (`-o anon,nolock,mtype=soft,…`) left lookups
-/// case-insensitive, a 0.8 s RPC timeout and one retry. `casesensitive=yes`
-/// keeps `report.pdf` from resolving to `Report.pdf`; the bare
-/// `casesensitive` Microsoft documents is an "Invalid command line argument".
-/// `timeout` is capped at 10 s (60 lists as 10.0), so `retry=10`, the most it
-/// takes, gives a RENAME (a copy, then a delete) the longest window a soft
-/// mount has. `anon`, `nolock`, `mtype=soft` and `lang=ansi` match the CI
-/// runner's defaults, which Microsoft documents differently for locking.
-/// `fileaccess` (the server reads no requested mode) and `rsize`/`wsize`
-/// (documented only up to 32 KB; the client's default is 1 MB) are left out.
-/// The native smoke test asserts the listing `mount.exe` prints.
+/// case-insensitive, a 0.8 s RPC timeout and one retry. (Microsoft's example
+/// puts several options after one `-o`, separated by spaces; one `-o` each is
+/// the form verified on windows-2022.) `casesensitive=yes` keeps `report.pdf`
+/// from resolving to `Report.pdf`; the bare `casesensitive` Microsoft
+/// documents is an "Invalid command line argument". `timeout=30` and
+/// `timeout=60` both list as 10.0, so the mount asks for 10, and `retry=10` is
+/// the most retries a soft mount takes; how long a RENAME (a copy, then a
+/// delete) may then run before the client gives up was not measured. `anon`,
+/// `nolock`, `mtype=soft` and `lang=ansi` match the CI runner's defaults,
+/// which Microsoft documents differently for locking. `fileaccess` (the
+/// server reads no requested mode) and `rsize`/`wsize` (documented only up to
+/// 32 KB; the client's default is 1 MB) are left out. The native smoke test
+/// asserts the listing `mount.exe` prints.
 pub const WINDOWS_MOUNT_OPTIONS: [&str; 7] = [
     "anon",
     "nolock",
@@ -126,6 +130,10 @@ pub const WINDOWS_MOUNT_OPTIONS: [&str; 7] = [
     "mtype=soft",
     "lang=ansi",
 ];
+
+/// The portmapper's port, where the Windows NFS client looks for a server:
+/// it takes no other, so a Windows mount's server listens on it.
+pub const PORTMAPPER_PORT: u16 = 111;
 
 /// How many loopback addresses a Windows mount's server can listen on: 254
 /// hosts (never .0 or .255) in each of the 256 subnets of 127.88.0.0/16.

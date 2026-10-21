@@ -288,30 +288,6 @@ fn handle_generations_are_unique_and_increase_for_every_caller() {
 }
 
 #[tokio::test]
-async fn a_windows_client_may_write_files_it_did_not_create() {
-    // Windows' Client for NFS checks the mode bits itself, as UID -2, so only
-    // the world bits count for it; Unix clients own the files and ask the
-    // server. On a read-only mount Windows sees no write bit at all.
-    assert_eq!(permission_modes(false, false), (0o755, 0o644));
-    assert_eq!(permission_modes(false, true), (0o755, 0o644));
-    assert_eq!(permission_modes(true, false), (0o777, 0o666));
-    assert_eq!(permission_modes(true, true), (0o555, 0o444));
-
-    // The attributes every reply carries use this platform's.
-    let fixture = serve(|_| async { Response::empty(404) }).await;
-    let fs = filesystem(fixture.client.clone(), "modes");
-    let file = fs
-        .intern_child("note", ROOT_ID, EntryKind::File, 0, 0)
-        .unwrap();
-    let (dir_mode, file_mode) = permission_modes(cfg!(windows), false);
-    assert_eq!(
-        fs.attr_of(ROOT_ID, &fs.inode(ROOT_ID).unwrap()).mode,
-        dir_mode
-    );
-    assert_eq!(fs.attr_of(file, &fs.inode(file).unwrap()).mode, file_mode);
-}
-
-#[tokio::test]
 async fn a_name_the_windows_client_may_have_mangled_names_nothing() {
     // The bucket holds whatever is asked for, `??.pdf` included: a macOS or
     // Linux client may name a file that.
