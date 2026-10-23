@@ -1,5 +1,9 @@
 use crate::commands::upload_cache::{update_cache_after_upload, update_cache_after_write};
 use crate::db::{self, UploadSession};
+use crate::upload_control::{
+    acquire_upload_slot, attempt_timeout, cancel_registered_upload, read_file_range,
+    register_upload, AttemptFailure, UploadHooks,
+};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
@@ -8,10 +12,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::Mutex;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -22,6 +25,8 @@ const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024;
 const PART_SIZE: u64 = 20 * 1024 * 1024;
 // Concurrent uploads: 6 parts in parallel
 const CONCURRENCY: usize = 6;
+// Lifetime of each presigned URL; a fresh one is signed for every attempt.
+const PRESIGN_EXPIRES_SECS: u64 = 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct R2Config {
@@ -47,9 +52,43 @@ pub struct UploadResult {
     pub error: Option<String>,
 }
 
-// Global cancel registry
-lazy_static::lazy_static! {
-    static ref CANCEL_REGISTRY: Mutex<HashMap<String, Arc<AtomicBool>>> = Mutex::new(HashMap::new());
+/// One HTTP client for every upload, so concurrent files share its connection
+/// pool instead of each opening (and TLS-handshaking) its own.
+///
+/// It has a connect timeout but no client-wide read or total timeout: reqwest's
+/// `read_timeout` runs from sending the request until the response headers, so
+/// it would also bound the body upload. Each request instead gets a timeout
+/// scaled to its size ([`attempt_timeout`]), and TCP keepalive detects a dead
+/// peer.
+fn upload_client() -> Result<Client, String> {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .tcp_keepalive(Duration::from_secs(30))
+        .pool_idle_timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    Ok(CLIENT.get_or_init(|| client).clone())
+}
+
+/// The failure of a response that was not 2xx: its status, body and any
+/// Retry-After, classified for [`crate::upload_control::retry_transient`].
+async fn response_failure(response: reqwest::Response, context: &str) -> AttemptFailure {
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let text = response.text().await.unwrap_or_default();
+    AttemptFailure::from_status(
+        status.as_u16(),
+        format!("{}: {} - {}", context, status, text),
+        retry_after.as_deref(),
+    )
 }
 
 fn sha256_hash(data: &[u8]) -> String {
@@ -174,44 +213,51 @@ async fn upload_single_part(
     content_type: &str,
     task_id: &str,
     app: &AppHandle,
-    cancelled: &Arc<AtomicBool>,
+    hooks: &UploadHooks,
 ) -> Result<(), String> {
-    let presigned_url = generate_presigned_url(config, "PUT", key, 3600, None, Some(content_type));
-
     let file_size = tokio::fs::metadata(file_path)
         .await
         .map_err(|e| format!("Failed to get file metadata: {}", e))?
         .len();
 
-    // Read file into memory for small files
-    let mut file = File::open(file_path)
-        .await
-        .map_err(|e| format!("Failed to open file: {}", e))?;
-
-    let mut buffer = Vec::with_capacity(file_size as usize);
-    file.read_to_end(&mut buffer)
-        .await
-        .map_err(|e| format!("Failed to read file: {}", e))?;
-
-    if cancelled.load(Ordering::SeqCst) {
-        return Err("Upload cancelled".to_string());
-    }
-
     let start_time = std::time::Instant::now();
 
-    let response = client
-        .put(&presigned_url)
-        .header("Content-Type", content_type)
-        .body(buffer)
-        .send()
-        .await
-        .map_err(|e| format!("Upload request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        return Err(format!("Upload failed: {} - {}", status, text));
-    }
+    hooks
+        .retry(|_| async move {
+            // Read file into memory for small files; read again (and sign a
+            // fresh URL) on every attempt so nothing stale is replayed.
+            let buffer = read_file_range(file_path, 0, file_size)
+                .await
+                .map_err(AttemptFailure::permanent)?;
+            if hooks.cancelled.load(Ordering::SeqCst) {
+                return Err(AttemptFailure::permanent(
+                    crate::upload_control::CANCELLED_MESSAGE,
+                ));
+            }
+            let presigned_url = generate_presigned_url(
+                config,
+                "PUT",
+                key,
+                PRESIGN_EXPIRES_SECS,
+                None,
+                Some(content_type),
+            );
+            let response = client
+                .put(&presigned_url)
+                .header("Content-Type", content_type)
+                .timeout(attempt_timeout(file_size))
+                .body(buffer)
+                .send()
+                .await
+                .map_err(|e| {
+                    AttemptFailure::from_reqwest(&e, format!("Upload request failed: {}", e))
+                })?;
+            if !response.status().is_success() {
+                return Err(response_failure(response, "Upload failed").await);
+            }
+            Ok(())
+        })
+        .await?;
 
     let elapsed = start_time.elapsed().as_secs_f64();
     let speed = if elapsed > 0.0 {
@@ -244,8 +290,9 @@ async fn upload_multipart(
     content_type: &str,
     task_id: &str,
     app: &AppHandle,
-    cancelled: &Arc<AtomicBool>,
+    hooks: &UploadHooks,
 ) -> Result<(), String> {
+    let cancelled = &hooks.cancelled;
     let metadata = tokio::fs::metadata(file_path)
         .await
         .map_err(|e| format!("Failed to get file metadata: {}", e))?;
@@ -299,34 +346,33 @@ async fn upload_multipart(
         }
         _ => {
             // Create new multipart upload
-            let create_url = generate_presigned_url(
-                config,
-                "POST",
-                key,
-                3600,
-                Some(&[("uploads", "")]),
-                Some(content_type),
-            );
-
-            let create_response = client
-                .post(&create_url)
-                .send()
-                .await
-                .map_err(|e| format!("Failed to initiate multipart upload: {}", e))?;
-
-            if !create_response.status().is_success() {
-                let status = create_response.status();
-                let text = create_response.text().await.unwrap_or_default();
-                return Err(format!(
-                    "Failed to initiate multipart upload: {} - {}",
-                    status, text
-                ));
-            }
-
-            let create_xml = create_response
-                .text()
-                .await
-                .map_err(|e| format!("Failed to read response: {}", e))?;
+            let create_xml = hooks
+                .retry(|_| async move {
+                    let create_url = generate_presigned_url(
+                        config,
+                        "POST",
+                        key,
+                        PRESIGN_EXPIRES_SECS,
+                        Some(&[("uploads", "")]),
+                        Some(content_type),
+                    );
+                    let context = "Failed to initiate multipart upload";
+                    let create_response = client
+                        .post(&create_url)
+                        .timeout(attempt_timeout(0))
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            AttemptFailure::from_reqwest(&e, format!("{}: {}", context, e))
+                        })?;
+                    if !create_response.status().is_success() {
+                        return Err(response_failure(create_response, context).await);
+                    }
+                    create_response.text().await.map_err(|e| {
+                        AttemptFailure::from_reqwest(&e, format!("Failed to read response: {}", e))
+                    })
+                })
+                .await?;
 
             let upload_id = create_xml
                 .split("<UploadId>")
@@ -407,9 +453,12 @@ async fn upload_multipart(
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(CONCURRENCY));
     let mut handles = Vec::new();
+    // Set once a part has failed for good (its retries exhausted, or a
+    // permanent error): the file has failed, so start no further parts.
+    let part_failed = Arc::new(AtomicBool::new(false));
 
     for part_number in part_numbers {
-        if cancelled.load(Ordering::SeqCst) {
+        if cancelled.load(Ordering::SeqCst) || part_failed.load(Ordering::SeqCst) {
             break;
         }
 
@@ -422,74 +471,85 @@ async fn upload_multipart(
         let task_id = task_id.to_string();
         let session_id = session_id.clone();
         let app = app.clone();
-        let cancelled = cancelled.clone();
+        let hooks = hooks.clone();
+        let part_failed = part_failed.clone();
         let uploaded_bytes = uploaded_bytes.clone();
         let completed_parts = completed_parts.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = permit;
 
-            if cancelled.load(Ordering::SeqCst) {
-                return Err("Upload cancelled".to_string());
+            if hooks.cancelled.load(Ordering::SeqCst) {
+                return Err(crate::upload_control::CANCELLED_MESSAGE.to_string());
             }
 
             let start = (part_number as u64 - 1) * PART_SIZE;
             let end = std::cmp::min(start + PART_SIZE, file_size);
             let part_size = end - start;
 
-            // Read part from file
-            let mut file = File::open(&file_path)
-                .await
-                .map_err(|e| format!("Failed to open file: {}", e))?;
-
-            file.seek(SeekFrom::Start(start))
-                .await
-                .map_err(|e| format!("Failed to seek: {}", e))?;
-
-            let mut buffer = vec![0u8; part_size as usize];
-            file.read_exact(&mut buffer)
-                .await
-                .map_err(|e| format!("Failed to read file part: {}", e))?;
-
-            if cancelled.load(Ordering::SeqCst) {
-                return Err("Upload cancelled".to_string());
-            }
-
-            // Generate presigned URL for this part
-            let part_url = generate_presigned_url(
+            let (config, key, client, upload_id, file_path, cancelled) = (
                 &config,
-                "PUT",
                 &key,
-                3600,
-                Some(&[
-                    ("partNumber", &part_number.to_string()),
-                    ("uploadId", &upload_id),
-                ]),
-                None,
+                &client,
+                &upload_id,
+                &file_path,
+                &hooks.cancelled,
             );
-
-            let response = client
-                .put(&part_url)
-                .body(buffer)
-                .send()
-                .await
-                .map_err(|e| format!("Failed to upload part {}: {}", part_number, e))?;
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                return Err(format!(
-                    "Failed to upload part {}: {} - {}",
-                    part_number, status, text
-                ));
-            }
-
-            let etag = response
-                .headers()
-                .get("ETag")
-                .and_then(|v| v.to_str().ok())
-                .ok_or(format!("No ETag returned for part {}", part_number))?
-                .to_string();
+            let result = hooks
+                .retry(|_| async move {
+                    // Read the part and sign its URL afresh on every attempt.
+                    let buffer = read_file_range(file_path, start, part_size)
+                        .await
+                        .map_err(AttemptFailure::permanent)?;
+                    if cancelled.load(Ordering::SeqCst) {
+                        return Err(AttemptFailure::permanent(
+                            crate::upload_control::CANCELLED_MESSAGE,
+                        ));
+                    }
+                    let part_url = generate_presigned_url(
+                        config,
+                        "PUT",
+                        key,
+                        PRESIGN_EXPIRES_SECS,
+                        Some(&[
+                            ("partNumber", &part_number.to_string()),
+                            ("uploadId", upload_id),
+                        ]),
+                        None,
+                    );
+                    let context = format!("Failed to upload part {}", part_number);
+                    let response = client
+                        .put(&part_url)
+                        .timeout(attempt_timeout(part_size))
+                        .body(buffer)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            AttemptFailure::from_reqwest(&e, format!("{}: {}", context, e))
+                        })?;
+                    if !response.status().is_success() {
+                        return Err(response_failure(response, &context).await);
+                    }
+                    response
+                        .headers()
+                        .get("ETag")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            AttemptFailure::permanent(format!(
+                                "No ETag returned for part {}",
+                                part_number
+                            ))
+                        })
+                })
+                .await;
+            let etag = match result {
+                Ok(etag) => etag,
+                Err(e) => {
+                    part_failed.store(true, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
 
             // Save completed part to DB
             if let Err(e) = db::save_completed_part(&session_id, part_number as i32, &etag).await {
@@ -549,7 +609,7 @@ async fn upload_multipart(
         let _ = db::update_session_status(&session_id, "cancelled").await;
 
         // Note: We don't abort the multipart upload on R2 so it can be resumed
-        return Err("Upload cancelled".to_string());
+        return Err(crate::upload_control::CANCELLED_MESSAGE.to_string());
     }
 
     if let Some(err) = upload_error {
@@ -586,9 +646,12 @@ async fn upload_multipart(
         None,
     );
 
+    // Not retried: a lost response cannot tell whether the object was
+    // published, and the session row lets a later upload resume instead.
     let complete_response = client
         .post(&complete_url)
         .header("Content-Type", "application/xml")
+        .timeout(attempt_timeout(0))
         .body(complete_xml)
         .send()
         .await
@@ -664,12 +727,21 @@ pub async fn upload_file(
         .map_err(|e| format!("Failed to get file metadata: {}", e))?
         .len();
 
-    // Register cancel flag
-    let cancelled = Arc::new(AtomicBool::new(false));
-    {
-        let mut registry = CANCEL_REGISTRY.lock().await;
-        registry.insert(task_id.clone(), cancelled.clone());
-    }
+    // Register cancel flag (unregistered when `registration` drops), then wait
+    // for one of the global upload slots — a cancel is heard while waiting.
+    let registration = register_upload(&task_id);
+    let cancelled = registration.cancelled.clone();
+    let _slot = match acquire_upload_slot(&cancelled).await {
+        Ok(slot) => slot,
+        Err(e) => {
+            return Ok(UploadResult {
+                task_id,
+                success: false,
+                error: Some(e),
+            })
+        }
+    };
+    let hooks = UploadHooks::for_task(&app, &task_id, cancelled.clone());
     // Captured before the upload, as a sync captures its scope before listing.
     // It may wait for the database, so only after a cancel can be heard. The
     // single-part path then checks the flag before its PUT; the multipart path
@@ -682,9 +754,7 @@ pub async fn upload_file(
     )])
     .await;
 
-    let client = Client::builder()
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = upload_client()?;
 
     let result = if file_size < MULTIPART_THRESHOLD {
         upload_single_part(
@@ -695,7 +765,7 @@ pub async fn upload_file(
             &content_type,
             &task_id,
             &app,
-            &cancelled,
+            &hooks,
         )
         .await
     } else {
@@ -707,16 +777,13 @@ pub async fn upload_file(
             &content_type,
             &task_id,
             &app,
-            &cancelled,
+            &hooks,
         )
         .await
     };
 
     // Cleanup cancel flag
-    {
-        let mut registry = CANCEL_REGISTRY.lock().await;
-        registry.remove(&task_id);
-    }
+    drop(registration);
 
     match result {
         Ok(()) => {
@@ -748,10 +815,7 @@ pub async fn upload_file(
 /// Cancel an upload
 #[tauri::command]
 pub async fn cancel_upload(task_id: String) -> Result<(), String> {
-    let registry = CANCEL_REGISTRY.lock().await;
-    if let Some(cancelled) = registry.get(&task_id) {
-        cancelled.store(true, Ordering::SeqCst);
-    }
+    cancel_registered_upload(&task_id);
     Ok(())
 }
 

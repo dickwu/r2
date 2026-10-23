@@ -1,139 +1,30 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
 import { Button, Progress, Typography } from 'antd';
 import {
   CheckCircleOutlined,
+  ClockCircleOutlined,
   CloseCircleOutlined,
   LoadingOutlined,
   StopOutlined,
 } from '@ant-design/icons';
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { uploadFile, type StorageConfig } from '@/app/lib/r2cache';
-import {
-  accountDisplayName,
-  preferRecorded,
-  uploadFailure,
-  type UploadFailureContext,
-} from '@/app/lib/taskFailures';
-import { useAccountStore } from '@/app/stores/accountStore';
-import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
+import { showUploadFailure } from '@/app/lib/uploadRunner';
 import { useUploadStore, type UploadTask } from '@/app/stores/uploadStore';
 
 const { Text } = Typography;
-
-interface UploadProgress {
-  task_id: string;
-  percent: number;
-  uploaded_bytes: number;
-  total_bytes: number;
-  speed: number;
-}
 
 interface UploadTaskItemProps {
   task: UploadTask;
 }
 
+// One row of the upload list. Starting, progress and retries are driven by the
+// upload queue (uploadStore + uploadRunner); the row only shows them.
 export default function UploadTaskItem({ task }: UploadTaskItemProps) {
-  const config = useUploadStore((s) => s.config);
-  const uploadPath = useUploadStore((s) => s.uploadPath);
-  const updateTask = useUploadStore((s) => s.updateTask);
   const removeTask = useUploadStore((s) => s.removeTask);
-
-  const isUploadingRef = useRef(false);
-  const unlistenRef = useRef<UnlistenFn | null>(null);
-
-  // Start upload when status changes to 'uploading'
-  useEffect(() => {
-    if (task.status !== 'uploading' || isUploadingRef.current || !config) return;
-    if (!config.accessKeyId || !config.secretAccessKey) return;
-    if (config.provider === 'aws' && !config.region) return;
-    if (
-      (config.provider === 'minio' || config.provider === 'rustfs') &&
-      (!config.endpointHost || !config.endpointScheme)
-    ) {
-      return;
-    }
-
-    isUploadingRef.current = true;
-
-    const key = uploadKey(uploadPath, task);
-    // A failed upload is recorded on the task and reported to the failure modal,
-    // with the destination this upload used
-    const fail = (error: string) => {
-      updateTask(task.id, { status: 'error', error, speed: 0 });
-      reportUploadFailure(task.id, uploadContext(config, key));
-    };
-
-    // Listen for progress events
-    listen<UploadProgress>('upload-progress', (event) => {
-      if (event.payload.task_id === task.id) {
-        updateTask(task.id, {
-          progress: event.payload.percent,
-          speed: event.payload.speed,
-        });
-      }
-    }).then((unlisten) => {
-      unlistenRef.current = unlisten;
-    });
-
-    uploadFile(config, {
-      taskId: task.id,
-      filePath: task.filePath,
-      key,
-      contentType: task.contentType,
-    })
-      .then((result) => {
-        if (result.success) {
-          updateTask(task.id, { status: 'success', progress: 100, speed: 0 });
-        } else {
-          if (result.error?.includes('cancelled')) {
-            updateTask(task.id, { status: 'cancelled', speed: 0 });
-          } else {
-            fail(result.error || 'Upload failed');
-          }
-        }
-      })
-      .catch((e) => {
-        const errorMsg = e instanceof Error ? e.message : String(e);
-        if (errorMsg.includes('cancelled')) {
-          updateTask(task.id, { status: 'cancelled', speed: 0 });
-        } else {
-          fail(errorMsg);
-        }
-      })
-      .finally(() => {
-        isUploadingRef.current = false;
-        if (unlistenRef.current) {
-          unlistenRef.current();
-          unlistenRef.current = null;
-        }
-      });
-
-    return () => {
-      // Cleanup: cancel upload if component unmounts during upload
-      if (isUploadingRef.current) {
-        invoke('cancel_upload', { taskId: task.id }).catch(() => {});
-      }
-      if (unlistenRef.current) {
-        unlistenRef.current();
-        unlistenRef.current = null;
-      }
-    };
-  }, [
-    task.status,
-    task.id,
-    task.filePath,
-    task.fileName,
-    task.contentType,
-    config,
-    uploadPath,
-    updateTask,
-  ]);
+  const cancelTask = useUploadStore((s) => s.cancelTask);
 
   function handleCancel() {
-    invoke('cancel_upload', { taskId: task.id }).catch(() => {});
+    cancelTask(task.id);
   }
 
   function handleRemove() {
@@ -147,7 +38,7 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
             Remove
           </Button>,
         ]
-      : task.status === 'uploading'
+      : task.status === 'uploading' || task.status === 'queued'
         ? [
             <Button
               key="cancel"
@@ -180,40 +71,6 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
   );
 }
 
-// The object key an upload writes: the destination folder, then the file's
-// (possibly auto-renamed) name
-function uploadKey(uploadPath: string, task: UploadTask): string {
-  const folder = uploadPath && !uploadPath.endsWith('/') ? `${uploadPath}/` : uploadPath;
-  return folder + (task.renamedFileName ?? task.fileName);
-}
-
-// Where an upload is going, as its failure record names it
-function uploadContext(config: StorageConfig | null, key: string): UploadFailureContext {
-  if (!config) return { key };
-  const { accounts } = useAccountStore.getState();
-  return {
-    key,
-    bucket: config.bucket,
-    account: accountDisplayName(accounts, config.provider, config.accountId),
-  };
-}
-
-// Report the upload that just failed, read back from the store so the record
-// carries the last progress the row showed
-function reportUploadFailure(taskId: string, context: UploadFailureContext) {
-  const failed = useUploadStore.getState().tasks.find((t) => t.id === taskId);
-  if (failed) useTransferErrorStore.getState().report(uploadFailure(failed, context));
-}
-
-// "Show error" re-opens the reported record, which holds the destination the
-// upload used; it rebuilds one only after the failure modal's list was cleared
-function showUploadFailure(task: UploadTask) {
-  const { config, uploadPath } = useUploadStore.getState();
-  const fresh = uploadFailure(task, uploadContext(config, uploadKey(uploadPath, task)));
-  const { failures, show } = useTransferErrorStore.getState();
-  show(preferRecorded(fresh, failures));
-}
-
 function StatusIcon({ status }: { status: UploadTask['status'] }) {
   switch (status) {
     case 'success':
@@ -224,6 +81,8 @@ function StatusIcon({ status }: { status: UploadTask['status'] }) {
       return <StopOutlined style={{ color: '#999', fontSize: 16 }} />;
     case 'uploading':
       return <LoadingOutlined style={{ color: '#1677ff', fontSize: 16 }} />;
+    case 'queued':
+      return <ClockCircleOutlined style={{ color: '#999', fontSize: 16 }} />;
     default:
       return null;
   }
@@ -240,7 +99,11 @@ function TaskDescription({ task }: { task: UploadTask }) {
         <div>
           <Progress percent={task.progress} size="small" />
           <Text type="secondary" style={{ fontSize: 11 }}>
-            {task.speed > 0 ? (
+            {task.retry ? (
+              <span title={task.retry.error}>
+                Retrying ({task.retry.attempt}/{task.retry.maxAttempts})…
+              </span>
+            ) : task.speed > 0 ? (
               <>
                 {formatSpeed(task.speed)}
                 <span style={{ marginLeft: 8, color: '#999' }}>{formatTimeLeft(eta)}</span>
@@ -252,6 +115,12 @@ function TaskDescription({ task }: { task: UploadTask }) {
         </div>
       );
     }
+    case 'queued':
+      return (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          Queued · {formatFileSize(task.fileSize)}
+        </Text>
+      );
     case 'error':
       return (
         <span className="task-failed">

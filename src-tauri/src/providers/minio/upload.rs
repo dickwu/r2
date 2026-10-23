@@ -1,11 +1,13 @@
 use super::types::{create_minio_client, MinioConfig, MinioResult};
+use crate::upload_control::{
+    read_file_range, sdk_attempt_failure, sdk_upload_timeouts, AttemptFailure, UploadHooks,
+    CANCELLED_MESSAGE,
+};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::Semaphore;
 
 pub async fn upload_content(
@@ -33,50 +35,61 @@ pub async fn upload_content(
     Ok(etag)
 }
 
-#[allow(dead_code)]
+/// PUT a whole file, retrying transient failures (see [`UploadHooks::retry`]);
+/// each attempt reopens the file and runs under size-scaled timeouts.
 pub async fn upload_file_simple(
     config: &MinioConfig,
     key: &str,
     file_path: &Path,
     content_type: Option<&str>,
+    hooks: &UploadHooks,
 ) -> MinioResult<String> {
-    let client = create_minio_client(config).await?;
-    let body = ByteStream::from_path(file_path).await?;
+    let client = &create_minio_client(config).await?;
+    let file_size = tokio::fs::metadata(file_path).await?.len();
 
-    let mut request = client
-        .put_object()
-        .bucket(&config.bucket)
-        .key(key)
-        .body(body);
-
-    if let Some(ct) = content_type {
-        request = request.content_type(ct);
-    }
-
-    let response = request.send().await?;
+    let response = hooks
+        .retry(|_| async move {
+            let body = ByteStream::from_path(file_path)
+                .await
+                .map_err(|e| AttemptFailure::permanent(format!("Failed to read file: {}", e)))?;
+            client
+                .put_object()
+                .bucket(&config.bucket)
+                .key(key)
+                .set_content_type(content_type.map(str::to_owned))
+                .body(body)
+                .customize()
+                .config_override(sdk_upload_timeouts(file_size))
+                .send()
+                .await
+                .map_err(|e| sdk_attempt_failure(&e))
+        })
+        .await?;
     let etag = response.e_tag().unwrap_or_default().to_string();
 
     Ok(etag)
 }
 
-#[allow(dead_code)]
 pub async fn initiate_multipart_upload(
     config: &MinioConfig,
     key: &str,
     content_type: Option<&str>,
+    hooks: &UploadHooks,
 ) -> MinioResult<String> {
-    let client = create_minio_client(config).await?;
+    let client = &create_minio_client(config).await?;
 
-    let mut request = client
-        .create_multipart_upload()
-        .bucket(&config.bucket)
-        .key(key);
-
-    if let Some(ct) = content_type {
-        request = request.content_type(ct);
-    }
-
-    let response = request.send().await?;
+    let response = hooks
+        .retry(|_| async move {
+            client
+                .create_multipart_upload()
+                .bucket(&config.bucket)
+                .key(key)
+                .set_content_type(content_type.map(str::to_owned))
+                .send()
+                .await
+                .map_err(|e| sdk_attempt_failure(&e))
+        })
+        .await?;
     let upload_id = response
         .upload_id()
         .ok_or("No upload ID returned")?
@@ -85,25 +98,39 @@ pub async fn initiate_multipart_upload(
     Ok(upload_id)
 }
 
-#[allow(dead_code)]
+/// Upload `len` bytes of the file at `offset` as one part, retrying transient
+/// failures; each attempt re-reads the part under size-scaled timeouts.
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_part(
     config: &MinioConfig,
     key: &str,
     upload_id: &str,
     part_number: i32,
-    data: Vec<u8>,
+    file_path: &Path,
+    offset: u64,
+    len: u64,
+    hooks: &UploadHooks,
 ) -> MinioResult<String> {
-    let client = create_minio_client(config).await?;
-    let body = ByteStream::from(data);
+    let client = &create_minio_client(config).await?;
 
-    let response = client
-        .upload_part()
-        .bucket(&config.bucket)
-        .key(key)
-        .upload_id(upload_id)
-        .part_number(part_number)
-        .body(body)
-        .send()
+    let response = hooks
+        .retry(|_| async move {
+            let data = read_file_range(file_path, offset, len)
+                .await
+                .map_err(AttemptFailure::permanent)?;
+            client
+                .upload_part()
+                .bucket(&config.bucket)
+                .key(key)
+                .upload_id(upload_id)
+                .part_number(part_number)
+                .body(ByteStream::from(data))
+                .customize()
+                .config_override(sdk_upload_timeouts(len))
+                .send()
+                .await
+                .map_err(|e| sdk_attempt_failure(&e))
+        })
         .await?;
 
     let etag = response.e_tag().unwrap_or_default().to_string();
@@ -193,7 +220,7 @@ pub async fn list_parts(
     Ok(parts)
 }
 
-#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_file_multipart(
     config: &MinioConfig,
     key: &str,
@@ -202,6 +229,7 @@ pub async fn upload_file_multipart(
     part_size: u64,
     concurrency: usize,
     progress_callback: Option<Box<dyn Fn(u64, u64) + Send + Sync>>,
+    hooks: &UploadHooks,
 ) -> MinioResult<String> {
     let metadata = tokio::fs::metadata(file_path).await?;
     let file_size = metadata.len();
@@ -210,15 +238,20 @@ pub async fn upload_file_multipart(
         return Err("Cannot upload empty file".into());
     }
 
-    let upload_id = initiate_multipart_upload(config, key, content_type).await?;
+    let upload_id = initiate_multipart_upload(config, key, content_type, hooks).await?;
     let total_parts = file_size.div_ceil(part_size) as usize;
 
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let uploaded_bytes = Arc::new(AtomicU64::new(0));
     let callback = Arc::new(progress_callback);
+    // Set once a part has failed for good: start no further parts.
+    let part_failed = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();
 
     for part_number in 1..=total_parts {
+        if hooks.cancelled.load(Ordering::SeqCst) || part_failed.load(Ordering::SeqCst) {
+            break;
+        }
         let permit = semaphore.clone().acquire_owned().await?;
         let config = config.clone();
         let key = key.to_string();
@@ -226,6 +259,8 @@ pub async fn upload_file_multipart(
         let file_path = file_path.to_path_buf();
         let uploaded_bytes = uploaded_bytes.clone();
         let callback = callback.clone();
+        let hooks = hooks.clone();
+        let part_failed = part_failed.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = permit;
@@ -233,13 +268,18 @@ pub async fn upload_file_multipart(
             let end = std::cmp::min(start + part_size, file_size);
             let part_data_size = end - start;
 
-            let mut file = File::open(&file_path).await?;
-            file.seek(SeekFrom::Start(start)).await?;
-
-            let mut buffer = vec![0u8; part_data_size as usize];
-            file.read_exact(&mut buffer).await?;
-
-            let etag = upload_part(&config, &key, &upload_id, part_number as i32, buffer).await?;
+            let etag = upload_part(
+                &config,
+                &key,
+                &upload_id,
+                part_number as i32,
+                &file_path,
+                start,
+                part_data_size,
+                &hooks,
+            )
+            .await
+            .inspect_err(|_| part_failed.store(true, Ordering::SeqCst))?;
 
             let new_total =
                 uploaded_bytes.fetch_add(part_data_size, Ordering::SeqCst) + part_data_size;
@@ -277,6 +317,11 @@ pub async fn upload_file_multipart(
         }
     }
 
+    if hooks.cancelled.load(Ordering::SeqCst) {
+        let _ = abort_multipart_upload(config, key, &upload_id).await;
+        return Err(CANCELLED_MESSAGE.into());
+    }
+
     if let Some(err) = first_error {
         let _ = abort_multipart_upload(config, key, &upload_id).await;
         return Err(err);
@@ -287,13 +332,15 @@ pub async fn upload_file_multipart(
     Ok(upload_id)
 }
 
-#[allow(dead_code)]
+/// Upload a file (multipart from 100 MB). `hooks` carries the cancel flag and
+/// the retry reporter of the command that owns the upload slot.
 pub async fn upload_file(
     config: &MinioConfig,
     key: &str,
     file_path: &Path,
     content_type: Option<&str>,
     progress_callback: Option<Box<dyn Fn(u64, u64) + Send + Sync>>,
+    hooks: &UploadHooks,
 ) -> MinioResult<String> {
     const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024;
     const PART_SIZE: u64 = 20 * 1024 * 1024;
@@ -302,10 +349,11 @@ pub async fn upload_file(
     let file_size = tokio::fs::metadata(file_path).await?.len();
 
     if file_size < MULTIPART_THRESHOLD {
+        let etag = upload_file_simple(config, key, file_path, content_type, hooks).await?;
         if let Some(ref cb) = progress_callback {
             cb(file_size, file_size);
         }
-        upload_file_simple(config, key, file_path, content_type).await
+        Ok(etag)
     } else {
         upload_file_multipart(
             config,
@@ -315,6 +363,7 @@ pub async fn upload_file(
             PART_SIZE,
             CONCURRENCY,
             progress_callback,
+            hooks,
         )
         .await
     }

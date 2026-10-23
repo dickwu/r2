@@ -17,7 +17,7 @@ import {
   ShrinkOutlined,
   InfoCircleOutlined,
 } from '@ant-design/icons';
-import { useUploadStore } from '@/app/stores/uploadStore';
+import { useUploadStore, type UploadTask } from '@/app/stores/uploadStore';
 import { useDownloadStore } from '@/app/stores/downloadStore';
 import { useMoveStore, isMoveAwaitingAction } from '@/app/stores/moveStore';
 import { useRenameStore, renameFailureRecord } from '@/app/stores/renameStore';
@@ -74,6 +74,13 @@ function uploadState(status: string): TaskState {
   if (status === 'success') return 'done';
   if (status === 'error' || status === 'cancelled') return 'error';
   return 'active';
+}
+
+// Chip for an upload waiting for a slot or for a retry
+function uploadPhase(t: UploadTask): string | undefined {
+  if (t.status === 'queued') return 'QUEUED';
+  if (t.status === 'uploading' && t.retry) return `RETRY ${t.retry.attempt}/${t.retry.maxAttempts}`;
+  return undefined;
 }
 
 function downloadState(status: string): TaskState {
@@ -143,6 +150,7 @@ export default function TransferDock() {
         id: t.id,
         kind: 'upload',
         name: t.renamedFileName ?? t.fileName,
+        phase: uploadPhase(t),
         progress: t.progress,
         state,
         speed: state === 'active' ? t.speed : 0,
