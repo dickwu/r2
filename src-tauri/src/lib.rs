@@ -20,6 +20,7 @@ mod r2;
 mod test_s3;
 mod transfer_progress;
 mod upload;
+mod upload_control;
 
 const APP_NAME: &str = "R2 Uploader";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

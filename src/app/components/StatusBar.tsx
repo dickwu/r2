@@ -76,7 +76,7 @@ export default function StatusBar({
 
   const transferCount = useMemo(() => {
     const activeUploads = uploadTasks.filter(
-      (t) => t.status === 'uploading' || t.status === 'pending'
+      (t) => t.status === 'uploading' || t.status === 'queued' || t.status === 'pending'
     ).length;
     const activeDownloads = downloadTasks.filter(
       (t) => t.status === 'downloading' || t.status === 'pending'

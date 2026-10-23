@@ -550,6 +550,26 @@ pub async fn upload_aws_file(
         .map_err(|e| format!("Failed to get file metadata: {}", e))?
         .len();
 
+    // Register the cancel flag `cancel_upload` sets, then wait for one of the
+    // global upload slots (shared with the R2 path) before transferring.
+    let registration = crate::upload_control::register_upload(&task_id);
+    let _slot = match crate::upload_control::acquire_upload_slot(&registration.cancelled).await {
+        Ok(slot) => slot,
+        Err(e) => {
+            return Ok(UploadResult {
+                task_id,
+                success: false,
+                error: Some(e),
+                upload_id: None,
+            })
+        }
+    };
+    let hooks = crate::upload_control::UploadHooks::for_task(
+        &app,
+        &task_id,
+        registration.cancelled.clone(),
+    );
+
     let task_id_clone = task_id.clone();
     let app_clone = app.clone();
     let progress_callback = Box::new(move |uploaded: u64, total: u64| {
@@ -576,8 +596,10 @@ pub async fn upload_aws_file(
         &path,
         content_type.as_deref(),
         Some(progress_callback),
+        &hooks,
     )
     .await;
+    drop(registration);
 
     match result {
         Ok(upload_id_or_etag) => {
