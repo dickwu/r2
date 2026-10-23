@@ -45,10 +45,10 @@ tokio = { version = "1", features = [
     "time",
 ] }
 tokio-util = { version = "0.7", features = ["io"] }
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 chrono = "0.4"
 urlencoding = "2"
 lazy_static = "1.4"
@@ -57,13 +57,13 @@ log = "0.4"
 tauri-plugin-video-thumbnail = { git = "https://github.com/dickwu/tauri-plugin-video-thumbnail" }
 # AWS S3 SDK for R2 operations
 aws-config = "1.8"
-aws-sdk-s3 = { version = "1.153.0", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.155.0", features = ["behavior-version-latest"] }
 aws-credential-types = "1.2"
 futures-util = "0.3"
 # Multi-threaded download engine with Range-based parallel chunk acceleration
 range-dl = { path = "crates/range-dl" }
 # Dev-only: connector for AI-assisted testing (opt-in via --features connector)
-tauri-plugin-connector = { version = "0.16", optional = true }
+tauri-plugin-connector = { version = "0.17", optional = true }
 # Localhost NFSv3 server backing the "mount bucket as local drive" feature
 nfsserve = "0.11"
 async-trait = "0.1"

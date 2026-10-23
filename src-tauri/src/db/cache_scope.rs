@@ -94,7 +94,7 @@ impl CacheConfig {
             &self.access_key_id,
             &self.secret_access_key,
         ))?;
-        Ok(format!("{:x}", Sha256::digest(serialized)))
+        Ok(hex::encode(Sha256::digest(serialized)))
     }
 }
 

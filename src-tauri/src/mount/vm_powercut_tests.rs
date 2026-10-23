@@ -223,7 +223,7 @@ async fn vm_nfs_powercut_writer() {
             "R2_VM_ACK",
             serde_json::json!({
                 "operation": index + 1, "kind": "kernel_nfs_fsync_returned", "bucket": BUCKET, "key": KEY,
-                "size": expected.len(), "sha256": format!("{:x}", Sha256::digest(&expected)),
+                "size": expected.len(), "sha256": hex::encode(Sha256::digest(&expected)),
                 "lsn": lsn, "generation": generation, "initial_etag": initial_etag,
             }),
         );
@@ -337,14 +337,14 @@ async fn vm_nfs_powercut_recover() {
         );
         bytes.extend(part);
     }
-    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let digest = hex::encode(Sha256::digest(&bytes));
     assert_eq!(digest, expected["sha256"].as_str().unwrap());
     let pending = tokio::time::timeout(Duration::from_secs(30), fs.drain(2, 1))
         .await
         .unwrap();
     assert_eq!(pending, 0, "Recovered publication must fully converge");
     assert_eq!(
-        format!("{:x}", Sha256::digest(&objects.lock().unwrap()[KEY].data)),
+        hex::encode(Sha256::digest(&objects.lock().unwrap()[KEY].data)),
         digest
     );
     assert_eq!(fs.pending_upload_count().await, 0);

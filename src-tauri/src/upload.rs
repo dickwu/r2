@@ -5,7 +5,7 @@ use crate::upload_control::{
     register_upload, AttemptFailure, UploadHooks,
 };
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

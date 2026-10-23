@@ -21,7 +21,7 @@ struct Object {
 }
 impl Object {
     fn etag(&self) -> String {
-        format!("\"{:x}\"", Sha256::digest(&self.data))
+        format!("\"{}\"", hex::encode(Sha256::digest(&self.data)))
     }
 }
 fn xml(value: &str) -> String {

@@ -101,18 +101,15 @@ fn identity(config: &MoveConfig) -> Result<BackendIdentity, String> {
         namespace,
         // Authentication identity may select a tenant on a compatible endpoint.
         // Keep credentials and even access-key identifiers out of journals/logs.
-        principal: principal.map(|p| format!("{:x}", Sha256::digest(p.as_bytes()))),
+        principal: principal.map(|p| hex::encode(Sha256::digest(p.as_bytes()))),
     })
 }
 
 pub(crate) fn scope(config: &MoveConfig) -> Result<String, String> {
     let id = identity(config)?;
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(
-            format!("{}\0{}", id.namespace, id.principal.unwrap_or_default()).as_bytes()
-        )
-    ))
+    Ok(hex::encode(Sha256::digest(
+        format!("{}\0{}", id.namespace, id.principal.unwrap_or_default()).as_bytes(),
+    )))
 }
 
 pub(crate) fn native_aws(config: &MoveConfig) -> bool {

@@ -119,7 +119,7 @@ fn object_key(scope: &str) -> String {
     );
     hash.update(NEXT.fetch_add(1, Ordering::Relaxed).to_le_bytes());
     hash.update(std::process::id().to_le_bytes());
-    format!(".r2-operation-checks/{:x}", hash.finalize())
+    format!(".r2-operation-checks/{}", hex::encode(hash.finalize()))
 }
 
 async fn probe(
