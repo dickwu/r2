@@ -1,0 +1,9 @@
+# Pin the Rust toolchain for this repo (the Rust workspace lives in src-tauri/).
+# CI builds on stable (dtolnay/rust-toolchain@stable in every workflow), so local
+# builds must too: with a nightly rustup default, transitive crates that switch to
+# nightly-only code paths (e.g. `branches`, pulled in by `turso_core`) can stop
+# compiling on any nightly bump — `bun run tauri build` broke that way on
+# the 2026-10-14 nightly, which renamed `core::intrinsics::abort`.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
