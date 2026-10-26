@@ -1,11 +1,10 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Image, Segmented, Spin, App } from 'antd';
+import { Image, Segmented, Spin, App, Tooltip } from 'antd';
 import {
   LinkOutlined,
   CopyOutlined,
-  DownloadOutlined,
   FileOutlined,
   FileImageOutlined,
   PlaySquareOutlined,
@@ -14,6 +13,7 @@ import {
   FileTextOutlined,
   LeftOutlined,
   RightOutlined,
+  EditOutlined,
 } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import dynamic from 'next/dynamic';
@@ -21,7 +21,6 @@ import {
   buildPublicUrl,
   generateSignedUrl,
   hasSigningCredentials,
-  uploadContent,
   isBucketPublic,
   StorageConfig,
 } from '@/app/lib/r2cache';
@@ -36,6 +35,9 @@ import { usePreviewTarget, type PreviewSource } from '@/app/components/preview/u
 import { useVideoThumbnail } from '@/app/hooks/useVideoThumbnail';
 import { usePreviewStore } from '@/app/stores/previewStore';
 import Modal from '@/app/components/ui/Modal';
+import FullscreenButton from '@/app/components/ui/FullscreenButton';
+import { useFullscreen, useWindowFullscreen } from '@/app/components/ui/useFullscreen';
+import { getEditability, type Editability } from '@/app/components/editor/editability';
 
 const TextViewer = dynamic(() => import('@/app/components/preview/TextViewer'), { ssr: false });
 // The viewer bundles every renderer preset (Office, PDF, CAD, archives, …), so
@@ -44,37 +46,10 @@ const FileViewerPane = dynamic(() => import('@/app/components/preview/FileViewer
   ssr: false,
   loading: () => <Spin />,
 });
-
-const TEXT_CONTENT_TYPES: Record<string, string> = {
-  js: 'application/javascript',
-  ts: 'application/typescript',
-  jsx: 'text/jsx',
-  tsx: 'text/tsx',
-  css: 'text/css',
-  scss: 'text/x-scss',
-  less: 'text/x-less',
-  html: 'text/html',
-  xml: 'application/xml',
-  json: 'application/json',
-  yaml: 'text/yaml',
-  yml: 'text/yaml',
-  toml: 'text/x-toml',
-  md: 'text/markdown',
-  markdown: 'text/markdown',
-  sql: 'text/x-sql',
-  sh: 'text/x-shellscript',
-  bash: 'text/x-shellscript',
-  zsh: 'text/x-shellscript',
-  txt: 'text/plain',
-  log: 'text/plain',
-  csv: 'text/csv',
-  ini: 'text/x-ini',
-  env: 'text/plain',
-};
-
-function getContentType(filename: string): string {
-  return TEXT_CONTENT_TYPES[getFileExtension(filename)] || 'text/plain';
-}
+// Monaco, the Markdown renderer and the image tools load when editing starts.
+const FileEditorModal = dynamic(() => import('@/app/components/editor/FileEditorModal'), {
+  ssr: false,
+});
 
 function fileTypeIcon({ kind, extension }: PreviewTarget, size = 18): React.ReactNode {
   const style = { fontSize: size };
@@ -121,8 +96,15 @@ interface FilePreviewModalProps {
 
 export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewModalProps) {
   const { message } = App.useApp();
-  const { file, files, close, navigate } = usePreviewStore();
+  const { file, files, close, navigate, editing, startEditing, stopEditing, markSaved, revision } =
+    usePreviewStore();
   const isOpen = !!file;
+  // The editor, when open, owns the keys (its own Escape, no F while typing).
+  const { fullscreen, toggle: toggleFullscreen } = useFullscreen({
+    active: isOpen && !editing,
+    shortcut: true,
+  });
+  useWindowFullscreen(isOpen && fullscreen);
   // Kept with the key it was made for: while the next file's URL is being
   // signed, that file must not preview (or probe) the previous one's URL.
   const [objectUrl, setObjectUrl] = useState<{ key: string; url: string | null } | null>(null);
@@ -147,7 +129,7 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
 
   // Keyboard navigation: arrow keys to switch files
   useEffect(() => {
-    if (!isOpen || previewableFiles.length <= 1) return;
+    if (!isOpen || editing || previewableFiles.length <= 1) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       // A renderer that owns the key (slideshow, comic pages, media seek)
       // has already called preventDefault by the time it reaches window.
@@ -179,7 +161,7 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, previewableFiles.length, navigate]);
+  }, [isOpen, editing, previewableFiles.length, navigate]);
 
   const hasCredentials = hasSigningCredentials(config);
   const isPublic = isBucketPublic(config);
@@ -187,27 +169,19 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   const canEdit = !!(config?.bucket && hasCredentials);
 
   const preview = usePreviewTarget(file, signedUrl, TEXT_EXTENSIONS);
-  // An object opened by its Content-Type keeps that type when saved.
-  const savedContentType = preview.target.contentType;
-
-  const handleSaveContent = useCallback(
-    async (content: string) => {
-      if (!file || !config || !hasCredentials) throw new Error('Missing credentials or file info');
-      try {
-        await uploadContent(
-          config,
-          file.key,
-          content,
-          savedContentType ?? getContentType(file.name)
-        );
-        message.success('File saved successfully');
-        onFileUpdated?.();
-      } catch (err) {
-        message.error('Failed to save file');
-        throw err;
-      }
+  const editability = useMemo(
+    () => (file ? getEditability(file.name, preview.target, file.size) : null),
+    [file, preview.target]
+  );
+  // The editor keeps the editability it opened with: the preview's content
+  // detection settling mid-edit must not swap or unmount it.
+  const [editingAs, setEditingAs] = useState<Extract<Editability, { editable: true }> | null>(null);
+  const handleSaved = useCallback(
+    (size: number) => {
+      markSaved(size);
+      onFileUpdated?.();
     },
-    [file, config, hasCredentials, savedContentType, message, onFileUpdated]
+    [markSaved, onFileUpdated]
   );
 
   useEffect(() => {
@@ -248,6 +222,10 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
     setObjectUrl(null);
   }, [isOpen, file, config, hasCredentials, isPublic]);
 
+  const { thumbnailSrc: videoPoster } = useVideoThumbnail(
+    file && preview.target.kind === 'video' ? signedUrl : null
+  );
+
   if (!file) return null;
 
   const fileUrl = signedUrl;
@@ -257,7 +235,6 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   const isVideo = kind === 'video';
   const isAudio = kind === 'audio';
   const isText = kind === 'text';
-  const { thumbnailSrc: videoPoster } = useVideoThumbnail(isVideo ? fileUrl : null);
 
   const getModalWidth = () => {
     const width = windowSize.width || (typeof window !== 'undefined' ? window.innerWidth : 1024);
@@ -268,6 +245,8 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
 
   const getPreviewMaxHeight = () => {
     const height = windowSize.height || (typeof window !== 'undefined' ? window.innerHeight : 768);
+    // Fullscreen gives the content everything but the header and footer.
+    if (fullscreen) return `${Math.max(height - 150, 240)}px`;
     return `${Math.min(height * 0.55, 700)}px`;
   };
 
@@ -353,8 +332,34 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
         </span>
       )}
 
+      {editability && (
+        <Tooltip
+          title={
+            !canEdit
+              ? needsCredentials || !hasCredentials
+                ? 'Editing needs access keys for this bucket. Add them in Account Settings.'
+                : 'Choose a bucket to edit its files.'
+              : editability.editable
+                ? 'Edit this file'
+                : editability.reason
+          }
+        >
+          <button
+            className="btn"
+            onClick={() => {
+              if (!editability.editable) return;
+              setEditingAs(editability);
+              startEditing();
+            }}
+            disabled={!canEdit || !editability.editable}
+          >
+            <EditOutlined /> Edit
+          </button>
+        </Tooltip>
+      )}
+
       <button className="btn btn-primary" onClick={close}>
-        <DownloadOutlined /> Close
+        Close
       </button>
     </>
   );
@@ -362,123 +367,143 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
   const modalWidth = getModalWidth();
 
   return (
-    <Modal
-      open={isOpen}
-      onClose={close}
-      title={file.name}
-      subtitle={subtitle}
-      icon={fileTypeIcon(target)}
-      width={typeof modalWidth === 'number' ? modalWidth : undefined}
-      footer={footer}
-    >
-      {/* The name and the content disagree on how to render it: let the user pick. */}
-      {preview.choices && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexWrap: 'wrap',
-            gap: 10,
-            marginBottom: 12,
-            fontSize: 12.5,
-            color: 'var(--text-muted)',
-          }}
-        >
-          <span>
-            The content is {preview.choices.contentName}, but the name says{' '}
-            {formatLabel(preview.choices.name)}. Render as
-          </span>
-          <Segmented<PreviewSource>
-            size="small"
-            value={preview.source}
-            onChange={preview.setSource}
-            options={[
-              { value: 'name', label: `${formatLabel(preview.choices.name)} · name` },
-              { value: 'content', label: `${formatLabel(preview.choices.content)} · content` },
-            ]}
-          />
-        </div>
-      )}
-
-      {/* Preview area */}
-      <div style={{ textAlign: 'center', marginBottom: 16 }}>
-        {loading || preview.pending ? (
-          <Spin />
-        ) : preview.error ? (
-          <p style={{ fontSize: 12.5, color: 'var(--danger)', margin: 0 }}>
-            Error: {preview.error}
-          </p>
-        ) : isImage && fileUrl ? (
-          imageBlobType ? (
-            <BlobImage url={fileUrl} type={imageBlobType} filename={file.name} style={imageStyle} />
-          ) : (
-            <Image src={fileUrl} alt={file.name} style={imageStyle} />
-          )
-        ) : isVideo && fileUrl ? (
-          <video
-            src={fileUrl}
-            controls
-            preload="metadata"
-            poster={videoPoster ?? undefined}
-            playsInline
+    <>
+      <Modal
+        open={isOpen}
+        onClose={close}
+        title={file.name}
+        subtitle={subtitle}
+        icon={fileTypeIcon(target)}
+        width={typeof modalWidth === 'number' ? modalWidth : undefined}
+        footer={footer}
+        fullscreen={fullscreen}
+        headerActions={
+          <FullscreenButton fullscreen={fullscreen} onToggle={toggleFullscreen} shortcutHint />
+        }
+      >
+        {/* The name and the content disagree on how to render it: let the user pick. */}
+        {preview.choices && (
+          <div
             style={{
-              display: 'block',
-              margin: '0 auto',
-              maxWidth: '100%',
-              maxHeight: getPreviewMaxHeight(),
-              borderRadius: 8,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexWrap: 'wrap',
+              gap: 10,
+              marginBottom: 12,
+              fontSize: 12.5,
+              color: 'var(--text-muted)',
             }}
-          />
-        ) : isAudio && fileUrl ? (
-          <audio src={fileUrl} controls style={{ width: '100%' }} />
-        ) : isText && fileUrl ? (
-          <TextViewer
-            url={fileUrl}
-            filename={file.name}
-            extension={target.extension}
-            maxHeight={getPreviewMaxHeight()}
-            editable={canEdit}
-            onSave={handleSaveContent}
-          />
-        ) : kind === 'viewer' && fileUrl ? (
-          <FileViewerPane
-            url={fileUrl}
-            filename={file.name}
-            extension={target.extension}
-            size={file.size}
-            height={getPreviewMaxHeight()}
-          />
-        ) : (
-          <span style={{ color: 'var(--accent)' }}>{placeholderIcon(target)}</span>
+          >
+            <span>
+              The content is {preview.choices.contentName}, but the name says{' '}
+              {formatLabel(preview.choices.name)}. Render as
+            </span>
+            <Segmented<PreviewSource>
+              size="small"
+              value={preview.source}
+              onChange={preview.setSource}
+              options={[
+                { value: 'name', label: `${formatLabel(preview.choices.name)} · name` },
+                { value: 'content', label: `${formatLabel(preview.choices.content)} · content` },
+              ]}
+            />
+          </div>
         )}
-      </div>
 
-      {/* URL display */}
-      {fileUrl ? (
-        <div
-          style={{
-            background: 'var(--bg-sunken)',
-            padding: '10px 14px',
-            borderRadius: 8,
-            fontFamily: 'var(--font-mono)',
-            fontSize: 11.5,
-            color: 'var(--text-muted)',
-            wordBreak: 'break-all',
-            lineHeight: 1.5,
-          }}
-        >
-          {fileUrl}
+        {/* Preview area: keyed by revision so a save shows the new version. */}
+        <div key={revision} style={{ textAlign: 'center', marginBottom: fullscreen ? 0 : 16 }}>
+          {loading || preview.pending ? (
+            <Spin />
+          ) : preview.error ? (
+            <p style={{ fontSize: 12.5, color: 'var(--danger)', margin: 0 }}>
+              Error: {preview.error}
+            </p>
+          ) : isImage && fileUrl ? (
+            imageBlobType ? (
+              <BlobImage
+                url={fileUrl}
+                type={imageBlobType}
+                filename={file.name}
+                style={imageStyle}
+              />
+            ) : (
+              <Image src={fileUrl} alt={file.name} style={imageStyle} />
+            )
+          ) : isVideo && fileUrl ? (
+            <video
+              src={fileUrl}
+              controls
+              preload="metadata"
+              poster={videoPoster ?? undefined}
+              playsInline
+              style={{
+                display: 'block',
+                margin: '0 auto',
+                maxWidth: '100%',
+                maxHeight: getPreviewMaxHeight(),
+                borderRadius: 8,
+              }}
+            />
+          ) : isAudio && fileUrl ? (
+            <audio src={fileUrl} controls style={{ width: '100%' }} />
+          ) : isText && fileUrl ? (
+            <TextViewer
+              url={fileUrl}
+              filename={file.name}
+              extension={target.extension}
+              maxHeight={getPreviewMaxHeight()}
+            />
+          ) : kind === 'viewer' && fileUrl ? (
+            <FileViewerPane
+              url={fileUrl}
+              filename={file.name}
+              extension={target.extension}
+              size={file.size}
+              height={getPreviewMaxHeight()}
+            />
+          ) : (
+            <span style={{ color: 'var(--accent)' }}>{placeholderIcon(target)}</span>
+          )}
         </div>
-      ) : needsCredentials ? (
-        <p style={{ textAlign: 'center', fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
-          S3 credentials required for signed URL. Configure in Account Settings.
-        </p>
-      ) : (
-        <p style={{ textAlign: 'center', fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
-          Unable to generate file URL
-        </p>
+
+        {/* URL display (fullscreen is for the content alone) */}
+        {fullscreen ? null : fileUrl ? (
+          <div
+            style={{
+              background: 'var(--bg-sunken)',
+              padding: '10px 14px',
+              borderRadius: 8,
+              fontFamily: 'var(--font-mono)',
+              fontSize: 11.5,
+              color: 'var(--text-muted)',
+              wordBreak: 'break-all',
+              lineHeight: 1.5,
+            }}
+          >
+            {fileUrl}
+          </div>
+        ) : needsCredentials ? (
+          <p style={{ textAlign: 'center', fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
+            S3 credentials required for signed URL. Configure in Account Settings.
+          </p>
+        ) : (
+          <p style={{ textAlign: 'center', fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
+            Unable to generate file URL
+          </p>
+        )}
+      </Modal>
+      {editing && config && editingAs && (
+        <FileEditorModal
+          key={file.key}
+          config={config}
+          file={file}
+          editability={editingAs}
+          previewContentType={target.contentType}
+          onSaved={handleSaved}
+          onClose={stopEditing}
+        />
       )}
-    </Modal>
+    </>
   );
 }

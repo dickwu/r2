@@ -1332,6 +1332,9 @@ export default function Home() {
                 onCredentialsUpdate={() => {
                   initialize();
                 }}
+                onFileUpdated={() => {
+                  void refresh();
+                }}
               />
             )}
 

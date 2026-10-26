@@ -1,10 +1,9 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
-import { Spin, Typography, Button, Space, Tooltip } from 'antd';
-import { FileTextOutlined, FormatPainterOutlined, SaveOutlined } from '@ant-design/icons';
-import Editor, { type Monaco } from '@monaco-editor/react';
-import type { editor } from 'monaco-editor';
+import { useEffect, useState } from 'react';
+import { Spin, Typography } from 'antd';
+import { FileTextOutlined } from '@ant-design/icons';
+import Editor from '@monaco-editor/react';
 import DownloadProgress from '@/app/components/preview/DownloadProgress';
 import {
   fetchPreviewBytes,
@@ -12,6 +11,7 @@ import {
 } from '@/app/components/preview/fetchPreviewBytes';
 import { configureMonacoLoader } from '@/app/components/preview/monacoAssets';
 import { getFileExtension } from '@/app/components/preview/previewKind';
+import { monacoLanguageFor } from '@/app/components/editor/editability';
 import { useThemeStore } from '@/app/stores/themeStore';
 
 const { Text } = Typography;
@@ -30,10 +30,8 @@ interface TextViewerProps {
   /** Format to highlight the text as; defaults to the name's extension. */
   extension?: string;
   maxHeight?: string;
-  editable?: boolean;
   onLoadSuccess?: () => void;
   onLoadError?: (error: Error) => void;
-  onSave?: (content: string) => Promise<void>;
 }
 
 // Common text file extensions
@@ -51,73 +49,26 @@ export const TEXT_EXTENSIONS = [
   ...DATA_EXTENSIONS,
 ];
 
-function getLanguageFromExtension(ext: string): string {
-  const langMap: Record<string, string> = {
-    js: 'javascript',
-    ts: 'typescript',
-    jsx: 'javascript',
-    tsx: 'typescript',
-    py: 'python',
-    rb: 'ruby',
-    go: 'go',
-    rs: 'rust',
-    java: 'java',
-    kt: 'kotlin',
-    swift: 'swift',
-    cs: 'csharp',
-    php: 'php',
-    css: 'css',
-    scss: 'scss',
-    less: 'less',
-    html: 'html',
-    xml: 'xml',
-    json: 'json',
-    yaml: 'yaml',
-    yml: 'yaml',
-    toml: 'ini',
-    md: 'markdown',
-    markdown: 'markdown',
-    sql: 'sql',
-    sh: 'shell',
-    bash: 'shell',
-    zsh: 'shell',
-    ini: 'ini',
-    env: 'ini',
-    csv: 'plaintext',
-    txt: 'plaintext',
-    log: 'plaintext',
-  };
-  return langMap[ext] || 'plaintext';
-}
-
 export default function TextViewer({
   url,
   filename = '',
   extension,
   maxHeight = '700px',
-  editable = false,
   onLoadSuccess,
   onLoadError,
-  onSave,
 }: TextViewerProps) {
   const [content, setContent] = useState<string | null>(null);
-  const [editedContent, setEditedContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<{
     loaded: number;
     total: number | null;
   }>({ loaded: 0, total: null });
 
-  const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
-  const monacoRef = useRef<Monaco | null>(null);
-
-  const language = getLanguageFromExtension(extension ?? getFileExtension(filename));
+  // Editing happens in the file editor (opened from the preview's Edit button).
+  const language = monacoLanguageFor(filename, extension ?? getFileExtension(filename));
   const appTheme = useThemeStore((s) => s.theme);
   const monacoTheme = appTheme === 'dark' ? 'vs-dark' : 'light';
-
-  const isModified = editedContent !== null && editedContent !== content;
 
   useEffect(() => {
     if (!url) {
@@ -151,41 +102,6 @@ export default function TextViewer({
     return () => controller.abort();
   }, [url, onLoadSuccess, onLoadError]);
 
-  // Reset edited content when original content changes
-  useEffect(() => {
-    setEditedContent(null);
-  }, [content]);
-
-  const handleEditorDidMount = (editor: editor.IStandaloneCodeEditor, monaco: Monaco) => {
-    editorRef.current = editor;
-    monacoRef.current = monaco;
-  };
-
-  const handleFormat = async () => {
-    if (editorRef.current) {
-      await editorRef.current.getAction('editor.action.formatDocument')?.run();
-    }
-  };
-
-  const handleSave = async () => {
-    if (!onSave || editedContent === null) return;
-
-    setSaving(true);
-    try {
-      await onSave(editedContent);
-      // Update original content to match saved content
-      setContent(editedContent);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleEditorChange = (value: string | undefined) => {
-    if (editable && value !== undefined) {
-      setEditedContent(value);
-    }
-  };
-
   if (loading) {
     return <DownloadProgress loaded={downloadProgress.loaded} total={downloadProgress.total} />;
   }
@@ -206,7 +122,7 @@ export default function TextViewer({
     );
   }
 
-  const displayContent = editedContent ?? content;
+  const displayContent = content;
   const lineCount = displayContent.split('\n').length;
   // Parse maxHeight to number for Monaco
   const heightNum = parseInt(maxHeight, 10) || 500;
@@ -226,31 +142,11 @@ export default function TextViewer({
           <Text className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
             {lineCount} {lineCount === 1 ? 'line' : 'lines'} • {language}
           </Text>
-          {isModified && <Text className="text-sm text-orange-500">• Modified</Text>}
         </div>
         <div className="flex items-center gap-2">
           <Text className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
             {(new TextEncoder().encode(displayContent).length / 1024).toFixed(1)} KB
           </Text>
-          {editable && (
-            <Space size="small">
-              <Tooltip title="Format Document">
-                <Button size="small" icon={<FormatPainterOutlined />} onClick={handleFormat} />
-              </Tooltip>
-              <Tooltip title={isModified ? 'Save Changes' : 'No changes to save'}>
-                <Button
-                  size="small"
-                  type={isModified ? 'primary' : 'default'}
-                  icon={<SaveOutlined />}
-                  onClick={handleSave}
-                  loading={saving}
-                  disabled={!isModified || !onSave}
-                >
-                  Save
-                </Button>
-              </Tooltip>
-            </Space>
-          )}
         </div>
       </div>
       <Editor
@@ -258,15 +154,13 @@ export default function TextViewer({
         language={language}
         value={displayContent}
         theme={monacoTheme}
-        onMount={handleEditorDidMount}
-        onChange={handleEditorChange}
         options={{
-          readOnly: !editable,
+          readOnly: true,
           minimap: { enabled: lineCount > 100 },
           scrollBeyondLastLine: false,
           fontSize: 13,
           lineNumbers: 'on',
-          renderLineHighlight: editable ? 'line' : 'none',
+          renderLineHighlight: 'none',
           selectionHighlight: true,
           wordWrap: 'on',
           contextmenu: true,
