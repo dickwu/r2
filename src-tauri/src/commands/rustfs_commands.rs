@@ -152,11 +152,22 @@ pub async fn generate_rustfs_signed_url(
 pub async fn upload_rustfs_content(
     config: RustfsConfigInput,
     key: String,
-    content: String,
+    content: Option<String>,
+    content_base64: Option<String>,
     content_type: Option<String>,
+    if_match: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
-    minio_commands::upload_minio_content(config.into(), key, content, content_type, app).await
+    minio_commands::upload_minio_content(
+        config.into(),
+        key,
+        content,
+        content_base64,
+        content_type,
+        if_match,
+        app,
+    )
+    .await
 }
 
 #[tauri::command]

@@ -15,24 +15,22 @@ pub async fn upload_content(
     key: &str,
     content: Vec<u8>,
     content_type: Option<&str>,
+    if_match: Option<&str>,
 ) -> AwsResult<String> {
     let client = create_aws_client(config).await?;
-    let body = ByteStream::from(content);
-
-    let mut request = client
+    let response = client
         .put_object()
         .bucket(&config.bucket)
         .key(key)
-        .body(body);
-
-    if let Some(ct) = content_type {
-        request = request.content_type(ct);
-    }
-
-    let response = request.send().await?;
-    let etag = response.e_tag().unwrap_or_default().to_string();
-
-    Ok(etag)
+        .set_content_type(content_type.map(str::to_owned))
+        // Only overwrite the version the editor opened; a provider that
+        // ignores the header still gets the editor's own ETag check.
+        .set_if_match(if_match.map(str::to_owned))
+        .body(ByteStream::from(content))
+        .send()
+        .await
+        .map_err(|e| crate::providers::s3_client::describe_write_error(&e))?;
+    Ok(response.e_tag().unwrap_or_default().to_string())
 }
 
 /// PUT a whole file, retrying transient failures (see [`UploadHooks::retry`]);

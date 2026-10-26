@@ -480,18 +480,23 @@ pub async fn generate_minio_signed_url(
 pub async fn upload_minio_content(
     config: MinioConfigInput,
     key: String,
-    content: String,
+    content: Option<String>,
+    content_base64: Option<String>,
     content_type: Option<String>,
+    if_match: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
-    upload_minio_content_with(config, key, content, content_type, &app).await
+    let body = super::content_body::content_body(content, content_base64)?;
+    let if_match = super::content_body::if_match_header(if_match);
+    upload_minio_content_with(config, key, body, content_type, if_match, &app).await
 }
 
 pub(crate) async fn upload_minio_content_with(
     config: MinioConfigInput,
     key: String,
-    content: String,
+    content_bytes: Vec<u8>,
     content_type: Option<String>,
+    if_match: Option<String>,
     app: &impl CacheEventSink,
 ) -> Result<String, String> {
     let bucket = config.bucket.clone();
@@ -500,12 +505,17 @@ pub(crate) async fn upload_minio_content_with(
     let scope = db::cache_scope::capture_write_scope(config.cache_configs()).await;
     let minio_config: minio::MinioConfig = config.into();
 
-    let content_bytes = content.into_bytes();
     let new_size = content_bytes.len() as i64;
 
-    let etag = minio::upload_content(&minio_config, &key, content_bytes, content_type.as_deref())
-        .await
-        .map_err(|e| format!("Failed to upload content: {}", e))?;
+    let etag = minio::upload_content(
+        &minio_config,
+        &key,
+        content_bytes,
+        content_type.as_deref(),
+        if_match.as_deref(),
+    )
+    .await
+    .map_err(|e| format!("Failed to upload content: {}", e))?;
 
     let last_modified = chrono::Utc::now().to_rfc3339();
 
@@ -724,6 +734,60 @@ mod tests {
         (fixture, input, cache_config)
     }
 
+    #[tokio::test]
+    async fn content_saves_only_overwrite_the_version_they_were_given() {
+        let fixture = serve(|request| async move {
+            match request.headers.get("if-match").map(String::as_str) {
+                None | Some("\"v1\"") => Response::empty(200).header("etag", "\"v2\""),
+                Some(_) => Response::xml(
+                    412,
+                    "<Error><Code>PreconditionFailed</Code>\
+                     <Message>At least one of the pre-conditions you specified did not hold</Message></Error>",
+                ),
+            }
+        })
+        .await;
+        let host = fixture
+            .endpoint
+            .strip_prefix("http://")
+            .unwrap()
+            .to_string();
+        let config: minio::MinioConfig = MinioConfigInput {
+            account_id: "if-match".into(),
+            bucket: "journal".into(),
+            access_key_id: "fixture".into(),
+            secret_access_key: "fixture-secret".into(),
+            endpoint_scheme: "http".into(),
+            endpoint_host: host,
+            force_path_style: true,
+        }
+        .into();
+
+        let etag = minio::upload_content(&config, "a.txt", b"x".to_vec(), None, Some("\"v1\""))
+            .await
+            .unwrap();
+        assert_eq!(etag, "\"v2\"");
+        let error = minio::upload_content(&config, "a.txt", b"x".to_vec(), None, Some("\"v0\""))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("HTTP 412: PreconditionFailed"), "{error}");
+        // Without a condition the write is unconditional, as before.
+        minio::upload_content(&config, "a.txt", b"x".to_vec(), Some("text/plain"), None)
+            .await
+            .unwrap();
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(
+            requests[0].headers.get("if-match").map(String::as_str),
+            Some("\"v1\"")
+        );
+        assert!(!requests[2].headers.contains_key("if-match"));
+        assert_eq!(
+            requests[2].headers.get("content-type").map(String::as_str),
+            Some("text/plain")
+        );
+    }
+
     fn scanned(account_id: &str, key: &str, size: i64) -> CachedFile {
         let (parent_path, name) = db::parse_key(key);
         CachedFile {
@@ -791,9 +855,16 @@ mod tests {
         delete_minio_object_with(input.clone(), "gone.txt".into(), &events)
             .await
             .unwrap();
-        upload_minio_content_with(input, "new.txt".into(), "hello".into(), None, &events)
-            .await
-            .unwrap();
+        upload_minio_content_with(
+            input,
+            "new.txt".into(),
+            b"hello".to_vec(),
+            None,
+            None,
+            &events,
+        )
+        .await
+        .unwrap();
         publish(&scope, ACCOUNT, &run).await.unwrap();
 
         let requests: Vec<_> = fixture

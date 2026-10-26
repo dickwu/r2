@@ -225,6 +225,21 @@ where
     description
 }
 
+/// [`describe_s3_error`] led by the HTTP status when the service answered,
+/// e.g. "HTTP 412: PreconditionFailed: …". The editor tells a conflict
+/// (412) and missing write access (403) apart by it, and some S3-compatible
+/// servers answer those with an empty body, so the status is all there is.
+pub fn describe_write_error<E>(error: &SdkError<E, HttpResponse>) -> String
+where
+    E: std::error::Error + ProvideErrorMetadata + 'static,
+{
+    let description = describe_s3_error(error);
+    match error.raw_response() {
+        Some(raw) => format!("HTTP {}: {description}", raw.status().as_u16()),
+        None => description,
+    }
+}
+
 /// What to change when macOS answers "No route to host" (os error 65). Since
 /// macOS 15 an app needs the Local Network privilege to reach a LAN endpoint —
 /// a self-hosted RustFS or MinIO — and a denial surfaces as that errno.
@@ -251,8 +266,8 @@ const TRANSIENT_ERROR_CODES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::{
-        create_s3_client, describe_s3_error, s3_error_class, S3ClientConfig, StorageErrorClass,
-        LOCAL_NETWORK_HINT,
+        create_s3_client, describe_s3_error, describe_write_error, s3_error_class, S3ClientConfig,
+        StorageErrorClass, LOCAL_NETWORK_HINT,
     };
     use aws_sdk_s3::config::http::HttpResponse;
     use aws_sdk_s3::error::{ConnectorError, ErrorMetadata, SdkError};
@@ -305,6 +320,27 @@ mod tests {
         let error = service_error(403, "AccessDenied", "Access Denied");
 
         assert_eq!(describe_s3_error(&error), "AccessDenied: Access Denied");
+    }
+
+    #[test]
+    fn write_errors_lead_with_the_status_so_conflicts_are_recognisable() {
+        let error = service_error(
+            412,
+            "PreconditionFailed",
+            "At least one precondition failed",
+        );
+        assert_eq!(
+            describe_write_error(&error),
+            "HTTP 412: PreconditionFailed: At least one precondition failed"
+        );
+        // An empty body still says what happened.
+        assert!(describe_write_error(&bare_status(403)).starts_with("HTTP 403: "));
+        // No response at all: nothing to lead with.
+        let timeout: ListError = SdkError::timeout_error("slow");
+        assert_eq!(
+            describe_write_error(&timeout),
+            "request has timed out: slow"
+        );
     }
 
     #[test]

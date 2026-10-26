@@ -455,8 +455,10 @@ pub async fn generate_aws_signed_url(
 pub async fn upload_aws_content(
     config: AwsConfigInput,
     key: String,
-    content: String,
+    content: Option<String>,
+    content_base64: Option<String>,
     content_type: Option<String>,
+    if_match: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     let bucket = config.bucket.clone();
@@ -465,12 +467,19 @@ pub async fn upload_aws_content(
     let scope = db::cache_scope::capture_write_scope([config.cache_config()]).await;
     let aws_config: aws::AwsConfig = config.into();
 
-    let content_bytes = content.into_bytes();
+    let content_bytes = super::content_body::content_body(content, content_base64)?;
+    let if_match = super::content_body::if_match_header(if_match);
     let new_size = content_bytes.len() as i64;
 
-    let etag = aws::upload_content(&aws_config, &key, content_bytes, content_type.as_deref())
-        .await
-        .map_err(|e| format!("Failed to upload content: {}", e))?;
+    let etag = aws::upload_content(
+        &aws_config,
+        &key,
+        content_bytes,
+        content_type.as_deref(),
+        if_match.as_deref(),
+    )
+    .await
+    .map_err(|e| format!("Failed to upload content: {}", e))?;
 
     let last_modified = chrono::Utc::now().to_rfc3339();
 

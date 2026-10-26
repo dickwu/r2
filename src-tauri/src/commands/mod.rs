@@ -8,6 +8,7 @@ mod aws_commands;
 pub(crate) mod batch_delete;
 pub(crate) mod batch_move;
 mod cache_events;
+mod content_body;
 pub(crate) mod delete_cache;
 mod file_cache;
 pub mod lazy_sync;

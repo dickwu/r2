@@ -339,6 +339,10 @@ pub struct DetectedType {
     pub name: String,
     /// The Content-Type header the object was stored with.
     pub content_type: Option<String>,
+    /// The object's ETag, which the editor checks before overwriting it.
+    pub etag: Option<String>,
+    /// The object's Last-Modified header, as sent.
+    pub last_modified: Option<String>,
 }
 
 /// The most the detector reads; asking for more would only cost bandwidth.
@@ -381,6 +385,16 @@ pub async fn detect_url_type(url: String) -> Result<DetectedType, String> {
         .map_err(|e| format!("Failed to fetch URL: {}", e))?;
 
     let status = response.status();
+    let header = |name: reqwest::header::HeaderName| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    // Read before the body: the editor compares them to spot a concurrent write.
+    let etag = header(reqwest::header::ETAG);
+    let last_modified = header(reqwest::header::LAST_MODIFIED);
     let mut head = Vec::with_capacity(DETECT_BYTES);
     let content_type = if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
         // Only an empty object has no first byte; the detector names it.
@@ -426,6 +440,8 @@ pub async fn detect_url_type(url: String) -> Result<DetectedType, String> {
         extension: detected.extension().trim_start_matches('.').to_owned(),
         name: detected.name().to_owned(),
         content_type,
+        etag,
+        last_modified,
     })
 }
 
@@ -473,6 +489,7 @@ mod tests {
     async fn identifies_the_content_from_its_first_bytes() {
         let (url, server) = serve_once(
             "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\n\
+             ETag: \"abc123\"\r\nLast-Modified: Mon, 26 Oct 2026 19:00:00 GMT\r\n\
              Content-Range: bytes 0-15/4096\r\nContent-Length: 16\r\n\r\n",
             PNG_SIGNATURE.to_vec(),
         )
@@ -483,6 +500,11 @@ mod tests {
         assert_eq!(
             detected.content_type.as_deref(),
             Some("application/octet-stream")
+        );
+        assert_eq!(detected.etag.as_deref(), Some("\"abc123\""));
+        assert_eq!(
+            detected.last_modified.as_deref(),
+            Some("Mon, 26 Oct 2026 19:00:00 GMT")
         );
         let request = server.await.unwrap();
         assert!(

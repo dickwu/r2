@@ -460,8 +460,10 @@ pub async fn generate_signed_url(
 pub async fn upload_r2_content(
     config: R2ConfigInput,
     key: String,
-    content: String,
+    content: Option<String>,
+    content_base64: Option<String>,
     content_type: Option<String>,
+    if_match: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     let bucket = config.bucket.clone();
@@ -471,13 +473,20 @@ pub async fn upload_r2_content(
     let r2_config: r2::R2Config = config.into();
 
     // Calculate content size before converting to bytes
-    let content_bytes = content.into_bytes();
+    let content_bytes = super::content_body::content_body(content, content_base64)?;
+    let if_match = super::content_body::if_match_header(if_match);
     let new_size = content_bytes.len() as i64;
 
     // Upload to R2
-    let etag = r2::upload_content(&r2_config, &key, content_bytes, content_type.as_deref())
-        .await
-        .map_err(|e| format!("Failed to upload content: {}", e))?;
+    let etag = r2::upload_content(
+        &r2_config,
+        &key,
+        content_bytes,
+        content_type.as_deref(),
+        if_match.as_deref(),
+    )
+    .await
+    .map_err(|e| format!("Failed to upload content: {}", e))?;
 
     // Update local database cache
     let last_modified = chrono::Utc::now().to_rfc3339();
