@@ -41,6 +41,7 @@ export type {
   UploadFileInput,
   UploadFileResult,
 } from '@/app/providers/types';
+import type { ContentBody, UploadContentOptions } from '@/app/providers/contentBody';
 
 export interface StoredFile {
   key: string;
@@ -144,10 +145,11 @@ export async function uploadFile(
 export async function uploadContent(
   config: StorageConfig,
   key: string,
-  content: string,
-  contentType?: string
+  content: ContentBody,
+  contentType?: string,
+  options?: UploadContentOptions
 ): Promise<string> {
-  return getProviderAdapter(config).uploadContent(config, key, content, contentType);
+  return getProviderAdapter(config).uploadContent(config, key, content, contentType, options);
 }
 
 // ============ Sync Operation (consolidated) ============

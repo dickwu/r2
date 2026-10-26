@@ -36,6 +36,10 @@ export interface DetectedType {
   name: string;
   /** The Content-Type header the object was stored with. */
   contentType: string | null;
+  /** The object's ETag as the server sent it (quoted), when it sent one. */
+  etag?: string | null;
+  /** The object's Last-Modified header, when the server sent one. */
+  lastModified?: string | null;
 }
 
 /** Raster/vector formats every WebView renders in an <img>. */

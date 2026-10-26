@@ -14,6 +14,7 @@ import type {
   UploadFileResult,
   StorageProviderAdapter,
 } from '@/app/providers/types';
+import { contentArgs } from '../contentBody';
 
 function requireR2Credentials(config: R2StorageConfig) {
   if (!config.accessKeyId || !config.secretAccessKey) {
@@ -119,11 +120,11 @@ export const r2Provider: StorageProviderAdapter<R2StorageConfig> = {
     });
   },
 
-  uploadContent: async (config, key, content, contentType) => {
+  uploadContent: async (config, key, content, contentType, options) => {
     return invoke<string>('upload_r2_content', {
       config: toR2ConfigInput(config),
       key,
-      content,
+      ...contentArgs(content, options),
       contentType,
     });
   },

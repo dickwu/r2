@@ -14,6 +14,7 @@ import type {
   UploadFileResult,
   StorageProviderAdapter,
 } from '@/app/providers/types';
+import { contentArgs } from '../contentBody';
 
 function requireRustfsFields(config: RustfsStorageConfig) {
   if (!config.accessKeyId || !config.secretAccessKey || !config.endpointHost) {
@@ -128,11 +129,11 @@ export const rustfsProvider: StorageProviderAdapter<RustfsStorageConfig> = {
     });
   },
 
-  uploadContent: async (config, key, content, contentType) => {
+  uploadContent: async (config, key, content, contentType, options) => {
     return invoke<string>('upload_rustfs_content', {
       config: toRustfsConfigInput(config),
       key,
-      content,
+      ...contentArgs(content, options),
       contentType,
     });
   },

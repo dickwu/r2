@@ -14,6 +14,7 @@ import type {
   UploadFileResult,
   StorageProviderAdapter,
 } from '@/app/providers/types';
+import { contentArgs } from '../contentBody';
 
 function requireMinioFields(config: MinioStorageConfig) {
   if (!config.accessKeyId || !config.secretAccessKey || !config.endpointHost) {
@@ -128,11 +129,11 @@ export const minioProvider: StorageProviderAdapter<MinioStorageConfig> = {
     });
   },
 
-  uploadContent: async (config, key, content, contentType) => {
+  uploadContent: async (config, key, content, contentType, options) => {
     return invoke<string>('upload_minio_content', {
       config: toMinioConfigInput(config),
       key,
-      content,
+      ...contentArgs(content, options),
       contentType,
     });
   },

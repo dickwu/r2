@@ -14,6 +14,7 @@ import type {
   UploadFileResult,
   StorageProviderAdapter,
 } from '@/app/providers/types';
+import { contentArgs } from '../contentBody';
 
 function requireAwsFields(config: AwsStorageConfig) {
   if (!config.accessKeyId || !config.secretAccessKey || !config.region) {
@@ -131,11 +132,11 @@ export const awsProvider: StorageProviderAdapter<AwsStorageConfig> = {
     });
   },
 
-  uploadContent: async (config, key, content, contentType) => {
+  uploadContent: async (config, key, content, contentType, options) => {
     return invoke<string>('upload_aws_content', {
       config: toAwsConfigInput(config),
       key,
-      content,
+      ...contentArgs(content, options),
       contentType,
     });
   },

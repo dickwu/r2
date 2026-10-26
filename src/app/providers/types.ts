@@ -1,3 +1,5 @@
+import type { ContentBody, UploadContentOptions } from './contentBody';
+
 export type StorageProvider = 'r2' | 'aws' | 'minio' | 'rustfs';
 
 export interface StorageBucket {
@@ -133,8 +135,9 @@ export interface StorageProviderAdapter<TConfig extends StorageConfig = StorageC
   uploadContent: (
     config: TConfig,
     key: string,
-    content: string,
-    contentType?: string
+    content: ContentBody,
+    contentType?: string,
+    options?: UploadContentOptions
   ) => Promise<string>;
   syncBucket: (config: TConfig) => Promise<SyncResult>;
   buildBucketBaseUrl: (config: TConfig) => string | null;
