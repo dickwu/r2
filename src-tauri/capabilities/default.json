@@ -18,6 +18,7 @@
     "dialog:allow-save",
     "fs:default",
     "fs:allow-write-text-file",
+    "fs:allow-write-file",
     "fs:allow-read-text-file",
     "video-thumbnail:default",
     "core:event:default",

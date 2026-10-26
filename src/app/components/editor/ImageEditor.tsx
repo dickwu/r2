@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from 'react';
 import { Button, Spin, Tooltip } from 'antd';
+import { imageEncodingProblem } from '@/app/components/editor/editedContent';
 import {
   CheckOutlined,
   CloseOutlined,
@@ -148,15 +149,8 @@ export default function ImageEditor({
           current.toBlob(
             (blob) => {
               if (!blob) return reject(new Error('The image could not be encoded'));
-              // WebKit falls back to PNG for formats it cannot write; that
-              // would store PNG bytes under a .webp/.jpg name.
-              if (blob.type !== mime) {
-                return reject(
-                  new Error(
-                    `This system cannot write ${mime.replace('image/', '').toUpperCase()} images.`
-                  )
-                );
-              }
+              const problem = imageEncodingProblem(blob.type, mime);
+              if (problem) return reject(new Error(problem));
               blob.arrayBuffer().then((buffer) => resolve(new Uint8Array(buffer)), reject);
             },
             mime,

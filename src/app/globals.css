@@ -2866,6 +2866,34 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
 .file-editor-status.is-error {
   color: var(--danger);
 }
+.file-editor-status-text {
+  min-width: 0;
+}
+.file-editor-inline-action {
+  flex-shrink: 0;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.file-editor-inline-action:hover {
+  background: var(--accent-soft);
+}
+.file-editor-inline-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.file-editor-inline-action:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
 .file-editor-status.is-ok {
   color: var(--mount-live);
 }

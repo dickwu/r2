@@ -5,6 +5,7 @@ import dynamic from 'next/dynamic';
 import { App, Button, Segmented, Spin, Tooltip } from 'antd';
 import {
   CheckCircleFilled,
+  DownloadOutlined,
   EditOutlined,
   FormatPainterOutlined,
   WarningFilled,
@@ -16,14 +17,15 @@ import Modal from '@/app/components/ui/Modal';
 import FullscreenButton from '@/app/components/ui/FullscreenButton';
 import { useFullscreen } from '@/app/components/ui/useFullscreen';
 import { guessContentType } from '@/app/components/editor/editability';
+import { decodeText, describeFormat, type TextFormat } from '@/app/components/editor/textCodec';
 import {
-  applyLineEnding,
-  decodeText,
-  describeFormat,
-  encodeText,
-  isPlainUtf8,
-  type TextFormat,
-} from '@/app/components/editor/textCodec';
+  downloadEditedCopy,
+  editedText,
+  localFileName,
+  saveFailure,
+  type SaveFailureKind,
+} from '@/app/components/editor/editedContent';
+import { tauriCopyDependencies } from '@/app/components/editor/copyToDisk';
 import { sniffDelimiter, type Delimiter } from '@/app/components/editor/delimited';
 import { errorMessage, saveWithVersionCheck } from '@/app/components/editor/saveFlow';
 import {
@@ -65,7 +67,7 @@ type Status =
   | { tone: 'idle' }
   | { tone: 'saving' }
   | { tone: 'saved'; at: Date }
-  | { tone: 'error'; text: string };
+  | { tone: 'error'; text: string; offerCopy: boolean };
 
 interface Loaded {
   bytes: Uint8Array;
@@ -120,6 +122,9 @@ export default function FileEditorModal({
   const imageRef = useRef<ImageEditorHandle | null>(null);
   const confirming = useRef(false);
   const saving = status.tone === 'saving';
+  // Learned from a 403 on save: there's no cheap way to know before trying.
+  const [readOnly, setReadOnly] = useState(false);
+  const [copying, setCopying] = useState(false);
 
   useEffect(() => {
     const update = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
@@ -212,6 +217,43 @@ export default function FileEditorModal({
     return stored || previewContentType || guessContentType(file.name);
   }, [loaded, editability, previewContentType, file.name]);
 
+  /** The edited file as bytes (and upload body), exactly as Save would store it. */
+  const editedFile = useCallback(async (): Promise<{
+    bytes: Uint8Array;
+    body: string | Uint8Array;
+  }> => {
+    if (!loaded) throw new Error('The file is still loading');
+    if (editability.mode === 'image') {
+      if (!imageRef.current) throw new Error('The image is still loading');
+      const bytes = await imageRef.current.encode();
+      return { bytes, body: bytes };
+    }
+    return editedText(text, loaded.text!.format);
+  }, [loaded, editability, text]);
+
+  const fail = useCallback((kind: SaveFailureKind, text: string) => {
+    const failure = saveFailure(kind, text);
+    if (failure.readOnly) setReadOnly(true);
+    setStatus({ tone: 'error', text: failure.text, offerCopy: failure.offerCopy });
+  }, []);
+
+  /** Writes the edited file to a local file the user picks; the editor keeps the edits. */
+  const downloadCopy = useCallback(async () => {
+    if (!loaded || copying) return;
+    setCopying(true);
+    try {
+      const { bytes } = await editedFile();
+      const outcome = await downloadEditedCopy(key, bytes, tauriCopyDependencies);
+      if (outcome.status === 'saved') {
+        message.success(`Saved a copy as ${localFileName(outcome.path)}`);
+      }
+    } catch (error) {
+      message.error(`The copy was not saved: ${errorMessage(error)}`);
+    } finally {
+      setCopying(false);
+    }
+  }, [loaded, copying, editedFile, key, message]);
+
   const save = useCallback(
     async (force = false) => {
       if (!loaded || status.tone === 'saving') return;
@@ -221,24 +263,16 @@ export default function FileEditorModal({
       let bytes: Uint8Array;
       let body: string | Uint8Array;
       try {
-        if (editability.mode === 'image') {
-          if (!imageRef.current) throw new Error('The image is still loading');
-          bytes = await imageRef.current.encode();
-          body = bytes;
-        } else {
-          const format = loaded.text!.format;
-          bytes = encodeText(text, format);
-          body = isPlainUtf8(format) ? applyLineEnding(text, format.eol) : bytes;
-        }
+        ({ bytes, body } = await editedFile());
       } catch (error) {
-        setStatus({ tone: 'error', text: errorMessage(error) });
+        fail('encode', errorMessage(error));
         return;
       }
       if (bytes.length > editability.maxBytes) {
-        setStatus({
-          tone: 'error',
-          text: `The edited file is ${formatBytes(bytes.length)}, over the ${formatBytes(editability.maxBytes)} the editor saves. Undo some changes.`,
-        });
+        fail(
+          'size',
+          `The edited file is ${formatBytes(bytes.length)}, over the ${formatBytes(editability.maxBytes)} the editor saves.`
+        );
         return;
       }
 
@@ -259,13 +293,13 @@ export default function FileEditorModal({
       );
 
       if (outcome.status === 'conflict') {
-        setStatus({ tone: 'error', text: 'Not saved: the file changed on the server.' });
+        fail('conflict', 'Not saved: the file changed on the server.');
         if (confirming.current) return;
         confirming.current = true;
         modal.confirm({
           title: 'This file changed on the server',
           content:
-            'A newer version was saved after you opened it. Overwrite it with your version, or keep editing and copy your changes somewhere safe first.',
+            'A newer version was saved after you opened it. Overwrite it with your version, or keep editing; you can download your version as a copy first.',
           okText: 'Overwrite',
           okButtonProps: { danger: true },
           cancelText: 'Keep editing',
@@ -279,10 +313,11 @@ export default function FileEditorModal({
         return;
       }
       if (outcome.status === 'error') {
-        setStatus({ tone: 'error', text: outcome.message });
+        fail(outcome.kind, outcome.message);
         return;
       }
 
+      setReadOnly(false);
       etagRef.current = outcome.etag ?? (await currentEtag().catch(() => null));
       if (editability.mode === 'image') {
         setImageRevision((r) => r + 1);
@@ -293,7 +328,19 @@ export default function FileEditorModal({
       message.success('Changes saved');
       onSaved(bytes.length);
     },
-    [loaded, status.tone, editability, text, contentType, key, modal, message, onSaved]
+    [
+      loaded,
+      status.tone,
+      editability,
+      text,
+      editedFile,
+      fail,
+      contentType,
+      key,
+      modal,
+      message,
+      onSaved,
+    ]
   );
 
   // Cmd/Ctrl+S, caught before Monaco or the webview sees it.
@@ -319,7 +366,7 @@ export default function FileEditorModal({
     confirming.current = true;
     modal.confirm({
       title: 'Discard unsaved changes?',
-      content: `Your changes to ${file.name} have not been saved.`,
+      content: `Your changes to ${file.name} have not been saved. To keep them without saving to the bucket, use Download copy first.`,
       okText: 'Discard changes',
       okButtonProps: { danger: true },
       cancelText: 'Keep editing',
@@ -510,7 +557,17 @@ export default function FileEditorModal({
       case 'error':
         return (
           <span className="file-editor-status is-error" role="alert">
-            <WarningFilled /> {status.text}
+            <WarningFilled /> <span className="file-editor-status-text">{status.text}</span>
+            {status.offerCopy && !readOnly && (
+              <button
+                type="button"
+                className="file-editor-inline-action"
+                onClick={() => void downloadCopy()}
+                disabled={copying}
+              >
+                Download edited copy
+              </button>
+            )}
           </span>
         );
       case 'saved':
@@ -537,23 +594,65 @@ export default function FileEditorModal({
       ? '⌘S'
       : 'Ctrl+S';
 
+  const copyLabel = copying ? 'Saving copy…' : 'Download edited copy';
+  const copyHint = 'Save what you see to a file on this computer. Nothing is uploaded.';
   const footer = (
     <>
       <span className="left" aria-live="polite">
         {statusLine}
       </span>
-      <button className="btn" onClick={requestClose} disabled={saving}>
-        Close
-      </button>
-      <Tooltip title={`Save changes (${saveKey})`}>
-        <button
-          className="btn btn-primary"
-          onClick={() => void save()}
-          disabled={!dirty || saving || !loaded}
-        >
-          {saving ? 'Saving…' : 'Save changes'}
-        </button>
-      </Tooltip>
+      {readOnly ? (
+        <>
+          <button className="btn" onClick={requestClose} disabled={saving}>
+            Close
+          </button>
+          <Tooltip title={`These credentials cannot write here. Try saving again (${saveKey})`}>
+            <button
+              className="btn"
+              onClick={() => void save()}
+              disabled={!dirty || saving || !loaded}
+            >
+              {saving ? 'Saving…' : 'Try saving again'}
+            </button>
+          </Tooltip>
+          <Tooltip title={copyHint}>
+            <button
+              className="btn btn-primary"
+              onClick={() => void downloadCopy()}
+              disabled={!loaded || copying}
+            >
+              <DownloadOutlined />
+              {copyLabel}
+            </button>
+          </Tooltip>
+        </>
+      ) : (
+        <>
+          <Tooltip title={copyHint}>
+            <button
+              className="btn"
+              onClick={() => void downloadCopy()}
+              disabled={!loaded || copying}
+              aria-label="Download edited copy"
+            >
+              <DownloadOutlined />
+              {copying ? 'Saving copy…' : 'Download copy'}
+            </button>
+          </Tooltip>
+          <button className="btn" onClick={requestClose} disabled={saving}>
+            Close
+          </button>
+          <Tooltip title={`Save changes (${saveKey})`}>
+            <button
+              className="btn btn-primary"
+              onClick={() => void save()}
+              disabled={!dirty || saving || !loaded}
+            >
+              {saving ? 'Saving…' : 'Save changes'}
+            </button>
+          </Tooltip>
+        </>
+      )}
     </>
   );
 
