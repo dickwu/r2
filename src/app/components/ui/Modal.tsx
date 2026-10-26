@@ -59,6 +59,10 @@ export interface ModalProps {
   bodyPadding?: number | string;
   /** Backdrop stacking; the stylesheet's `.modal-backdrop` layer (100) when unset. */
   zIndex?: number;
+  /** Fills the whole window instead of floating at `width`. */
+  fullscreen?: boolean;
+  /** Buttons shown in the header, left of the close button. */
+  headerActions?: ReactNode;
 }
 
 export default function Modal({
@@ -72,6 +76,8 @@ export default function Modal({
   children,
   bodyPadding,
   zIndex,
+  fullscreen = false,
+  headerActions,
 }: ModalProps) {
   // The latest onClose, so a parent passing a fresh arrow on every render
   // neither re-registers this modal nor moves it within the stack.
@@ -97,13 +103,16 @@ export default function Modal({
 
   const content = (
     <div
-      className="modal-backdrop"
+      className={fullscreen ? 'modal-backdrop modal-backdrop-fullscreen' : 'modal-backdrop'}
       style={zIndex != null ? { zIndex } : undefined}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="modal" style={{ width }}>
+      <div
+        className={fullscreen ? 'modal modal-fullscreen' : 'modal'}
+        style={fullscreen ? undefined : { width }}
+      >
         <div className="modal-header">
           <div>
             <div className="modal-title">
@@ -112,9 +121,12 @@ export default function Modal({
             </div>
             {subtitle && <div className="modal-subtitle">{subtitle}</div>}
           </div>
-          <button className="modal-close" onClick={onClose} aria-label="Close">
-            <CloseOutlined style={{ fontSize: 14 }} />
-          </button>
+          <div className="modal-header-actions">
+            {headerActions}
+            <button className="modal-close" onClick={onClose} aria-label="Close">
+              <CloseOutlined style={{ fontSize: 14 }} />
+            </button>
+          </div>
         </div>
         <div
           className="modal-body"
