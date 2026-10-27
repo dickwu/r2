@@ -301,6 +301,20 @@ pub(crate) async fn head_identity(
     head_identity_checked(config, key, &NEVER_CANCELLED_HEAD, &NEVER_PAUSED_HEAD).await
 }
 
+/// Compares the receipt of our write with a later HEAD of the destination.
+/// Size and ETag must always agree. A version id is compared only when both
+/// sides report one: R2 returns `x-amz-version-id` on CopyObject/PutObject but
+/// never on HEAD, so a receipt version with no HEAD version is the same object,
+/// not a changed one.
+fn same_written_object(recorded: &SourceIdentity, current: &SourceIdentity) -> bool {
+    recorded.size == current.size
+        && recorded.etag == current.etag
+        && match (&recorded.version_id, &current.version_id) {
+            (Some(recorded), Some(current)) => recorded == current,
+            _ => true,
+        }
+}
+
 pub(crate) fn verified_destination(
     journal: &MoveJournal,
     current: &SourceIdentity,
@@ -312,7 +326,7 @@ pub(crate) fn verified_destination(
     if journal
         .destination
         .as_ref()
-        .is_some_and(|recorded| recorded != current)
+        .is_some_and(|recorded| !same_written_object(recorded, current))
     {
         return Err("conflict: Destination changed after copying; source retained".to_string());
     }
@@ -904,6 +918,42 @@ mod tests {
         let mut changed = identity;
         changed.etag = "new".into();
         assert!(verified_destination(&journal, &changed, Some("task")).is_err());
+    }
+    #[test]
+    fn a_write_receipt_version_the_head_does_not_report_still_verifies() {
+        // R2 returns x-amz-version-id on CopyObject/PutObject but never on
+        // HEAD, so the receipt and the HEAD of the same object differ only in
+        // version_id. That must not read as "destination changed".
+        let head = SourceIdentity {
+            size: 44,
+            etag: "\"e\"".into(),
+            version_id: None,
+        };
+        let mut journal = MoveJournal {
+            task_id: "task".into(),
+            stage: "copied".into(),
+            source: head.clone(),
+            source_scope: "a".into(),
+            dest_scope: "a".into(),
+            destination: Some(SourceIdentity {
+                version_id: Some("receipt-version".into()),
+                ..head.clone()
+            }),
+            retry: Default::default(),
+            metrics: Default::default(),
+        };
+        assert!(verified_destination(&journal, &head, Some("task")).is_ok());
+        let mut other_etag = head.clone();
+        other_etag.etag = "\"other\"".into();
+        assert!(verified_destination(&journal, &other_etag, Some("task")).is_err());
+        // When both sides report a version, they still have to agree.
+        let other_version = SourceIdentity {
+            version_id: Some("someone-else".into()),
+            ..head.clone()
+        };
+        assert!(verified_destination(&journal, &other_version, Some("task")).is_err());
+        journal.destination = Some(head.clone());
+        assert!(verified_destination(&journal, &other_version, Some("task")).is_ok());
     }
     #[test]
     fn failed_delete_and_uncertain_commit_never_restart_a_transfer() {
