@@ -817,6 +817,16 @@ export default function Home() {
     await refresh();
   }, [refresh, clearSelection]);
 
+  // Row-level "Move" action in list view: opens the same move modal as the
+  // batch toolbar, scoped to just this file.
+  const handleMoveClick = useCallback(
+    (item: FileItem) => {
+      if (item.isFolder) return;
+      openMoveModal(new Set([item.key]));
+    },
+    [openMoveModal]
+  );
+
   const handleRenameClick = useCallback((item: FileItem) => {
     setRenameFile(item);
   }, []);
@@ -1239,6 +1249,7 @@ export default function Home() {
                   onFolderDelete={handleFolderDelete}
                   onFolderDownload={handleFolderDownload}
                   onFolderRename={handleFolderRenameClick}
+                  onMove={handleMoveClick}
                   onFocus={setFocusedItem}
                 />
               ) : (
