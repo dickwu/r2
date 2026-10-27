@@ -1,5 +1,6 @@
 import type { Editability } from '@/app/components/editor/editability';
 import { errorMessage } from '@/app/components/editor/saveFlow';
+import { findJsonSyntaxError, lineAndColumn } from '@/app/components/editor/jsonSyntax';
 
 /** A file the editor can open, and how. */
 export type EditableAs = Extract<Editability, { editable: true }>;
@@ -53,20 +54,26 @@ export function jsonIndent(text: string): string | number {
   return match[1].startsWith('\t') ? '\t' : match[1].length;
 }
 
-/** Where a JSON document stops parsing, as a message, or null when it parses. */
+/**
+ * Where a JSON document stops parsing, as a message, or null when it parses.
+ * The position comes from our own scan, since WebKit's JSON.parse errors carry none.
+ */
 export function jsonProblem(text: string): string | null {
   if (text.trim() === '') return null;
   try {
     JSON.parse(text);
     return null;
   } catch (error) {
+    const found = findJsonSyntaxError(text);
+    if (found) {
+      const { line, column } = lineAndColumn(text, found.offset);
+      return `Invalid JSON at line ${line}, column ${column}: ${found.reason}`;
+    }
+    // The scan accepted what the engine rejected; fall back to the engine's own words.
     const message = errorMessage(error);
     const position = /position (\d+)/.exec(message);
     if (!position) return message;
-    const offset = Number(position[1]);
-    const before = text.slice(0, offset);
-    const line = before.split('\n').length;
-    const column = offset - before.lastIndexOf('\n');
+    const { line, column } = lineAndColumn(text, Number(position[1]));
     return `Invalid JSON at line ${line}, column ${column}`;
   }
 }

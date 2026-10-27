@@ -432,7 +432,7 @@ export default function FileEditorModal({
               role="status"
             >
               {jsonError ? <WarningFilled /> : <CheckCircleFilled />}
-              {jsonError ?? 'Valid JSON'}
+              <span className="file-editor-status-text">{jsonError ?? 'Valid JSON'}</span>
             </span>
           </>
         );

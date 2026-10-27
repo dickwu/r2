@@ -11,8 +11,46 @@ describe('editorText', () => {
   test('jsonProblem points at the line and column', () => {
     expect(jsonProblem('{"a": 1}')).toBeNull();
     expect(jsonProblem('   ')).toBeNull();
-    const problem = jsonProblem('{\n  "a": 1,\n}');
-    expect(problem).toBeTruthy();
+    expect(jsonProblem('{\n  "a": 1,\n}')).toBe(
+      'Invalid JSON at line 3, column 1: Trailing comma before "}"'
+    );
+  });
+
+  test('jsonProblem gives a line and column on WebKit, whose errors carry no position', () => {
+    const parse = JSON.parse;
+    const webkit = [
+      'JSON Parse error: Property name must be a string literal',
+      "JSON Parse error: Expected '}'",
+      'JSON Parse error: Unexpected identifier "oops"',
+    ];
+    try {
+      for (const message of webkit) {
+        JSON.parse = () => {
+          throw new SyntaxError(message);
+        };
+        expect(jsonProblem('{\n  "name": "test", oops: 1\n}')).toBe(
+          'Invalid JSON at line 2, column 19: Expected a property name in double quotes, found "o"'
+        );
+      }
+    } finally {
+      JSON.parse = parse;
+    }
+  });
+
+  test('jsonProblem falls back to the engine when the scan finds nothing', () => {
+    const parse = JSON.parse;
+    try {
+      JSON.parse = () => {
+        throw new SyntaxError('Unexpected token at position 3');
+      };
+      expect(jsonProblem('{"a":\n1}')).toBe('Invalid JSON at line 1, column 4');
+      JSON.parse = () => {
+        throw new SyntaxError('JSON Parse error: Something odd');
+      };
+      expect(jsonProblem('{"a": 1}')).toBe('JSON Parse error: Something odd');
+    } finally {
+      JSON.parse = parse;
+    }
   });
 
   test('documentLabel names the document type', () => {
