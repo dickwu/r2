@@ -1,114 +1,68 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
-import { getVersion } from '@tauri-apps/api/app';
-import { check, type Update } from '@tauri-apps/plugin-updater';
-import { relaunch } from '@tauri-apps/plugin-process';
-import { Button, Badge, Tooltip, App } from 'antd';
-import { CloudSyncOutlined } from '@ant-design/icons';
+import { Button, Tooltip } from 'antd';
+import {
+  CheckOutlined,
+  CloudDownloadOutlined,
+  LoadingOutlined,
+  WarningOutlined,
+} from '@ant-design/icons';
+import { useAppUpdater } from '@/app/hooks/useAppUpdater';
+import { updateStatusView } from '@/app/lib/updates/updateStatus';
+import UpdateModal from '@/app/components/updates/UpdateModal';
+import ReleaseNotesModal from '@/app/components/updates/ReleaseNotesModal';
+import WhatsNewNotice from '@/app/components/updates/WhatsNewNotice';
 
-const AUTO_CHECK_DELAY_MS = 3_000;
-const AUTO_CHECK_INTERVAL_MS = 30 * 60 * 1_000;
+const TONE_CLASS = {
+  default: 'sb-update',
+  muted: 'sb-update sb-update-muted',
+  accent: 'sb-update sb-update-accent',
+  error: 'sb-update sb-update-error',
+} as const;
 
+/**
+ * The status bar's version, which turns into the update's state: a check you
+ * asked for and its result, "v0.3.18 available", download progress, and
+ * "Restart to update". It also hosts the update dialog, What's new, and the
+ * release notes, so the updater runs once for the whole app.
+ */
 export default function UpdateChecker() {
-  const [appVersion, setAppVersion] = useState<string>('');
-  const [updateAvailable, setUpdateAvailable] = useState<{
-    version: string;
-    body?: string;
-  } | null>(null);
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const { message, modal } = App.useApp();
-  const modalShownForRef = useRef<string | null>(null);
+  const updater = useAppUpdater();
+  const view = updateStatusView(updater);
 
-  const promptUpdate = useCallback(
-    (update: Update) => {
-      if (modalShownForRef.current === update.version) return;
-      modalShownForRef.current = update.version;
+  const onClick = () => {
+    if (view.action === 'check') void updater.checkForUpdates({ manual: true });
+    else if (view.action === 'retryCheck') void updater.retry();
+    else if (view.action === 'openDialog') updater.openDialog();
+  };
 
-      setUpdateAvailable({ version: update.version, body: update.body ?? undefined });
-
-      modal.confirm({
-        title: `Update Available: v${update.version}`,
-        content: update.body || 'A new version is available. Would you like to update now?',
-        okText: 'Update & Restart',
-        cancelText: 'Later',
-        onOk: async () => {
-          message.loading({ content: 'Downloading update...', key: 'update', duration: 0 });
-          await update.downloadAndInstall();
-          message.success({ content: 'Update installed! Restarting...', key: 'update' });
-          await relaunch();
-        },
-        onCancel: () => {
-          modalShownForRef.current = null;
-        },
-      });
-    },
-    [message, modal]
-  );
-
-  const checkForUpdate = useCallback(
-    async (opts?: { silent?: boolean }) => {
-      const silent = opts?.silent ?? false;
-      setCheckingUpdate(true);
-      try {
-        const update = await check();
-        if (update) {
-          promptUpdate(update);
-        } else {
-          setUpdateAvailable(null);
-          if (!silent) {
-            message.success("You're on the latest version!");
-          }
-        }
-      } catch (e) {
-        if (!silent) {
-          message.error('Failed to check for updates');
-        }
-      } finally {
-        setCheckingUpdate(false);
-      }
-    },
-    [message, promptUpdate]
-  );
-
-  useEffect(() => {
-    async function init() {
-      try {
-        const version = await getVersion();
-        setAppVersion(version);
-      } catch {
-        // non-Tauri env
-      }
-    }
-    init();
-
-    const startupTimer = setTimeout(() => {
-      checkForUpdate({ silent: true });
-    }, AUTO_CHECK_DELAY_MS);
-
-    const interval = setInterval(() => {
-      checkForUpdate({ silent: true });
-    }, AUTO_CHECK_INTERVAL_MS);
-
-    return () => {
-      clearTimeout(startupTimer);
-      clearInterval(interval);
-    };
-  }, [checkForUpdate]);
+  const icon = view.spinning ? (
+    <LoadingOutlined />
+  ) : updater.phase === 'upToDate' ? (
+    <CheckOutlined />
+  ) : view.tone === 'error' ? (
+    <WarningOutlined />
+  ) : view.tone === 'accent' ? (
+    <CloudDownloadOutlined />
+  ) : undefined;
 
   return (
-    <Tooltip title="Check for updates">
-      <Badge dot={!!updateAvailable} offset={[-2, 2]}>
+    <>
+      <Tooltip title={view.hint}>
         <Button
           type="text"
           size="small"
-          icon={<CloudSyncOutlined spin={checkingUpdate} />}
-          onClick={() => checkForUpdate()}
-          loading={checkingUpdate}
+          className={TONE_CLASS[view.tone]}
+          icon={icon}
+          onClick={onClick}
+          aria-disabled={view.action === 'none'}
         >
-          v{appVersion || '...'}
+          <span aria-live="polite">{view.label}</span>
         </Button>
-      </Badge>
-    </Tooltip>
+      </Tooltip>
+      <UpdateModal />
+      <ReleaseNotesModal />
+      <WhatsNewNotice />
+    </>
   );
 }

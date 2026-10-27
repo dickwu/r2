@@ -28,6 +28,8 @@ declare module 'bun:test' {
     toBeLessThan(expected: number): void;
     toBeLessThanOrEqual(expected: number): void;
     toMatch(expected: string | RegExp): void;
+    toMatchObject(expected: object): void;
+    toThrow(expected?: string | RegExp): void;
   }
 
   export const expect: {

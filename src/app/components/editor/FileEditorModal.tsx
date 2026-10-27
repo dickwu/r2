@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { App, Button, Segmented, Spin, Tooltip } from 'antd';
 import {
@@ -43,6 +43,7 @@ import {
 import type { CodeEditorHandle } from '@/app/components/editor/CodeEditor';
 import type { ImageEditorHandle } from '@/app/components/editor/ImageEditor';
 import { tableUnavailableReason } from '@/app/components/editor/DelimitedTableEditor';
+import { useEditorDirtyStore } from '@/app/stores/editorDirtyStore';
 
 const editorLoading = () => (
   <div style={{ display: 'grid', placeItems: 'center', height: '100%', minHeight: 120 }}>
@@ -197,6 +198,14 @@ export default function FileEditorModal({
   const dirty = isText ? loaded !== null && text !== savedText : imageEdits > 0;
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
+
+  // The updater asks before a restart would drop these changes.
+  const editorId = useId();
+  const setEditorDirty = useEditorDirtyStore((state) => state.setDirty);
+  useEffect(() => {
+    setEditorDirty(editorId, dirty);
+    return () => setEditorDirty(editorId, false);
+  }, [editorId, dirty, setEditorDirty]);
 
   const delimiter: Delimiter = useMemo(() => {
     if (editability.mode !== 'text' || editability.flavor !== 'delimited') return ',';

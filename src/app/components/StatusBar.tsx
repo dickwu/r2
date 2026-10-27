@@ -13,6 +13,7 @@ import UpdateChecker from '@/app/components/UpdateChecker';
 import ReportProblemButton from '@/app/components/report/ReportProblemButton';
 import BucketStats from '@/app/components/status-bar-parts/BucketStats';
 import type { StorageConfig } from '@/app/lib/r2cache';
+import { countActiveTransfers } from '@/app/lib/updates/activeWork';
 
 interface StatusBarProps {
   totalItemsCount: number;
@@ -74,23 +75,10 @@ export default function StatusBar({
   const moveTasks = useMoveStore((s) => s.tasks);
   const moveAttentionCount = useMoveStore(selectAttentionCount);
 
-  const transferCount = useMemo(() => {
-    const activeUploads = uploadTasks.filter(
-      (t) => t.status === 'uploading' || t.status === 'queued' || t.status === 'pending'
-    ).length;
-    const activeDownloads = downloadTasks.filter(
-      (t) => t.status === 'downloading' || t.status === 'pending'
-    ).length;
-    const activeMoves = moveTasks.filter(
-      (t) =>
-        t.status === 'downloading' ||
-        t.status === 'uploading' ||
-        t.status === 'finishing' ||
-        t.status === 'deleting' ||
-        t.status === 'pending'
-    ).length;
-    return activeUploads + activeDownloads + activeMoves;
-  }, [uploadTasks, downloadTasks, moveTasks]);
+  const transferCount = useMemo(
+    () => countActiveTransfers(uploadTasks, downloadTasks, moveTasks),
+    [uploadTasks, downloadTasks, moveTasks]
+  );
 
   // Sync state class
   const syncClass =
@@ -174,7 +162,7 @@ export default function StatusBar({
         {/* Report a problem (opens a prefilled GitHub issue) */}
         <ReportProblemButton />
 
-        {/* Update checker (shows app version + update-available badge) */}
+        {/* App version, which becomes the update's state (and hosts the update dialog) */}
         <UpdateChecker />
       </div>
 

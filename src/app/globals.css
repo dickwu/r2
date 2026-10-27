@@ -5985,3 +5985,202 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
     transition: none;
   }
 }
+
+/* ── App updates (status bar control, dialog, release notes) ────── */
+.statusbar .sb-update.ant-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  height: 20px;
+  padding: 0 6px;
+}
+.statusbar .sb-update.sb-update-muted.ant-btn {
+  color: var(--text-subtle);
+}
+.statusbar .sb-update.sb-update-accent.ant-btn {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 999px;
+  padding: 0 9px;
+}
+.statusbar .sb-update.sb-update-accent.ant-btn:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.statusbar .sb-update.sb-update-error.ant-btn {
+  color: #d4493a;
+}
+
+.update-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.update-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.update-progress-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.update-progress .ant-progress {
+  margin: 0;
+}
+.update-error-detail {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.update-error-detail summary {
+  cursor: pointer;
+}
+.update-error-detail code {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.update-notes-box {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+}
+.update-notes-missing {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.update-notes {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.update-notes > :first-child {
+  margin-top: 0;
+}
+.update-notes > :last-child {
+  margin-bottom: 0;
+}
+.update-notes h2 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 14px 0 6px;
+}
+.update-notes h3 {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 10px 0 4px;
+}
+.update-notes p {
+  margin: 0 0 8px;
+}
+.update-notes ul {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+.update-notes li + li {
+  margin-top: 3px;
+}
+.update-notes code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+}
+.update-notes a {
+  color: var(--accent);
+}
+.update-notes-compact {
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+.update-link {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.update-link:hover {
+  text-decoration: underline;
+}
+.whats-new {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.whats-new p {
+  margin: 0;
+}
+
+.release-notes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.release-notes-entry + .release-notes-entry {
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.release-notes-entry header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.release-notes-version {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+.release-notes-date {
+  font-size: 11.5px;
+  color: var(--text-subtle);
+}
+.release-notes-entry h3 {
+  margin: 4px 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.release-notes-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.release-notes-failed p {
+  margin: 0;
+}
+
+button.settings-nav-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.settings-nav-link:disabled {
+  cursor: default;
+  color: var(--text-subtle);
+}
+.settings-nav-link.settings-nav-link-accent {
+  color: var(--accent);
+}

@@ -64,6 +64,14 @@ if [ -n "$(git status --porcelain)" ]; then
     exit 1
 fi
 
+# Release notes come from r2-home's data/releases.json (the website changelog and
+# the in-app update dialog read the same entry). Refuse to tag without one.
+if ! bun scripts/release-notes.ts "$NEW_VERSION" >/dev/null; then
+    echo -e "${RED}Error: No release notes for ${NEW_VERSION}. Add the entry to r2-home's data/releases.json (draft: true is fine) and try again.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ Found release notes for ${NEW_VERSION}${NC}"
+
 # Update package.json
 sed_inplace 's/"version": "[0-9]*\.[0-9]*\.[0-9]*"/"version": "'"$NEW_VERSION"'"/' package.json
 echo -e "${GREEN}✓ Updated package.json${NC}"
@@ -105,3 +113,4 @@ echo -e "${GREEN}✓ Pushed to remote${NC}"
 echo ""
 echo -e "${GREEN}Successfully published v$NEW_VERSION${NC}"
 echo -e "GitHub Actions will now build and create the release."
+echo -e "When it finishes: bun scripts/release-notes.ts ${NEW_VERSION} --apply --publish"

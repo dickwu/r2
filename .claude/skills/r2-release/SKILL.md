@@ -5,9 +5,9 @@ description: >
   Use when the user asks to "publish a release", "cut a release", "bump the version",
   "release a new version", "check ci" after changes are committed, or
   "write release notes" / "publish release notes".
-  Handles pre-flight checks, version bumping, git tagging, pushing, CI monitoring,
-  and generating release notes from git diff using the project's publish.sh script
-  and the gh CLI.
+  Handles pre-flight checks, the shared release-notes entry in r2-home, version
+  bumping, git tagging, pushing, CI monitoring, and applying the notes to the GitHub
+  Release and latest.json with publish.sh, scripts/release-notes.ts, and the gh CLI.
 ---
 
 # R2 Client Release Workflow
@@ -15,9 +15,46 @@ description: >
 The project has a `./publish.sh` script that handles the full release pipeline:
 
 1. Validates version argument (patch/minor/major or explicit x.y.z)
-2. Checks for clean working tree (uncommitted changes = error)
-3. Updates `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`
-4. Commits, creates annotated tag, pushes to origin — triggers GitHub Actions
+2. Checks that r2-home has a release-notes entry for the new version (missing = error)
+3. Checks for clean working tree (uncommitted changes = error)
+4. Updates `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`
+5. Commits, creates annotated tag, pushes to origin — triggers GitHub Actions
+
+## Release Notes Live in r2-home
+
+One entry per version in r2-home's `data/releases.json`
+(`/Users/lifefarmer/opensource/r2-home`, or `$R2_HOME_DIR`) feeds four places:
+
+- the website changelog (generated into `index.html` by `npm run build` in r2-home)
+- the public feed `https://r2.lifefarmer.ca/releases.json` and `/releases/<v>.json`,
+  which the app's update dialog, What's New notice, and Settings → Release notes read
+- the GitHub Release body
+- the `notes` field of the release's `latest.json` (the updater's fallback when the feed
+  can't be reached)
+
+Write the entry **before** running `publish.sh` (it refuses to tag without one). Mark it
+`"draft": true` with `"date": null` until the release is out: the website hides drafts,
+but the feed carries them, so the update dialog has notes the moment CI publishes.
+
+```json
+{
+  "version": "0.3.18",
+  "date": null,
+  "draft": true,
+  "title": "Short headline in sentence case",
+  "summary": "One or two plain sentences for the changelog card.",
+  "notes": {
+    "new": ["What someone can now do."],
+    "improved": ["What works better."],
+    "fixed": ["What was broken and now works."]
+  }
+}
+```
+
+Build the notes from the commits since the last tag (`git log --oneline <prev-tag>..HEAD --no-merges`),
+written for users: what changed for them, one line each, no commit prefixes. Omit empty groups.
+Then in r2-home run `npm run build` and commit. Preview the GitHub body from r2 with
+`bun scripts/release-notes.ts <version>`.
 
 ## Pre-flight: Ensure Clean Working Tree
 
@@ -84,61 +121,17 @@ When both runs reach `completed success`, report:
 
 ## Release Notes
 
-After CI succeeds, generate release notes and publish them to the GitHub release.
-The Release workflow creates a **draft** release with artifacts — this step adds
-notes and marks it as published.
-
-### Generating Notes from Git Diff
+After CI succeeds the Release workflow has created a **draft** release with artifacts.
+Apply the shared notes and publish it:
 
 ```bash
-# Find the previous release tag
-git tag --sort=-v:refname | head -2
-
-# Commits since last release (use for the changelog summary)
-git log --oneline <prev-tag>..<new-tag> --no-merges
-
-# File-level change stats (exclude version-bump-only files)
-git diff --stat <prev-tag>..<new-tag> -- ':!src-tauri/Cargo.lock' ':!src-tauri/Cargo.toml' ':!src-tauri/tauri.conf.json' ':!package.json'
+# Writes the release body and latest.json notes, then publishes the draft release
+bun scripts/release-notes.ts <version> --apply --publish
 ```
 
-### Writing Notes
+Then finish the r2-home entry: set `"date"` to the release day (YYYY-MM-DD), remove
+`"draft"`, run `npm run build`, commit, and push r2-home `main` (pushing deploys the site,
+so the changelog, `latest` in the feed, and the version on the page all move together).
 
-Categorize commits using conventional-commit types:
-
-- **feat:** -> "New Features"
-- **fix:** -> "Bug Fixes"
-- **refactor/perf:** -> "Improvements"
-- **chore/ci/docs:** -> "Maintenance"
-
-Template:
-
-```markdown
-## What's Changed
-
-### New Features
-
-- <description from feat commits>
-
-### Bug Fixes
-
-- <description from fix commits>
-
-### Improvements / Maintenance
-
-- <description from chore/refactor commits>
-
-**Full Changelog**: https://github.com/dickwu/r2/compare/v<prev>...v<new>
-```
-
-Omit empty sections. Keep bullet points concise (one line each).
-
-### Publishing
-
-```bash
-gh release edit v<version> --draft=false --notes "$(cat <<'EOF'
-## What's Changed
-...
-**Full Changelog**: https://github.com/dickwu/r2/compare/v<prev>...v<new>
-EOF
-)"
-```
+To fix notes after the fact, edit the entry in r2-home, push the site, and rerun
+`bun scripts/release-notes.ts <version> --apply`.

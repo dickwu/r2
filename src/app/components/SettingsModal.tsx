@@ -14,6 +14,9 @@ import { ACCENT_LIST } from '@/app/lib/accent';
 import Modal from '@/app/components/ui/Modal';
 import SettingsAccountPanel from '@/app/components/SettingsAccountPanel';
 import SettingsMountsPanel from '@/app/components/SettingsMountsPanel';
+import { useShallow } from 'zustand/react/shallow';
+import { useUpdateStore } from '@/app/stores/updateStore';
+import { updateStatusView } from '@/app/lib/updates/updateStatus';
 
 export type SettingsTab = 'appearance' | 'layout' | 'account' | 'mounts' | 'shortcuts';
 
@@ -420,6 +423,59 @@ function ShortcutsPanel() {
 
 /* ── Account panel is now the full SettingsAccountPanel ─────────── */
 
+/* ── Version, release notes, and update check (nav foot) ────────── */
+function SettingsVersionFoot() {
+  const s = useUpdateStore(
+    useShallow((state) => ({
+      phase: state.phase,
+      manualCheck: state.manualCheck,
+      currentVersion: state.currentVersion,
+      update: state.update,
+      progress: state.progress,
+      failure: state.failure,
+      checkForUpdates: state.checkForUpdates,
+      openDialog: state.openDialog,
+      retry: state.retry,
+      openReleaseNotes: state.openReleaseNotes,
+    }))
+  );
+  const view = updateStatusView(s);
+  // At rest the status bar shows the version; here the link names its action.
+  const label =
+    view.action === 'check' && s.phase !== 'upToDate' ? 'Check for updates' : view.label;
+
+  const onUpdateClick = () => {
+    if (view.action === 'check') void s.checkForUpdates({ manual: true });
+    else if (view.action === 'retryCheck') void s.retry();
+    else if (view.action === 'openDialog') s.openDialog();
+  };
+
+  return (
+    <>
+      <div className="settings-nav-version">
+        R2 Client{s.currentVersion ? ` ${s.currentVersion}` : ''}
+      </div>
+      <button type="button" className="settings-nav-link" onClick={s.openReleaseNotes}>
+        Release notes
+      </button>
+      <button
+        type="button"
+        className={
+          view.tone === 'accent'
+            ? 'settings-nav-link settings-nav-link-accent'
+            : 'settings-nav-link'
+        }
+        onClick={onUpdateClick}
+        disabled={view.action === 'none'}
+        title={view.hint}
+        aria-live="polite"
+      >
+        {label}
+      </button>
+    </>
+  );
+}
+
 /* ── SettingsModal ───────────────────────────────────────────────── */
 export default function SettingsModal({
   open,
@@ -487,7 +543,7 @@ export default function SettingsModal({
           ))}
           <div className="settings-nav-spacer" />
           <div className="settings-nav-foot">
-            <div className="settings-nav-version">R2 Client</div>
+            <SettingsVersionFoot />
             <a
               className="settings-nav-link"
               href="https://github.com/dickwu/r2"
