@@ -980,7 +980,12 @@ pub(crate) async fn stream_transfer_without_temp(
     let (identity, head) = interruptible(
         cancelled,
         paused,
-        head_identity_checked(source_config, &session.source_key, cancelled, paused),
+        Box::pin(head_identity_checked(
+            source_config,
+            &session.source_key,
+            cancelled,
+            paused,
+        )),
     )
     .await??
     .ok_or("Source object no longer exists")?;
@@ -1000,7 +1005,13 @@ pub(crate) async fn stream_transfer_without_temp(
     } else {
         crate::providers::conditional::Condition::PutCreate
     };
-    if !interruptible(cancelled, paused, dest_config.supports_condition(condition)).await?? {
+    if !interruptible(
+        cancelled,
+        paused,
+        Box::pin(dest_config.supports_condition(condition)),
+    )
+    .await??
+    {
         return Err("needs_action: This endpoint did not enforce conditional destination creation; the source and destination were retained".into());
     }
     if let Some(app) = app {
@@ -1012,7 +1023,7 @@ pub(crate) async fn stream_transfer_without_temp(
         .get_or_insert_with(|| chrono::Utc::now().timestamp_millis());
     save_phase(&mut journal, "transferring").await?;
     let copied = if journal.source.size >= MULTIPART_THRESHOLD {
-        stream_multipart(
+        Box::pin(stream_multipart(
             client,
             &source_client,
             &dest_client,
@@ -1024,7 +1035,7 @@ pub(crate) async fn stream_transfer_without_temp(
             app,
             cancelled,
             paused,
-        )
+        ))
         .await
     } else {
         journal.metrics.copy_requests = journal.metrics.copy_requests.saturating_add(1);
@@ -1032,7 +1043,7 @@ pub(crate) async fn stream_transfer_without_temp(
         save_move_journal(&journal)
             .await
             .map_err(|e| format!("Cannot persist move metrics: {e}"))?;
-        stream_single_put(
+        Box::pin(stream_single_put(
             client,
             &source_client,
             &dest_client,
@@ -1043,7 +1054,7 @@ pub(crate) async fn stream_transfer_without_temp(
             &mut journal,
             cancelled,
             paused,
-        )
+        ))
         .await
     }?;
     journal.metrics.copy_completed_at_ms = Some(chrono::Utc::now().timestamp_millis());

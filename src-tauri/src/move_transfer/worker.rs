@@ -242,7 +242,12 @@ async fn move_file_internal(
                 let observed = super::stream::protocol::interruptible(
                     cancelled,
                     paused,
-                    head_identity_checked(dest_config, &session.dest_key, cancelled, paused),
+                    Box::pin(head_identity_checked(
+                        dest_config,
+                        &session.dest_key,
+                        cancelled,
+                        paused,
+                    )),
                 )
                 .await??;
                 if let Some((identity, head)) = observed {
@@ -254,7 +259,7 @@ async fn move_file_internal(
                             .map(String::as_str),
                     )?;
                     if journal.destination.is_none() {
-                        super::planner::verify_unknown_content(
+                        Box::pin(super::planner::verify_unknown_content(
                             source_config,
                             dest_config,
                             &session.source_key,
@@ -263,7 +268,7 @@ async fn move_file_internal(
                             &identity,
                             cancelled,
                             paused,
-                        )
+                        ))
                         .await?;
                     }
                     let mut reconciled = journal.clone();
@@ -286,14 +291,14 @@ async fn move_file_internal(
                     );
                 }
                 let mut recovered = journal.clone();
-                if super::stream::recover_absent_multipart(
+                if Box::pin(super::stream::recover_absent_multipart(
                     source_config,
                     dest_config,
                     session,
                     &mut recovered,
                     cancelled,
                     paused,
-                )
+                ))
                 .await?
                 {
                     return Ok(Some(MoveUploadResult {
@@ -324,7 +329,12 @@ async fn move_file_internal(
     let (source_identity, source_head) = super::stream::protocol::interruptible(
         cancelled,
         paused,
-        head_identity_checked(source_config, &session.source_key, cancelled, paused),
+        Box::pin(head_identity_checked(
+            source_config,
+            &session.source_key,
+            cancelled,
+            paused,
+        )),
     )
     .await??
     .ok_or_else(|| "not_found: Move source does not exist".to_string())?;
@@ -352,11 +362,16 @@ async fn move_file_internal(
     if let Some((identity, head)) = super::stream::protocol::interruptible(
         cancelled,
         paused,
-        head_identity_checked(dest_config, &session.dest_key, cancelled, paused),
+        Box::pin(head_identity_checked(
+            dest_config,
+            &session.dest_key,
+            cancelled,
+            paused,
+        )),
     )
     .await??
     {
-        if reconcile_legacy_multipart(
+        if Box::pin(reconcile_legacy_multipart(
             source_config,
             dest_config,
             session,
@@ -365,7 +380,7 @@ async fn move_file_internal(
             &head,
             cancelled,
             paused,
-        )
+        ))
         .await?
         {
             return Ok(Some(MoveUploadResult {
@@ -378,10 +393,16 @@ async fn move_file_internal(
     save_move_journal(&journal)
         .await
         .map_err(|e| format!("Cannot persist source identity: {e}"))?;
-    let plan = execution_plan(session, source_config, dest_config, journal.source.size).await?;
+    let plan = Box::pin(execution_plan(
+        session,
+        source_config,
+        dest_config,
+        journal.source.size,
+    ))
+    .await?;
     let uploaded_size = match plan {
         TransferPlan::SingleCopy | TransferPlan::MultipartCopy => {
-            super::server_copy::copy(
+            Box::pin(super::server_copy::copy(
                 plan,
                 session,
                 dest_config,
@@ -390,11 +411,11 @@ async fn move_file_internal(
                 app,
                 cancelled,
                 paused,
-            )
+            ))
             .await?
         }
         TransferPlan::Relay => {
-            stream_transfer_without_temp(
+            Box::pin(stream_transfer_without_temp(
                 client,
                 session,
                 source_config,
@@ -402,7 +423,7 @@ async fn move_file_internal(
                 app,
                 cancelled,
                 paused,
-            )
+            ))
             .await?
         }
         _ => return Err("conflict: Invalid transfer plan".into()),
@@ -416,7 +437,12 @@ async fn move_file_internal(
     let (destination, head) = super::stream::protocol::interruptible(
         cancelled,
         paused,
-        head_identity_checked(dest_config, &session.dest_key, cancelled, paused),
+        Box::pin(head_identity_checked(
+            dest_config,
+            &session.dest_key,
+            cancelled,
+            paused,
+        )),
     )
     .await??
     .ok_or("outcome_unknown: Destination not visible after upload")?;
@@ -428,7 +454,7 @@ async fn move_file_internal(
             .map(String::as_str),
     )?;
     if journal.destination.is_none() {
-        super::planner::verify_unknown_content(
+        Box::pin(super::planner::verify_unknown_content(
             source_config,
             dest_config,
             &session.source_key,
@@ -437,7 +463,7 @@ async fn move_file_internal(
             &destination,
             cancelled,
             paused,
-        )
+        ))
         .await?;
     }
     if uploaded_size != journal.source.size {
@@ -666,7 +692,7 @@ pub(crate) async fn spawn_move_task(
         }
     };
 
-    let result = move_file_internal(
+    let result = Box::pin(move_file_internal(
         &client,
         &session,
         &source_config,
@@ -674,7 +700,7 @@ pub(crate) async fn spawn_move_task(
         Some(&app),
         &cancelled,
         &paused,
-    )
+    ))
     .await;
 
     match result {
@@ -916,9 +942,14 @@ async fn continue_move_queue(app: &AppHandle, source_bucket: &str, source_accoun
                 );
 
                 let app_clone = app.clone();
-                tokio::spawn(async move {
-                    spawn_move_task(app_clone, next_session, source_config, dest_config).await;
-                });
+                // Boxed so the task's state lives on the heap, not in the
+                // frame of whichever worker first polls it.
+                tokio::spawn(Box::pin(spawn_move_task(
+                    app_clone,
+                    next_session,
+                    source_config,
+                    dest_config,
+                )));
                 started += 1;
             }
 
@@ -1222,21 +1253,13 @@ mod recovery_tests {
 
     #[test]
     fn a_failed_copy_capability_probe_relays_the_move_instead_of_failing_it() {
-        // Polling a whole unoptimised relay Move, SDK calls included, takes a
-        // little more than a test thread's 2 MiB of stack (the relay code at
-        // e0a6051 needs the same), so it runs on a thread with the 8 MiB a
-        // main thread gets.
-        std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(|| {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(copy_probe_denied_move_relays())
-            })
-            .unwrap()
-            .join()
+        // Runs on a worker of the runtime the app installs for Tauri. An
+        // unoptimised relay Move, SDK calls included, needs more than tokio's
+        // default 2 MiB worker stack (it overflowed a real dev-build move), so
+        // this also guards the larger stack crate::build_async_runtime sets.
+        let runtime = crate::build_async_runtime().unwrap();
+        runtime
+            .block_on(runtime.spawn(copy_probe_denied_move_relays()))
             .unwrap();
     }
 

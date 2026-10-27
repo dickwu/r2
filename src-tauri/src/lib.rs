@@ -105,8 +105,32 @@ async fn init_db_with_recovery<R: tauri::Runtime>(
     Ok(())
 }
 
+/// Stack size for the async runtime's worker threads. Tokio's default is
+/// 2 MiB, and an unoptimised (dev) build overflowed it polling one relay Move
+/// through the AWS SDK; that Move needs about 1.5 MiB in a dev build and well
+/// under 512 KiB in a release build. Workers get the 8 MiB a main thread has.
+/// Only touched pages are committed, so idle workers cost no extra memory.
+pub(crate) const ASYNC_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+/// The multi-thread runtime Tauri runs commands and spawned tasks on: Tauri's
+/// default, except for the worker stack size.
+pub(crate) fn build_async_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(ASYNC_WORKER_STACK_SIZE)
+        .build()
+}
+
+static ASYNC_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Must run before anything touches tauri::async_runtime; the runtime is
+    // kept in a static because Tauri only borrows its handle.
+    let runtime = ASYNC_RUNTIME
+        .get_or_init(|| build_async_runtime().expect("Failed to create async runtime"));
+    tauri::async_runtime::set(runtime.handle().clone());
+
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
