@@ -113,6 +113,8 @@ export default function FileEditorModal({
   const [savedText, setSavedText] = useState('');
   const [imageEdits, setImageEdits] = useState(0);
   const [imageRevision, setImageRevision] = useState(0);
+  // The size of the last save, so the header stops showing the size the file opened at.
+  const [savedSize, setSavedSize] = useState<number | null>(null);
   const [status, setStatus] = useState<Status>({ tone: 'idle' });
   const [markdownView, setMarkdownView] = useState<MarkdownView>('split');
   const [delimitedView, setDelimitedView] = useState<DelimitedView>('table');
@@ -141,6 +143,7 @@ export default function FileEditorModal({
     const controller = new AbortController();
     setLoaded(null);
     setLoadError(null);
+    setSavedSize(null);
     (async () => {
       try {
         const url = await generateSignedUrl(configRef.current, key);
@@ -324,6 +327,7 @@ export default function FileEditorModal({
       } else {
         setSavedText(snapshot);
       }
+      setSavedSize(bytes.length);
       setStatus({ tone: 'saved', at: new Date() });
       message.success('Changes saved');
       onSaved(bytes.length);
@@ -545,7 +549,7 @@ export default function FileEditorModal({
   const subtitle = [
     documentLabel(editability),
     format ? describeFormat(format) : null,
-    loaded ? formatBytes(loaded.bytes.length) : null,
+    loaded ? formatBytes(savedSize ?? loaded.bytes.length) : null,
   ]
     .filter(Boolean)
     .join(', ');
