@@ -266,11 +266,21 @@ export default function BatchMoveModal({
         className="left"
         style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}
       >
-        <div
+        <button
+          type="button"
+          role="switch"
+          aria-checked={deleteOriginal}
+          aria-labelledby="batch-move-delete-original-label"
           className={deleteOriginal ? 'switch on' : 'switch'}
           onClick={() => setDeleteOriginal((v) => !v)}
         />
-        Delete original after copy
+        <span
+          id="batch-move-delete-original-label"
+          style={{ cursor: 'pointer' }}
+          onClick={() => setDeleteOriginal((v) => !v)}
+        >
+          Delete original after copy
+        </span>
       </span>
       <button className="btn" onClick={onClose} disabled={isStartingQueue}>
         Cancel

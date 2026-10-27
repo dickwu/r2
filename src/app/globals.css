@@ -3183,12 +3183,21 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
 .switch {
   width: 32px;
   height: 18px;
+  padding: 0;
+  border: 0;
   background: var(--border-strong);
   border-radius: 99px;
   position: relative;
   cursor: pointer;
-  transition: background 160ms;
+  transition:
+    background 160ms,
+    box-shadow 120ms;
   flex-shrink: 0;
+  outline: none;
+  appearance: none;
+}
+.switch:focus-visible {
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .switch::after {
   content: '';
