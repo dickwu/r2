@@ -114,7 +114,12 @@ const seam = {
     return on;
   },
   useReleases(url: string = RELEASES_URL) {
-    setUpdaterPlugins({ releasesUrl: url });
+    // A local feed (wrangler dev on :8787) has an explicit port, which the HTTP
+    // plugin's scope refuses, so read it with the webview's own fetch.
+    const local = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(url);
+    setUpdaterPlugins(
+      local ? { releasesUrl: url, fetch: (u, init) => window.fetch(u, init) } : { releasesUrl: url }
+    );
     useUpdateStore.setState({ feed: null, feedStatus: 'idle' });
     void useUpdateStore.getState().loadFeed({ force: true });
     return updaterPlugins().releasesUrl;

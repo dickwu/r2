@@ -3344,8 +3344,8 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
 /* ── Settings panels (handoff) ── */
 .settings-shell {
   display: flex;
-  min-height: 540px;
-  max-height: min(640px, 78vh);
+  min-height: min(540px, calc(100vh - 240px));
+  max-height: min(640px, calc(100vh - 240px));
 }
 
 .settings-nav {
@@ -3353,6 +3353,8 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   display: flex;
   flex-direction: column;
   padding: 14px 10px;
+  min-height: 0;
+  overflow-y: auto;
   background: var(--bg-sunken);
   border-right: 1px solid var(--border);
   gap: 2px;
@@ -3398,6 +3400,9 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
   flex: 1;
 }
 .settings-nav-foot {
+  position: sticky;
+  bottom: -14px;
+  background: var(--bg-sunken);
   padding: 10px 10px 4px;
   border-top: 1px solid var(--border);
   margin: 6px -2px 0;
@@ -6086,6 +6091,10 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
 .update-notes ul {
   margin: 0 0 8px;
   padding-left: 18px;
+  list-style: disc;
+}
+.update-notes li::marker {
+  color: var(--text-subtle);
 }
 .update-notes li + li {
   margin-top: 3px;

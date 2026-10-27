@@ -3,7 +3,7 @@
 import { Alert, Progress, Skeleton } from 'antd';
 import { CloudDownloadOutlined } from '@ant-design/icons';
 import { useShallow } from 'zustand/react/shallow';
-import Modal from '@/app/components/ui/Modal';
+import Modal, { ABOVE_ANTD_MODALS_Z_INDEX } from '@/app/components/ui/Modal';
 import UpdateNotes, { openExternal } from '@/app/components/updates/UpdateNotes';
 import { useActiveWork } from '@/app/hooks/useActiveWork';
 import { describeActiveWork, hasActiveWork } from '@/app/lib/updates/activeWork';
@@ -142,6 +142,7 @@ function UpdateDialog() {
 
   return (
     <Modal
+      zIndex={ABOVE_ANTD_MODALS_Z_INDEX}
       open
       onClose={s.closeDialog}
       title={title}
@@ -191,8 +192,8 @@ function UpdateDialog() {
             title={`Restarting now would ${describeActiveWork(work)}.`}
             description={
               installed
-                ? 'Restart when they are done.'
-                : 'Install now, restart later installs the update and keeps them going. Restart when they are done.'
+                ? "Restart when you're done."
+                : "Install now, restart later installs the update without restarting. Restart when you're done."
             }
           />
         )}

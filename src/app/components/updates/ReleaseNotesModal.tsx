@@ -3,7 +3,7 @@
 import { Skeleton } from 'antd';
 import { FileTextOutlined } from '@ant-design/icons';
 import { useShallow } from 'zustand/react/shallow';
-import Modal from '@/app/components/ui/Modal';
+import Modal, { ABOVE_ANTD_MODALS_Z_INDEX } from '@/app/components/ui/Modal';
 import UpdateNotes, { openExternal } from '@/app/components/updates/UpdateNotes';
 import {
   GITHUB_RELEASES_URL,
@@ -27,6 +27,7 @@ function ReleaseNotesDialog() {
 
   return (
     <Modal
+      zIndex={ABOVE_ANTD_MODALS_Z_INDEX}
       open
       onClose={s.close}
       title="Release notes"
