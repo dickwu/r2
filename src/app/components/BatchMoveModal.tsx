@@ -267,7 +267,7 @@ export default function BatchMoveModal({
         style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}
       >
         <div
-          className={`switch${deleteOriginal ? 'on' : ''}`}
+          className={deleteOriginal ? 'switch on' : 'switch'}
           onClick={() => setDeleteOriginal((v) => !v)}
         />
         Delete original after copy

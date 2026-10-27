@@ -388,7 +388,7 @@ export default function TransferDock() {
 
       <div className="dock-overall">
         <div
-          className={`dock-overall-fill${running > 0 ? 'active' : ''}`}
+          className={running > 0 ? 'dock-overall-fill active' : 'dock-overall-fill'}
           style={{ width: `${agg.percent}%` }}
         />
       </div>
@@ -427,7 +427,7 @@ function ProgressRing({ percent, active }: { percent: number; active: boolean })
   const c = 2 * Math.PI * r;
   const filled = (Math.max(0, Math.min(100, percent)) / 100) * c;
   return (
-    <svg className={`dock-ring${active ? 'active' : ''}`} viewBox="0 0 20 20" aria-hidden>
+    <svg className={active ? 'dock-ring active' : 'dock-ring'} viewBox="0 0 20 20" aria-hidden>
       <circle className="dock-ring-track" cx="10" cy="10" r={r} />
       <circle
         className="dock-ring-fill"
@@ -566,7 +566,7 @@ function DockTaskRow({ task }: { task: DockTask }) {
       </div>
       <div className="dock-task-bar">
         <div
-          className={`dock-task-fill${task.state === 'active' ? 'active' : ''}`}
+          className={task.state === 'active' ? 'dock-task-fill active' : 'dock-task-fill'}
           style={{ width: `${Math.max(0, Math.min(100, task.progress))}%` }}
         />
       </div>

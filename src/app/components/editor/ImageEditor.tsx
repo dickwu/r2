@@ -328,7 +328,7 @@ export default function ImageEditor({
       </div>
       <div
         ref={stageRef}
-        className={`file-editor-canvas-stage${cropping ? ' is-cropping' : ''}`}
+        className={cropping ? 'file-editor-canvas-stage is-cropping' : 'file-editor-canvas-stage'}
         style={{ flex: 1 }}
         onPointerDown={(event) => {
           if (!cropping) return;

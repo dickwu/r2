@@ -385,7 +385,7 @@ export default function UploadModal({
 
         {/* Drop zone */}
         <div
-          className={`drop-zone${over ? 'over' : ''}`}
+          className={over ? 'drop-zone over' : 'drop-zone'}
           onDragOver={(e) => {
             e.preventDefault();
             if (!hasActiveUploads) setOver(true);
