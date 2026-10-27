@@ -27,7 +27,12 @@ import {
 } from '@/app/components/editor/editedContent';
 import { tauriCopyDependencies } from '@/app/components/editor/copyToDisk';
 import { sniffDelimiter, type Delimiter } from '@/app/components/editor/delimited';
-import { errorMessage, saveWithVersionCheck } from '@/app/components/editor/saveFlow';
+import {
+  errorMessage,
+  SAVE_TIMEOUTS,
+  saveWithVersionCheck,
+  withTimeout,
+} from '@/app/components/editor/saveFlow';
 import {
   documentLabel,
   formatBytes,
@@ -228,7 +233,11 @@ export default function FileEditorModal({
     if (!loaded) throw new Error('The file is still loading');
     if (editability.mode === 'image') {
       if (!imageRef.current) throw new Error('The image is still loading');
-      const bytes = await imageRef.current.encode();
+      const bytes = await withTimeout(
+        imageRef.current.encode(),
+        SAVE_TIMEOUTS.encodeMs,
+        'The image could not be encoded in time'
+      );
       return { bytes, body: bytes };
     }
     return editedText(text, loaded.text!.format);
@@ -262,75 +271,86 @@ export default function FileEditorModal({
       if (!loaded || status.tone === 'saving') return;
       if (!force && !dirtyRef.current) return;
       setStatus({ tone: 'saving' });
-
-      let bytes: Uint8Array;
-      let body: string | Uint8Array;
+      // Every expected failure is reported below; the catch only keeps an
+      // unexpected throw from leaving the editor at "Saving…".
       try {
-        ({ bytes, body } = await editedFile());
-      } catch (error) {
-        fail('encode', errorMessage(error));
-        return;
-      }
-      if (bytes.length > editability.maxBytes) {
-        fail(
-          'size',
-          `The edited file is ${formatBytes(bytes.length)}, over the ${formatBytes(editability.maxBytes)} the editor saves.`
+        let bytes: Uint8Array;
+        let body: string | Uint8Array;
+        try {
+          ({ bytes, body } = await editedFile());
+        } catch (error) {
+          fail('encode', errorMessage(error));
+          return;
+        }
+        if (bytes.length > editability.maxBytes) {
+          fail(
+            'size',
+            `The edited file is ${formatBytes(bytes.length)}, over the ${formatBytes(editability.maxBytes)} the editor saves.`
+          );
+          return;
+        }
+
+        const snapshot = text;
+        const type = contentType();
+        const currentEtag = async () => {
+          const url = await generateSignedUrl(configRef.current, key);
+          return (await detectObjectType(url)).etag ?? null;
+        };
+        const outcome = await saveWithVersionCheck(
+          etagRef.current,
+          {
+            currentEtag,
+            upload: (ifMatch) =>
+              uploadContent(configRef.current, key, body, type, ifMatch ? { ifMatch } : undefined),
+          },
+          { force }
         );
-        return;
-      }
 
-      const snapshot = text;
-      const type = contentType();
-      const currentEtag = async () => {
-        const url = await generateSignedUrl(configRef.current, key);
-        return (await detectObjectType(url)).etag ?? null;
-      };
-      const outcome = await saveWithVersionCheck(
-        etagRef.current,
-        {
-          currentEtag,
-          upload: (ifMatch) =>
-            uploadContent(configRef.current, key, body, type, ifMatch ? { ifMatch } : undefined),
-        },
-        { force }
-      );
+        if (outcome.status === 'conflict') {
+          fail('conflict', 'Not saved: the file changed on the server.');
+          if (confirming.current) return;
+          confirming.current = true;
+          modal.confirm({
+            title: 'This file changed on the server',
+            content:
+              'A newer version was saved after you opened it. Overwrite it with your version, or keep editing; you can download your version as a copy first.',
+            okText: 'Overwrite',
+            okButtonProps: { danger: true },
+            cancelText: 'Keep editing',
+            onOk: () => {
+              void save(true);
+            },
+            afterClose: () => {
+              confirming.current = false;
+            },
+          });
+          return;
+        }
+        if (outcome.status === 'error') {
+          fail(outcome.kind, outcome.message);
+          return;
+        }
 
-      if (outcome.status === 'conflict') {
-        fail('conflict', 'Not saved: the file changed on the server.');
-        if (confirming.current) return;
-        confirming.current = true;
-        modal.confirm({
-          title: 'This file changed on the server',
-          content:
-            'A newer version was saved after you opened it. Overwrite it with your version, or keep editing; you can download your version as a copy first.',
-          okText: 'Overwrite',
-          okButtonProps: { danger: true },
-          cancelText: 'Keep editing',
-          onOk: () => {
-            void save(true);
-          },
-          afterClose: () => {
-            confirming.current = false;
-          },
-        });
-        return;
+        setReadOnly(false);
+        etagRef.current =
+          outcome.etag ??
+          (await withTimeout(
+            currentEtag(),
+            SAVE_TIMEOUTS.checkMs,
+            'The new version could not be read in time'
+          ).catch(() => null));
+        if (editability.mode === 'image') {
+          setImageRevision((r) => r + 1);
+        } else {
+          setSavedText(snapshot);
+        }
+        setSavedSize(bytes.length);
+        setStatus({ tone: 'saved', at: new Date() });
+        message.success('Changes saved');
+        onSaved(bytes.length);
+      } catch (error) {
+        fail('other', errorMessage(error));
       }
-      if (outcome.status === 'error') {
-        fail(outcome.kind, outcome.message);
-        return;
-      }
-
-      setReadOnly(false);
-      etagRef.current = outcome.etag ?? (await currentEtag().catch(() => null));
-      if (editability.mode === 'image') {
-        setImageRevision((r) => r + 1);
-      } else {
-        setSavedText(snapshot);
-      }
-      setSavedSize(bytes.length);
-      setStatus({ tone: 'saved', at: new Date() });
-      message.success('Changes saved');
-      onSaved(bytes.length);
     },
     [
       loaded,

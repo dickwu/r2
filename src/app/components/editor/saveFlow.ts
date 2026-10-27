@@ -26,7 +26,35 @@ export function etagsDiffer(a: string | null | undefined, b: string | null | und
 }
 
 export type SaveErrorKind =
-  'conflict' | 'forbidden' | 'condition-unsupported' | 'too-large' | 'other';
+  'conflict' | 'forbidden' | 'condition-unsupported' | 'too-large' | 'timeout' | 'other';
+
+/** A step that did not settle in time. The work it started may still finish. */
+export class TimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TimeoutError';
+  }
+}
+
+/**
+ * Settles with `promise`, or rejects with a TimeoutError after `ms`. The
+ * underlying work is not cancelled (an IPC call cannot be), only no longer
+ * waited for, so a save never sits at "Saving…" forever.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new TimeoutError(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** How long each save step may take. The upload allows for the backend's own 120 s request timeout. */
+export const SAVE_TIMEOUTS = {
+  encodeMs: 30_000,
+  checkMs: 20_000,
+  uploadMs: 150_000,
+} as const;
 
 export function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -35,6 +63,7 @@ export function errorMessage(error: unknown): string {
 
 /** Sorts a write error (the backend leads with `HTTP <status>`) into what the UI says about it. */
 export function classifySaveError(error: unknown): SaveErrorKind {
+  if (error instanceof TimeoutError) return 'timeout';
   const message = errorMessage(error);
   if (/HTTP 412\b|PreconditionFailed|HTTP 409\b|ConditionalRequestConflict/i.test(message)) {
     return 'conflict';
@@ -56,6 +85,8 @@ export function describeSaveError(kind: SaveErrorKind, message: string): string 
       return 'The server refused the file as too large.';
     case 'condition-unsupported':
       return 'The server does not support conditional writes.';
+    case 'timeout':
+      return 'The server did not confirm the save in time. It may still complete; saving again checks the server version first.';
     default:
       return message;
   }
@@ -66,6 +97,8 @@ export interface SaveDependencies {
   currentEtag: () => Promise<string | null>;
   /** Writes the new content, conditional on `ifMatch` when given; resolves to the new ETag. */
   upload: (ifMatch?: string) => Promise<string>;
+  /** Overrides SAVE_TIMEOUTS (tests). */
+  timeouts?: { checkMs?: number; uploadMs?: number };
 }
 
 export type SaveOutcome =
@@ -83,26 +116,34 @@ export async function saveWithVersionCheck(
   options: { force?: boolean } = {}
 ): Promise<SaveOutcome> {
   const guard = !options.force && normalizeEtag(expectedEtag) !== null;
+  const checkMs = deps.timeouts?.checkMs ?? SAVE_TIMEOUTS.checkMs;
+  const uploadMs = deps.timeouts?.uploadMs ?? SAVE_TIMEOUTS.uploadMs;
+  const upload = (ifMatch?: string) =>
+    withTimeout(deps.upload(ifMatch), uploadMs, 'The upload did not finish in time');
 
   if (guard) {
     let serverEtag: string | null = null;
     try {
-      serverEtag = await deps.currentEtag();
+      serverEtag = await withTimeout(
+        deps.currentEtag(),
+        checkMs,
+        'The version check did not finish in time'
+      );
     } catch {
-      // The conditional PUT below still protects the write.
+      // Unknown, or too slow: the conditional PUT below still protects the write.
     }
     if (etagsDiffer(serverEtag, expectedEtag)) return { status: 'conflict', serverEtag };
   }
 
   const ifMatch = guard ? `"${normalizeEtag(expectedEtag)}"` : undefined;
   try {
-    return { status: 'saved', etag: normalizeEtag(await deps.upload(ifMatch)) };
+    return { status: 'saved', etag: normalizeEtag(await upload(ifMatch)) };
   } catch (error) {
     const kind = classifySaveError(error);
     if (kind === 'conflict') return { status: 'conflict', serverEtag: null };
     if (kind === 'condition-unsupported' && ifMatch) {
       try {
-        return { status: 'saved', etag: normalizeEtag(await deps.upload(undefined)) };
+        return { status: 'saved', etag: normalizeEtag(await upload(undefined)) };
       } catch (retryError) {
         const retryKind = classifySaveError(retryError);
         const message = errorMessage(retryError);

@@ -2,11 +2,16 @@ import { describe, expect, test } from 'bun:test';
 import {
   classifySaveError,
   describeSaveError,
+  errorMessage,
   etagsDiffer,
   normalizeEtag,
   saveWithVersionCheck,
+  TimeoutError,
+  withTimeout,
   type SaveDependencies,
 } from './saveFlow';
+
+const never = <T>() => new Promise<T>(() => {});
 
 /** A fake bucket holding one object version, with the calls the save made. */
 function server(etag: string | null, behaviour: { failWith?: string[]; noEtag?: boolean } = {}) {
@@ -127,5 +132,64 @@ describe('saveWithVersionCheck', () => {
     };
     expect((await saveWithVersionCheck('"v1"', flaky)).status).toBe('saved');
     expect(state.uploads).toEqual(['"v1"']);
+  });
+
+  test('a version check that never answers does not block the save', async () => {
+    const { state, deps } = server('"v1"');
+    const hung: SaveDependencies = {
+      currentEtag: never,
+      upload: deps.upload,
+      timeouts: { checkMs: 10 },
+    };
+    expect((await saveWithVersionCheck('"v1"', hung)).status).toBe('saved');
+    expect(state.uploads).toEqual(['"v1"']);
+  });
+
+  test('an upload that never answers ends in a timeout error, not "Saving…" forever', async () => {
+    const { deps } = server('"v1"');
+    const hung: SaveDependencies = {
+      currentEtag: deps.currentEtag,
+      upload: () => never<string>(),
+      timeouts: { uploadMs: 10 },
+    };
+    const outcome = await saveWithVersionCheck('"v1"', hung);
+    expect(outcome.status).toBe('error');
+    expect(outcome.status === 'error' && outcome.kind).toBe('timeout');
+    expect(outcome.status === 'error' && outcome.message).toContain('may still complete');
+  });
+
+  test('a late upload after a timeout is caught by the next save as a conflict', async () => {
+    const { state, deps } = server('"v1"');
+    let land: () => void = () => {};
+    const slow: SaveDependencies = {
+      currentEtag: deps.currentEtag,
+      upload: (ifMatch) =>
+        new Promise<string>((resolve, reject) => {
+          land = () => deps.upload(ifMatch).then(resolve, reject);
+        }),
+      timeouts: { uploadMs: 10 },
+    };
+    expect((await saveWithVersionCheck('"v1"', slow)).status).toBe('error');
+    land();
+    await Promise.resolve();
+    expect(state.etag).not.toBe('"v1"');
+    expect((await saveWithVersionCheck('"v1"', deps)).status).toBe('conflict');
+  });
+});
+
+describe('withTimeout', () => {
+  test('passes a value or an error through when it settles in time', async () => {
+    expect(await withTimeout(Promise.resolve(3), 50, 'slow')).toBe(3);
+    const failed = await withTimeout(Promise.reject(new Error('boom')), 50, 'slow').catch(
+      (e: unknown) => e
+    );
+    expect(errorMessage(failed)).toBe('boom');
+  });
+
+  test('rejects with a TimeoutError the save classifies as a timeout', async () => {
+    const error = await withTimeout(never(), 5, 'slow').catch((e: unknown) => e);
+    expect(error instanceof TimeoutError).toBe(true);
+    expect(classifySaveError(error)).toBe('timeout');
+    expect(describeSaveError('timeout', 'x')).toContain('may still complete');
   });
 });
