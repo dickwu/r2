@@ -151,6 +151,14 @@
   margin: 0 4px;
   color: var(--text-subtle);
 }
+.tl-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tl-path .sep {
+  margin: 0 5px;
+}
 .tl-cmd {
   -webkit-app-region: no-drag;
   margin-left: auto;

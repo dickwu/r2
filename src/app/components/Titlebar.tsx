@@ -4,6 +4,7 @@ import React from 'react';
 import { SearchOutlined } from '@ant-design/icons';
 import { useAccountStore } from '@/app/stores/accountStore';
 import { useCurrentPathStore } from '@/app/stores/currentPathStore';
+import { titlebarPathSegments, titlebarPathTitle } from '@/app/utils/titlebarPath';
 
 interface TitlebarProps {
   /**
@@ -57,9 +58,18 @@ export default function Titlebar({ onOpenPalette }: TitlebarProps) {
           </>
         )}
         {bucket && (
-          <span style={{ marginLeft: 4 }}>
-            {bucket}
-            {currentPath || '/'}
+          <span
+            className="tl-path"
+            style={{ marginLeft: 4 }}
+            title={titlebarPathTitle(bucket, currentPath)}
+          >
+            <strong>{bucket}</strong>
+            {titlebarPathSegments(currentPath).map((segment, index) => (
+              <React.Fragment key={`${index}-${segment}`}>
+                <span className="sep">/</span>
+                {segment}
+              </React.Fragment>
+            ))}
           </span>
         )}
       </div>
