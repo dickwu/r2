@@ -15,6 +15,7 @@ import {
   KeyOutlined,
   SwapOutlined,
 } from '@ant-design/icons';
+import { publicAfterDomainEdit } from '@/app/lib/bucketDomain';
 import { listBuckets, StorageProvider } from '@/app/lib/r2cache';
 import {
   useAccountStore,
@@ -312,6 +313,7 @@ export default function ConfigModal({
               ...b,
               publicDomainHost: parsed.host || undefined,
               publicDomainScheme: parsed.scheme || b.publicDomainScheme || 'https',
+              isPublic: publicAfterDomainEdit(b.publicDomainHost, parsed.host, b.isPublic),
             }
           : b
       )

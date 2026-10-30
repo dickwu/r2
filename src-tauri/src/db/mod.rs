@@ -151,16 +151,21 @@ async fn migrate_on(conn: &Connection) -> DbResult<()> {
 
     // Add explicit public-access flag + R2 public path prefix for existing DBs
     // (idempotent: the ADD COLUMN reports a duplicate once the column exists).
-    add_column_on(conn, "buckets", "is_public INTEGER NOT NULL DEFAULT 0").await?;
+    let added_is_public =
+        add_column_on(conn, "buckets", "is_public INTEGER NOT NULL DEFAULT 0").await?;
     add_column_on(conn, "buckets", "public_path_prefix TEXT").await?;
     // Buckets that already carried a public domain were served publicly before
-    // this flag existed — preserve that behavior on upgrade.
-    let _ = conn
-        .execute(
-            "UPDATE buckets SET is_public = 1 WHERE public_domain IS NOT NULL AND public_domain <> ''",
-            (),
-        )
-        .await;
+    // this flag existed — preserve that behavior on upgrade. Only when the flag
+    // is new: on later starts it is the user's choice, and flipping it here
+    // would change links only after a restart.
+    if added_is_public {
+        let _ = conn
+            .execute(
+                "UPDATE buckets SET is_public = 1 WHERE public_domain IS NOT NULL AND public_domain <> ''",
+                (),
+            )
+            .await;
+    }
 
     // Provider-specific tables
     conn.execute_batch(&format!(
@@ -188,16 +193,19 @@ async fn migrate_on(conn: &Connection) -> DbResult<()> {
     // existing DBs (idempotent). Backfill: any bucket that already had a custom
     // public domain host was served publicly before the flag existed.
     for table in ["aws_buckets", "minio_buckets", "rustfs_buckets"] {
-        add_column_on(conn, table, "is_public INTEGER NOT NULL DEFAULT 0").await?;
+        let added_is_public =
+            add_column_on(conn, table, "is_public INTEGER NOT NULL DEFAULT 0").await?;
         add_column_on(conn, table, "public_path_prefix TEXT").await?;
-        let _ = conn
-            .execute(
-                &format!(
-                    "UPDATE {table} SET is_public = 1 WHERE public_domain_host IS NOT NULL AND public_domain_host <> ''"
-                ),
-                (),
-            )
-            .await;
+        if added_is_public {
+            let _ = conn
+                .execute(
+                    &format!(
+                        "UPDATE {table} SET is_public = 1 WHERE public_domain_host IS NOT NULL AND public_domain_host <> ''"
+                    ),
+                    (),
+                )
+                .await;
+        }
     }
 
     // Create app_state table
@@ -514,6 +522,67 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
+    }
+
+    #[tokio::test]
+    async fn public_flag_backfill_runs_once_and_keeps_later_choices() {
+        let db = Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        // A database from before the public flag existed.
+        conn.execute_batch(
+            "CREATE TABLE buckets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                public_domain TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(token_id, name)
+            );
+            INSERT INTO buckets (token_id, name, public_domain, created_at, updated_at)
+                VALUES (1, 'legacy', 'cdn.example.com', 1, 1), (1, 'plain', NULL, 1, 1);",
+        )
+        .await
+        .unwrap();
+
+        migrate_on(&conn).await.unwrap();
+        assert_eq!(
+            rows(&conn, "SELECT name, is_public FROM buckets ORDER BY name").await,
+            vec![
+                "Text(\"legacy\")|Integer(1)".to_string(),
+                "Text(\"plain\")|Integer(0)".into()
+            ]
+        );
+
+        // Later the user attaches a domain but keeps the bucket private.
+        conn.execute(
+            "UPDATE buckets SET public_domain = 'cdn2.example.com', is_public = 0 WHERE name = 'plain'",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO minio_accounts (id, name, access_key_id, secret_access_key, endpoint_scheme, endpoint_host, force_path_style, created_at, updated_at)
+                VALUES ('minio', NULL, 'mk', 'ms', 'http', 'minio.local:9000', 1, 1, 1);
+            INSERT INTO minio_buckets (account_id, name, public_domain_scheme, public_domain_host, is_public, public_path_prefix, created_at, updated_at)
+                VALUES ('minio', 'data', 'https', 'files.example.com', 0, NULL, 1, 1);",
+        )
+        .await
+        .unwrap();
+
+        // The next start must not flip it: links would change only after a restart.
+        migrate_on(&conn).await.unwrap();
+        assert_eq!(
+            rows(&conn, "SELECT name, is_public FROM buckets ORDER BY name").await,
+            vec![
+                "Text(\"legacy\")|Integer(1)".to_string(),
+                "Text(\"plain\")|Integer(0)".into()
+            ]
+        );
+        assert_eq!(
+            rows(&conn, "SELECT is_public FROM minio_buckets").await,
+            vec!["Integer(0)".to_string()]
+        );
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ import {
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import { useAccountStore, type ProviderAccount } from '@/app/stores/accountStore';
+import { publicAfterDomainEdit } from '@/app/lib/bucketDomain';
 import { listBuckets, type StorageProvider } from '@/app/lib/r2cache';
 import Modal from '@/app/components/ui/Modal';
 
@@ -353,6 +354,7 @@ export default function AccountEditModal({
               ...b,
               publicDomainHost: parsed.host,
               publicDomainScheme: parsed.scheme || b.publicDomainScheme || 'https',
+              isPublic: publicAfterDomainEdit(b.publicDomainHost, parsed.host, b.isPublic),
             }
           : b
       )
