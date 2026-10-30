@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "tauri-connector": {
+      "source": "dickwu/tauri-connector",
+      "sourceType": "github",
+      "skillPath": "skill/SKILL.md",
+      "computedHash": "f0b4430f09a8979df0b6cd3c8052fdd34e1361043c60902bfd53589885797857"
+    }
+  }
+}
