@@ -95,7 +95,7 @@ The sync system caches bucket contents locally in SQLite for fast browsing:
 [tauri-connector](https://github.com/dickwu/tauri-connector) provides deep inspection and interaction with the running app via an embedded MCP server + CLI. Enabled via `--features connector`.
 
 ```bash
-bun run tauri:dev            # Starts app with connector enabled (port 9555 WS, 9556 MCP)
+bun run tauri:dev            # Starts app with connector enabled (pinned: 9568 WS, 9567 MCP)
 tauri-connector snapshot -i  # AI DOM snapshot with refs and React component names
 tauri-connector click @e5    # Click element by ref
 tauri-connector fill @e3 "text"  # Fill input
@@ -103,6 +103,8 @@ tauri-connector screenshot /tmp/shot.png  # Screenshot
 tauri-connector logs -n 20   # Console logs
 tauri-connector state        # App metadata
 ```
+
+The `tauri:dev` script pins the connector to WS 9568 and MCP 9567 (`TAURI_CONNECTOR_PORT` / `TAURI_CONNECTOR_MCP_PORT`) so `.mcp.json` (`http://127.0.0.1:9567/mcp`) always reaches this app, not another connector app on the default 9555+ range. Exact ports do not fall back: if one is busy the connector logs an error and does not start. Pass `--project r2` to the CLI when several connector apps run.
 
 ## Key Conventions
 

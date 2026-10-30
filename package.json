@@ -9,7 +9,7 @@
     "tauri": "tauri",
     "assets:file-viewer": "node scripts/copy-file-viewer-assets.mjs",
     "assets:monaco": "node scripts/copy-monaco-assets.mjs",
-    "tauri:dev": "tauri dev --features connector",
+    "tauri:dev": "TAURI_CONNECTOR_PORT=9568 TAURI_CONNECTOR_MCP_PORT=9567 tauri dev --features connector",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",

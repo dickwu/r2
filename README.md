@@ -128,7 +128,7 @@ bun run tauri dev
 [tauri-connector](https://github.com/dickwu/tauri-connector) is integrated for AI-assisted debugging and testing. It provides DOM inspection, element interaction, screenshots, and console log access via CLI or MCP server.
 
 ```bash
-# Start with connector enabled
+# Start with connector enabled (pinned ports: WS 9568, MCP 9567 — see .mcp.json)
 bun run tauri:dev
 
 # CLI commands (after app is running)
