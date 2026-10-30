@@ -1,7 +1,7 @@
 {
   "name": "Cloudflare R2 Client",
   "private": true,
-  "version": "0.3.18",
+  "version": "0.3.19",
   "scripts": {
     "dev": "bun run assets:file-viewer && bun run assets:monaco && next dev --turbopack -p 3000",
     "build": "bun run assets:file-viewer && bun run assets:monaco && next build",
