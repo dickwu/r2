@@ -85,3 +85,33 @@ tracing-subscriber = "0.3"
 [features]
 default = []
 connector = ["tauri-plugin-connector"]
+
+# Thumbnail codecs are unusably slow unoptimized (a 24 MP JPEG takes ~4 s to
+# decode and shrink in a debug build, ~0.1 s optimized), so dev builds and
+# tests compile just these crates with optimizations. Release is unaffected.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.zune-core]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.gif]
+opt-level = 3
+[profile.dev.package.tiff]
+opt-level = 3
+[profile.dev.package.weezl]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.simd-adler32]
+opt-level = 3
+[profile.dev.package.webp]
+opt-level = 3
+[profile.dev.package.libwebp-sys]
+opt-level = 3

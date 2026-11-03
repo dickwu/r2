@@ -416,16 +416,30 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| format!("Thumbnail worker failed: {e}"))?
 }
 
-async fn render_image(source: &str, width: u32) -> Result<Vec<u8>, String> {
+async fn render_image(source: &str, width: u32, label: &str) -> Result<Vec<u8>, String> {
+    let queued = Instant::now();
     let _slot = IMAGE_SLOTS
         .acquire()
         .await
         .map_err(|e| format!("Thumbnail queue closed: {e}"))?;
+    let fetching = Instant::now();
     let bytes = fetch_image(source).await?;
+    let working = Instant::now();
     let bytes = std::sync::Arc::new(bytes);
     let input = bytes.clone();
     match blocking(move || decode_image(&input).and_then(|img| to_webp(img, width))).await {
-        Ok(webp) => Ok(webp),
+        Ok(webp) => {
+            dev_log(|| {
+                format!(
+                    "image {label}: queued {} ms, fetch {} ms ({} B), decode+encode {} ms",
+                    (fetching - queued).as_millis(),
+                    (working - fetching).as_millis(),
+                    bytes.len(),
+                    working.elapsed().as_millis()
+                )
+            });
+            Ok(webp)
+        }
         Err(decode_error) => {
             // Not a format the Rust decoders know: let ffmpeg try. It needs a
             // seekable file (HEIF is an ISO-BMFF container).
@@ -448,15 +462,26 @@ async fn render_image(source: &str, width: u32) -> Result<Vec<u8>, String> {
     }
 }
 
-async fn render_video(source: &str, width: u32) -> Result<Vec<u8>, String> {
+async fn render_video(source: &str, width: u32, label: &str) -> Result<Vec<u8>, String> {
+    let started = Instant::now();
     let frame = video_thumbnail::render_video_frame(source, width).await?;
-    blocking(move || decode_image(&frame).and_then(|img| to_webp(img, width))).await
+    let encoding = Instant::now();
+    let webp = blocking(move || decode_image(&frame).and_then(|img| to_webp(img, width))).await?;
+    dev_log(|| {
+        format!(
+            "video {label}: ffmpeg frame {} ms, webp {} ms",
+            (encoding - started).as_millis(),
+            encoding.elapsed().as_millis()
+        )
+    });
+    Ok(webp)
 }
 
-async fn render(kind: Kind, source: &str, width: u32) -> Result<Vec<u8>, String> {
+/// `label` names the object in dev logs; never pass the (signed) source URL.
+async fn render(kind: Kind, source: &str, width: u32, label: &str) -> Result<Vec<u8>, String> {
     match kind {
-        Kind::Image => render_image(source, width).await,
-        Kind::Video => render_video(source, width).await,
+        Kind::Image => render_image(source, width, label).await,
+        Kind::Video => render_video(source, width, label).await,
     }
 }
 
@@ -578,7 +603,11 @@ pub async fn get_thumbnail(
         }
     }
 
-    let bytes = render(kind, &source, width).await?;
+    let label = object
+        .as_ref()
+        .map(|o| o.key.as_str())
+        .unwrap_or("(uncached)");
+    let bytes = render(kind, &source, width, label).await?;
     if let Some((dir, object)) = cached {
         if let Err(e) = store(dir, object, kind, &bytes).await {
             log::warn!("thumbnail cache: store failed: {e}");
@@ -1060,7 +1089,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let webp = render(Kind::Video, path.to_str().unwrap(), 320)
+        let webp = render(Kind::Video, path.to_str().unwrap(), 320, "clip")
             .await
             .unwrap();
         assert_eq!(&webp[8..12], b"WEBP");
