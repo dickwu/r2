@@ -1,4 +1,4 @@
-import { memo, useCallback, useState } from 'react';
+import { memo, useCallback, useMemo, useState } from 'react';
 import {
   FolderOutlined,
   FileImageOutlined,
@@ -13,13 +13,32 @@ import { FileItem } from '@/app/hooks/useR2Files';
 import { FolderMetadata } from '@/app/stores/folderSizeStore';
 import { formatBytes } from '@/app/utils/formatBytes';
 import VideoThumbnail from '@/app/components/VideoThumbnail';
+import { useThumbnail } from '@/app/hooks/useThumbnail';
+import type { ThumbnailObject } from '@/app/lib/thumbnailIdentity';
 import FileContextMenu from '@/app/components/FileContextMenu';
 import { StorageConfig } from '@/app/lib/r2cache';
 import { usePreviewUrl } from '@/app/hooks/usePreviewUrl';
 import { useListedObjectType } from '@/app/hooks/useListedObjectType';
 import dayjs from 'dayjs';
 
-const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
+const IMAGE_EXTENSIONS = [
+  'jpg',
+  'jpeg',
+  'png',
+  'gif',
+  'webp',
+  'svg',
+  'bmp',
+  'ico',
+  'tif',
+  'tiff',
+  'heic',
+  'heif',
+  'avif',
+  'psd',
+];
+/** Vector images stay sharp at any size: the tile shows the original. */
+const ORIGINAL_ONLY_EXTENSIONS = ['svg'];
 const VIDEO_EXTENSIONS = ['mp4', 'avi', 'mkv', 'mov', 'wmv', 'flv', 'webm', 'm4v'];
 
 function getExt(name: string) {
@@ -134,6 +153,41 @@ function ThumbImage({
   );
 }
 
+/**
+ * Grid thumbnail for an image: a small WebP made natively and kept in the
+ * on-disk cache, so scrolling a folder of large photos neither downloads nor
+ * decodes the originals again. While it is made the type icon shows; if it
+ * cannot be made (too large, unknown format, offline) the tile loads the
+ * original as before.
+ */
+function ImageThumbnail({
+  src,
+  alt,
+  object,
+  fallback,
+}: {
+  src: string;
+  alt: string;
+  object: ThumbnailObject | null;
+  fallback: React.ReactNode;
+}) {
+  const { containerRef, error, thumbnailSrc } = useThumbnail('image', src, {
+    lazy: true,
+    object,
+  });
+  return (
+    <div ref={containerRef} className="fg-thumb-media">
+      {error ? (
+        <ThumbImage key={src} src={src} alt={alt} fallback={fallback} />
+      ) : thumbnailSrc ? (
+        <ThumbImage key={thumbnailSrc} src={thumbnailSrc} alt={alt} fallback={fallback} />
+      ) : (
+        fallback
+      )}
+    </div>
+  );
+}
+
 interface FileGridTileProps {
   item: FileItem;
   storageConfig?: StorageConfig | null;
@@ -176,6 +230,19 @@ const FileGridTile = memo(function FileGridTile({
     !item.isFolder && (VIDEO_EXTENSIONS.includes(ext) || listedType?.kind === 'video');
   const tone = hasImage ? 'image' : hasVideo ? 'video' : tileType(item, ext);
   const fileUrl = usePreviewUrl(storageConfig, item.key, hasImage || hasVideo);
+  const thumbnailObject = useMemo<ThumbnailObject | null>(
+    () =>
+      storageConfig && !item.isFolder
+        ? {
+            accountId: storageConfig.accountId,
+            bucket: storageConfig.bucket,
+            key: item.key,
+            size: item.size,
+            lastModified: item.lastModified || undefined,
+          }
+        : null,
+    [storageConfig, item.isFolder, item.key, item.size, item.lastModified]
+  );
 
   const handleClick = useCallback(() => {
     if (onFocus) onFocus(item);
@@ -226,15 +293,22 @@ const FileGridTile = memo(function FileGridTile({
 
         {/* Thumbnail / preview */}
         <div className={`fg-thumb ${tone}`}>
-          {fileUrl && hasImage ? (
+          {fileUrl && hasImage && ORIGINAL_ONLY_EXTENSIONS.includes(ext) ? (
             <ThumbImage
               key={fileUrl}
               src={fileUrl}
               alt={item.name}
               fallback={<TileIcon tone={tone} />}
             />
+          ) : fileUrl && hasImage ? (
+            <ImageThumbnail
+              src={fileUrl}
+              alt={item.name}
+              object={thumbnailObject}
+              fallback={<TileIcon tone={tone} />}
+            />
           ) : fileUrl && hasVideo ? (
-            <VideoThumbnail src={fileUrl} alt={item.name} />
+            <VideoThumbnail src={fileUrl} alt={item.name} object={thumbnailObject} />
           ) : (
             <TileIcon tone={tone} />
           )}

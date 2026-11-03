@@ -222,8 +222,23 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
     setObjectUrl(null);
   }, [isOpen, file, config, hasCredentials, isPublic]);
 
+  // The same identity as the grid tile, so the poster comes from the disk cache.
+  const posterObject = useMemo(
+    () =>
+      file && config
+        ? {
+            accountId: config.accountId,
+            bucket: config.bucket,
+            key: file.key,
+            size: file.size,
+            lastModified: file.lastModified || undefined,
+          }
+        : null,
+    [file, config]
+  );
   const { thumbnailSrc: videoPoster } = useVideoThumbnail(
-    file && preview.target.kind === 'video' ? signedUrl : null
+    file && preview.target.kind === 'video' ? signedUrl : null,
+    { object: posterObject }
   );
 
   if (!file) return null;

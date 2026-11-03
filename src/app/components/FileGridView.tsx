@@ -5,6 +5,7 @@ import { FileItem } from '@/app/hooks/useR2Files';
 import { FolderMetadata } from '@/app/stores/folderSizeStore';
 import { StorageConfig } from '@/app/lib/r2cache';
 import FileGridTile from '@/app/components/FileGridTile';
+import { useThumbnailCacheSync } from '@/app/hooks/useThumbnailCacheSync';
 
 interface FileGridViewProps {
   items: FileItem[];
@@ -85,6 +86,7 @@ export default memo(function FileGridView({
   onFocus,
 }: FileGridViewProps) {
   const density = useThemeStore((s) => s.density);
+  useThumbnailCacheSync(storageConfig);
 
   return (
     <VirtuosoGrid

@@ -42,3 +42,16 @@ describe('VideoThumbnailCache', () => {
     expect(cache.get('https://x/c.mp4', 0)).toBeUndefined();
   });
 });
+
+describe('VideoThumbnailCache maintenance', () => {
+  test('deleteWhere drops matching entries and clear drops everything', () => {
+    const cache = new VideoThumbnailCache();
+    cache.set('one', 'data:image/webp;base64,1');
+    cache.set('two', 'data:image/webp;base64,2');
+    expect(cache.deleteWhere((key) => key === 'one')).toBe(1);
+    expect(cache.get('one')).toBeUndefined();
+    expect(cache.get('two')).toBe('data:image/webp;base64,2');
+    cache.clear();
+    expect(cache.size).toBe(0);
+  });
+});

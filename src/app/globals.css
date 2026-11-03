@@ -2534,6 +2534,12 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
 .fg-thumb-img.is-loaded {
   opacity: 1;
 }
+.fg-thumb-media {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
 
 .fg-name {
   font-size: 12.5px;
@@ -4139,6 +4145,73 @@ html.dark .download-task-list > div::-webkit-scrollbar-thumb:hover {
    body → trailing-action anatomy. Only the body's first line differs,
    carrying the mount schematic (bucket, live wire, local folder) that
    the mount modal and the sidebar marker already speak. */
+.thumb-cache-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+.thumb-cache-figures {
+  display: flex;
+  gap: 28px;
+}
+.thumb-cache-figure {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.thumb-cache-figure strong {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.thumb-cache-figure span {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.thumb-cache-meter {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  overflow: hidden;
+}
+.thumb-cache-meter span {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 200ms ease;
+}
+.thumb-cache-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+.thumb-cache-foot .btn {
+  flex-shrink: 0;
+}
+.btn.thumb-cache-clear {
+  color: var(--danger);
+}
+.btn.thumb-cache-clear:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+.thumb-cache-error {
+  font-size: 11.5px;
+  color: var(--danger, #d4380d);
+}
 .settings-mount-head-actions {
   display: flex;
   align-items: center;

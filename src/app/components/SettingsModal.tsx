@@ -8,17 +8,19 @@ import {
   UnorderedListOutlined,
   CheckOutlined,
   LinkOutlined,
+  DatabaseOutlined,
 } from '@ant-design/icons';
 import { useThemeStore } from '@/app/stores/themeStore';
 import { ACCENT_LIST } from '@/app/lib/accent';
 import Modal from '@/app/components/ui/Modal';
 import SettingsAccountPanel from '@/app/components/SettingsAccountPanel';
 import SettingsMountsPanel from '@/app/components/SettingsMountsPanel';
+import SettingsStoragePanel from '@/app/components/SettingsStoragePanel';
 import { useShallow } from 'zustand/react/shallow';
 import { useUpdateStore } from '@/app/stores/updateStore';
 import { updateStatusView } from '@/app/lib/updates/updateStatus';
 
-export type SettingsTab = 'appearance' | 'layout' | 'account' | 'mounts' | 'shortcuts';
+export type SettingsTab = 'appearance' | 'layout' | 'account' | 'mounts' | 'storage' | 'shortcuts';
 
 interface SettingsModalProps {
   open: boolean;
@@ -495,12 +497,13 @@ export default function SettingsModal({
     { id: 'layout', label: 'Layout', icon: <AppstoreOutlined /> },
     { id: 'account', label: 'Account', icon: <SettingOutlined /> },
     { id: 'mounts', label: 'Mounts', icon: <LinkOutlined /> },
+    { id: 'storage', label: 'Storage', icon: <DatabaseOutlined /> },
     { id: 'shortcuts', label: 'Shortcuts', icon: <UnorderedListOutlined /> },
   ];
 
-  // Only the preference panels save as you go; accounts and mounts act on click.
+  // Only the preference panels save as you go; accounts, mounts and storage act on click.
   const footer =
-    tab === 'account' || tab === 'mounts' ? (
+    tab === 'account' || tab === 'mounts' || tab === 'storage' ? (
       <>
         <button className="btn btn-primary" onClick={onClose}>
           Done
@@ -562,6 +565,7 @@ export default function SettingsModal({
           {tab === 'shortcuts' && <ShortcutsPanel />}
           {tab === 'account' && <SettingsAccountPanel initialAccountId={initialAccountId} />}
           {tab === 'mounts' && <SettingsMountsPanel />}
+          {tab === 'storage' && <SettingsStoragePanel />}
         </div>
       </div>
     </Modal>

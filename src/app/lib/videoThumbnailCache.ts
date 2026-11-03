@@ -65,4 +65,24 @@ export class VideoThumbnailCache {
   set(src: string, value: string | null, now = Date.now()): void {
     this.entries.set(thumbnailCacheKey(src), { value, at: now });
   }
+
+  /** Drop the entries whose key passes `matches`; returns how many went. */
+  deleteWhere(matches: (key: string) => boolean): number {
+    let removed = 0;
+    for (const key of [...this.entries.keys()]) {
+      if (matches(key)) {
+        this.entries.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  clear(): void {
+    this.entries.clear();
+  }
+
+  get size(): number {
+    return this.entries.size;
+  }
 }
