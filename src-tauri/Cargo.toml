@@ -59,6 +59,10 @@ aws-config = "1.8"
 aws-sdk-s3 = { version = "1.155.0", features = ["behavior-version-latest"] }
 aws-credential-types = "1.2"
 futures-util = "0.3"
+# Image thumbnails: decode the common raster formats in-process (pure Rust)
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico", "tiff"] }
+# Lossy WebP encoding of cached thumbnails (libwebp, vendored and built with cc on every target)
+webp = { version = "0.3", default-features = false }
 # Multi-threaded download engine with Range-based parallel chunk acceleration
 range-dl = { path = "crates/range-dl" }
 # Dev-only: connector for AI-assisted testing (opt-in via --features connector)

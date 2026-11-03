@@ -592,6 +592,7 @@ pub(crate) async fn delete_cached_file_on(
     match result {
         Ok(value) => {
             conn.execute("COMMIT", ()).await?;
+            crate::thumbnail_cache::forget_keys_on(conn, bucket, account_id, &[key]).await;
             Ok(value)
         }
         Err(error) => {
@@ -693,6 +694,8 @@ pub(crate) async fn delete_cached_files_batch_on(
     match result {
         Ok(value) => {
             conn.execute("COMMIT", ()).await?;
+            let deleted: Vec<&str> = keys.iter().map(String::as_str).collect();
+            crate::thumbnail_cache::forget_keys_on(conn, bucket, account_id, &deleted).await;
             Ok(value)
         }
         Err(error) => {
@@ -785,6 +788,7 @@ pub(crate) async fn move_cached_file_on(
     match result {
         Ok(value) => {
             conn.execute("COMMIT", ()).await?;
+            crate::thumbnail_cache::forget_keys_on(conn, bucket, account_id, &[old_key]).await;
             Ok(value)
         }
         Err(error) => {
@@ -876,6 +880,15 @@ pub(crate) async fn update_cached_file_on(
     match result {
         Ok(value) => {
             conn.execute("COMMIT", ()).await?;
+            // An overwritten object's thumbnail no longer shows it.
+            let keys = [key];
+            crate::thumbnail_cache::reconcile_after_on(
+                conn,
+                bucket,
+                account_id,
+                super::thumbnails::Scope::Keys(&keys),
+            )
+            .await;
             Ok(value)
         }
         Err(error) => {
@@ -1712,6 +1725,15 @@ pub async fn finish_sync_with_metadata(
     match result {
         Ok(()) => {
             conn.execute("COMMIT", ()).await?;
+            // The published scan is the bucket's new listing: drop thumbnails
+            // of objects it changed or no longer has.
+            crate::thumbnail_cache::reconcile_after_on(
+                &conn,
+                bucket,
+                account_id,
+                super::thumbnails::Scope::Bucket { skipped_prefixes },
+            )
+            .await;
             Ok(())
         }
         Err(error) => {

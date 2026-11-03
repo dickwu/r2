@@ -27,6 +27,7 @@ pub mod prefix_sync;
 pub mod rustfs_accounts;
 pub mod rustfs_buckets;
 pub mod sessions;
+pub mod thumbnails;
 pub mod tokens;
 
 // Re-export types
@@ -223,6 +224,9 @@ async fn migrate_on(conn: &Connection) -> DbResult<()> {
 
     // Create prefix sync times table (for lazy sync)
     conn.execute_batch(prefix_sync::get_table_sql()).await?;
+
+    // Index of the on-disk thumbnail cache (v0.3.21)
+    conn.execute_batch(thumbnails::get_table_sql()).await?;
     add_column_on(conn, "sync_meta", "generation INTEGER NOT NULL DEFAULT 0").await?;
     add_column_on(
         conn,
@@ -490,6 +494,8 @@ mod tests {
             "move_task_retries",
             "prefix_mutation_generations",
             "sync_mutation_journal",
+            "thumbnail_cache",
+            "idx_thumbnail_cache_lru",
         ] {
             assert!(names.contains(&format!("Text(\"{added}\")")), "{added}");
         }

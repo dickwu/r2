@@ -119,6 +119,18 @@ pub(crate) async fn replace_complete_prefix_on(
     match result {
         Ok(fresh) => {
             conn.execute("COMMIT", ()).await?;
+            // A complete listing no local write overlapped is the folder's
+            // current content: drop thumbnails of objects it changed or
+            // no longer has. A stale one is relisted, so wait for that.
+            if fresh {
+                crate::thumbnail_cache::reconcile_after_on(
+                    conn,
+                    bucket,
+                    account_id,
+                    super::thumbnails::Scope::Folder(prefix),
+                )
+                .await;
+            }
             Ok(fresh)
         }
         Err(error) => {

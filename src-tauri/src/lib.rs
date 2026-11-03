@@ -18,6 +18,7 @@ mod providers;
 mod r2;
 #[cfg(test)]
 mod test_s3;
+mod thumbnail_cache;
 mod transfer_progress;
 mod upload;
 mod upload_control;
@@ -199,6 +200,12 @@ pub fn run() {
                 }
             });
 
+            // On-disk thumbnail cache (startup sweep and eviction run in the background)
+            match app.path().app_cache_dir() {
+                Ok(cache_dir) => thumbnail_cache::init(app_handle, cache_dir),
+                Err(e) => eprintln!("Thumbnail cache disabled: no app cache dir: {}", e),
+            }
+
             // Setup custom application menu (macOS menu bar)
             #[cfg(target_os = "macos")]
             {
@@ -310,6 +317,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Video thumbnails (frame at 1 s via ffmpeg)
             video_thumbnail::generate_video_thumbnail,
+            thumbnail_cache::get_thumbnail,
+            thumbnail_cache::get_thumbnail_cache_stats,
+            thumbnail_cache::set_thumbnail_cache_limit,
+            thumbnail_cache::clear_thumbnail_cache,
             // Upload commands
             upload::upload_file,
             upload::cancel_upload,

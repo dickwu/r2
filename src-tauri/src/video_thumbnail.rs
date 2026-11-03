@@ -148,7 +148,7 @@ fn candidate_paths(env: impl Fn(&str) -> Option<OsString>, exe_dir: Option<&Path
 
 /// The ffmpeg binary to use. A hit is kept for the session; a miss is retried
 /// after [`NOT_FOUND_RECHECK`].
-fn locate_ffmpeg() -> Option<PathBuf> {
+pub(crate) fn locate_ffmpeg() -> Option<PathBuf> {
     let mut guard = FFMPEG_LOOKUP.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((found, at)) = guard.as_ref() {
         match found {
@@ -176,7 +176,8 @@ fn is_remote(source: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
-/// ffmpeg arguments that write one JPEG frame to stdout. `seek` is an input
+/// ffmpeg arguments that write one JPEG frame to stdout (near-lossless: the
+/// cache re-encodes it to WebP). `seek` is an input
 /// option (before `-i`), so for a remote file ffmpeg jumps there with a range
 /// request instead of reading everything before it.
 fn ffmpeg_args(source: &str, seek: Option<&str>, max_width: u32) -> Vec<String> {
@@ -205,7 +206,7 @@ fn ffmpeg_args(source: &str, seek: Option<&str>, max_width: u32) -> Vec<String> 
             "-c:v",
             "mjpeg",
             "-q:v",
-            "4",
+            "2",
             "-f",
             "image2pipe",
             "pipe:1",
@@ -278,43 +279,71 @@ async fn run_ffmpeg(
     ))
 }
 
-/// Renders the frame at 1 s of a video (first frame when it is shorter) as a
-/// JPEG `data:` URL. `source` is an http(s) URL or a local path.
-#[tauri::command]
-pub async fn generate_video_thumbnail(
-    source: String,
-    max_width: Option<u32>,
-) -> Result<String, String> {
-    if source.trim().is_empty() {
-        return Err("No video source".to_string());
-    }
-    let ffmpeg = tokio::task::spawn_blocking(locate_ffmpeg)
+/// Clamp a requested thumbnail width to what the grid can use.
+pub(crate) fn clamp_width(max_width: Option<u32>) -> u32 {
+    max_width
+        .unwrap_or(DEFAULT_MAX_WIDTH)
+        .clamp(MIN_WIDTH, MAX_WIDTH)
+}
+
+async fn ffmpeg_path() -> Result<PathBuf, String> {
+    tokio::task::spawn_blocking(locate_ffmpeg)
         .await
         .ok()
         .flatten()
-        .ok_or_else(|| FFMPEG_NOT_FOUND.to_string())?;
-    let width = max_width
-        .unwrap_or(DEFAULT_MAX_WIDTH)
-        .clamp(MIN_WIDTH, MAX_WIDTH);
+        .ok_or_else(|| FFMPEG_NOT_FOUND.to_string())
+}
 
+/// The frame at 1 s of a video (first frame when it is shorter) as JPEG
+/// bytes, at most `width` pixels wide. `source` is an http(s) URL or a path.
+pub(crate) async fn render_video_frame(source: &str, width: u32) -> Result<Vec<u8>, String> {
+    if source.trim().is_empty() {
+        return Err("No video source".to_string());
+    }
+    let ffmpeg = ffmpeg_path().await?;
     let _slot = FFMPEG_SLOTS
         .acquire()
         .await
         .map_err(|e| format!("Thumbnail queue closed: {e}"))?;
 
-    let first = run_ffmpeg(&ffmpeg, &source, Some(THUMBNAIL_SEEK_SECONDS), width).await;
-    let frame = match first {
-        Ok(FrameOutcome::Frame(bytes)) => bytes,
+    let first = run_ffmpeg(&ffmpeg, source, Some(THUMBNAIL_SEEK_SECONDS), width).await;
+    match first {
+        Ok(FrameOutcome::Frame(bytes)) => Ok(bytes),
         // A network stall would only stall again; don't double the wait.
-        Err(e) if e == TIMED_OUT => return Err(e),
+        Err(e) if e == TIMED_OUT => Err(e),
         // Shorter than 1 s, or a seek ffmpeg could not satisfy: first frame.
-        Ok(FrameOutcome::Empty) | Err(_) => {
-            match run_ffmpeg(&ffmpeg, &source, None, width).await? {
-                FrameOutcome::Frame(bytes) => bytes,
-                FrameOutcome::Empty => return Err("Video has no decodable frame".to_string()),
-            }
-        }
-    };
+        Ok(FrameOutcome::Empty) | Err(_) => match run_ffmpeg(&ffmpeg, source, None, width).await? {
+            FrameOutcome::Frame(bytes) => Ok(bytes),
+            FrameOutcome::Empty => Err("Video has no decodable frame".to_string()),
+        },
+    }
+}
+
+/// The first frame of a still image ffmpeg can decode but the Rust decoders
+/// cannot (HEIC, AVIF, PSD, JPEG XL, ... as far as the bundled build supports
+/// them), as JPEG bytes at most `width` pixels wide.
+pub(crate) async fn render_still_frame(source: &Path, width: u32) -> Result<Vec<u8>, String> {
+    let ffmpeg = ffmpeg_path().await?;
+    let _slot = FFMPEG_SLOTS
+        .acquire()
+        .await
+        .map_err(|e| format!("Thumbnail queue closed: {e}"))?;
+    let source = source.to_string_lossy();
+    match run_ffmpeg(&ffmpeg, &source, None, width).await? {
+        FrameOutcome::Frame(bytes) => Ok(bytes),
+        FrameOutcome::Empty => Err("Image has no decodable frame".to_string()),
+    }
+}
+
+/// Renders the frame at 1 s of a video (first frame when it is shorter) as a
+/// JPEG `data:` URL, without the disk cache. `source` is an http(s) URL or a
+/// local path. The grid uses `get_thumbnail`, which caches.
+#[tauri::command]
+pub async fn generate_video_thumbnail(
+    source: String,
+    max_width: Option<u32>,
+) -> Result<String, String> {
+    let frame = render_video_frame(&source, clamp_width(max_width)).await?;
     Ok(format!("data:image/jpeg;base64,{}", STANDARD.encode(frame)))
 }
 
