@@ -392,20 +392,45 @@ fn to_webp(img: image::DynamicImage, width: u32) -> Result<Vec<u8>, String> {
         return Err("Image is empty".to_string());
     }
     let encoded = if img.color().has_alpha() {
-        let rgba = img.to_rgba8();
-        webp::Encoder::from_rgba(&rgba, w, h)
-            .encode(WEBP_QUALITY)
-            .to_vec()
+        encode_webp(&img.to_rgba8(), w, h, 4)?
     } else {
-        let rgb = img.to_rgb8();
-        webp::Encoder::from_rgb(&rgb, w, h)
-            .encode(WEBP_QUALITY)
-            .to_vec()
+        encode_webp(&img.to_rgb8(), w, h, 3)?
     };
     if encoded.is_empty() {
         return Err("WebP encoding failed".to_string());
     }
     Ok(encoded)
+}
+
+/// Lossy WebP through libwebp's simple encoding API. `pixels` is tightly
+/// packed RGB (`channels == 3`) or RGBA (`channels == 4`).
+fn encode_webp(pixels: &[u8], width: u32, height: u32, channels: u32) -> Result<Vec<u8>, String> {
+    let stride = width
+        .checked_mul(channels)
+        .filter(|s| (*s as u64) * height as u64 == pixels.len() as u64)
+        .ok_or("WebP encoding failed: bad pixel buffer")?;
+    let (w, h, stride) = (
+        i32::try_from(width).map_err(|_| "Image too wide")?,
+        i32::try_from(height).map_err(|_| "Image too tall")?,
+        i32::try_from(stride).map_err(|_| "Image too wide")?,
+    );
+    let mut out: *mut u8 = std::ptr::null_mut();
+    // SAFETY: `pixels` holds exactly `stride * height` bytes (checked above)
+    // and outlives the call. On success libwebp hands back a buffer of `len`
+    // bytes that we copy out and release with WebPFree exactly once.
+    unsafe {
+        let len = if channels == 4 {
+            libwebp_sys::WebPEncodeRGBA(pixels.as_ptr(), w, h, stride, WEBP_QUALITY, &mut out)
+        } else {
+            libwebp_sys::WebPEncodeRGB(pixels.as_ptr(), w, h, stride, WEBP_QUALITY, &mut out)
+        };
+        if out.is_null() {
+            return Err("WebP encoding failed".to_string());
+        }
+        let encoded = std::slice::from_raw_parts(out, len).to_vec();
+        libwebp_sys::WebPFree(out.cast());
+        Ok(encoded)
+    }
 }
 
 async fn blocking<T: Send + 'static>(
