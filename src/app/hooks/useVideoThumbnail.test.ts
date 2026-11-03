@@ -1,7 +1,11 @@
 import { describe, expect, mock, test } from 'bun:test';
 
 let reply: () => Promise<string> = () => Promise.resolve('data:image/jpeg;base64,AAAA');
+// Keep the real exports: bun module mocks are process-wide, and Tauri's event
+// module (imported by other test files) needs transformCallback from core.
+const tauriCore = await import('@tauri-apps/api/core');
 mock.module('@tauri-apps/api/core', () => ({
+  ...tauriCore,
   invoke: (command: string) => {
     expect(command).toBe('generate_video_thumbnail');
     return reply();
