@@ -176,17 +176,61 @@ fn is_remote(source: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
+/// System CA bundles, most common first. The bundled static ffmpeg builds use
+/// OpenSSL on macOS and Linux with a CA path baked in at build time that does
+/// not exist on users' machines, so without `-ca_file` every https source
+/// fails with "certificate verify failed". The Windows build uses GnuTLS,
+/// which falls back to the Windows certificate store, so it needs no file.
+#[cfg(not(windows))]
+const SYSTEM_CA_FILES: &[&str] = &[
+    "/etc/ssl/cert.pem",                  // macOS, Alpine, Arch
+    "/etc/ssl/certs/ca-certificates.crt", // Debian, Ubuntu
+    "/etc/pki/tls/certs/ca-bundle.crt",   // Fedora, RHEL
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    "/etc/ssl/ca-bundle.pem", // openSUSE
+];
+#[cfg(windows)]
+const SYSTEM_CA_FILES: &[&str] = &[];
+
+/// The CA bundle to hand ffmpeg: `SSL_CERT_FILE` when it names a file (the
+/// usual way to add corporate roots), else the first system bundle found.
+fn pick_ca_file(env_file: Option<OsString>, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    env_file
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(SYSTEM_CA_FILES.iter().map(PathBuf::from))
+        .find(|p| exists(p))
+}
+
+fn ca_file() -> Option<&'static Path> {
+    static CA_FILE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    CA_FILE
+        .get_or_init(|| pick_ca_file(std::env::var_os("SSL_CERT_FILE"), Path::is_file))
+        .as_deref()
+}
+
 /// ffmpeg arguments that write one JPEG frame to stdout (near-lossless: the
 /// cache re-encodes it to WebP). `seek` is an input
 /// option (before `-i`), so for a remote file ffmpeg jumps there with a range
 /// request instead of reading everything before it.
-fn ffmpeg_args(source: &str, seek: Option<&str>, max_width: u32) -> Vec<String> {
+fn ffmpeg_args(
+    source: &str,
+    seek: Option<&str>,
+    max_width: u32,
+    ca_file: Option<&Path>,
+) -> Vec<String> {
     let mut args: Vec<String> = ["-hide_banner", "-nostdin", "-loglevel", "error"]
         .iter()
         .map(|s| s.to_string())
         .collect();
     if is_remote(source) {
         args.extend(["-rw_timeout".to_string(), FFMPEG_RW_TIMEOUT_US.to_string()]);
+        if let Some(ca_file) = ca_file {
+            args.extend([
+                "-ca_file".to_string(),
+                ca_file.to_string_lossy().into_owned(),
+            ]);
+        }
     }
     if let Some(seek) = seek {
         args.extend(["-ss".to_string(), seek.to_string()]);
@@ -249,7 +293,7 @@ async fn run_ffmpeg(
     max_width: u32,
 ) -> Result<FrameOutcome, String> {
     let mut cmd = tokio::process::Command::new(ffmpeg);
-    cmd.args(ffmpeg_args(source, seek, max_width))
+    cmd.args(ffmpeg_args(source, seek, max_width, ca_file()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -435,7 +479,7 @@ mod tests {
 
     #[test]
     fn seek_is_an_input_option() {
-        let args = ffmpeg_args("https://x/v.mp4?X-Amz-Signature=s", Some("1"), 480);
+        let args = ffmpeg_args("https://x/v.mp4?X-Amz-Signature=s", Some("1"), 480, None);
         let ss = args.iter().position(|a| a == "-ss").unwrap();
         let input = args.iter().position(|a| a == "-i").unwrap();
         assert!(ss < input, "-ss must come before -i for fast range seeking");
@@ -446,9 +490,43 @@ mod tests {
 
     #[test]
     fn first_frame_fallback_has_no_seek_and_local_has_no_rw_timeout() {
-        let args = ffmpeg_args("/tmp/v.mp4", None, 480);
+        let args = ffmpeg_args("/tmp/v.mp4", None, 480, Some(Path::new("/ca.pem")));
         assert!(!args.contains(&"-ss".to_string()));
         assert!(!args.contains(&"-rw_timeout".to_string()));
+        assert!(!args.contains(&"-ca_file".to_string()));
+    }
+
+    #[test]
+    fn remote_sources_get_the_ca_file_before_the_input() {
+        let args = ffmpeg_args(
+            "https://x/v.mp4",
+            Some("1"),
+            480,
+            Some(Path::new("/ca.pem")),
+        );
+        let ca = args.iter().position(|a| a == "-ca_file").unwrap();
+        let input = args.iter().position(|a| a == "-i").unwrap();
+        assert!(ca < input);
+        assert_eq!(args[ca + 1], "/ca.pem");
+        let args = ffmpeg_args("https://x/v.mp4", Some("1"), 480, None);
+        assert!(!args.contains(&"-ca_file".to_string()));
+    }
+
+    #[test]
+    fn ca_file_prefers_ssl_cert_file_then_system_bundles() {
+        let custom = OsString::from("/corp/roots.pem");
+        let all = |_: &Path| true;
+        assert_eq!(
+            pick_ca_file(Some(custom.clone()), all),
+            Some(PathBuf::from("/corp/roots.pem"))
+        );
+        // A stale SSL_CERT_FILE falls through to the system bundles.
+        let system_only = |p: &Path| p != Path::new("/corp/roots.pem");
+        assert_eq!(
+            pick_ca_file(Some(custom), system_only),
+            SYSTEM_CA_FILES.first().map(PathBuf::from)
+        );
+        assert_eq!(pick_ca_file(None, |_: &Path| false), None);
     }
 
     #[test]
