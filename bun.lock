@@ -34,7 +34,6 @@
         "react-dom": "^19.3.1",
         "react-virtuoso": "^4.18.20",
         "tailwindcss": "^4.3.4",
-        "tauri-plugin-video-thumbnail": "^0.1.0",
         "zustand": "^5.0.16",
       },
       "devDependencies": {
@@ -1046,8 +1045,6 @@
     "tailwindcss": ["tailwindcss@4.3.4", "", {}, "sha512-PCJZTFFdG+sL3gvnP1Do9o6GbkvH2q0p04xSs3f7cSvmAeK+sttG+/7ncK1fdRwKFfC7n+wDDJaOMBSefkI9ow=="],
 
     "tapable": ["tapable@2.3.3", "", {}, "sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A=="],
-
-    "tauri-plugin-video-thumbnail": ["tauri-plugin-video-thumbnail@0.1.0", "", { "peerDependencies": { "@tauri-apps/api": "^2.0.0" } }, "sha512-LFS45V+Gcv9hY29SDGQn0GyKsxOhuTTXeOcGUFa2UlyRPWQVs2vcjq5cOF6+tJKPKIg/PoSulJHoqHq+08RF2w=="],
 
     "three": ["three@0.186.1", "", {}, "sha512-blFeqb49wRCSGUGj7gtpfnSGHy2lwDk94RhUmS1c/hTby70kvChbWpkJ4Pm1390LqzzvTmzgXKHPEafJwCb8jA=="],
 

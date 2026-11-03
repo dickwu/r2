@@ -91,6 +91,12 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      - name: Fetch bundled ffmpeg sidecar
+        # Pinned, sha256-checked static ffmpeg for src-tauri/binaries;
+        # tauri-build needs it for the target triple before any cargo step.
+        shell: bash
+        run: bun scripts/fetch-ffmpeg.ts ${{ matrix.args }}
+
       - name: Acceptance harness self-tests (offline)
         # bash -eo pipefail fails on the first failing self-test; the Windows
         # pwsh default would only report the last command's exit code.

@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:3000",
-    "beforeBuildCommand": "bun run build",
+    "beforeBuildCommand": "bun run ffmpeg:fetch && bun run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -37,7 +37,12 @@
       "icons/icon.ico",
       "icons/icon.png"
     ],
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "externalBin": ["binaries/r2-ffmpeg"],
+    "resources": {
+      "licenses/FFMPEG-NOTICE.md": "licenses/FFMPEG-NOTICE.md",
+      "licenses/GPL-3.0.txt": "licenses/GPL-3.0.txt"
+    }
   },
   "plugins": {
     "updater": {

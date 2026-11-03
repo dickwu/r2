@@ -21,6 +21,7 @@ mod test_s3;
 mod transfer_progress;
 mod upload;
 mod upload_control;
+mod video_thumbnail;
 
 const APP_NAME: &str = "R2 Uploader";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -139,8 +140,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_video_thumbnail::init());
+        .plugin(tauri_plugin_fs::init());
 
     #[cfg(all(debug_assertions, feature = "connector"))]
     {
@@ -308,6 +308,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // Video thumbnails (frame at 1 s via ffmpeg)
+            video_thumbnail::generate_video_thumbnail,
             // Upload commands
             upload::upload_file,
             upload::cancel_upload,

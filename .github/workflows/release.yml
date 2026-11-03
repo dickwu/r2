@@ -123,6 +123,12 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      - name: Fetch bundled ffmpeg sidecar
+        # Pinned, sha256-checked static ffmpeg for src-tauri/binaries;
+        # tauri-build needs it for the target triple before any cargo step.
+        shell: bash
+        run: bun scripts/fetch-ffmpeg.ts ${{ matrix.args }}
+
       - name: Debug - Check signing key
         run: echo "TAURI_SIGNING_PRIVATE_KEY length is ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' && 'SET' || 'EMPTY' }}"
 

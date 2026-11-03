@@ -874,7 +874,8 @@ body {
   object-fit: cover;
 }
 
-.video-thumbnail img {
+.video-thumbnail img,
+.video-thumbnail video {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -888,7 +889,12 @@ body {
   pointer-events: none;
 }
 
+.video-thumbnail video {
+  pointer-events: none;
+}
+
 .video-thumbnail-loading {
+  position: absolute;
   font-size: 24px;
   color: var(--color-icon-file);
 }
@@ -897,8 +903,15 @@ body {
   width: 100%;
   height: 100%;
   display: flex;
+  flex-direction: column;
+  gap: 6px;
   align-items: center;
   justify-content: center;
+}
+
+.video-thumbnail-note {
+  font-size: 11px;
+  color: var(--color-text-secondary);
 }
 
 .video-thumbnail-fallback .video-icon {

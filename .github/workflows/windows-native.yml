@@ -92,6 +92,9 @@ jobs:
         run: |
           bun install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # tauri-build needs the bundled ffmpeg sidecar before cargo runs.
+          bun scripts/fetch-ffmpeg.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           bun run build
 
       - name: Execute Rust tests on Windows

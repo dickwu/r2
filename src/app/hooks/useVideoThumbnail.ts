@@ -1,9 +1,23 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { generateThumbnail } from 'tauri-plugin-video-thumbnail';
+import { invoke } from '@tauri-apps/api/core';
+import { VideoThumbnailCache } from '@/app/lib/videoThumbnailCache';
 
-const thumbnailCache = new Map<string, string | null>();
+/** Width of the generated frame; grid tiles are ~160 px, at 2x plus margin. */
+const THUMBNAIL_MAX_WIDTH = 480;
+
+/** Error the native command returns when neither the bundled nor a system ffmpeg exists. */
+export const FFMPEG_NOT_FOUND = 'ffmpeg_not_found';
+
+const thumbnailCache = new VideoThumbnailCache();
+/** Set by the last native attempt; lets a tile say why it has no preview. */
+let ffmpegMissing = false;
+
+export function isFfmpegMissing(): boolean {
+  return ffmpegMissing;
+}
+
 const thumbnailPromiseCache = new Map<string, Promise<string | null>>();
 
 interface UseVideoThumbnailOptions {
@@ -11,6 +25,11 @@ interface UseVideoThumbnailOptions {
   rootMargin?: string;
 }
 
+/**
+ * JPEG data: URL of the frame at 1 s (the first frame for shorter videos),
+ * rendered natively by ffmpeg. Resolves to null when ffmpeg is missing or
+ * cannot read the video; callers then fall back to a `<video>` element.
+ */
 export async function getVideoThumbnailSrc(src: string): Promise<string | null> {
   const cached = thumbnailCache.get(src);
   if (cached !== undefined) {
@@ -22,16 +41,21 @@ export async function getVideoThumbnailSrc(src: string): Promise<string | null> 
     return pending;
   }
 
-  const request = generateThumbnail({
+  const request = invoke<string>('generate_video_thumbnail', {
     source: src,
-    size: 'large',
+    maxWidth: THUMBNAIL_MAX_WIDTH,
   })
-    .then((result) => {
-      const thumbnail = result.base64 ? `data:image/png;base64,${result.base64}` : null;
-      thumbnailCache.set(src, thumbnail);
-      return thumbnail;
+    .then((thumbnail) => {
+      ffmpegMissing = false;
+      const value = thumbnail.startsWith('data:image/') ? thumbnail : null;
+      thumbnailCache.set(src, value);
+      return value;
     })
-    .catch(() => {
+    .catch((error: unknown) => {
+      ffmpegMissing = String(error) === FFMPEG_NOT_FOUND;
+      if (ffmpegMissing) {
+        console.warn('Video thumbnails: no ffmpeg found (bundled or system)');
+      }
       thumbnailCache.set(src, null);
       return null;
     })
