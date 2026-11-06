@@ -6,6 +6,7 @@
  * stores; the store imports are types only.
  */
 
+import { t as i18nT } from '@/i18n';
 import type { StorageProvider } from '@/app/lib/r2cache';
 import type { TransferFailure } from '@/app/lib/transferFailure';
 import type { ProviderAccount } from '@/app/stores/accountStore';
@@ -54,7 +55,7 @@ export const uploadFailure = (
   id: `upload:${task.id}`,
   kind: 'upload',
   name: task.fileName,
-  message: task.error || 'Upload failed',
+  message: task.error || i18nT('transfer.kindFailed', { kind: i18nT('transfer.kind.upload') }),
   occurredAt: ctx.occurredAt ?? Date.now(),
   key: ctx.key,
   bucket: ctx.bucket,
@@ -69,7 +70,7 @@ export const downloadFailure = (
   id: `download:${task.id}`,
   kind: 'download',
   name: task.fileName,
-  message: task.error || 'Download failed',
+  message: task.error || i18nT('transfer.kindFailed', { kind: i18nT('transfer.kind.download') }),
   occurredAt: ctx.occurredAt ?? Date.now(),
   key: task.key,
   bucket: task.bucket,
@@ -86,14 +87,14 @@ export const moveFailure = (task: MoveTask, ctx: MoveFailureContext = {}): Trans
   id: ctx.stage ? `move-recovery:${task.id}` : `move:${task.id}`,
   kind: 'move',
   name: baseName(task.sourceKey),
-  message: task.error || 'Move failed',
+  message: task.error || i18nT('transfer.kindFailed', { kind: i18nT('transfer.kind.move') }),
   occurredAt: ctx.occurredAt ?? Date.now(),
   key: `${task.sourceKey} → ${task.destKey}`,
   bucket: task.destBucket,
   stage: ctx.stage,
   progress: { done: movedBytes(task), total: task.fileSize },
   // The status bar's own words for these moves.
-  title: ctx.stage ? 'Move needs attention' : undefined,
+  title: ctx.stage ? i18nT('moves.needsAttention') : undefined,
 });
 
 /**

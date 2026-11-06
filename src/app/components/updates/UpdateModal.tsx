@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { Alert, Progress, Skeleton } from 'antd';
 import { CloudDownloadOutlined } from '@ant-design/icons';
 import { useShallow } from 'zustand/react/shallow';
@@ -29,6 +30,7 @@ function UpdateDialog() {
     }))
   );
   const work = useActiveWork();
+  const { t } = useTranslation();
   if (!s.update) return null;
 
   const { phase, failure } = s;
@@ -45,16 +47,18 @@ function UpdateDialog() {
   const releaseUrl = githubReleaseUrl(version);
   const percent = progressPercent(s.progress);
 
-  const title = installed ? 'Restart to finish updating' : `Update to v${version}`;
+  const title = installed
+    ? t('updates.dialog.restartTitle')
+    : t('updates.dialog.updateTitle', { version });
   const subtitle = installed
-    ? `v${version} is installed. It starts the next time R2 Client opens.`
+    ? t('updates.dialog.installedSubtitle', { version })
     : s.currentVersion
-      ? `You have v${s.currentVersion}.`
+      ? t('updates.youHave', { version: s.currentVersion })
       : undefined;
 
   const downloadFromGitHub = (
     <button type="button" className="btn btn-ghost" onClick={() => openExternal(releaseUrl)}>
-      Download from GitHub
+      {t('updates.dialog.downloadFromGitHub')}
     </button>
   );
 
@@ -64,11 +68,11 @@ function UpdateDialog() {
       <>
         {failure.step !== 'restart' && <span className="left">{downloadFromGitHub}</span>}
         <button type="button" className="btn" onClick={s.closeDialog}>
-          Later
+          {t('updates.dialog.later')}
         </button>
         {failure.retryable || failure.step === 'restart' ? (
           <button type="button" className="btn btn-primary" onClick={() => void s.retry()}>
-            Try again
+            {t('common.tryAgain')}
           </button>
         ) : (
           <button
@@ -76,7 +80,7 @@ function UpdateDialog() {
             className="btn btn-primary"
             onClick={() => openExternal(releaseUrl)}
           >
-            Download from GitHub
+            {t('updates.dialog.downloadFromGitHub')}
           </button>
         )}
       </>
@@ -85,7 +89,7 @@ function UpdateDialog() {
     footer = (
       <>
         <button type="button" className="btn" onClick={s.closeDialog} disabled={busy}>
-          Later
+          {t('updates.dialog.later')}
         </button>
         <button
           type="button"
@@ -93,14 +97,14 @@ function UpdateDialog() {
           onClick={() => void s.restartNow()}
           disabled={busy}
         >
-          {phase === 'restarting' ? 'Restarting…' : 'Restart now'}
+          {phase === 'restarting' ? t('updates.status.restarting') : t('updates.dialog.restartNow')}
         </button>
       </>
     );
   } else if (busy) {
     footer = (
       <button type="button" className="btn" onClick={s.closeDialog}>
-        Hide
+        {t('updates.dialog.hide')}
       </button>
     );
   } else {
@@ -108,23 +112,23 @@ function UpdateDialog() {
       <>
         <span className="left">
           <button type="button" className="btn btn-ghost" onClick={s.skipThisVersion}>
-            Skip this version
+            {t('updates.dialog.skip')}
           </button>
         </span>
         <button type="button" className="btn" onClick={s.closeDialog}>
-          Later
+          {t('updates.dialog.later')}
         </button>
         {workAtRisk ? (
           <>
             <button type="button" className="btn" onClick={() => void s.install({ restart: true })}>
-              Update and restart
+              {t('updates.dialog.updateAndRestart')}
             </button>
             <button
               type="button"
               className="btn btn-primary"
               onClick={() => void s.install({ restart: false })}
             >
-              Install now, restart later
+              {t('updates.dialog.installLater')}
             </button>
           </>
         ) : (
@@ -133,7 +137,7 @@ function UpdateDialog() {
             className="btn btn-primary"
             onClick={() => void s.install({ restart: true })}
           >
-            Update and restart
+            {t('updates.dialog.updateAndRestart')}
           </button>
         )}
       </>
@@ -157,8 +161,8 @@ function UpdateDialog() {
             <div className="update-progress-label">
               <span>
                 {phase === 'installing'
-                  ? 'Installing…'
-                  : `Downloading ${progressAmount(s.progress)}`}
+                  ? t('updates.dialog.installing')
+                  : t('updates.dialog.downloadingAmount', { amount: progressAmount(s.progress) })}
               </span>
               {phase === 'downloading' && percent !== null && <span>{percent}%</span>}
             </div>
@@ -178,7 +182,7 @@ function UpdateDialog() {
             title={failure.message}
             description={
               <details className="update-error-detail">
-                <summary>Details</summary>
+                <summary>{t('common.details')}</summary>
                 <code>{failure.detail}</code>
               </details>
             }
@@ -189,11 +193,9 @@ function UpdateDialog() {
           <Alert
             type="warning"
             showIcon
-            title={`Restarting now would ${describeActiveWork(work)}.`}
+            title={t('updates.dialog.workAtRisk', { work: describeActiveWork(work) })}
             description={
-              installed
-                ? "Restart when you're done."
-                : "Install now, restart later installs the update without restarting. Restart when you're done."
+              installed ? t('updates.dialog.restartWhenDone') : t('updates.dialog.installLaterHint')
             }
           />
         )}
@@ -203,9 +205,7 @@ function UpdateDialog() {
             {notes.source === 'none' && (s.feedStatus === 'loading' || s.feedStatus === 'idle') ? (
               <Skeleton active title={false} paragraph={{ rows: 4 }} />
             ) : notes.source === 'none' ? (
-              <p className="update-notes-missing">
-                There are no release notes for this version here yet.
-              </p>
+              <p className="update-notes-missing">{t('updates.dialog.noNotes')}</p>
             ) : (
               <UpdateNotes markdown={notes.markdown} />
             )}
@@ -213,7 +213,7 @@ function UpdateDialog() {
         )}
 
         <button type="button" className="update-link" onClick={() => openExternal(releaseUrl)}>
-          Release notes on GitHub
+          {t('updates.releaseNotesOnGitHub')}
         </button>
       </div>
     </Modal>

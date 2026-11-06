@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 import { create } from 'zustand';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
@@ -176,12 +177,23 @@ export function isMoveAwaitingAction(status: string): boolean {
   );
 }
 
+// Getters so the label follows the current UI language.
 export const MOVE_RECOVERY_LABELS: Record<string, string> = {
-  delete_pending: 'Copy verified; source retained until deletion succeeds',
-  outcome_unknown: 'Remote result uncertain; resume to reconcile before continuing',
-  needs_auth: 'Credentials or permissions need attention; source deletion stopped',
-  conflict: 'Object changed; source deletion stopped for review',
-  needs_action: 'Copy or cleanup needs review; the recovery record is retained',
+  get delete_pending() {
+    return i18nT('moves.recovery.delete_pending');
+  },
+  get outcome_unknown() {
+    return i18nT('moves.recovery.outcome_unknown');
+  },
+  get needs_auth() {
+    return i18nT('moves.recovery.needs_auth');
+  },
+  get conflict() {
+    return i18nT('moves.recovery.conflict');
+  },
+  get needs_action() {
+    return i18nT('moves.recovery.needs_action');
+  },
 };
 
 /**
@@ -232,7 +244,7 @@ export function moveFailureFromEvent(
     id: `move:${event.task_id}`,
     kind: 'move',
     name: baseName(sourceKey) || 'Move',
-    message: event.error || 'Move failed',
+    message: event.error || i18nT('transfer.kindFailed', { kind: i18nT('transfer.kind.move') }),
     occurredAt: now,
     key: sourceKey && destKey ? `${sourceKey} → ${destKey}` : sourceKey || undefined,
     bucket: event.dest_bucket,

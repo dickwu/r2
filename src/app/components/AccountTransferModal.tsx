@@ -1,5 +1,7 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
+import { Trans, useTranslation } from 'react-i18next';
 import { useMemo, useState, type ReactNode } from 'react';
 import { App } from 'antd';
 import {
@@ -106,37 +108,37 @@ function accountIdentity(account: ProviderAccount): string {
 
 function validateAccount(entry: unknown): ValidationResult {
   if (!entry || typeof entry !== 'object' || !('provider' in entry)) {
-    return { ok: false, reason: 'Missing provider field' };
+    return { ok: false, reason: i18nT('transferAcct.missingProvider') };
   }
   const data = entry as ProviderAccount;
   if (data.provider === 'r2') {
     if (!data.account?.id) {
-      return { ok: false, reason: 'Missing R2 account id', providerHint: 'r2' };
+      return { ok: false, reason: i18nT('transferAcct.missingR2Id'), providerHint: 'r2' };
     }
     return { ok: true, account: data };
   }
   if (data.provider === 'aws') {
     const a = data.account;
     if (!a?.access_key_id || !a?.secret_access_key || !a?.region || !a?.endpoint_scheme) {
-      return { ok: false, reason: 'Missing required AWS field', providerHint: 'aws' };
+      return { ok: false, reason: i18nT('transferAcct.missingAws'), providerHint: 'aws' };
     }
     return { ok: true, account: data };
   }
   if (data.provider === 'minio') {
     const a = data.account;
     if (!a?.access_key_id || !a?.secret_access_key || !a?.endpoint_scheme || !a?.endpoint_host) {
-      return { ok: false, reason: 'Missing required MinIO field', providerHint: 'minio' };
+      return { ok: false, reason: i18nT('transferAcct.missingMinio'), providerHint: 'minio' };
     }
     return { ok: true, account: data };
   }
   if (data.provider === 'rustfs') {
     const a = data.account;
     if (!a?.access_key_id || !a?.secret_access_key || !a?.endpoint_scheme || !a?.endpoint_host) {
-      return { ok: false, reason: 'Missing required RustFS field', providerHint: 'rustfs' };
+      return { ok: false, reason: i18nT('transferAcct.missingRustfs'), providerHint: 'rustfs' };
     }
     return { ok: true, account: data };
   }
-  return { ok: false, reason: 'Unknown provider' };
+  return { ok: false, reason: i18nT('transferAcct.unknownProvider') };
 }
 
 function maskKey(key: string): string {
@@ -449,8 +451,9 @@ function buildPreviewRow(entry: unknown, idx: number, existingIdentities: Set<st
     const provider = validation.providerHint ?? 'unknown';
     const fallbackName =
       entry && typeof entry === 'object' && 'account' in entry
-        ? ((entry as { account?: { name?: string } }).account?.name ?? 'Untitled')
-        : 'Untitled';
+        ? ((entry as { account?: { name?: string } }).account?.name ??
+          i18nT('transferAcct.untitled'))
+        : i18nT('transferAcct.untitled');
     return {
       rowId,
       classification: 'invalid',
@@ -534,23 +537,25 @@ function CheckBox({
 }
 
 function StatusPill({ row }: { row: PreviewRow }) {
-  if (row.classification === 'new') return <span className="tx-status is-new">New</span>;
+  const { t } = useTranslation();
+  if (row.classification === 'new')
+    return <span className="tx-status is-new">{t('transferAcct.statusNew')}</span>;
   if (row.classification === 'conflict')
-    return <span className="tx-status is-conflict">Conflict</span>;
+    return <span className="tx-status is-conflict">{t('transferAcct.statusConflict')}</span>;
   return (
     <span className="tx-status is-invalid" title={row.invalidReason}>
-      Invalid
+      {t('transferAcct.statusInvalid')}
     </span>
   );
 }
 
 function SecurityNote() {
+  const { t } = useTranslation();
   return (
     <div className="tx-note">
       <KeyOutlined className="tx-note-icon" />
       <span>
-        Exported files contain <strong>access keys, secrets, and API tokens in plain text</strong>.
-        Store them somewhere safe and delete them once restored.
+        <Trans i18nKey="transferAcct.securityNote" components={{ strong: <strong /> }} />
       </span>
     </div>
   );
@@ -563,6 +568,7 @@ function SecurityNote() {
 function ExportPanel() {
   const accounts = useAccountStore((s) => s.accounts);
   const { message } = App.useApp();
+  const { t } = useTranslation();
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [exporting, setExporting] = useState(false);
 
@@ -608,7 +614,7 @@ function ExportPanel() {
   async function handleExport() {
     const picked = accounts.filter((a) => selected.has(accountIdentity(a)));
     if (picked.length === 0) {
-      message.warning('Select at least one account to export');
+      message.warning(t('transferAcct.selectOne'));
       return;
     }
     setExporting(true);
@@ -627,10 +633,10 @@ function ExportPanel() {
         accounts: picked,
       };
       await writeTextFile(filePath, JSON.stringify(payload, null, 2));
-      message.success(`Exported ${picked.length} account${picked.length !== 1 ? 's' : ''}`);
+      message.success(t('transferAcct.exported', { count: picked.length }));
     } catch (e) {
       console.error('Failed to export accounts:', e);
-      message.error('Failed to export accounts');
+      message.error(t('transferAcct.exportFailed'));
     } finally {
       setExporting(false);
     }
@@ -640,8 +646,8 @@ function ExportPanel() {
     return (
       <div className="tx-empty">
         <InboxOutlined className="tx-empty-icon" />
-        <strong>No accounts to export</strong>
-        <span>Add a storage provider first, then come back to back it up.</span>
+        <strong>{t('transferAcct.noAccounts')}</strong>
+        <span>{t('transferAcct.noAccountsHint')}</span>
       </div>
     );
   }
@@ -663,9 +669,11 @@ function ExportPanel() {
             indeterminate={someSelected}
             onChange={(v) => setAllSelection(v)}
           />
-          <span>Select all accounts</span>
+          <span>{t('transferAcct.selectAll')}</span>
         </button>
-        <span className="tx-toolbar-count">{selected.size} selected</span>
+        <span className="tx-toolbar-count">
+          {t('transferAcct.selectedCount', { count: selected.size })}
+        </span>
       </div>
 
       <div className="tx-groups">
@@ -713,10 +721,15 @@ function ExportPanel() {
         <span className="tx-summary">
           {selected.size > 0 ? (
             <span>
-              Exporting <b>{selected.size}</b> account{selected.size !== 1 ? 's' : ''}
+              <Trans
+                i18nKey="transferAcct.exporting"
+                count={selected.size}
+                values={{ count: selected.size }}
+                components={{ b: <b /> }}
+              />
             </span>
           ) : (
-            <span>Choose accounts to include in the backup.</span>
+            <span>{t('transferAcct.chooseAccounts')}</span>
           )}
         </span>
         <button
@@ -726,7 +739,7 @@ function ExportPanel() {
           onClick={handleExport}
         >
           <DownloadOutlined style={{ fontSize: 12 }} />
-          {exporting ? 'Exporting…' : 'Export to file'}
+          {exporting ? t('transferAcct.exportingBusy') : t('transferAcct.exportToFile')}
         </button>
       </div>
     </div>
@@ -740,6 +753,7 @@ function ExportPanel() {
 function ImportPanel({ onApplied }: { onApplied?: () => void }) {
   const accounts = useAccountStore((s) => s.accounts);
   const { message, modal } = App.useApp();
+  const { t } = useTranslation();
   const [rows, setRows] = useState<PreviewRow[] | null>(null);
   const [applying, setApplying] = useState(false);
 
@@ -768,20 +782,20 @@ function ImportPanel({ onApplied }: { onApplied?: () => void }) {
       const parsed = JSON.parse(text);
       const rawAccounts = extractAccountsFromPayload(parsed);
       if (!rawAccounts) {
-        message.error('Invalid account export file');
+        message.error(t('config.invalidExport'));
         return;
       }
       const built = rawAccounts.map((entry, idx) =>
         buildPreviewRow(entry, idx, existingIdentities)
       );
       if (built.length === 0) {
-        message.warning('No accounts found in file');
+        message.warning(t('transferAcct.noneInFile'));
         return;
       }
       setRows(built);
     } catch (e) {
       console.error('Failed to read import file:', e);
-      message.error('Failed to read file');
+      message.error(t('transferAcct.readFailed'));
     }
   }
 
@@ -809,19 +823,17 @@ function ImportPanel({ onApplied }: { onApplied?: () => void }) {
       else if (r.action === 'duplicate') toDuplicate += 1;
     }
     if (toImport + toOverwrite + toDuplicate === 0) {
-      message.warning('Nothing selected to import');
+      message.warning(t('transferAcct.nothingSelected'));
       return;
     }
     if (toOverwrite > 0) {
       const confirmed = await new Promise<boolean>((resolve) => {
         modal.confirm({
-          title: 'Confirm overwrite',
-          content: `${toOverwrite} existing account${
-            toOverwrite !== 1 ? 's' : ''
-          } will be overwritten with the imported version. This cannot be undone.`,
-          okText: 'Overwrite',
+          title: t('transferAcct.confirmOverwrite'),
+          content: t('transferAcct.overwriteContent', { count: toOverwrite }),
+          okText: t('transferAcct.overwrite'),
           okButtonProps: { danger: true },
-          cancelText: 'Cancel',
+          cancelText: t('common.cancel'),
           onOk: () => resolve(true),
           onCancel: () => resolve(false),
         });
@@ -832,19 +844,21 @@ function ImportPanel({ onApplied }: { onApplied?: () => void }) {
     try {
       const result = await applyImport(rows, existingNames);
       const parts: string[] = [];
-      if (result.imported) parts.push(`${result.imported} imported`);
-      if (result.overwritten) parts.push(`${result.overwritten} overwritten`);
-      if (result.duplicated) parts.push(`${result.duplicated} duplicated`);
-      if (result.skipped) parts.push(`${result.skipped} skipped`);
-      if (result.failed) parts.push(`${result.failed} failed`);
-      const summary = parts.join(', ') || 'No changes';
+      if (result.imported) parts.push(t('transferAcct.r.imported', { count: result.imported }));
+      if (result.overwritten)
+        parts.push(t('transferAcct.r.overwritten', { count: result.overwritten }));
+      if (result.duplicated)
+        parts.push(t('transferAcct.r.duplicated', { count: result.duplicated }));
+      if (result.skipped) parts.push(t('transferAcct.r.skipped', { count: result.skipped }));
+      if (result.failed) parts.push(t('transferAcct.r.failed', { count: result.failed }));
+      const summary = parts.join(t('common.listSeparator')) || t('transferAcct.noChanges');
       if (result.failed > 0) message.warning(summary);
       else message.success(summary);
       setRows(null);
       onApplied?.();
     } catch (e) {
       console.error('Failed to apply import:', e);
-      message.error('Import failed');
+      message.error(t('transferAcct.importFailed'));
     } finally {
       setApplying(false);
     }
@@ -855,11 +869,11 @@ function ImportPanel({ onApplied }: { onApplied?: () => void }) {
       <div className="tx-panel">
         <button type="button" className="tx-empty tx-empty-btn" onClick={handlePickFile}>
           <InboxOutlined className="tx-empty-icon" />
-          <strong>Choose a backup file</strong>
-          <span>Pick a previously exported JSON file to preview the accounts inside.</span>
+          <strong>{t('transferAcct.chooseFile')}</strong>
+          <span>{t('transferAcct.chooseFileHint')}</span>
           <span className="btn btn-primary tx-empty-cta">
             <FileAddOutlined style={{ fontSize: 12 }} />
-            Browse files…
+            {t('transferAcct.browse')}
           </span>
         </button>
       </div>
@@ -888,26 +902,26 @@ function ImportPanel({ onApplied }: { onApplied?: () => void }) {
           className="btn btn-sm"
           onClick={() => bulkSet((r) => r.classification === 'new', 'import')}
         >
-          Import all new
+          {t('transferAcct.importAllNew')}
         </button>
         <button
           className="btn btn-sm"
           onClick={() => bulkSet((r) => r.classification === 'conflict', 'overwrite')}
         >
-          Overwrite conflicts
+          {t('transferAcct.overwriteConflicts')}
         </button>
         <button
           className="btn btn-sm"
           onClick={() => bulkSet((r) => r.classification === 'conflict', 'duplicate')}
         >
-          Duplicate conflicts
+          {t('transferAcct.duplicateConflicts')}
         </button>
         <button className="btn btn-sm" onClick={() => bulkSet(() => true, 'skip')}>
-          Skip all
+          {t('transferAcct.skipAll')}
         </button>
         <span className="tx-bulk-spacer" />
         <button className="btn btn-ghost btn-sm" onClick={() => setRows(null)}>
-          Choose another file
+          {t('transferAcct.chooseAnother')}
         </button>
       </div>
 
@@ -917,14 +931,14 @@ function ImportPanel({ onApplied }: { onApplied?: () => void }) {
           const options =
             row.classification === 'new'
               ? [
-                  { value: 'skip', label: 'Skip' },
-                  { value: 'import', label: 'Import' },
-                  { value: 'duplicate', label: 'Import as duplicate' },
+                  { value: 'skip', label: t('transferAcct.skip') },
+                  { value: 'import', label: t('transferAcct.import') },
+                  { value: 'duplicate', label: t('transferAcct.importDuplicate') },
                 ]
               : [
-                  { value: 'skip', label: 'Skip' },
-                  { value: 'overwrite', label: 'Overwrite local' },
-                  { value: 'duplicate', label: 'Import as duplicate' },
+                  { value: 'skip', label: t('transferAcct.skip') },
+                  { value: 'overwrite', label: t('transferAcct.overwriteLocal') },
+                  { value: 'duplicate', label: t('transferAcct.importDuplicate') },
                 ];
           return (
             <div
@@ -938,7 +952,7 @@ function ImportPanel({ onApplied }: { onApplied?: () => void }) {
               </div>
               <StatusPill row={row} />
               {isInvalid ? (
-                <span className="tx-prow-invalid">Cannot import</span>
+                <span className="tx-prow-invalid">{t('transferAcct.cannotImport')}</span>
               ) : (
                 <select
                   className="tx-row-select"
@@ -960,23 +974,32 @@ function ImportPanel({ onApplied }: { onApplied?: () => void }) {
       {invalidCount > 0 && (
         <div className="tx-note tx-note-warn">
           <WarningOutlined className="tx-note-icon" />
-          <span>
-            {invalidCount} row{invalidCount !== 1 ? 's' : ''} cannot be imported because{' '}
-            {invalidCount !== 1 ? 'they are' : 'it is'} missing required fields.
-          </span>
+          <span>{t('transferAcct.invalidRows', { count: invalidCount })}</span>
         </div>
       )}
 
       <div className="tx-actionbar">
         <span className="tx-summary">
           <span>
-            <b>{toImport}</b> new
+            <Trans
+              i18nKey="transferAcct.sum.new"
+              values={{ count: toImport }}
+              components={{ b: <b /> }}
+            />
           </span>
           <span>
-            <b>{toOverwrite}</b> overwrite
+            <Trans
+              i18nKey="transferAcct.sum.overwrite"
+              values={{ count: toOverwrite }}
+              components={{ b: <b /> }}
+            />
           </span>
           <span>
-            <b>{toDuplicate}</b> duplicate
+            <Trans
+              i18nKey="transferAcct.sum.duplicate"
+              values={{ count: toDuplicate }}
+              components={{ b: <b /> }}
+            />
           </span>
         </span>
         <button
@@ -987,8 +1010,8 @@ function ImportPanel({ onApplied }: { onApplied?: () => void }) {
         >
           <UploadOutlined style={{ fontSize: 12 }} />
           {applying
-            ? 'Importing…'
-            : `Import ${totalActionable} account${totalActionable !== 1 ? 's' : ''}`}
+            ? t('transferAcct.importing')
+            : t('transferAcct.importCount', { count: totalActionable })}
         </button>
       </div>
     </div>
@@ -1005,31 +1028,40 @@ export default function AccountTransferModal({
   initialMode = 'export',
 }: AccountTransferModalProps) {
   const [mode, setMode] = useState<TransferMode>(initialMode);
+  const { t } = useTranslation();
 
   const tabs: Array<{ id: TransferMode; label: string; icon: ReactNode }> = [
-    { id: 'export', label: 'Export', icon: <DownloadOutlined style={{ fontSize: 12 }} /> },
-    { id: 'import', label: 'Import', icon: <UploadOutlined style={{ fontSize: 12 }} /> },
+    {
+      id: 'export',
+      label: t('transferAcct.tabExport'),
+      icon: <DownloadOutlined style={{ fontSize: 12 }} />,
+    },
+    {
+      id: 'import',
+      label: t('transferAcct.tabImport'),
+      icon: <UploadOutlined style={{ fontSize: 12 }} />,
+    },
   ];
 
   return (
     <Modal
       open={open}
       onClose={onClose}
-      title="Backup & transfer"
-      subtitle="Move your storage accounts between machines as a JSON file"
+      title={t('transferAcct.title')}
+      subtitle={t('transferAcct.subtitle')}
       icon={<SwapOutlined style={{ fontSize: 18 }} />}
       width={720}
     >
       <div className="tx-shell">
         <div className="segmented tx-toggle">
-          {tabs.map((t) => (
+          {tabs.map((tab) => (
             <button
-              key={t.id}
-              className={mode === t.id ? 'active' : undefined}
-              onClick={() => setMode(t.id)}
+              key={tab.id}
+              className={mode === tab.id ? 'active' : undefined}
+              onClick={() => setMode(tab.id)}
             >
-              {t.icon}
-              {t.label}
+              {tab.icon}
+              {tab.label}
             </button>
           ))}
         </div>

@@ -2,6 +2,7 @@
  * The bytes an edit produces, shared by "Save changes" (upload) and "Download
  * edited copy" (a local file), so both always write exactly the same thing.
  */
+import { t as i18nT } from '@/i18n';
 import { applyLineEnding, encodeText, isPlainUtf8, type TextFormat } from './textCodec';
 import type { SaveErrorKind } from './saveFlow';
 
@@ -25,7 +26,9 @@ export function editedText(text: string, format: TextFormat): EditedText {
  */
 export function imageEncodingProblem(blobType: string, mime: string): string | null {
   if (blobType === mime) return null;
-  return `This system cannot write ${mime.replace('image/', '').toUpperCase()} images.`;
+  return i18nT('editor.imageEncodingUnsupported', {
+    format: mime.replace('image/', '').toUpperCase(),
+  });
 }
 
 /** The name a downloaded copy is offered under: the object's own file name. */

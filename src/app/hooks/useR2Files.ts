@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -50,7 +51,7 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
   const query = useQuery({
     queryKey,
     queryFn: async ({ signal }): Promise<FolderSnapshot> => {
-      if (!config) throw new Error('Storage account is not configured');
+      if (!config) throw new Error(i18nT('errors.notConfigured'));
       const forceRefresh = forceNextRefresh.current;
       forceNextRefresh.current = false;
       return loadFolderItems({

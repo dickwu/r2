@@ -1,3 +1,5 @@
+import { t as i18nT } from '@/i18n';
+
 /**
  * Format bytes to human-readable string (e.g., "1.5 MB")
  */
@@ -23,17 +25,19 @@ export function formatSpeed(bytesPerSecond: number): string {
 /**
  * Format seconds to human-readable time remaining (e.g., "2m 30s left")
  */
+const left = (duration: string): string => i18nT('time.left', { duration });
+
 export function formatTimeLeft(seconds: number): string {
   if (seconds <= 0) return '';
-  if (seconds < 60) return `${Math.ceil(seconds)}s left`;
+  if (seconds < 60) return left(`${Math.ceil(seconds)}s`);
   if (seconds < 3600) {
     const mins = Math.floor(seconds / 60);
     const secs = Math.ceil(seconds % 60);
-    return secs > 0 ? `${mins}m ${secs}s left` : `${mins}m left`;
+    return left(secs > 0 ? `${mins}m ${secs}s` : `${mins}m`);
   }
   const hours = Math.floor(seconds / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
-  return mins > 0 ? `${hours}h ${mins}m left` : `${hours}h left`;
+  return left(mins > 0 ? `${hours}h ${mins}m` : `${hours}h`);
 }
 
 /**
@@ -41,9 +45,9 @@ export function formatTimeLeft(seconds: number): string {
  */
 export function formatEta(seconds: number): string {
   if (seconds <= 0 || !isFinite(seconds)) return '';
-  if (seconds < 60) return `~${Math.ceil(seconds)}s left`;
-  if (seconds < 3600) return `~${Math.floor(seconds / 60)}m left`;
+  if (seconds < 60) return left(`~${Math.ceil(seconds)}s`);
+  if (seconds < 3600) return left(`~${Math.floor(seconds / 60)}m`);
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
-  return m > 0 ? `~${h}h ${m}m left` : `~${h}h left`;
+  return left(m > 0 ? `~${h}h ${m}m` : `~${h}h`);
 }

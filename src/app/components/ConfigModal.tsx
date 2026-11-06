@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -78,6 +79,7 @@ export default function ConfigModal({
   const [form] = Form.useForm<FormValues>();
   const selectedBucket = Form.useWatch('selectedBucket', form);
   const { message } = App.useApp();
+  const { t } = useTranslation();
 
   // Use Zustand store
   const accounts = useAccountStore((state) => state.accounts);
@@ -347,12 +349,12 @@ export default function ConfigModal({
       provider === 'rustfs' ? true : form.getFieldValue('forcePathStyle') || false;
 
     if (provider === 'r2' && (!accountId || !accessKeyId || !secretAccessKey)) {
-      message.warning('Please enter Account ID, Access Key ID, and Secret Access Key first');
+      message.warning(t('config.needR2Creds'));
       return;
     }
 
     if (provider === 'aws' && (!accessKeyId || !secretAccessKey || !region)) {
-      message.warning('Please enter Region, Access Key ID, and Secret Access Key first');
+      message.warning(t('config.needAwsCreds'));
       return;
     }
 
@@ -360,7 +362,7 @@ export default function ConfigModal({
       (provider === 'minio' || provider === 'rustfs') &&
       (!accessKeyId || !secretAccessKey || !endpointHost)
     ) {
-      message.warning('Please enter Endpoint, Access Key ID, and Secret Access Key first');
+      message.warning(t('config.needS3Creds'));
       return;
     }
 
@@ -424,7 +426,7 @@ export default function ConfigModal({
           : { name: b.name };
       });
       setBuckets(newBuckets);
-      message.success(`Found ${newBuckets.length} bucket(s)`);
+      message.success(t('config.foundBuckets', { count: newBuckets.length }));
 
       // Auto-select first bucket if none selected
       if (newBuckets.length > 0 && !form.getFieldValue('selectedBucket')) {
@@ -432,7 +434,7 @@ export default function ConfigModal({
       }
     } catch (e) {
       console.error('Failed to load buckets:', e);
-      message.error(e instanceof Error ? e.message : 'Failed to load buckets');
+      message.error(e instanceof Error ? e.message : t('config.loadBucketsFailed'));
     } finally {
       setLoadingBuckets(false);
     }
@@ -444,7 +446,7 @@ export default function ConfigModal({
       if (mode === 'edit-account') {
         if (provider === 'r2') {
           await updateAccountFn(values.accountId, values.accountName);
-          message.success('Account updated');
+          message.success(t('config.accountUpdated'));
         } else if (provider === 'aws' && editAccount?.provider === 'aws') {
           await updateAwsAccount({
             id: editAccount.account.id,
@@ -466,7 +468,7 @@ export default function ConfigModal({
               public_path_prefix: b.publicPathPrefix || null,
             }))
           );
-          message.success('Account updated');
+          message.success(t('config.accountUpdated'));
         } else if (provider === 'minio' && editAccount?.provider === 'minio') {
           await updateMinioAccount({
             id: editAccount.account.id,
@@ -487,7 +489,7 @@ export default function ConfigModal({
               public_path_prefix: b.publicPathPrefix || null,
             }))
           );
-          message.success('Account updated');
+          message.success(t('config.accountUpdated'));
         } else if (provider === 'rustfs' && editAccount?.provider === 'rustfs') {
           await updateRustfsAccount({
             id: editAccount.account.id,
@@ -507,11 +509,11 @@ export default function ConfigModal({
               public_path_prefix: b.publicPathPrefix || null,
             }))
           );
-          message.success('Account updated');
+          message.success(t('config.accountUpdated'));
         }
       } else if (mode === 'add-account') {
         if (buckets.length === 0) {
-          message.error('Please add at least one bucket');
+          message.error(t('config.needBucket'));
           setSaving(false);
           return;
         }
@@ -538,7 +540,7 @@ export default function ConfigModal({
           );
 
           await selectR2Bucket(token.id, values.selectedBucket || buckets[0].name);
-          message.success('Account created and configured');
+          message.success(t('config.accountCreated'));
         } else if (provider === 'aws') {
           const account = await createAwsAccount({
             name: values.accountName,
@@ -562,7 +564,7 @@ export default function ConfigModal({
           );
 
           await selectAwsBucket(account.id, values.selectedBucket || buckets[0].name);
-          message.success('Account created and configured');
+          message.success(t('config.accountCreated'));
         } else if (provider === 'minio') {
           const account = await createMinioAccount({
             name: values.accountName,
@@ -585,7 +587,7 @@ export default function ConfigModal({
           );
 
           await selectMinioBucket(account.id, values.selectedBucket || buckets[0].name);
-          message.success('Account created and configured');
+          message.success(t('config.accountCreated'));
         } else if (provider === 'rustfs') {
           const account = await createRustfsAccount({
             name: values.accountName,
@@ -607,11 +609,11 @@ export default function ConfigModal({
           );
 
           await selectRustfsBucket(account.id, values.selectedBucket || buckets[0].name);
-          message.success('Account created and configured');
+          message.success(t('config.accountCreated'));
         }
       } else if (mode === 'add-token') {
         if (buckets.length === 0) {
-          message.error('Please add at least one bucket');
+          message.error(t('config.needBucket'));
           setSaving(false);
           return;
         }
@@ -637,7 +639,7 @@ export default function ConfigModal({
           }))
         );
 
-        message.success('Token added');
+        message.success(t('config.tokenAdded'));
       } else if (mode === 'edit-token' && editToken) {
         await updateAccountFn(values.accountId, values.accountName);
 
@@ -662,13 +664,13 @@ export default function ConfigModal({
           );
         }
 
-        message.success('Token updated');
+        message.success(t('config.tokenUpdated'));
       }
 
       onClose(true);
     } catch (e) {
       console.error('Save failed:', e);
-      message.error(e instanceof Error ? e.message : 'Failed to save');
+      message.error(e instanceof Error ? e.message : t('config.saveFailed'));
     } finally {
       setSaving(false);
     }
@@ -869,19 +871,23 @@ export default function ConfigModal({
     }
 
     if (imported === 0 && skipped === 0 && failed === 0) {
-      message.warning('No valid accounts found to import');
+      message.warning(t('config.noValidImport'));
       return false;
     }
 
     if (failed > 0 || warnings > 0) {
       message.warning(
-        `Imported ${imported} account${imported !== 1 ? 's' : ''}, ` +
-          `${skipped} skipped, ${failed} failed, ${warnings} warning${warnings !== 1 ? 's' : ''}`
+        t('config.importedMixed', {
+          imported: t('config.importedCount', { count: imported }),
+          skipped,
+          failed,
+          warnings: t('config.warningCount', { count: warnings }),
+        })
       );
     } else {
       message.success(
-        `Imported ${imported} account${imported !== 1 ? 's' : ''}` +
-          (skipped > 0 ? `, ${skipped} skipped` : '')
+        t('config.importedCount', { count: imported }) +
+          (skipped > 0 ? t('config.skippedSuffix', { skipped }) : '')
       );
     }
     return imported > 0;
@@ -899,7 +905,7 @@ export default function ConfigModal({
       const parsed = JSON.parse(text);
       const rawAccounts = extractAccountsFromPayload(parsed);
       if (!rawAccounts) {
-        message.error('Invalid account export file');
+        message.error(t('config.invalidExport'));
         return;
       }
       const didImport = await handleImportAccounts(rawAccounts);
@@ -908,7 +914,7 @@ export default function ConfigModal({
       }
     } catch (e) {
       console.error('Failed to import accounts:', e);
-      message.error('Failed to import accounts');
+      message.error(t('config.importFailed'));
     }
   }
 
@@ -923,13 +929,13 @@ export default function ConfigModal({
             : 'RustFS';
     switch (mode) {
       case 'add-account':
-        return `Add ${providerLabel} Account`;
+        return t('config.addAccount', { provider: providerLabel });
       case 'edit-account':
-        return `Edit ${providerLabel} Account`;
+        return t('config.editAccount', { provider: providerLabel });
       case 'add-token':
-        return 'Add Token';
+        return t('config.addToken');
       case 'edit-token':
-        return 'Edit Token';
+        return t('config.editToken');
     }
   }
 
@@ -985,9 +991,9 @@ export default function ConfigModal({
       >
         {isR2Provider && (
           <Form.Item
-            label="Account ID"
+            label={t('config.accountId')}
             name="accountId"
-            rules={[{ required: true, message: 'Required' }]}
+            rules={[{ required: true, message: t('config.required') }]}
             style={{ marginBottom: 12 }}
           >
             <Input
@@ -1002,9 +1008,9 @@ export default function ConfigModal({
         )}
 
         {/* Account Name - always show */}
-        <Form.Item label="Account Name" name="accountName" style={{ marginBottom: 12 }}>
+        <Form.Item label={t('config.accountName')} name="accountName" style={{ marginBottom: 12 }}>
           <Input
-            placeholder="My Account (optional)"
+            placeholder={t('config.accountNamePh')}
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="off"
@@ -1016,13 +1022,13 @@ export default function ConfigModal({
           <>
             <Divider plain style={{ margin: '12px 0 8px' }}>
               <span style={{ fontSize: 12 }}>
-                <KeyOutlined /> Token Credentials
+                <KeyOutlined /> {t('config.tokenCreds')}
               </span>
             </Divider>
 
-            <Form.Item label="Token Name" name="tokenName" style={{ marginBottom: 12 }}>
+            <Form.Item label={t('config.tokenName')} name="tokenName" style={{ marginBottom: 12 }}>
               <Input
-                placeholder="Production / Staging (optional)"
+                placeholder={t('config.tokenNamePh')}
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
@@ -1030,18 +1036,18 @@ export default function ConfigModal({
             </Form.Item>
 
             <Form.Item
-              label="API Token"
+              label={t('config.apiToken')}
               name="apiToken"
-              rules={[{ required: true, message: 'Required' }]}
+              rules={[{ required: true, message: t('config.required') }]}
               style={{ marginBottom: 12 }}
             >
               <Input.Password placeholder="Cloudflare API Token" />
             </Form.Item>
 
             <Form.Item
-              label="Access Key ID"
+              label={t('config.accessKeyId')}
               name="accessKeyId"
-              rules={[{ required: true, message: 'Required' }]}
+              rules={[{ required: true, message: t('config.required') }]}
               style={{ marginBottom: 12 }}
             >
               <Input
@@ -1053,9 +1059,9 @@ export default function ConfigModal({
             </Form.Item>
 
             <Form.Item
-              label="Secret Access Key"
+              label={t('config.secretAccessKey')}
               name="secretAccessKey"
-              rules={[{ required: true, message: 'Required' }]}
+              rules={[{ required: true, message: t('config.required') }]}
               style={{ marginBottom: 12 }}
             >
               <Input.Password placeholder="Secret Access Key" />
@@ -1068,14 +1074,14 @@ export default function ConfigModal({
           <>
             <Divider plain style={{ margin: '12px 0 8px' }}>
               <span style={{ fontSize: 12 }}>
-                <KeyOutlined /> Access Credentials
+                <KeyOutlined /> {t('config.accessCreds')}
               </span>
             </Divider>
 
             <Form.Item
-              label="Access Key ID"
+              label={t('config.accessKeyId')}
               name="accessKeyId"
-              rules={[{ required: true, message: 'Required' }]}
+              rules={[{ required: true, message: t('config.required') }]}
               style={{ marginBottom: 12 }}
             >
               <Input
@@ -1087,9 +1093,9 @@ export default function ConfigModal({
             </Form.Item>
 
             <Form.Item
-              label="Secret Access Key"
+              label={t('config.secretAccessKey')}
               name="secretAccessKey"
-              rules={[{ required: true, message: 'Required' }]}
+              rules={[{ required: true, message: t('config.required') }]}
               style={{ marginBottom: 12 }}
             >
               <Input.Password placeholder="Secret Access Key" />
@@ -1097,16 +1103,16 @@ export default function ConfigModal({
 
             {provider === 'aws' && (
               <Form.Item
-                label="Region"
+                label={t('config.region')}
                 name="region"
-                rules={[{ required: true, message: 'Required' }]}
+                rules={[{ required: true, message: t('config.required') }]}
                 style={{ marginBottom: 12 }}
               >
                 <Input placeholder="us-east-1" autoComplete="off" autoCorrect="off" />
               </Form.Item>
             )}
 
-            <Form.Item label="Endpoint" style={{ marginBottom: 12 }}>
+            <Form.Item label={t('config.endpoint')} style={{ marginBottom: 12 }}>
               <Space.Compact size="small" style={{ width: '100%' }}>
                 <Form.Item name="endpointScheme" noStyle initialValue="https">
                   <Select style={{ width: 90 }} options={[{ value: 'https' }, { value: 'http' }]} />
@@ -1117,14 +1123,14 @@ export default function ConfigModal({
                   rules={[
                     {
                       required: provider === 'minio' || provider === 'rustfs',
-                      message: 'Required',
+                      message: t('config.required'),
                     },
                   ]}
                 >
                   <Input
                     placeholder={
                       provider === 'aws'
-                        ? 'custom endpoint (optional)'
+                        ? t('config.customEndpointPh')
                         : provider === 'rustfs'
                           ? 'rustfs.example.com:9000'
                           : 'minio.example.com:9000'
@@ -1145,7 +1151,11 @@ export default function ConfigModal({
             </Form.Item>
 
             {provider !== 'rustfs' && (
-              <Form.Item label="Force Path Style" name="forcePathStyle" valuePropName="checked">
+              <Form.Item
+                label={t('config.forcePathStyle')}
+                name="forcePathStyle"
+                valuePropName="checked"
+              >
                 <Switch />
               </Form.Item>
             )}
@@ -1156,7 +1166,7 @@ export default function ConfigModal({
         {(isR2Provider ? mode !== 'edit-account' : isAccountMode) && (
           <>
             <Divider plain style={{ margin: '12px 0 8px' }}>
-              <span style={{ fontSize: 12 }}>Buckets</span>
+              <span style={{ fontSize: 12 }}>{t('config.buckets')}</span>
             </Divider>
 
             <div
@@ -1174,7 +1184,7 @@ export default function ConfigModal({
                 onClick={() => setAddingBucket(true)}
                 style={{ padding: 0, height: 'auto', fontSize: 12 }}
               >
-                Add
+                {t('config.add')}
               </Button>
               <Button
                 type="link"
@@ -1184,7 +1194,7 @@ export default function ConfigModal({
                 loading={loadingBuckets}
                 style={{ padding: 0, height: 'auto', fontSize: 12 }}
               >
-                Load
+                {t('config.load')}
               </Button>
             </div>
 
@@ -1241,8 +1251,8 @@ export default function ConfigModal({
                         size="small"
                         checked={!!bucket.isPublic}
                         onChange={(checked) => handleTogglePublic(bucket.name, checked)}
-                        checkedChildren="Public"
-                        unCheckedChildren="Private"
+                        checkedChildren={t('config.public')}
+                        unCheckedChildren={t('config.private')}
                       />
                       {showDomainSettings && (
                         <Space.Compact size="small" style={{ flex: 1 }}>
@@ -1263,7 +1273,7 @@ export default function ConfigModal({
                             autoCapitalize="off"
                           />
                           <Input
-                            placeholder="prefix (optional)"
+                            placeholder={t('config.prefixPh')}
                             value={bucket.publicPathPrefix || ''}
                             onChange={(e) => handlePrefixChange(bucket.name, e.target.value)}
                             style={{ width: 110, fontSize: 12 }}
@@ -1301,7 +1311,7 @@ export default function ConfigModal({
                     }}
                     onPressEnter={handleAddBucket}
                     autoFocus
-                    placeholder="Enter bucket name"
+                    placeholder={t('config.bucketNamePh')}
                     style={{ flex: 1, fontSize: 12 }}
                   />
                 </div>
@@ -1316,7 +1326,7 @@ export default function ConfigModal({
                     fontSize: 12,
                   }}
                 >
-                  Click &quot;Load&quot; to fetch or &quot;Add&quot; manually
+                  {t('config.emptyBuckets')}
                 </div>
               )}
             </div>
@@ -1325,17 +1335,17 @@ export default function ConfigModal({
 
         <Form.Item style={{ marginBottom: 0, marginTop: 12 }}>
           <Button type="primary" htmlType="submit" loading={saving} block>
-            {isEditMode ? 'Save Changes' : 'Add'}
+            {isEditMode ? t('config.saveChanges') : t('config.add')}
           </Button>
         </Form.Item>
 
         {showImportOption && (
           <>
             <Divider plain style={{ margin: '12px 0 8px' }}>
-              <span style={{ fontSize: 12 }}>Or import</span>
+              <span style={{ fontSize: 12 }}>{t('config.orImport')}</span>
             </Divider>
             <Button block icon={<SwapOutlined />} onClick={handleTriggerImport}>
-              Import JSON
+              {t('config.importJson')}
             </Button>
           </>
         )}

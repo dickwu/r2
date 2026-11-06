@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 import { invoke } from '@tauri-apps/api/core';
 import { encodeObjectKeyForUrl } from '@/app/utils/objectKeyUrl';
 import type {
@@ -18,7 +19,7 @@ import { contentArgs } from '../contentBody';
 
 function requireR2Credentials(config: R2StorageConfig) {
   if (!config.accessKeyId || !config.secretAccessKey) {
-    throw new Error('Missing R2 access key or secret key');
+    throw new Error(i18nT('errors.r2Creds'));
   }
 }
 

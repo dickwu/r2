@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useState } from 'react';
 import { App } from 'antd';
 import { DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
@@ -21,6 +22,7 @@ import {
  */
 export default function SettingsStoragePanel() {
   const { message, modal } = App.useApp();
+  const { t } = useTranslation();
   const [stats, setStats] = useState<ThumbnailCacheStats | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -44,7 +46,7 @@ export default function SettingsStoragePanel() {
     try {
       setStats(await setThumbnailCacheLimit(bytes));
     } catch (e) {
-      message.error(`Could not change the limit: ${String(e)}`);
+      message.error(t('storage.changeLimitFailed', { error: String(e) }));
     } finally {
       setBusy(false);
     }
@@ -52,21 +54,26 @@ export default function SettingsStoragePanel() {
 
   const confirmClear = () => {
     const held = stats
-      ? `${stats.count.toLocaleString()} thumbnails (${formatBytes(stats.bytes)})`
-      : 'all thumbnails';
+      ? t('storage.heldThumbnails', {
+          count: stats.count,
+          formatted: stats.count.toLocaleString(),
+          size: formatBytes(stats.bytes),
+        })
+      : t('storage.allThumbnails');
     modal.confirm({
-      title: 'Clear thumbnail cache?',
-      content: `Remove ${held} from this computer? Files in your buckets are not touched; thumbnails are made again as you browse.`,
-      okText: 'Clear cache',
+      title: t('storage.clearConfirmTitle'),
+      content: t('storage.clearConfirmContent', { held }),
+      okText: t('storage.clearCache'),
+      cancelText: t('common.cancel'),
       okButtonProps: { danger: true },
       onOk: async () => {
         setBusy(true);
         try {
           setStats(await clearThumbnailCache());
           clearThumbnailMemory();
-          message.success('Thumbnail cache cleared');
+          message.success(t('storage.cleared'));
         } catch (e) {
-          message.error(`Could not clear the cache: ${String(e)}`);
+          message.error(t('storage.clearFailed', { error: String(e) }));
           throw e;
         } finally {
           setBusy(false);
@@ -82,15 +89,15 @@ export default function SettingsStoragePanel() {
       <section className="settings-section">
         <div className="settings-section-head">
           <div>
-            <h3>Thumbnail cache</h3>
-            <p>Small previews of images and videos, kept on this computer so folders open fast.</p>
+            <h3>{t('storage.title')}</h3>
+            <p>{t('storage.desc')}</p>
           </div>
           <div className="settings-mount-head-actions">
             <button
               className="btn btn-sm"
               onClick={() => void refresh()}
               disabled={busy}
-              title="Refresh"
+              title={t('common.refresh')}
             >
               <ReloadOutlined />
             </button>
@@ -103,19 +110,19 @@ export default function SettingsStoragePanel() {
               <strong data-testid="thumbnail-cache-size">
                 {stats ? formatBytes(stats.bytes) : '—'}
               </strong>
-              <span>of {stats ? formatBytes(stats.maxBytes) : '—'} used</span>
+              <span>{t('storage.ofUsed', { max: stats ? formatBytes(stats.maxBytes) : '—' })}</span>
             </div>
             <div className="thumb-cache-figure">
               <strong data-testid="thumbnail-cache-count">
                 {stats ? stats.count.toLocaleString() : '—'}
               </strong>
-              <span>{stats?.count === 1 ? 'thumbnail' : 'thumbnails'}</span>
+              <span>{t('storage.thumbnailsNoun', { count: stats?.count ?? 0 })}</span>
             </div>
           </div>
           <div
             className="thumb-cache-meter"
             role="meter"
-            aria-label="Thumbnail cache usage"
+            aria-label={t('storage.usageAria')}
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={Math.round(percent)}
@@ -123,15 +130,13 @@ export default function SettingsStoragePanel() {
             <span style={{ width: `${percent}%` }} />
           </div>
           <div className="thumb-cache-foot">
-            <span>
-              Unused for 30 days, or least recently used past the limit, are removed automatically.
-            </span>
+            <span>{t('storage.evictionNote')}</span>
             <button
               className="btn btn-sm thumb-cache-clear"
               onClick={confirmClear}
               disabled={busy || !stats || stats.count === 0}
             >
-              <DeleteOutlined /> Clear thumbnail cache
+              <DeleteOutlined /> {t('storage.clearThumbnailCache')}
             </button>
           </div>
           {error && <div className="thumb-cache-error">{error}</div>}
@@ -141,17 +146,17 @@ export default function SettingsStoragePanel() {
       <section className="settings-section">
         <div className="settings-section-head">
           <div>
-            <h3>Cache size limit</h3>
+            <h3>{t('storage.limitTitle')}</h3>
             <p>
-              Lowering it removes the least recently used thumbnails now.
+              {t('storage.limitDesc')}
               {stats
-                ? ` Images over ${formatBytes(stats.imageMaxBytes)} are shown from the original.`
+                ? ` ${t('storage.imageMaxNote', { size: formatBytes(stats.imageMaxBytes) })}`
                 : ''}
             </p>
           </div>
         </div>
         <div className="option-row-list">
-          {THUMBNAIL_LIMIT_OPTIONS.map((option) => (
+          {THUMBNAIL_LIMIT_OPTIONS.map((option, index) => (
             <button
               key={option.bytes}
               className={['option-row', stats?.maxBytes === option.bytes && 'active']
@@ -162,7 +167,7 @@ export default function SettingsStoragePanel() {
             >
               <span className="option-row-text">
                 <strong>{option.label}</strong>
-                <span>{option.sub}</span>
+                <span>{t(`storage.limitSub.${index}`, { defaultValue: option.sub })}</span>
               </span>
               <span className="option-row-radio" />
             </button>

@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { App } from 'antd';
 import { ArrowRightOutlined, SendOutlined } from '@ant-design/icons';
@@ -56,6 +57,7 @@ export default function BatchMoveModal({
   const accounts = useAccountStore((state) => state.accounts);
   const loadAccounts = useAccountStore((state) => state.loadAccounts);
   const { message } = App.useApp();
+  const { t } = useTranslation();
 
   const selectedCount = selectedKeys.size;
 
@@ -76,7 +78,7 @@ export default function BatchMoveModal({
             accountId: account.account.id,
             accountLabel: account.account.name || account.account.id,
             tokenId: token.token.id,
-            tokenLabel: token.token.name || `Token ${token.token.id}`,
+            tokenLabel: token.token.name || t('batchMove.tokenFallback', { id: token.token.id }),
             accessKeyId: token.token.access_key_id,
             secretAccessKey: token.token.secret_access_key,
             buckets: token.buckets.map((bucket) => ({ name: bucket.name })),
@@ -171,18 +173,18 @@ export default function BatchMoveModal({
     if (isStartingQueue) return;
     if (!config || selectedKeys.size === 0 || !selectedDestination || !selectedBucket) return;
     if (!config.accessKeyId || !config.secretAccessKey) {
-      message.error('Source credentials are required to move files');
+      message.error(t('batchMove.needSource'));
       return;
     }
     if (config.provider === 'aws' && !config.region) {
-      message.error('AWS region is required to move files');
+      message.error(t('batchMove.needRegion'));
       return;
     }
     if (
       (config.provider === 'minio' || config.provider === 'rustfs') &&
       (!config.endpointScheme || !config.endpointHost)
     ) {
-      message.error('Endpoint configuration is required to move files');
+      message.error(t('batchMove.needEndpoint'));
       return;
     }
 
@@ -194,10 +196,11 @@ export default function BatchMoveModal({
       return;
     }
 
-    const actionLabel = deleteOriginal ? 'Move' : 'Copy';
     setIsStartingQueue(true);
     message.loading({
-      content: `Queuing ${operations.length} file${operations.length > 1 ? 's' : ''} for ${actionLabel.toLowerCase()}...`,
+      content: deleteOriginal
+        ? t('batchMove.queuingMove', { count: operations.length })
+        : t('batchMove.queuingCopy', { count: operations.length }),
       key: 'batch-move',
     });
 
@@ -234,14 +237,18 @@ export default function BatchMoveModal({
 
       await loadAllActiveMoves();
       message.success({
-        content: `${actionLabel} started for ${operations.length} file${operations.length > 1 ? 's' : ''}`,
+        content: deleteOriginal
+          ? t('batchMove.moveStarted', { count: operations.length })
+          : t('batchMove.copyStarted', { count: operations.length }),
         key: 'batch-move',
       });
       onClose();
       onSuccess();
     } catch (e) {
       message.error({
-        content: `Failed to start move: ${e instanceof Error ? e.message : 'Unknown error'}`,
+        content: t('batchMove.startFailed', {
+          error: e instanceof Error ? e.message : t('common.unknownError'),
+        }),
         key: 'batch-move',
       });
     } finally {
@@ -279,11 +286,11 @@ export default function BatchMoveModal({
           style={{ cursor: 'pointer' }}
           onClick={() => setDeleteOriginal((v) => !v)}
         >
-          Delete original after copy
+          {t('batchMove.deleteOriginal')}
         </span>
       </span>
       <button className="btn" onClick={onClose} disabled={isStartingQueue}>
-        Cancel
+        {t('common.cancel')}
       </button>
       <button
         className="btn btn-primary"
@@ -291,11 +298,11 @@ export default function BatchMoveModal({
         disabled={!selectedDestination || !selectedBucket || isStartingQueue}
       >
         {isStartingQueue ? (
-          'Starting...'
+          t('batchMove.starting')
         ) : (
           <>
             {deleteOriginal ? <ArrowRightOutlined /> : <SendOutlined />}{' '}
-            {deleteOriginal ? 'Move' : 'Copy'} here
+            {deleteOriginal ? t('batchMove.moveHere') : t('batchMove.copyHere')}
           </>
         )}
       </button>
@@ -307,24 +314,26 @@ export default function BatchMoveModal({
       <Modal
         open={open}
         onClose={onClose}
-        title={`${deleteOriginal ? 'Move' : 'Copy'} ${selectedCount} item${selectedCount !== 1 ? 's' : ''}`}
-        subtitle="Pick a destination bucket and folder"
+        title={
+          deleteOriginal
+            ? t('batchMove.titleMove', { count: selectedCount })
+            : t('batchMove.titleCopy', { count: selectedCount })
+        }
+        subtitle={t('batchMove.subtitle')}
         icon={<ArrowRightOutlined style={{ fontSize: 18 }} />}
         width={640}
         footer={footer}
       >
-        <p style={{ color: 'var(--text-secondary)', fontSize: 12 }}>
-          Existing destination files are preserved. A name conflict stops that file for review.
-        </p>
+        <p style={{ color: 'var(--text-secondary)', fontSize: 12 }}>{t('batchMove.preserved')}</p>
         {/* Destination account + bucket */}
         <div className="field">
-          <div className="field-label">Destination account</div>
+          <div className="field-label">{t('batchMove.destAccount')}</div>
           <select
             className="select"
             value={selectedDestinationId ?? ''}
             onChange={(e) => setSelectedDestinationId(e.target.value || null)}
           >
-            <option value="">Select destination account…</option>
+            <option value="">{t('batchMove.selectAccount')}</option>
             {destinationOptions.map((option) => (
               <option key={option.id} value={option.id}>
                 {option.provider === 'r2'
@@ -336,14 +345,14 @@ export default function BatchMoveModal({
         </div>
 
         <div className="field">
-          <div className="field-label">Destination bucket</div>
+          <div className="field-label">{t('batchMove.destBucket')}</div>
           <select
             className="select"
             value={selectedBucket}
             onChange={(e) => setSelectedBucket(e.target.value)}
             disabled={!selectedDestination}
           >
-            <option value="">Select bucket…</option>
+            <option value="">{t('batchMove.selectBucket')}</option>
             {(selectedDestination?.buckets || []).map((bucket) => (
               <option key={bucket.name} value={bucket.name}>
                 {bucket.name}
@@ -354,7 +363,7 @@ export default function BatchMoveModal({
 
         {/* Target folder */}
         <div className="field">
-          <div className="field-label">Target folder</div>
+          <div className="field-label">{t('batchMove.targetFolder')}</div>
           {isSameDestination ? (
             <div
               style={{
@@ -378,27 +387,25 @@ export default function BatchMoveModal({
                   flex: 1,
                 }}
               >
-                {targetDirectory ? `/${targetDirectory}/` : '/ (root)'}
+                {targetDirectory ? `/${targetDirectory}/` : t('batchMove.root')}
               </span>
               <button
                 className="btn"
                 style={{ height: 26, fontSize: 11.5, padding: '0 10px' }}
                 onClick={() => setFolderPickerOpen(true)}
               >
-                Change...
+                {t('batchMove.change')}
               </button>
             </div>
           ) : (
             <input
               className="input mono"
-              placeholder="Enter destination folder (optional)"
+              placeholder={t('batchMove.folderPh')}
               value={targetDirectory}
               onChange={(e) => setTargetDirectory(e.target.value.replace(/^\/+/, ''))}
             />
           )}
-          <div className="field-hint">
-            Cross-provider transfers stream without temp files (4 parallel parts)
-          </div>
+          <div className="field-hint">{t('batchMove.streamHint')}</div>
         </div>
       </Modal>
 
@@ -408,7 +415,7 @@ export default function BatchMoveModal({
           onClose={() => setFolderPickerOpen(false)}
           selectedPath={targetDirectory}
           onConfirm={setTargetDirectory}
-          title="Select Target Folder"
+          title={t('batchMove.selectFolder')}
         />
       )}
     </>

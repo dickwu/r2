@@ -4,6 +4,8 @@
  * behaviour is unit-testable.
  */
 
+import { t as i18nT } from '@/i18n';
+
 export type OsKind = 'macos' | 'windows' | 'linux';
 
 /**
@@ -19,17 +21,16 @@ export function detectOs(userAgent?: string): OsKind {
 
 /** What the OS calls its file manager, for buttons that open one. */
 export function revealActionLabel(os: OsKind): string {
-  if (os === 'windows') return 'Show in Explorer';
-  if (os === 'linux') return 'Show in Files';
-  return 'Reveal in Finder';
+  if (os === 'windows') return i18nT('mount.reveal.windows');
+  if (os === 'linux') return i18nT('mount.reveal.linux');
+  return i18nT('mount.reveal.macos');
 }
 
 /** One line on what mounting needs from this OS, shown before the user commits. */
 export function mountRequirementHint(os: OsKind): string {
-  if (os === 'windows')
-    return 'Requires the "Client for NFS" Windows feature (Pro/Enterprise); mounts to a drive letter. Read-only mode is enforced by the app — Explorer still shows the drive as writable.';
-  if (os === 'linux') return 'Requires nfs-utils; may prompt for sudo.';
-  return 'Mounts instantly — no extra software needed.';
+  if (os === 'windows') return i18nT('mount.requirement.windows');
+  if (os === 'linux') return i18nT('mount.requirement.linux');
+  return i18nT('mount.requirement.macos');
 }
 
 export function pathSeparator(os: OsKind): string {
@@ -75,26 +76,22 @@ export function middleTruncate(text: string, max = 46): string {
  */
 export function relativeMountTime(mountedAt: number, nowMs: number = Date.now()): string {
   const diffMin = Math.floor((nowMs - mountedAt * 1000) / 60_000);
-  if (diffMin < 1) return 'just now';
-  if (diffMin === 1) return '1 min ago';
-  if (diffMin < 60) return `${diffMin} min ago`;
+  if (diffMin < 1) return i18nT('time.justNow');
+  if (diffMin < 60) return i18nT('time.minAgo', { count: diffMin });
   const diffHr = Math.floor(diffMin / 60);
-  if (diffHr === 1) return '1 hr ago';
-  if (diffHr < 24) return `${diffHr} hr ago`;
+  if (diffHr < 24) return i18nT('time.hrAgo', { count: diffHr });
   const diffDay = Math.floor(diffHr / 24);
-  return diffDay === 1 ? '1 day ago' : `${diffDay} days ago`;
+  return i18nT('time.dayAgo', { count: diffDay });
 }
 
 /** What a mount lets you do, named the same way wherever the mode is shown. */
 export function mountModeLabel(readOnly: boolean): string {
-  return readOnly ? 'Read-only' : 'Writable';
+  return readOnly ? i18nT('mount.mode.readOnly') : i18nT('mount.mode.writable');
 }
 
 /** The consequence of that mode, in one line. */
 export function mountModeHint(readOnly: boolean): string {
-  return readOnly
-    ? 'Files open and copy out; nothing writes back.'
-    : 'Changes in this folder upload to the bucket. Deletes are real.';
+  return readOnly ? i18nT('mount.mode.readOnlyHint') : i18nT('mount.mode.writableHint');
 }
 
 /**

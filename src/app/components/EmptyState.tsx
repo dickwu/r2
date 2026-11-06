@@ -1,4 +1,5 @@
 import { FolderOutlined, CloudOutlined, UploadOutlined, PlusOutlined } from '@ant-design/icons';
+import { useTranslation } from 'react-i18next';
 import { useThemeStore } from '@/app/stores/themeStore';
 
 interface EmptyStateProps {
@@ -28,6 +29,7 @@ function IllustratedArt() {
 }
 
 export default function EmptyState({ search, onUpload, onNewFolder }: EmptyStateProps) {
+  const { t } = useTranslation();
   const emptyStyle = useThemeStore((s) => s.emptyStyle);
 
   return (
@@ -43,25 +45,23 @@ export default function EmptyState({ search, onUpload, onNewFolder }: EmptyState
       </div>
 
       <div className="empty-title">
-        {search ? `No results for "${search}"` : 'This folder is empty'}
+        {search ? t('empty.noResults', { search }) : t('empty.folderEmpty')}
       </div>
 
       <div className="empty-desc">
-        {search
-          ? 'Try a different keyword, or expand search across the bucket.'
-          : 'Drop files here or upload from your machine. Multipart resumable transfers handle files up to 5 GB out of the box.'}
+        {search ? t('empty.noResultsDesc') : t('empty.folderEmptyDesc')}
       </div>
 
       {!search && (
         <div className="empty-actions">
           {onUpload && (
             <button className="btn btn-primary" onClick={onUpload}>
-              <UploadOutlined style={{ fontSize: 13 }} /> Upload files
+              <UploadOutlined style={{ fontSize: 13 }} /> {t('empty.uploadFiles')}
             </button>
           )}
           {onNewFolder && (
             <button className="btn" onClick={onNewFolder}>
-              <PlusOutlined style={{ fontSize: 13 }} /> New folder
+              <PlusOutlined style={{ fontSize: 13 }} /> {t('empty.newFolder')}
             </button>
           )}
         </div>

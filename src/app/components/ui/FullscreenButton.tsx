@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { Tooltip } from 'antd';
 import { FullscreenExitOutlined, FullscreenOutlined } from '@ant-design/icons';
 
@@ -16,7 +17,8 @@ export default function FullscreenButton({
   onToggle,
   shortcutHint = false,
 }: FullscreenButtonProps) {
-  const label = fullscreen ? 'Exit fullscreen' : 'Fullscreen';
+  const { t } = useTranslation();
+  const label = fullscreen ? t('fullscreen.exit') : t('fullscreen.enter');
   const keys = fullscreen ? 'Esc' : shortcutHint ? 'F' : null;
   return (
     <Tooltip title={keys ? `${label} (${keys})` : label} placement="bottom">

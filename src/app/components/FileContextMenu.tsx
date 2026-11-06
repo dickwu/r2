@@ -1,4 +1,5 @@
 import { Dropdown } from 'antd';
+import { useTranslation } from 'react-i18next';
 import type { MenuProps } from 'antd';
 import {
   DownloadOutlined,
@@ -30,6 +31,7 @@ export default function FileContextMenu({
   onFolderRename,
   onFolderDelete,
 }: FileContextMenuProps) {
+  const { t } = useTranslation();
   const handleCopyPath = () => {
     navigator.clipboard.writeText(item.key);
   };
@@ -40,7 +42,7 @@ export default function FileContextMenu({
           ? [
               {
                 key: 'download',
-                label: 'Download Folder',
+                label: t('files.menu.downloadFolder'),
                 icon: <DownloadOutlined />,
                 onClick: () => onFolderDownload(item),
               },
@@ -50,7 +52,7 @@ export default function FileContextMenu({
           ? [
               {
                 key: 'rename',
-                label: 'Rename Folder',
+                label: t('files.menu.renameFolder'),
                 icon: <EditOutlined />,
                 onClick: () => onFolderRename(item),
               },
@@ -58,7 +60,7 @@ export default function FileContextMenu({
           : []),
         {
           key: 'copy-path',
-          label: 'Copy Path',
+          label: t('files.menu.copyPath'),
           icon: <CopyOutlined />,
           onClick: handleCopyPath,
         },
@@ -67,7 +69,7 @@ export default function FileContextMenu({
           ? [
               {
                 key: 'delete',
-                label: 'Delete Folder',
+                label: t('files.menu.deleteFolder'),
                 icon: <DeleteOutlined />,
                 danger: true,
                 onClick: () => onFolderDelete(item),
@@ -80,7 +82,7 @@ export default function FileContextMenu({
           ? [
               {
                 key: 'download',
-                label: 'Download',
+                label: t('files.menu.download'),
                 icon: <DownloadOutlined />,
                 onClick: () => onDownload(item),
               },
@@ -88,20 +90,20 @@ export default function FileContextMenu({
           : []),
         {
           key: 'rename',
-          label: 'Rename',
+          label: t('files.menu.rename'),
           icon: <EditOutlined />,
           onClick: () => onRename(item),
         },
         {
           key: 'copy-path',
-          label: 'Copy Path',
+          label: t('files.menu.copyPath'),
           icon: <CopyOutlined />,
           onClick: handleCopyPath,
         },
         { type: 'divider' as const },
         {
           key: 'delete',
-          label: 'Delete',
+          label: t('files.menu.delete'),
           icon: <DeleteOutlined />,
           danger: true,
           onClick: () => onDelete(item),

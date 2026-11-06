@@ -1,5 +1,6 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
 import { useEffect, useState, type CSSProperties } from 'react';
 import { Image, Typography } from 'antd';
 import DownloadProgress from '@/app/components/preview/DownloadProgress';
@@ -45,7 +46,7 @@ export default function BlobImage({ url, type, filename, style }: BlobImageProps
       .catch((err: unknown) => {
         if (controller.signal.aborted || err instanceof PreviewFetchAbortedError) return;
         console.error('Failed to fetch preview:', err);
-        setError(err instanceof Error ? err.message : 'Failed to load file');
+        setError(err instanceof Error ? err.message : i18nT('preview.loadFailed'));
       });
 
     return () => {

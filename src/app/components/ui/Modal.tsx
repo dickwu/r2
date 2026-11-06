@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useEffect, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { CloseOutlined } from '@ant-design/icons';
@@ -79,6 +80,7 @@ export default function Modal({
   fullscreen = false,
   headerActions,
 }: ModalProps) {
+  const { t } = useTranslation();
   // The latest onClose, so a parent passing a fresh arrow on every render
   // neither re-registers this modal nor moves it within the stack.
   const latestOnClose = useRef(onClose);
@@ -123,7 +125,7 @@ export default function Modal({
           </div>
           <div className="modal-header-actions">
             {headerActions}
-            <button className="modal-close" onClick={onClose} aria-label="Close">
+            <button className="modal-close" onClick={onClose} aria-label={t('common.close')}>
               <CloseOutlined style={{ fontSize: 14 }} />
             </button>
           </div>

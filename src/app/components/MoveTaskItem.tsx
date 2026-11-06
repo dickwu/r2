@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { memo } from 'react';
 import { Button, Progress, Typography, Space, Tooltip } from 'antd';
 import {
@@ -27,6 +28,7 @@ interface MoveTaskItemProps {
 }
 
 function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
+  const { t } = useTranslation();
   async function handlePause() {
     try {
       await invoke('pause_move', { taskId: task.id });
@@ -72,7 +74,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
       case 'pending':
         return (
           <Space size={4}>
-            <Tooltip title="Delete">
+            <Tooltip title={t('tasks.delete')}>
               <Button
                 type="text"
                 size="small"
@@ -86,7 +88,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
       case 'downloading':
         return (
           <Space size={4}>
-            <Tooltip title="Pause">
+            <Tooltip title={t('dock.pause')}>
               <Button
                 type="text"
                 size="small"
@@ -94,7 +96,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
                 onClick={handlePause}
               />
             </Tooltip>
-            <Tooltip title="Cancel">
+            <Tooltip title={t('common.cancel')}>
               <Button
                 type="text"
                 size="small"
@@ -110,7 +112,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
         if (isUploadFinishing) {
           return (
             <Space size={4}>
-              <Tooltip title="Cancel">
+              <Tooltip title={t('common.cancel')}>
                 <Button
                   type="text"
                   size="small"
@@ -124,7 +126,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
         }
         return (
           <Space size={4}>
-            <Tooltip title="Pause">
+            <Tooltip title={t('dock.pause')}>
               <Button
                 type="text"
                 size="small"
@@ -132,7 +134,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
                 onClick={handlePause}
               />
             </Tooltip>
-            <Tooltip title="Cancel">
+            <Tooltip title={t('common.cancel')}>
               <Button
                 type="text"
                 size="small"
@@ -148,7 +150,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
         // Post-processing (finishing) - only cancel, no pause
         return (
           <Space size={4}>
-            <Tooltip title="Cancel">
+            <Tooltip title={t('common.cancel')}>
               <Button
                 type="text"
                 size="small"
@@ -162,7 +164,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
       case 'paused':
         return (
           <Space size={4}>
-            <Tooltip title="Resume">
+            <Tooltip title={t('dock.resume')}>
               <Button
                 type="text"
                 size="small"
@@ -171,7 +173,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
                 style={{ color: '#52c41a' }}
               />
             </Tooltip>
-            <Tooltip title="Cancel">
+            <Tooltip title={t('common.cancel')}>
               <Button
                 type="text"
                 size="small"
@@ -180,7 +182,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
                 onClick={handleCancel}
               />
             </Tooltip>
-            <Tooltip title="Delete">
+            <Tooltip title={t('tasks.delete')}>
               <Button
                 type="text"
                 size="small"
@@ -194,7 +196,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
       case 'error':
         return (
           <Space size={4}>
-            <Tooltip title="Retry">
+            <Tooltip title={t('page.retry')}>
               <Button
                 type="text"
                 size="small"
@@ -203,7 +205,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
                 style={{ color: '#1677ff' }}
               />
             </Tooltip>
-            <Tooltip title="Delete">
+            <Tooltip title={t('tasks.delete')}>
               <Button
                 type="text"
                 size="small"
@@ -217,7 +219,7 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
       case 'success':
       case 'cancelled':
         return (
-          <Tooltip title="Delete">
+          <Tooltip title={t('tasks.delete')}>
             <Button
               type="text"
               size="small"
@@ -297,6 +299,7 @@ function showMoveFailure(task: MoveTask, stage?: string) {
 }
 
 function TaskDescription({ task }: { task: MoveTask }) {
+  const { t } = useTranslation();
   if (isMoveAwaitingAction(task.status))
     return (
       <div>
@@ -311,7 +314,7 @@ function TaskDescription({ task }: { task: MoveTask }) {
                 className="btn btn-sm btn-danger-ghost"
                 onClick={() => showMoveFailure(task, MOVE_RECOVERY_LABELS[task.status])}
               >
-                Show details
+                {t('moves.showDetails')}
               </button>
             </span>
           </div>
@@ -328,11 +331,12 @@ function TaskDescription({ task }: { task: MoveTask }) {
       if (isUploadFinishing) {
         return (
           <Text type="success" style={{ fontSize: 12 }}>
-            Finishing (uploaded, syncing...)
+            {t('moves.finishingSync')}
           </Text>
         );
       }
-      const phaseLabel = task.status === 'downloading' ? 'Downloading' : 'Uploading';
+      const phaseLabel =
+        task.status === 'downloading' ? t('moves.downloading') : t('moves.uploading');
       return (
         <div>
           <Progress
@@ -357,51 +361,51 @@ function TaskDescription({ task }: { task: MoveTask }) {
     case 'finishing':
       return (
         <Text type="success" style={{ fontSize: 12 }}>
-          Finishing (uploaded, syncing...)
+          {t('moves.finishingSync')}
         </Text>
       );
     case 'deleting':
       // Post-processing phase - transfer complete, cleaning up
       return (
         <Text type="success" style={{ fontSize: 12 }}>
-          Finishing (removing source)
+          {t('moves.finishingRemove')}
         </Text>
       );
     case 'paused':
       return (
         <Text type="warning" style={{ fontSize: 12 }}>
-          Paused at {Math.round(task.progress)}%
+          {t('moves.pausedAt', { pct: Math.round(task.progress) })}
         </Text>
       );
     case 'error':
       return (
         <span className="task-failed">
-          Failed
+          {t('tasks.failed')}
           <button
             type="button"
             className="btn btn-sm btn-danger-ghost"
             onClick={() => showMoveFailure(task)}
           >
-            Show error
+            {t('syncBanner.showError')}
           </button>
         </span>
       );
     case 'success':
       return (
         <Text type="success" style={{ fontSize: 12 }}>
-          Moved
+          {t('moves.moved')}
         </Text>
       );
     case 'cancelled':
       return (
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Cancelled
+          {t('tasks.cancelled')}
         </Text>
       );
     default:
       return (
         <Text type="secondary" style={{ fontSize: 12 }}>
-          {task.fileSize > 0 ? formatBytes(task.fileSize) : 'Queued'}
+          {task.fileSize > 0 ? formatBytes(task.fileSize) : t('tasks.queued')}
         </Text>
       );
   }

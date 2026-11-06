@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { t as i18nT } from '@/i18n';
 import type { StorageConfig } from '@/app/lib/r2cache';
 import {
   DEFAULT_MAX_CONCURRENT_UPLOADS,
@@ -169,7 +170,7 @@ export const useUploadStore = create<UploadStore>((set, get) => ({
           if (current?.status === 'uploading') {
             get().updateTask(id, {
               status: 'error',
-              error: current.error || 'Upload ended unexpectedly',
+              error: current.error || i18nT('transfer.uploadEndedUnexpectedly'),
               speed: 0,
             });
           }

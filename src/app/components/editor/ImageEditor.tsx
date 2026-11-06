@@ -1,5 +1,7 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
+import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from 'react';
 import { Button, Spin, Tooltip } from 'antd';
 import { imageEncodingProblem } from '@/app/components/editor/editedContent';
@@ -48,7 +50,7 @@ function apply(op: ImageOp, source: HTMLCanvasElement): HTMLCanvasElement {
   canvas.width = size.width;
   canvas.height = size.height;
   const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Canvas is unavailable');
+  if (!ctx) throw new Error(i18nT('editor.image.noCanvas'));
   switch (op.type) {
     case 'rotate':
       ctx.translate(size.width / 2, size.height / 2);
@@ -91,6 +93,7 @@ export default function ImageEditor({
   handleRef,
   savedRevision,
 }: ImageEditorProps) {
+  const { t } = useTranslation();
   const [history, setHistory] = useState<HTMLCanvasElement[]>([]);
   const [baseline, setBaseline] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -115,7 +118,7 @@ export default function ImageEditor({
         setBaseline(0);
       })
       .catch(() => {
-        if (!cancelled) setError('The image could not be decoded, so it cannot be edited.');
+        if (!cancelled) setError(i18nT('editor.image.decodeFailed'));
       });
     return () => {
       cancelled = true;
@@ -145,10 +148,10 @@ export default function ImageEditor({
     handleRef.current = {
       encode: () =>
         new Promise<Uint8Array>((resolve, reject) => {
-          if (!current) return reject(new Error('The image is still loading'));
+          if (!current) return reject(new Error(i18nT('editor.modal.imageStillLoading')));
           current.toBlob(
             (blob) => {
-              if (!blob) return reject(new Error('The image could not be encoded'));
+              if (!blob) return reject(new Error(i18nT('editor.image.encodeFailed')));
               const problem = imageEncodingProblem(blob.type, mime);
               if (problem) return reject(new Error(problem));
               blob.arrayBuffer().then((buffer) => resolve(new Uint8Array(buffer)), reject);
@@ -224,13 +227,13 @@ export default function ImageEditor({
 
   return (
     <div className="file-editor" style={{ height }}>
-      <div className="file-editor-toolbar" role="toolbar" aria-label="Image tools">
+      <div className="file-editor-toolbar" role="toolbar" aria-label={t('editor.image.tools')}>
         {cropping ? (
           <>
             <span className="file-editor-hint">
               {selection
-                ? `${selection.width} × ${selection.height} px selected`
-                : 'Drag across the image to choose the area to keep'}
+                ? t('editor.image.selected', { width: selection.width, height: selection.height })
+                : t('editor.image.dragHint')}
             </span>
             <Button
               size="small"
@@ -239,7 +242,7 @@ export default function ImageEditor({
               onClick={finishCrop}
               disabled={!selection}
             >
-              Crop to selection
+              {t('editor.image.cropToSelection')}
             </Button>
             <Button
               size="small"
@@ -249,44 +252,44 @@ export default function ImageEditor({
                 setDrag(null);
               }}
             >
-              Cancel
+              {t('common.cancel')}
             </Button>
           </>
         ) : (
           <>
-            <Tooltip title="Rotate left">
+            <Tooltip title={t('editor.image.rotateLeft')}>
               <Button
                 size="small"
                 icon={<RotateLeftOutlined />}
                 onClick={() => run({ type: 'rotate', degrees: -90 })}
-                aria-label="Rotate left"
+                aria-label={t('editor.image.rotateLeft')}
                 disabled={!current}
               />
             </Tooltip>
-            <Tooltip title="Rotate right">
+            <Tooltip title={t('editor.image.rotateRight')}>
               <Button
                 size="small"
                 icon={<RotateRightOutlined />}
                 onClick={() => run({ type: 'rotate', degrees: 90 })}
-                aria-label="Rotate right"
+                aria-label={t('editor.image.rotateRight')}
                 disabled={!current}
               />
             </Tooltip>
-            <Tooltip title="Flip horizontally">
+            <Tooltip title={t('editor.image.flipH')}>
               <Button
                 size="small"
                 icon={<SwapOutlined />}
                 onClick={() => run({ type: 'flip', axis: 'horizontal' })}
-                aria-label="Flip horizontally"
+                aria-label={t('editor.image.flipH')}
                 disabled={!current}
               />
             </Tooltip>
-            <Tooltip title="Flip vertically">
+            <Tooltip title={t('editor.image.flipV')}>
               <Button
                 size="small"
                 icon={<SwapOutlined rotate={90} />}
                 onClick={() => run({ type: 'flip', axis: 'vertical' })}
-                aria-label="Flip vertically"
+                aria-label={t('editor.image.flipV')}
                 disabled={!current}
               />
             </Tooltip>
@@ -296,26 +299,26 @@ export default function ImageEditor({
               onClick={() => setCropping(true)}
               disabled={!current}
             >
-              Crop
+              {t('editor.image.crop')}
             </Button>
             <span className="spacer" />
-            <Tooltip title="Undo">
+            <Tooltip title={t('editor.image.undo')}>
               <Button
                 size="small"
                 icon={<UndoOutlined />}
                 onClick={undo}
                 disabled={history.length <= 1}
-                aria-label="Undo"
+                aria-label={t('editor.image.undo')}
               />
             </Tooltip>
-            <Tooltip title="Back to the saved image">
+            <Tooltip title={t('editor.image.revertHint')}>
               <Button
                 size="small"
                 icon={<CompressOutlined />}
                 onClick={() => setHistory((h) => h.slice(0, baseline + 1))}
                 disabled={edits === 0 || baseline < 0}
               >
-                Revert
+                {t('editor.image.revert')}
               </Button>
             </Tooltip>
           </>
@@ -344,7 +347,7 @@ export default function ImageEditor({
         }}
       >
         {!current && <Spin />}
-        <canvas ref={viewRef} aria-label="Image being edited" hidden={!current} />
+        <canvas ref={viewRef} aria-label={t('editor.image.canvas')} hidden={!current} />
         {overlay && <div className="file-editor-crop" style={overlay} />}
       </div>
     </div>

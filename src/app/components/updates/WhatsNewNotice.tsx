@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useEffect } from 'react';
 import { App } from 'antd';
 import { useShallow } from 'zustand/react/shallow';
@@ -20,6 +21,7 @@ const KEY = 'whats-new';
  */
 export default function WhatsNewNotice() {
   const { notification } = App.useApp();
+  const { t } = useTranslation();
   const { whatsNew, feed, feedStatus } = useUpdateStore(
     useShallow((s) => ({ whatsNew: s.whatsNew, feed: s.feed, feedStatus: s.feedStatus }))
   );
@@ -38,7 +40,7 @@ export default function WhatsNewNotice() {
 
     notification.open({
       key: KEY,
-      title: `Updated to v${to}`,
+      title: t('updates.whatsNew.title', { version: to }),
       duration: 0,
       placement: 'bottomRight',
       description: (
@@ -49,11 +51,11 @@ export default function WhatsNewNotice() {
               markdown={entriesToMarkdown(entries, { versionHeadings: entries.length > 1 })}
             />
           ) : (
-            <p>R2 Client is now on v{to}.</p>
+            <p>{t('updates.whatsNew.fallback', { version: to })}</p>
           )}
           {entries.length > 0 ? (
             <button type="button" className="update-link" onClick={openAll}>
-              All release notes
+              {t('updates.allReleaseNotes')}
             </button>
           ) : (
             <button
@@ -61,13 +63,13 @@ export default function WhatsNewNotice() {
               className="update-link"
               onClick={() => openExternal(githubReleaseUrl(to))}
             >
-              Release notes on GitHub
+              {t('updates.releaseNotesOnGitHub')}
             </button>
           )}
         </div>
       ),
     });
-  }, [whatsNew, feed, feedStatus, notification]);
+  }, [whatsNew, feed, feedStatus, notification, t]);
 
   return null;
 }

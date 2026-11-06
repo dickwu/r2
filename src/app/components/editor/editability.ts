@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 import { getFileExtension, type PreviewTarget } from '@/app/components/preview/previewKind';
 
 /** How the editor presents a text file. */
@@ -217,10 +218,10 @@ const EDITABLE_IMAGES: Readonly<Record<string, string>> = {
 
 /** Why each family of formats stays view-only. */
 const VIEW_ONLY: ReadonlyArray<[readonly string[], string]> = [
-  [['gif', 'apng'], 'Editing would flatten the animation to a single frame.'],
+  [['gif', 'apng'], 'animated'],
   [
     ['bmp', 'ico', 'avif', 'heic', 'heif', 'tif', 'tiff', 'psd', 'raw', 'cr2', 'nef', 'dng'],
-    'The app can display this image format but cannot encode it back.',
+    'noEncode',
   ],
   [
     [
@@ -239,9 +240,9 @@ const VIEW_ONLY: ReadonlyArray<[readonly string[], string]> = [
       'aac',
       'opus',
     ],
-    'Audio and video are not editable in the app.',
+    'media',
   ],
-  [['pdf'], 'PDF is a page-layout format; edit it in a PDF editor.'],
+  [['pdf'], 'pdf'],
   [
     [
       'doc',
@@ -258,12 +259,9 @@ const VIEW_ONLY: ReadonlyArray<[readonly string[], string]> = [
       'numbers',
       'key',
     ],
-    'Office documents are binary packages; edit them in an office suite.',
+    'office',
   ],
-  [
-    ['zip', 'gz', 'tgz', 'tar', 'bz2', 'xz', 'zst', '7z', 'rar', 'jar', 'war', 'whl'],
-    'Archives are compressed binaries.',
-  ],
+  [['zip', 'gz', 'tgz', 'tar', 'bz2', 'xz', 'zst', '7z', 'rar', 'jar', 'war', 'whl'], 'archive'],
   [
     [
       'epub',
@@ -280,13 +278,13 @@ const VIEW_ONLY: ReadonlyArray<[readonly string[], string]> = [
       'avro',
       'orc',
     ],
-    'This binary format can be previewed but not edited.',
+    'binary',
   ],
 ];
 
 function viewOnlyReason(ext: string): string | null {
   for (const [extensions, reason] of VIEW_ONLY) {
-    if (extensions.includes(ext)) return reason;
+    if (extensions.includes(ext)) return i18nT(`editor.viewOnly.${reason}`);
   }
   return null;
 }
@@ -367,7 +365,7 @@ function textEditability(name: string, extension: string, sizeError: string | nu
 function tooLarge(size: number | undefined, limit: number): string | null {
   if (size === undefined || size <= limit) return null;
   const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
-  return `This file is ${mb(size)}; the editor opens files up to ${mb(limit)}. Download it to edit locally.`;
+  return i18nT('editor.viewOnly.tooLarge', { size: mb(size), max: mb(limit) });
 }
 
 /**
@@ -425,7 +423,7 @@ export function getEditability(
   }
   return {
     editable: false,
-    reason: 'This file is not a text or image format the editor supports.',
+    reason: i18nT('editor.viewOnly.unsupported'),
   };
 }
 

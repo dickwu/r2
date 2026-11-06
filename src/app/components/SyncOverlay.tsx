@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { Spin } from 'antd';
 import {
   CloudDownloadOutlined,
@@ -15,6 +16,7 @@ export default function SyncOverlay() {
   const storedFiles = useSyncStore((state) => state.storedFiles);
   const totalFiles = useSyncStore((state) => state.totalFiles);
   const indexingProgress = useSyncStore((state) => state.indexingProgress);
+  const { t } = useTranslation();
 
   const phaseInfo: Record<
     SyncPhase,
@@ -22,28 +24,28 @@ export default function SyncOverlay() {
   > = {
     idle: {
       icon: <CloudDownloadOutlined />,
-      title: 'Preparing...',
-      description: 'Getting ready to sync your bucket',
+      title: t('sync.overlay.idle.title'),
+      description: t('sync.overlay.idle.description'),
     },
     fetching: {
       icon: <CloudDownloadOutlined />,
-      title: 'Fetching Files',
-      description: 'Downloading file list from R2...',
+      title: t('sync.overlay.fetching.title'),
+      description: t('sync.overlay.fetching.description'),
     },
     storing: {
       icon: <DatabaseOutlined />,
-      title: 'Caching Data',
-      description: 'Storing files in local database...',
+      title: t('sync.overlay.storing.title'),
+      description: t('sync.overlay.storing.description'),
     },
     indexing: {
       icon: <BuildOutlined />,
-      title: 'Building Index',
-      description: 'Creating folder structure...',
+      title: t('sync.overlay.indexing.title'),
+      description: t('sync.overlay.indexing.description'),
     },
     complete: {
       icon: <CheckCircleOutlined />,
-      title: 'Ready!',
-      description: 'Your files are ready to browse',
+      title: t('sync.overlay.complete.title'),
+      description: t('sync.overlay.complete.description'),
     },
   };
 
@@ -55,7 +57,7 @@ export default function SyncOverlay() {
     progressDisplay = (
       <div className="sync-overlay-progress">
         <span className="sync-overlay-count">{processedFiles.toLocaleString()}</span>
-        <span className="sync-overlay-label">files found</span>
+        <span className="sync-overlay-label">{t('sync.overlay.filesFound')}</span>
       </div>
     );
   } else if (phase === 'storing') {
@@ -66,7 +68,7 @@ export default function SyncOverlay() {
           {storedFiles.toLocaleString()}
           {total > 0 ? ` / ${total.toLocaleString()}` : ''}
         </span>
-        <span className="sync-overlay-label">files cached</span>
+        <span className="sync-overlay-label">{t('sync.overlay.filesCached')}</span>
       </div>
     );
   } else if (phase === 'indexing') {

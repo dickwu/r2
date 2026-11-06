@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { App } from 'antd';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -51,6 +52,7 @@ function MountRow({
   onReveal: (mount: MountInfo) => void;
   onUnmount: (mount: MountInfo) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="settings-mount-card">
       <ProviderIcon provider={mount.provider} />
@@ -83,17 +85,15 @@ function MountRow({
               }
             >
               {mount.health === 'mounted'
-                ? `Mounted ${relativeMountTime(mount.mountedAt, now)}`
+                ? t('mount.mountedAgo', { time: relativeMountTime(mount.mountedAt, now) })
                 : mount.health === 'degraded'
-                  ? 'Degraded'
+                  ? t('mount.health.degraded')
                   : mount.health === 'offline'
-                    ? 'Offline'
-                    : 'Unmounting…'}
+                    ? t('mount.health.offline')
+                    : t('mount.unmounting')}
             </span>
             {mount.pendingUploads > 0 && (
-              <span>
-                {mount.pendingUploads} pending {mount.pendingUploads === 1 ? 'upload' : 'uploads'}
-              </span>
+              <span>{t('mount.pendingUploads', { count: mount.pendingUploads })}</span>
             )}
             <span className="settings-mount-dot" />
             <span className="settings-mount-account">{mount.accountId}</span>
@@ -106,7 +106,7 @@ function MountRow({
             </button>
             <button className="btn btn-sm" onClick={() => onUnmount(mount)} disabled={busy}>
               <DisconnectOutlined style={{ fontSize: 11 }} />
-              {busy ? 'Unmounting…' : 'Unmount'}
+              {busy ? t('mount.unmounting') : t('sidebar.unmount')}
             </button>
           </div>
         </div>
@@ -131,6 +131,7 @@ function PendingMountUploads() {
   const mountCount = useMountStore((s) => s.mounts.length);
   const accounts = useAccountStore((s) => s.accounts);
   const { message, modal } = App.useApp();
+  const { t } = useTranslation();
   const [busyId, setBusyId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -142,10 +143,7 @@ function PendingMountUploads() {
   const handleResume = (recovery: MountRecovery) => {
     const target = resolveRecoveryTarget(recovery, accounts);
     if (target) openMountModal(target, recovery.recoveryId);
-    else
-      message.info(
-        'Open this account and bucket in the sidebar, choose Mount as local drive, then select these saved writes. Restore the saved account first if it is missing.'
-      );
+    else message.info(t('mount.resumeHowTo'));
   };
 
   const handleExport = async (recovery: MountRecovery) => {
@@ -154,12 +152,12 @@ function PendingMountUploads() {
       const destination = await openDialog({
         directory: true,
         multiple: false,
-        title: 'Export saved writes to a folder',
+        title: t('mount.exportDialogTitle'),
       });
       if (typeof destination !== 'string') return;
       const path = await exportRecovery(recovery.recoveryId, destination);
-      if (path) message.success(`Saved writes exported to ${path}`);
-      else message.error(useMountStore.getState().recoveryError || 'Could not export saved writes');
+      if (path) message.success(t('mount.exported', { path }));
+      else message.error(useMountStore.getState().recoveryError || t('mount.exportFailed'));
     } catch (e) {
       message.error(e instanceof Error ? e.message : String(e));
     } finally {
@@ -169,18 +167,16 @@ function PendingMountUploads() {
 
   const handleDiscard = (recovery: MountRecovery) => {
     modal.confirm({
-      title: 'Discard saved changes?',
-      content: `Permanently remove the local recovery records for ${recovery.bucket || recovery.recoveryId}? Unuploaded files will be lost. Completed cloud changes will remain. Export a copy first if you need to keep these records.`,
-      okText: 'Discard saved writes',
+      title: t('mount.discardTitle'),
+      content: t('mount.discardContent', { name: recovery.bucket || recovery.recoveryId }),
+      okText: t('mount.discardOk'),
+      cancelText: t('common.cancel'),
       okButtonProps: { danger: true },
       onOk: async () => {
         setBusyId(recovery.recoveryId);
         try {
-          if (await discardRecovery(recovery.recoveryId)) message.success('Saved writes discarded');
-          else
-            throw new Error(
-              useMountStore.getState().recoveryError || 'Could not discard saved writes'
-            );
+          if (await discardRecovery(recovery.recoveryId)) message.success(t('mount.discarded'));
+          else throw new Error(useMountStore.getState().recoveryError || t('mount.discardFailed'));
         } catch (e) {
           message.error(e instanceof Error ? e.message : String(e));
           throw e;
@@ -195,11 +191,11 @@ function PendingMountUploads() {
     <section className="settings-section">
       <div className="settings-section-head">
         <div>
-          <h3>Pending changes</h3>
-          <p>Resume interrupted uploads and file changes, or export their recovery files.</p>
+          <h3>{t('mount.pendingTitle')}</h3>
+          <p>{t('mount.pendingDesc')}</p>
         </div>
         <button className="btn btn-sm" onClick={() => void refresh()} disabled={loading}>
-          {loading ? 'Refreshing…' : 'Refresh'}
+          {loading ? t('common.refreshing') : t('common.refresh')}
         </button>
       </div>
       {recoveryError && (
@@ -210,10 +206,10 @@ function PendingMountUploads() {
       {recoveries.length === 0 ? (
         <p className="field-hint">
           {loading
-            ? 'Checking saved writes…'
+            ? t('mount.checking')
             : recoveryError
-              ? 'Saved writes could not be checked.'
-              : 'No saved writes waiting to upload.'}
+              ? t('mount.checkFailed')
+              : t('mount.noneWaiting')}
         </p>
       ) : (
         <div className="settings-mount-list">
@@ -225,10 +221,10 @@ function PendingMountUploads() {
                 <FolderOpenOutlined />
               )}
               <div className="settings-mount-card-body">
-                <strong>{recovery.bucket || 'Unrecognized saved writes'}</strong>
+                <strong>{recovery.bucket || t('mount.unrecognized')}</strong>
                 <div className="settings-mount-meta">
                   <span>
-                    {recovery.files.length} {recovery.files.length === 1 ? 'file' : 'files'} ·{' '}
+                    {t('mount.fileCount', { count: recovery.files.length })} ·{' '}
                     {formatBytes(recovery.files.reduce((sum, file) => sum + file.size, 0))}
                   </span>
                   {recovery.accountId && <span>{recovery.accountId}</span>}
@@ -238,16 +234,12 @@ function PendingMountUploads() {
                 </code>
                 {recovery.error && (
                   <div className="field-hint" role="status">
-                    {recovery.error} Export these files to recover them manually.
+                    {recovery.error} {t('mount.exportToRecover')}
                   </div>
                 )}
-                {recovery.active && (
-                  <div className="field-hint">
-                    This bucket is mounted. Uploads are managed by its active mount.
-                  </div>
-                )}
+                {recovery.active && <div className="field-hint">{t('mount.activeHint')}</div>}
                 <details>
-                  <summary>Saved changes</summary>
+                  <summary>{t('mount.savedChanges')}</summary>
                   <div style={{ maxHeight: 180, overflowY: 'auto' }}>
                     {recovery.files.slice(0, 50).map((file) => (
                       <div className="field-hint" key={file.path}>
@@ -257,9 +249,7 @@ function PendingMountUploads() {
                       </div>
                     ))}
                     {recovery.files.length > 50 && (
-                      <div className="field-hint">
-                        Showing the first 50 files. Export includes all saved files.
-                      </div>
+                      <div className="field-hint">{t('mount.first50')}</div>
                     )}
                   </div>
                 </details>
@@ -270,7 +260,7 @@ function PendingMountUploads() {
                       disabled={busyId !== null}
                       onClick={() => handleResume(recovery)}
                     >
-                      Resume uploads
+                      {t('mount.resumeUploads')}
                     </button>
                   )}
                   <button
@@ -278,7 +268,7 @@ function PendingMountUploads() {
                     disabled={recovery.active || busyId !== null}
                     onClick={() => void handleExport(recovery)}
                   >
-                    Export files…
+                    {t('mount.exportFiles')}
                   </button>
                   {!recovery.error && (
                     <button
@@ -286,7 +276,7 @@ function PendingMountUploads() {
                       disabled={recovery.active || busyId !== null}
                       onClick={() => handleDiscard(recovery)}
                     >
-                      Discard…
+                      {t('mount.discard')}
                     </button>
                   )}
                 </div>
@@ -312,8 +302,10 @@ export default function SettingsMountsPanel() {
   }, [refreshMounts]);
 
   const { message } = App.useApp();
+  const { t, i18n } = useTranslation();
   const os = useMemo(() => detectOs(), []);
-  const revealLabel = useMemo(() => revealActionLabel(os), [os]);
+  // Recomputed per language so the label follows the UI language.
+  const revealLabel = useMemo(() => revealActionLabel(os), [os, i18n.language]);
   const now = useClock();
 
   // Busy is per row: unmounting one bucket must not freeze the others.
@@ -339,11 +331,11 @@ export default function SettingsMountsPanel() {
           await openPath(mount.localPath);
         } catch (e) {
           console.error('Failed to open mount folder:', e);
-          message.error('Could not open the folder');
+          message.error(t('sidebar.openFolderFailed'));
         }
       }
     },
-    [message]
+    [message, t]
   );
 
   const unmountOne = useCallback(
@@ -359,10 +351,13 @@ export default function SettingsMountsPanel() {
   const handleUnmount = useCallback(
     async (mount: MountInfo) => {
       const ok = await unmountOne(mount);
-      if (ok) message.success(`${mount.bucket} unmounted`);
-      else message.error(useMountStore.getState().error || `Could not unmount ${mount.bucket}`);
+      if (ok) message.success(t('sidebar.unmounted', { bucket: mount.bucket }));
+      else
+        message.error(
+          useMountStore.getState().error || t('sidebar.unmountFailed', { bucket: mount.bucket })
+        );
     },
-    [message, unmountOne]
+    [message, unmountOne, t]
   );
 
   const handleUnmountAll = useCallback(async () => {
@@ -370,13 +365,15 @@ export default function SettingsMountsPanel() {
     for (const mount of [...mounts]) {
       const ok = await unmountOne(mount);
       if (!ok) {
-        message.error(useMountStore.getState().error || `Could not unmount ${mount.bucket}`);
+        message.error(
+          useMountStore.getState().error || t('sidebar.unmountFailed', { bucket: mount.bucket })
+        );
         break;
       }
       done += 1;
     }
-    if (done > 0) message.success(`Unmounted ${done} ${done === 1 ? 'bucket' : 'buckets'}`);
-  }, [message, mounts, unmountOne]);
+    if (done > 0) message.success(t('mount.unmountedCount', { count: done }));
+  }, [message, mounts, unmountOne, t]);
 
   const anyBusy = busyIds.size > 0;
 
@@ -385,18 +382,18 @@ export default function SettingsMountsPanel() {
       <section className="settings-section">
         <div className="settings-section-head">
           <div>
-            <h3>Mounted buckets</h3>
-            <p>Buckets attached to this computer as local folders.</p>
+            <h3>{t('mount.mountedTitle')}</h3>
+            <p>{t('mount.mountedDesc')}</p>
           </div>
           <div className="settings-mount-head-actions">
             {mounts.length > 0 && (
               <span className="settings-pill">
-                {mounts.length} {mounts.length === 1 ? 'mount' : 'mounts'}
+                {t('mount.mountCount', { count: mounts.length })}
               </span>
             )}
             {mounts.length >= 2 && (
               <button className="btn btn-sm" onClick={handleUnmountAll} disabled={anyBusy}>
-                Unmount all
+                {t('mount.unmountAll')}
               </button>
             )}
           </div>
@@ -405,11 +402,8 @@ export default function SettingsMountsPanel() {
         {mounts.length === 0 ? (
           <div className="settings-account-empty">
             <LinkOutlined style={{ fontSize: 22, color: 'var(--text-subtle)' }} />
-            <strong>Nothing mounted</strong>
-            <span>
-              Open a bucket&rsquo;s menu in the sidebar and choose Mount as local drive. It shows up
-              here once it is live.
-            </span>
+            <strong>{t('mount.nothing')}</strong>
+            <span>{t('mount.nothingDesc')}</span>
           </div>
         ) : (
           <div className="settings-mount-list">

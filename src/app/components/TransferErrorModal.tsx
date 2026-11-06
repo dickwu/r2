@@ -1,5 +1,7 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
+import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { App } from 'antd';
 import { BugOutlined, CheckOutlined, CloseCircleFilled, CopyOutlined } from '@ant-design/icons';
@@ -31,7 +33,7 @@ const amountFormat = (kind: TransferFailureKind): ((n: number) => string) =>
   isCountKind(kind) ? formatCount : formatBytes;
 
 const subtitleFor = (failures: readonly TransferFailure[], focused: TransferFailure): string => {
-  if (failures.length > 1) return 'Select one to see why.';
+  if (failures.length > 1) return i18nT('transfer.selectOne');
   return focused.bucket ? `${focused.name} · ${focused.bucket}` : focused.name;
 };
 
@@ -88,6 +90,7 @@ function useDialogFocus(target: RefObject<HTMLElement | null>): void {
  */
 function TransferErrorDialog() {
   const { message } = App.useApp();
+  const { t } = useTranslation();
   const failures = useTransferErrorStore((s) => s.failures);
   const focused = useTransferErrorStore(selectFocusedFailure);
   const select = useTransferErrorStore((s) => s.select);
@@ -108,7 +111,7 @@ function TransferErrorDialog() {
       await navigator.clipboard.writeText(formatFailureDetails(focused, format));
       flashCopied(focused.id);
     } catch {
-      message.error('Could not copy — select the text instead');
+      message.error(t('transfer.copyFailed'));
     }
   };
 
@@ -141,20 +144,20 @@ function TransferErrorDialog() {
           <span className="left" style={{ display: 'flex', gap: 4 }}>
             <button type="button" className="btn btn-ghost" onClick={handleCopy}>
               {copied ? <CheckOutlined /> : <CopyOutlined />}
-              {copied ? 'Copied' : 'Copy details'}
+              {copied ? t('common.copied') : t('transfer.copyDetails')}
             </button>
             <button type="button" className="btn btn-ghost" onClick={handleReport}>
               <BugOutlined />
-              Report a problem
+              {t('report.trigger')}
             </button>
             {failures.length > 1 && (
               <button type="button" className="btn btn-ghost" onClick={clear}>
-                Clear all
+                {t('common.clearAll')}
               </button>
             )}
           </span>
           <button type="button" className="btn btn-primary" onClick={close}>
-            Close
+            {t('common.close')}
           </button>
         </>
       }

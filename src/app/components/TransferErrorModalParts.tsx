@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { Fragment, type KeyboardEvent } from 'react';
 import {
   KIND_LABEL,
@@ -24,6 +25,7 @@ interface FaultListProps {
  * one shown below. One Tab stop: the selected row (roving tabindex).
  */
 export function FaultList({ failures, focusedId, onSelect }: FaultListProps) {
+  const { t } = useTranslation();
   const rows = [...failures].reverse();
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -37,7 +39,12 @@ export function FaultList({ failures, focusedId, onSelect }: FaultListProps) {
   };
 
   return (
-    <div className="fault-list" role="listbox" aria-label="Failures" onKeyDown={handleKeyDown}>
+    <div
+      className="fault-list"
+      role="listbox"
+      aria-label={t('transfer.failures')}
+      onKeyDown={handleKeyDown}
+    >
       {rows.map((failure) => {
         const selected = failure.id === focusedId;
         return (
@@ -73,19 +80,20 @@ interface FaultLineProps {
  * the end and reports which items failed, so "stopped at" would be untrue.
  */
 export function FaultLine({ failure, format }: FaultLineProps) {
+  const { t } = useTranslation();
   const pct = failurePercent(failure.progress);
   const amount = formatFailureAmount(failure, format);
   if (pct === null || amount === null || isCountKind(failure.kind)) return null;
 
   return (
-    <div className="fault-line" role="img" aria-label={`Stopped at ${pct}%`}>
+    <div className="fault-line" role="img" aria-label={t('transfer.stoppedAtPct', { pct })}>
       <div className="fault-line-track">
         <div className="fault-line-fill" style={{ width: `${pct}%` }} />
       </div>
       <div className="fault-line-caption">
         <span>{amount}</span>
         <span className="fault-line-pct">
-          <em>stopped at</em>
+          <em>{t('transfer.stoppedAt')}</em>
           {pct}%
         </span>
       </div>
@@ -114,14 +122,15 @@ interface Fact {
 
 /** Where and when, in a fixed order, showing only the facts this record has. */
 export function FaultFacts({ failure }: { failure: TransferFailure }) {
+  const { t } = useTranslation();
   const facts: Fact[] = [
-    { label: 'Kind', value: KIND_LABEL[failure.kind] },
-    { label: 'Account', value: failure.account },
-    { label: 'Bucket', value: failure.bucket },
-    { label: 'Key', value: failure.key, mono: true },
-    { label: 'Stage', value: failure.stage },
+    { label: t('transfer.fact.kind'), value: KIND_LABEL[failure.kind] },
+    { label: t('transfer.fact.account'), value: failure.account },
+    { label: t('transfer.fact.bucket'), value: failure.bucket },
+    { label: t('transfer.fact.key'), value: failure.key, mono: true },
+    { label: t('transfer.fact.stage'), value: failure.stage },
     {
-      label: 'When',
+      label: t('transfer.fact.when'),
       value: formatFailureClock(failure.occurredAt),
       title: formatFailureTimestamp(failure.occurredAt),
     },

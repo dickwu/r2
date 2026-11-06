@@ -1,5 +1,7 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
+import { useTranslation } from 'react-i18next';
 import dynamic from 'next/dynamic';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { Alert, App, Button, Spin, type InputRef } from 'antd';
@@ -154,6 +156,7 @@ export default function Home() {
   const [searchTotalCount, setSearchTotalCount] = useState(0);
   const [isSearching, setIsSearching] = useState(false);
   const { message } = App.useApp();
+  const { t } = useTranslation();
   const sidebarStyle = useThemeStore((s) => s.sidebarStyle);
   const mountModalOpen = useMountStore((s) => s.modalOpen);
   const moveTaskModalOpen = useMoveStore((s) => s.modalOpen);
@@ -395,7 +398,7 @@ export default function Home() {
   useEffect(() => {
     if (error) {
       console.error('R2 fetch error:', error);
-      message.error(`Failed to load files: ${error.message}`);
+      message.error(i18nT('page.loadFailed', { error: error.message }));
     }
   }, [error, message]);
 
@@ -649,9 +652,9 @@ export default function Home() {
     try {
       await refreshSync();
       await refresh();
-      message.success('Files refreshed');
+      message.success(i18nT('page.refreshed'));
     } catch {
-      message.error('Failed to refresh files');
+      message.error(i18nT('page.refreshFailed'));
     }
   }, [refresh, refreshSync, message]);
 
@@ -660,11 +663,15 @@ export default function Home() {
       if (!config) return;
       try {
         await deleteObject(config, item.key);
-        message.success(`Deleted "${item.name}"`);
+        message.success(i18nT('page.deleted', { name: item.name }));
         await refresh();
       } catch (e) {
         console.error('Delete error:', e);
-        message.error(`Failed to delete: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        message.error(
+          i18nT('page.deleteFailed', {
+            error: e instanceof Error ? e.message : i18nT('common.unknownError'),
+          })
+        );
       }
     },
     [config, message, refresh]
@@ -674,12 +681,12 @@ export default function Home() {
     async (item: FileItem) => {
       if (!config) return;
       try {
-        message.loading({ content: 'Loading folder contents...', key: 'folder-delete' });
+        message.loading({ content: i18nT('page.loadingFolder'), key: 'folder-delete' });
         const objects = await listAllObjectsUnderPrefix(config, item.key);
         message.destroy('folder-delete');
 
         if (objects.length === 0) {
-          message.info('Folder is empty');
+          message.info(i18nT('page.folderEmpty'));
           return;
         }
 
@@ -690,7 +697,9 @@ export default function Home() {
         message.destroy('folder-delete');
         console.error('Folder delete error:', e);
         message.error(
-          `Failed to list folder contents: ${e instanceof Error ? e.message : 'Unknown error'}`
+          i18nT('page.listFailed', {
+            error: e instanceof Error ? e.message : i18nT('common.unknownError'),
+          })
         );
       }
     },
@@ -703,12 +712,12 @@ export default function Home() {
       if (!config || !item.isFolder || !isConfigReady) return;
 
       try {
-        message.loading({ content: 'Loading folder contents...', key: 'folder-download' });
+        message.loading({ content: i18nT('page.loadingFolder'), key: 'folder-download' });
         const objects = await listAllObjectsUnderPrefix(config, item.key);
         message.destroy('folder-download');
 
         if (objects.length === 0) {
-          message.info('Folder is empty');
+          message.info(i18nT('page.folderEmpty'));
           return;
         }
 
@@ -743,12 +752,14 @@ export default function Home() {
         // Start download queue via Rust backend
         setTimeout(() => startDownloadQueue(), 50);
 
-        message.success(`Queued ${objects.length} file(s) for download`);
+        message.success(i18nT('page.queuedDownloads', { count: objects.length }));
       } catch (e) {
         message.destroy('folder-download');
         console.error('Folder download error:', e);
         message.error(
-          `Failed to download folder: ${e instanceof Error ? e.message : 'Unknown error'}`
+          i18nT('page.downloadFolderFailed', {
+            error: e instanceof Error ? e.message : i18nT('common.unknownError'),
+          })
         );
       }
     },
@@ -766,12 +777,12 @@ export default function Home() {
 
     let finalKeys = currentSelection;
     if (hasFolders) {
-      message.loading({ content: 'Preparing files...', key: 'batch-prep' });
+      message.loading({ content: i18nT('page.preparing'), key: 'batch-prep' });
       finalKeys = await expandFolderKeys(currentSelection);
       message.destroy('batch-prep');
 
       if (finalKeys.size === 0) {
-        message.info('No files to delete');
+        message.info(i18nT('page.noDelete'));
         return;
       }
     }
@@ -799,12 +810,12 @@ export default function Home() {
 
     let finalKeys = currentSelection;
     if (hasFolders) {
-      message.loading({ content: 'Preparing files...', key: 'batch-prep' });
+      message.loading({ content: i18nT('page.preparing'), key: 'batch-prep' });
       finalKeys = await expandFolderKeys(currentSelection);
       message.destroy('batch-prep');
 
       if (finalKeys.size === 0) {
-        message.info('No files to move');
+        message.info(i18nT('page.noMove'));
         return;
       }
     }
@@ -874,7 +885,11 @@ export default function Home() {
         setTimeout(() => startDownloadQueue(), 50);
       } catch (e) {
         console.error('Download error:', e);
-        message.error(`Failed to download: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        message.error(
+          i18nT('page.downloadFailed', {
+            error: e instanceof Error ? e.message : i18nT('common.unknownError'),
+          })
+        );
       }
     },
     [config, isConfigReady, message, addDownloadTask, startDownloadQueue]
@@ -891,12 +906,12 @@ export default function Home() {
 
       let fileKeys = currentSelection;
       if (hasFolders) {
-        message.loading({ content: 'Preparing files...', key: 'batch-download-prep' });
+        message.loading({ content: i18nT('page.preparing'), key: 'batch-download-prep' });
         fileKeys = await expandFolderKeys(currentSelection);
         message.destroy('batch-download-prep');
 
         if (fileKeys.size === 0) {
-          message.info('No files to download');
+          message.info(i18nT('page.noDownload'));
           return;
         }
       }
@@ -905,7 +920,7 @@ export default function Home() {
       const filesToDownload = Array.from(fileKeys).filter((key) => !key.endsWith('/'));
 
       if (filesToDownload.length === 0) {
-        message.info('No files to download');
+        message.info(i18nT('page.noDownload'));
         return;
       }
 
@@ -941,11 +956,13 @@ export default function Home() {
       // Start download queue via Rust backend
       setTimeout(() => startDownloadQueue(), 50);
 
-      message.success(`Queued ${filesToDownload.length} file(s) for download`);
+      message.success(i18nT('page.queuedDownloads', { count: filesToDownload.length }));
     } catch (e) {
       console.error('Batch download error:', e);
       message.error(
-        `Failed to start downloads: ${e instanceof Error ? e.message : 'Unknown error'}`
+        i18nT('page.startDownloadsFailed', {
+          error: e instanceof Error ? e.message : i18nT('common.unknownError'),
+        })
       );
     }
   }, [
@@ -986,7 +1003,7 @@ export default function Home() {
         // 'dock' — TransferDock auto-shows when tasks are running; no extra state needed
       } else if (action.type === 'refresh') {
         handleRefresh();
-        pushToast('Files refreshed', 'success');
+        pushToast(i18nT('page.refreshed'), 'success');
       } else if (action.type === 'theme') {
         toggleTheme();
       } else if (action.type === 'view') {
@@ -1196,13 +1213,19 @@ export default function Home() {
                 showIcon
                 title={
                   error
-                    ? `${isPartial ? 'Some files are loaded' : 'Showing cached folder contents'}; refresh failed`
+                    ? isPartial
+                      ? t('page.partialRefreshFailed')
+                      : t('page.cachedRefreshFailed')
                     : isPartial
-                      ? 'Loading more files — sorting the files loaded so far'
-                      : 'Showing cached folder contents; checking for changes'
+                      ? t('page.loadingMore')
+                      : t('page.cachedChecking')
                 }
                 description={error?.message}
-                action={error ? <Button onClick={() => void refresh()}>Retry</Button> : undefined}
+                action={
+                  error ? (
+                    <Button onClick={() => void refresh()}>{t('page.retry')}</Button>
+                  ) : undefined
+                }
               />
             )}
 
@@ -1214,13 +1237,13 @@ export default function Home() {
                 <Alert
                   type="error"
                   showIcon
-                  title="Could not load this folder"
+                  title={t('page.folderLoadFailed')}
                   description={error.message}
-                  action={<Button onClick={() => void refresh()}>Retry</Button>}
+                  action={<Button onClick={() => void refresh()}>{t('page.retry')}</Button>}
                 />
               ) : isLoading || isSearching ? (
                 <div className="file-list-loading">
-                  <Spin description={isSearching ? 'Searching bucket...' : undefined} fullscreen />
+                  <Spin description={isSearching ? t('page.searching') : undefined} fullscreen />
                 </div>
               ) : filteredItems.length === 0 ? (
                 <EmptyState

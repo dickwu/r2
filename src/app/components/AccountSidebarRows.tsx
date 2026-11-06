@@ -5,6 +5,7 @@
  * Kept in a separate file to stay within 600-line limit per file.
  */
 
+import { useTranslation } from 'react-i18next';
 import { Dropdown, Tooltip } from 'antd';
 import type { MenuProps } from 'antd';
 import { DatabaseOutlined, MoreOutlined, RightOutlined } from '@ant-design/icons';
@@ -56,6 +57,7 @@ export function BucketRow({
   mountedPath,
   onOpenMounts,
 }: BucketRowProps) {
+  const { t } = useTranslation();
   return (
     <div
       className={['sb-bucket-row', active ? 'active' : ''].filter(Boolean).join(' ')}
@@ -65,24 +67,24 @@ export function BucketRow({
       <span className="sb-bucket-name">{bucketName}</span>
       {mountedPath ? (
         onOpenMounts ? (
-          <Tooltip title={`Mounted at ${mountedPath} — click to manage`} placement="right">
+          <Tooltip title={t('sidebar.mountedManage', { path: mountedPath })} placement="right">
             <button
               className="sb-bucket-mounted-btn"
               onClick={(e) => {
                 e.stopPropagation();
                 onOpenMounts();
               }}
-              aria-label={`Mounted at ${mountedPath}. Manage mounts`}
+              aria-label={t('sidebar.mountedManageAria', { path: mountedPath })}
             >
               <span className="sb-bucket-mounted" />
             </button>
           </Tooltip>
         ) : (
-          <Tooltip title={`Mounted at ${mountedPath}`} placement="right">
+          <Tooltip title={t('sidebar.mountedAt', { path: mountedPath })} placement="right">
             <span
               className="sb-bucket-mounted"
               role="img"
-              aria-label={`Mounted at ${mountedPath}`}
+              aria-label={t('sidebar.mountedAt', { path: mountedPath })}
             />
           </Tooltip>
         )
@@ -93,7 +95,7 @@ export function BucketRow({
           <button
             className="sb-icon-btn"
             onClick={(e) => e.stopPropagation()}
-            title="Bucket options"
+            title={t('sidebar.bucketOptions')}
             style={{ width: 20, height: 20, flexShrink: 0 }}
           >
             <MoreOutlined style={{ fontSize: 11 }} />
@@ -129,6 +131,7 @@ export function R2AccountChildren({
   getMountedPath,
   onOpenMounts,
 }: R2AccountChildrenProps) {
+  const { t } = useTranslation();
   const tokens = accountData.tokens;
 
   const filteredTokens = search
@@ -154,7 +157,7 @@ export function R2AccountChildren({
     return (
       <div className="sb-children">
         <div style={{ padding: '6px 10px', fontSize: 11, color: 'var(--text-subtle)' }}>
-          No tokens yet
+          {t('sidebar.noTokens')}
         </div>
       </div>
     );
@@ -186,13 +189,13 @@ export function R2AccountChildren({
                   minWidth: 0,
                 }}
               >
-                ↳ {token.name || 'Unnamed Token'}
+                ↳ {token.name || t('sidebar.unnamedToken')}
               </span>
               <Dropdown menu={{ items: getTokenContextMenu(token) }} trigger={['click']}>
                 <button
                   className="sb-icon-btn"
                   onClick={(e) => e.stopPropagation()}
-                  title="Token options"
+                  title={t('sidebar.tokenOptions')}
                   style={{ width: 20, height: 20, flexShrink: 0 }}
                 >
                   <MoreOutlined style={{ fontSize: 11 }} />
@@ -201,7 +204,7 @@ export function R2AccountChildren({
             </div>
             {tokenData.buckets.length === 0 ? (
               <div style={{ padding: '4px 10px 6px', fontSize: 11, color: 'var(--text-subtle)' }}>
-                No buckets
+                {t('sidebar.noBuckets')}
               </div>
             ) : (
               tokenData.buckets.map((bucket: Bucket) => (
@@ -248,6 +251,7 @@ export function NonR2AccountChildren({
   getMountedPath,
   onOpenMounts,
 }: NonR2AccountChildrenProps) {
+  const { t } = useTranslation();
   const buckets = (accountData.buckets as GenericBucket[]).filter((b) =>
     search
       ? b.name.toLowerCase().includes(search) ||
@@ -260,7 +264,7 @@ export function NonR2AccountChildren({
     return (
       <div className="sb-children">
         <div style={{ padding: '6px 10px', fontSize: 11, color: 'var(--text-subtle)' }}>
-          No buckets
+          {t('sidebar.noBuckets')}
         </div>
       </div>
     );
@@ -300,6 +304,7 @@ export function AccountRow({
   onToggle,
   contextMenu,
 }: AccountRowProps) {
+  const { t } = useTranslation();
   const account = accountData.account;
   const displayName = account.name || account.id.slice(0, 12) + '…';
   const bucketCount =
@@ -326,7 +331,7 @@ export function AccountRow({
           <button
             className="sb-icon-btn"
             onClick={(e) => e.stopPropagation()}
-            title="Account options"
+            title={t('sidebar.accountOptions')}
             style={{ width: 20, height: 20, flexShrink: 0 }}
           >
             <MoreOutlined style={{ fontSize: 11 }} />

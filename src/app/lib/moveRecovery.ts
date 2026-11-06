@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 import { invoke } from '@tauri-apps/api/core';
 import { useAccountStore } from '@/app/stores/accountStore';
 import type { MoveTask } from '@/app/stores/moveStore';
@@ -12,7 +13,6 @@ export async function resumeSavedMove(task: MoveTask): Promise<void> {
   const accounts = useAccountStore.getState().accounts;
   const sourceConfig = buildSourceConfigFromAccounts(task, accounts);
   const destConfig = buildDestinationConfigFromAccounts(task, accounts);
-  if (!sourceConfig || !destConfig)
-    throw new Error('Source and destination credentials are required to resume this move');
+  if (!sourceConfig || !destConfig) throw new Error(i18nT('errors.moveResumeCreds'));
   await invoke('resume_move', { taskId: task.id, sourceConfig, destConfig });
 }

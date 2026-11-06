@@ -1,5 +1,6 @@
 'use client';
 
+import { Trans, useTranslation } from 'react-i18next';
 import { useEffect, useCallback, useState, useRef } from 'react';
 import { App, Switch } from 'antd';
 import {
@@ -87,6 +88,7 @@ export default function UploadModal({
   onUploadComplete,
 }: UploadModalProps) {
   const { message } = App.useApp();
+  const { t } = useTranslation();
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const [renameMode, setRenameMode] = useState<RenameMode>('overwrite');
   const [over, setOver] = useState(false);
@@ -144,13 +146,13 @@ export default function UploadModal({
     if (!isOpen || dropQueue.length === 0 || isProcessingDropRef.current) return;
 
     if (!hasS3Credentials) {
-      message.warning('S3 credentials required. Please configure them in Account Settings.');
+      message.warning(t('uploadModal.needCreds'));
       onDropHandled();
       return;
     }
 
     if (hasActiveUploads) {
-      message.info('Uploads are currently in progress. Please wait before adding more files.');
+      message.info(t('uploadModal.busy'));
       onDropHandled();
       return;
     }
@@ -196,10 +198,10 @@ export default function UploadModal({
               });
               tasks.push({ filePath, fileName, fileSize, contentType: getContentType(fileName) });
             } catch (fileError) {
-              message.error(`Failed to read dropped file: ${filePath}`);
+              message.error(t('uploadModal.readFileFailed', { path: filePath }));
             }
           } else {
-            message.error(`Failed to read dropped folder: ${filePath}`);
+            message.error(t('uploadModal.readFolderFailed', { path: filePath }));
           }
         }
       }
@@ -227,7 +229,7 @@ export default function UploadModal({
 
   const handleSelectFiles = useCallback(async () => {
     if (!hasS3Credentials) {
-      message.warning('S3 credentials required. Please configure them in Account Settings.');
+      message.warning(t('uploadModal.needCreds'));
       return;
     }
     try {
@@ -250,7 +252,7 @@ export default function UploadModal({
 
   const handleSelectFolder = useCallback(async () => {
     if (!hasS3Credentials) {
-      message.warning('S3 credentials required. Please configure them in Account Settings.');
+      message.warning(t('uploadModal.needCreds'));
       return;
     }
     try {
@@ -293,13 +295,13 @@ export default function UploadModal({
         className="left"
         style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}
       >
-        {doneTasks}/{totalTasks} complete
+        {t('uploadModal.complete', { done: doneTasks, total: totalTasks })}
       </span>
       <button className="btn" onClick={handleClose} disabled={hasActiveUploads}>
-        Close
+        {t('common.close')}
       </button>
       <button className="btn btn-primary" onClick={handleClose} disabled={hasActiveUploads}>
-        <CheckOutlined /> Done
+        <CheckOutlined /> {t('common.done')}
       </button>
     </>
   );
@@ -309,8 +311,10 @@ export default function UploadModal({
       <Modal
         open={isOpen}
         onClose={handleClose}
-        title="Upload files"
-        subtitle={`Destination: ${uploadPath ? `/${uploadPath.replace(/\/+$/, '')}/` : '/ (root)'}`}
+        title={t('uploadModal.title')}
+        subtitle={t('uploadModal.destination', {
+          path: uploadPath ? `/${uploadPath.replace(/\/+$/, '')}/` : t('batchMove.root'),
+        })}
         icon={<UploadOutlined style={{ fontSize: 18 }} />}
         width={620}
         footer={footer}
@@ -341,7 +345,7 @@ export default function UploadModal({
                   color: 'var(--text)',
                 }}
               >
-                {uploadPath ? `/${uploadPath.replace(/\/+$/, '')}/` : '/ (root)'}
+                {uploadPath ? `/${uploadPath.replace(/\/+$/, '')}/` : t('batchMove.root')}
               </span>
             </div>
             <button
@@ -350,7 +354,7 @@ export default function UploadModal({
               onClick={() => setFolderPickerOpen(true)}
               disabled={hasActiveUploads}
             >
-              <SwapOutlined /> Change...
+              <SwapOutlined /> {t('batchMove.change')}
             </button>
           </div>
 
@@ -362,7 +366,7 @@ export default function UploadModal({
               disabled={hasActiveUploads}
             />
             <span style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>
-              Auto-rename to avoid collisions
+              {t('uploadModal.autoRename')}
             </span>
           </div>
         </div>
@@ -379,7 +383,7 @@ export default function UploadModal({
               color: 'var(--text-muted)',
             }}
           >
-            S3 credentials required for uploads — configure in Account Settings.
+            {t('uploadModal.credsBanner')}
           </div>
         )}
 
@@ -403,10 +407,15 @@ export default function UploadModal({
         >
           <FileAddOutlined style={{ fontSize: 28, color: 'var(--accent)' }} />
           <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text)' }}>
-            Drop files or folders here
+            {t('uploadModal.drop')}
           </div>
           <div style={{ fontSize: 12 }}>
-            or <span style={{ color: 'var(--accent)', textDecoration: 'underline' }}>browse</span>
+            <Trans
+              i18nKey="uploadModal.orBrowse"
+              components={{
+                u: <span style={{ color: 'var(--accent)', textDecoration: 'underline' }} />,
+              }}
+            />
             {' · '}
             <button
               className="btn"
@@ -417,7 +426,7 @@ export default function UploadModal({
               }}
               disabled={hasActiveUploads}
             >
-              <FolderOutlined /> Folder
+              <FolderOutlined /> {t('uploadModal.folder')}
             </button>
           </div>
         </div>
@@ -432,7 +441,7 @@ export default function UploadModal({
           onClose={() => setFolderPickerOpen(false)}
           selectedPath={uploadPath}
           onConfirm={setUploadPath}
-          title="Select Upload Folder"
+          title={t('uploadModal.selectFolder')}
         />
       )}
     </>

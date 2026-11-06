@@ -1,5 +1,7 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
+import { useTranslation } from 'react-i18next';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { App } from 'antd';
 import { BugOutlined } from '@ant-design/icons';
@@ -50,13 +52,9 @@ const explainCuts = async (
 ): Promise<void> => {
   if (result.descriptionTrimmed) {
     const copied = await copyToClipboard(description);
-    warn(
-      copied
-        ? 'The description was cut to fit the link — the full text is on your clipboard, paste it on GitHub.'
-        : 'The description was cut to fit the link — add the rest on GitHub.'
-    );
+    warn(copied ? i18nT('report.cutCopied') : i18nT('report.cutAddRest'));
   } else if (result.droppedLogLines > 0) {
-    warn(`${result.droppedLogLines} older log lines were left out to keep the link short.`);
+    warn(i18nT('report.droppedLines', { count: result.droppedLogLines }));
   }
 };
 
@@ -73,6 +71,7 @@ const currentContext = (): ReportContext => ({
  */
 function ReportProblemDialog() {
   const { message } = App.useApp();
+  const { t } = useTranslation();
   const close = useReportStore((s) => s.close);
   const prefill = useReportStore((s) => s.prefill);
   const [title, setTitle] = useState(() => clampPrefillText(prefill?.title, TITLE_MAX));
@@ -128,13 +127,13 @@ function ReportProblemDialog() {
       await openInBrowser(result.url);
     } catch (error) {
       console.error('[ReportProblem] could not open the browser:', error);
-      message.error('Could not open your browser. Please try again.');
+      message.error(t('report.browserFailed'));
       setOpening(false);
       return;
     }
 
     await explainCuts(result, description, (text) => message.warning(text, 8));
-    message.success('Issue draft opened on GitHub — review it there and press Submit');
+    message.success(t('report.opened'));
     close();
   };
 
@@ -142,30 +141,30 @@ function ReportProblemDialog() {
     ? [
         info.appVersion ? `v${info.appVersion}` : '',
         info.os,
-        `provider: ${info.provider}`,
+        t('report.provider', { provider: info.provider }),
         info.window,
       ].filter((part) => part !== '')
-    : ['Collecting app info…'];
+    : [t('report.collecting')];
 
   return (
     <Modal
       open
       onClose={close}
-      title="Report a problem"
-      subtitle="Opens a GitHub issue draft pre-filled with the details below. Review it there — nothing is filed until you press Submit."
+      title={t('report.trigger')}
+      subtitle={t('report.subtitle')}
       icon={<BugOutlined style={{ fontSize: 18 }} />}
       width={600}
       zIndex={ABOVE_ANTD_MODALS_Z_INDEX}
       footer={
         <>
           <span style={{ marginRight: 'auto', fontSize: 11.5, color: 'var(--text-subtle)' }}>
-            Needs a GitHub account
+            {t('report.needsGitHub')}
           </span>
           <button type="button" className="btn" onClick={close}>
-            Cancel
+            {t('common.cancel')}
           </button>
           <button type="submit" form={FORM_ID} className="btn btn-primary" disabled={!canSubmit}>
-            {opening ? 'Opening…' : 'Open on GitHub ↗'}
+            {opening ? t('report.opening') : t('report.openOnGitHub')}
           </button>
         </>
       }
@@ -179,14 +178,14 @@ function ReportProblemDialog() {
 
         <div className="field">
           <label className="field-label field-required" htmlFor="report-title">
-            Title
+            {t('report.titleLabel')}
           </label>
           <input
             id="report-title"
             className="input"
             value={title}
             maxLength={TITLE_MAX}
-            placeholder="Short summary, e.g. Upload stalls at 99%"
+            placeholder={t('report.titlePlaceholder')}
             onChange={(e) => setTitle(e.target.value)}
             autoFocus
           />
@@ -194,7 +193,7 @@ function ReportProblemDialog() {
 
         <div className="field">
           <label className="field-label field-required" htmlFor="report-description">
-            What went wrong?
+            {t('report.whatWentWrong')}
           </label>
           <textarea
             id="report-description"
@@ -202,7 +201,7 @@ function ReportProblemDialog() {
             rows={5}
             value={description}
             maxLength={DESCRIPTION_MAX}
-            placeholder="What you were doing, what you expected, and what happened instead"
+            placeholder={t('report.descriptionPlaceholder')}
             onChange={(e) => setDescription(e.target.value)}
           />
           <span className="field-hint">
@@ -217,11 +216,8 @@ function ReportProblemDialog() {
           aria-pressed={includeLog}
         >
           <span className="option-row-text">
-            <strong>Include recent app log</strong>
-            <span>
-              Warnings and errors from the last 5 minutes. Access keys and secrets are redacted;
-              file and folder names are not — review every line below before you send it.
-            </span>
+            <strong>{t('report.includeLog')}</strong>
+            <span>{t('report.includeLogHint')}</span>
           </span>
           <span className="toggle-switch">
             <span className="toggle-knob" />

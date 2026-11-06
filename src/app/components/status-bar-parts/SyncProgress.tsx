@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { Spin } from 'antd';
 import {
   CloudDownloadOutlined,
@@ -11,10 +12,10 @@ import { useSyncStore, SyncPhase } from '@/app/stores/syncStore';
 
 const phaseConfig: Record<SyncPhase, { icon: React.ReactNode; label: string }> = {
   idle: { icon: null, label: '' },
-  fetching: { icon: <CloudDownloadOutlined />, label: 'Fetching' },
-  storing: { icon: <DatabaseOutlined />, label: 'Storing' },
-  indexing: { icon: <BuildOutlined />, label: 'Indexing' },
-  complete: { icon: <CheckCircleOutlined />, label: 'Complete' },
+  fetching: { icon: <CloudDownloadOutlined />, label: 'status.phase.fetching' },
+  storing: { icon: <DatabaseOutlined />, label: 'status.phase.storing' },
+  indexing: { icon: <BuildOutlined />, label: 'status.phase.indexing' },
+  complete: { icon: <CheckCircleOutlined />, label: 'status.complete' },
 };
 
 interface SyncProgressProps {
@@ -28,6 +29,7 @@ export default function SyncProgress({ onClick }: SyncProgressProps) {
   const storedFiles = useSyncStore((state) => state.storedFiles);
   const totalFiles = useSyncStore((state) => state.totalFiles);
   const indexingProgress = useSyncStore((state) => state.indexingProgress);
+  const { t } = useTranslation();
 
   if (!isSyncing || phase === 'idle' || phase === 'complete') {
     return null;
@@ -38,20 +40,30 @@ export default function SyncProgress({ onClick }: SyncProgressProps) {
   // Calculate progress text based on phase
   let progressText = '';
   if (phase === 'fetching') {
-    progressText = `${processedFiles.toLocaleString()} files`;
+    progressText = t('status.files', {
+      count: processedFiles,
+      formatted: processedFiles.toLocaleString(),
+    });
   } else if (phase === 'storing') {
     const total = processedFiles || totalFiles;
     progressText =
       total > 0
-        ? `${storedFiles.toLocaleString()} / ${total.toLocaleString()} files`
-        : `${storedFiles.toLocaleString()} files`;
+        ? t('status.filesOf', {
+            count: total,
+            done: storedFiles.toLocaleString(),
+            total: total.toLocaleString(),
+          })
+        : t('status.files', { count: storedFiles, formatted: storedFiles.toLocaleString() });
   } else if (phase === 'indexing') {
     const { current, total } = indexingProgress;
     if (total > 0) {
       const percentage = Math.round((current / total) * 100);
       progressText = `${percentage}% (${current.toLocaleString()}/${total.toLocaleString()})`;
     } else if (totalFiles > 0) {
-      progressText = `${totalFiles.toLocaleString()} files`;
+      progressText = t('status.files', {
+        count: totalFiles,
+        formatted: totalFiles.toLocaleString(),
+      });
     }
   }
 
@@ -60,11 +72,11 @@ export default function SyncProgress({ onClick }: SyncProgressProps) {
       className="sync-progress"
       onClick={onClick}
       style={onClick ? { cursor: 'pointer' } : undefined}
-      title={onClick ? 'Click to view sync details' : undefined}
+      title={onClick ? t('status.syncDetailsHint') : undefined}
     >
       <Spin size="small" />
       <span className="sync-phase">
-        {icon} {label}
+        {icon} {t(label)}
       </span>
       {progressText && <span className="sync-count">{progressText}</span>}
     </span>

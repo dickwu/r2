@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useEffect } from 'react';
 import { Button, Select, Typography } from 'antd';
 import { StopOutlined } from '@ant-design/icons';
@@ -23,6 +24,7 @@ const CONCURRENCY_OPTIONS = Array.from(
 );
 
 export default function UploadTaskList() {
+  const { t } = useTranslation();
   const tasks = useUploadStore((s) => s.tasks);
   const startAllPending = useUploadStore((s) => s.startAllPending);
   const clearFinished = useUploadStore((s) => s.clearFinished);
@@ -52,10 +54,10 @@ export default function UploadTaskList() {
           marginBottom: 8,
         }}
       >
-        <Text strong>{tasks.length} file(s) selected</Text>
+        <Text strong>{t('upload.filesSelected', { count: tasks.length })}</Text>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            Parallel
+            {t('upload.parallel')}
           </Text>
           <Select
             size="small"
@@ -63,11 +65,11 @@ export default function UploadTaskList() {
             options={CONCURRENCY_OPTIONS}
             onChange={setMaxConcurrent}
             style={{ width: 64 }}
-            aria-label="Files uploaded in parallel"
+            aria-label={t('upload.parallelAria')}
           />
           {finishedCount > 0 && !hasActiveUploads && (
             <Button type="link" size="small" onClick={clearFinished}>
-              Clear finished
+              {t('common.clearFinished')}
             </Button>
           )}
         </div>

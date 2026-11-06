@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 /**
  * Work a restart would cut off: transfers in flight, uploads a mounted drive
  * still has to send, and editor changes not saved yet. The status bar's
@@ -30,8 +31,6 @@ export interface ActiveWork {
 export const hasActiveWork = (work: ActiveWork): boolean =>
   work.transfers > 0 || work.mountUploads > 0 || work.unsavedEditors > 0;
 
-const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
-
 /**
  * What a restart right now would cost, as a sentence ending:
  * "stop 2 transfers and lose your unsaved changes in the editor". '' when nothing.
@@ -39,14 +38,15 @@ const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 export const describeActiveWork = (work: ActiveWork): string => {
   const parts: string[] = [];
   if (work.transfers > 0) {
-    parts.push(`stop ${work.transfers} ${plural(work.transfers, 'transfer', 'transfers')}`);
+    parts.push(i18nT('updates.work.transfers', { count: work.transfers }));
   }
   if (work.mountUploads > 0) {
-    parts.push(
-      `stop ${work.mountUploads} ${plural(work.mountUploads, 'upload', 'uploads')} from a mounted drive`
-    );
+    parts.push(i18nT('updates.work.mountUploads', { count: work.mountUploads }));
   }
-  if (work.unsavedEditors > 0) parts.push('lose your unsaved changes in the editor');
+  if (work.unsavedEditors > 0) parts.push(i18nT('updates.work.unsavedEditors'));
   if (parts.length <= 1) return parts[0] ?? '';
-  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+  return i18nT('common.listAnd', {
+    head: parts.slice(0, -1).join(i18nT('common.listSeparator')),
+    last: parts[parts.length - 1],
+  });
 };

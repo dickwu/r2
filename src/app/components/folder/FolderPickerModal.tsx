@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useState } from 'react';
 import { Modal } from 'antd';
 import { useAntdModalFocusable } from '@/app/hooks/useAntdModalFocusable';
@@ -18,10 +19,11 @@ export default function FolderPickerModal({
   onClose,
   selectedPath,
   onConfirm,
-  title = 'Select Folder',
+  title,
 }: FolderPickerModalProps) {
   const [tempPath, setTempPath] = useState(selectedPath);
   const focusable = useAntdModalFocusable();
+  const { t } = useTranslation();
 
   const handleOk = () => {
     onConfirm(tempPath);
@@ -35,12 +37,12 @@ export default function FolderPickerModal({
 
   return (
     <Modal
-      title={title}
+      title={title ?? t('folderPicker.title')}
       open={open}
       onOk={handleOk}
       onCancel={handleCancel}
-      okText="Select"
-      cancelText="Cancel"
+      okText={t('common.select')}
+      cancelText={t('common.cancel')}
       width="90%"
       style={{ top: '3%' }}
       destroyOnHidden

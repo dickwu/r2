@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 /**
  * A transfer that stopped, as the failure modal shows it. Stores report these
  * when a task enters a failed state, rows and the dock show them again on
@@ -37,14 +38,29 @@ export interface TransferFailure {
   title?: string;
 }
 
+// Getters so the label follows the current UI language.
 export const KIND_LABEL: Record<TransferFailureKind, string> = {
-  upload: 'Upload',
-  download: 'Download',
-  move: 'Move',
-  rename: 'Rename',
-  sync: 'Sync',
-  delete: 'Delete',
-  mount: 'Mount transfer',
+  get upload() {
+    return i18nT('transfer.kind.upload');
+  },
+  get download() {
+    return i18nT('transfer.kind.download');
+  },
+  get move() {
+    return i18nT('transfer.kind.move');
+  },
+  get rename() {
+    return i18nT('transfer.kind.rename');
+  },
+  get sync() {
+    return i18nT('transfer.kind.sync');
+  },
+  get delete() {
+    return i18nT('transfer.kind.delete');
+  },
+  get mount() {
+    return i18nT('transfer.kind.mount');
+  },
 };
 
 /** Kinds whose progress counts items (objects deleted, files renamed) rather than bytes. */
@@ -97,18 +113,21 @@ export const formatFailureAmount = (
   // formatBytes has no unit for values below one byte.
   const total = Math.round(progress.total);
   const done = Math.round(Math.min(Math.max(progress.done, 0), progress.total));
-  const amount = `${format(done)} of ${format(total)}`;
-  if (!isCountKind(failure.kind)) return amount;
-  return `${amount} ${total === 1 ? 'item' : 'items'}`;
+  if (!isCountKind(failure.kind)) {
+    return i18nT('transfer.amountOf', { done: format(done), total: format(total) });
+  }
+  return i18nT('transfer.itemsOf', { count: total, done: format(done), total: format(total) });
 };
 
 /** What one record's header says: its own title, else "Upload failed". */
 export const singleFailureTitle = (failure: Pick<TransferFailure, 'kind' | 'title'>): string =>
-  failure.title ?? `${KIND_LABEL[failure.kind]} failed`;
+  failure.title ?? i18nT('transfer.kindFailed', { kind: KIND_LABEL[failure.kind] });
 
 /** Title for one failure: "Upload failed". For several: "3 failures". */
 export const failureTitle = (failures: readonly TransferFailure[]): string =>
-  failures.length === 1 ? singleFailureTitle(failures[0]) : `${failures.length} failures`;
+  failures.length === 1
+    ? singleFailureTitle(failures[0])
+    : i18nT('transfer.failureCount', { count: failures.length });
 
 /** The first non-empty line of a message — what a one-line list row has room for. */
 export const firstLine = (message: string): string =>

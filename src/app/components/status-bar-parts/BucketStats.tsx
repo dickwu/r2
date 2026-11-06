@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getBucketSummary } from '@/app/lib/r2cache';
@@ -23,6 +24,7 @@ interface BucketStatsProps {
  * sync), never a full-cache scan from the UI.
  */
 export default function BucketStats({ hasConfig, provider, accountId, bucket }: BucketStatsProps) {
+  const { t } = useTranslation();
   const backgroundSync = useSyncStore((state) => state.backgroundSync);
   const bucketSyncTimes = useSyncStore((state) => state.bucketSyncTimes);
 
@@ -55,9 +57,9 @@ export default function BucketStats({ hasConfig, provider, accountId, bucket }: 
   }
 
   const title = view.live
-    ? 'Counting bucket…'
+    ? t('status.countingBucket')
     : summary?.lastModified
-      ? `Newest object: ${summary.lastModified}`
+      ? t('status.newestObject', { date: summary.lastModified })
       : undefined;
 
   return (

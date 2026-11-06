@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { memo, useState } from 'react';
 import { Button, Progress, Typography, Space, Tooltip } from 'antd';
 import {
@@ -29,6 +30,7 @@ interface DownloadTaskItemProps {
 }
 
 function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
 
   async function handlePause() {
@@ -84,7 +86,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
       case 'pending':
         return (
           <Space size={4}>
-            <Tooltip title="Delete">
+            <Tooltip title={t('tasks.delete')}>
               <Button
                 type="text"
                 size="small"
@@ -98,7 +100,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
       case 'downloading':
         return (
           <Space size={4}>
-            <Tooltip title="Pause">
+            <Tooltip title={t('dock.pause')}>
               <Button
                 type="text"
                 size="small"
@@ -106,7 +108,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
                 onClick={handlePause}
               />
             </Tooltip>
-            <Tooltip title="Cancel">
+            <Tooltip title={t('common.cancel')}>
               <Button
                 type="text"
                 size="small"
@@ -120,7 +122,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
       case 'paused':
         return (
           <Space size={4}>
-            <Tooltip title="Resume">
+            <Tooltip title={t('dock.resume')}>
               <Button
                 type="text"
                 size="small"
@@ -129,7 +131,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
                 style={{ color: 'var(--color-success)' }}
               />
             </Tooltip>
-            <Tooltip title="Cancel">
+            <Tooltip title={t('common.cancel')}>
               <Button
                 type="text"
                 size="small"
@@ -138,7 +140,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
                 onClick={handleCancel}
               />
             </Tooltip>
-            <Tooltip title="Delete">
+            <Tooltip title={t('tasks.delete')}>
               <Button
                 type="text"
                 size="small"
@@ -152,7 +154,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
       case 'error':
         return (
           <Space size={4}>
-            <Tooltip title="Retry">
+            <Tooltip title={t('page.retry')}>
               <Button
                 type="text"
                 size="small"
@@ -161,7 +163,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
                 style={{ color: 'var(--color-link)' }}
               />
             </Tooltip>
-            <Tooltip title="Delete">
+            <Tooltip title={t('tasks.delete')}>
               <Button
                 type="text"
                 size="small"
@@ -175,7 +177,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
       case 'success':
         return (
           <Space size={4}>
-            <Tooltip title="Show in Folder">
+            <Tooltip title={t('tasks.showInFolder')}>
               <Button
                 type="text"
                 size="small"
@@ -183,7 +185,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
                 onClick={handleShowInFolder}
               />
             </Tooltip>
-            <Tooltip title="Delete">
+            <Tooltip title={t('tasks.delete')}>
               <Button
                 type="text"
                 size="small"
@@ -196,7 +198,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
         );
       case 'cancelled':
         return (
-          <Tooltip title="Delete">
+          <Tooltip title={t('tasks.delete')}>
             <Button
               type="text"
               size="small"
@@ -256,7 +258,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
           {task.speedHistory.length > 1 && (
             <div style={{ marginTop: 8 }}>
               <Text type="secondary" style={{ fontSize: 11 }}>
-                Speed history
+                {t('downloads.speedHistory')}
               </Text>
               <Sparkline
                 data={task.speedHistory}
@@ -268,7 +270,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
           )}
           {task.peakSpeed > 0 && (
             <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
-              Peak: {formatSpeed(task.peakSpeed)}
+              {t('downloads.peak', { speed: formatSpeed(task.peakSpeed) })}
             </Text>
           )}
         </div>
@@ -339,11 +341,13 @@ function showDownloadFailure(task: DownloadTask) {
 }
 
 function TaskDescription({ task }: { task: DownloadTask }) {
+  const { t } = useTranslation();
   switch (task.status) {
     case 'downloading': {
       const remainingBytes = Math.max(0, task.fileSize - task.downloadedBytes);
       const eta = task.speed > 0 ? remainingBytes / task.speed : 0;
-      const chunkLabel = task.chunks.length > 1 ? ` · ${task.chunks.length} chunks` : '';
+      const chunkLabel =
+        task.chunks.length > 1 ? ` · ${t('downloads.chunks', { count: task.chunks.length })}` : '';
       // Show "finishing..." when > 97% — the last few percent often take longer
       // due to file assembly, rename, and integrity checks
       const isFinishing = task.progress >= 97;
@@ -363,13 +367,13 @@ function TaskDescription({ task }: { task: DownloadTask }) {
                 {formatSpeed(task.speed)}
                 {chunkLabel}
                 <span style={{ marginLeft: 8, color: 'var(--color-text-tertiary)' }}>
-                  {isFinishing ? 'finishing...' : formatTimeLeft(eta)}
+                  {isFinishing ? t('downloads.finishing') : formatTimeLeft(eta)}
                 </span>
               </>
             ) : task.downloadedBytes > 0 ? (
               `${formatBytes(task.downloadedBytes)} / ${formatBytes(task.fileSize)}`
             ) : (
-              'Connecting...'
+              t('downloads.connecting')
             )}
           </Text>
         </div>
@@ -386,7 +390,10 @@ function TaskDescription({ task }: { task: DownloadTask }) {
             size={['100%', 8]}
           />
           <Text style={{ fontSize: 12, color: 'var(--color-warning, #faad14)' }}>
-            Paused - {formatBytes(task.downloadedBytes)} / {formatBytes(task.fileSize)}
+            {t('downloads.pausedAt', {
+              done: formatBytes(task.downloadedBytes),
+              total: formatBytes(task.fileSize),
+            })}
           </Text>
         </div>
       );
@@ -394,26 +401,26 @@ function TaskDescription({ task }: { task: DownloadTask }) {
     case 'error':
       return (
         <span className="task-failed">
-          Failed
+          {t('tasks.failed')}
           <button
             type="button"
             className="btn btn-sm btn-danger-ghost"
             onClick={() => showDownloadFailure(task)}
           >
-            Show error
+            {t('syncBanner.showError')}
           </button>
         </span>
       );
     case 'success':
       return (
         <Text style={{ fontSize: 12, color: 'var(--color-success)' }}>
-          Downloaded · {formatBytes(task.fileSize)}
+          {t('downloads.downloaded', { size: formatBytes(task.fileSize) })}
         </Text>
       );
     case 'cancelled':
       return (
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Cancelled
+          {t('tasks.cancelled')}
         </Text>
       );
     default:

@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { Modal, Button, Empty, App, Tabs, Badge, Popconfirm } from 'antd';
 import { invoke } from '@tauri-apps/api/core';
@@ -39,6 +40,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
   const [activeTab, setActiveTab] = useState<'pending' | 'finished'>('pending');
 
   const { message } = App.useApp();
+  const { t } = useTranslation();
 
   // Filter tasks by tab, sort downloading items to top
   const pendingTasks = useMemo(() => {
@@ -99,10 +101,10 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
       });
       // Reload immediately to update UI - don't rely solely on async event
       await reloadTasksFromDatabase();
-      message.success(`Paused ${count} downloads`);
+      message.success(t('downloads.paused', { count }));
     } catch (e) {
       console.error('Failed to pause downloads:', e);
-      message.error('Failed to pause downloads');
+      message.error(t('downloads.pauseFailed'));
     }
   };
 
@@ -115,7 +117,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
       ((storageConfig.provider === 'minio' || storageConfig.provider === 'rustfs') &&
         (!storageConfig.endpointHost || !storageConfig.endpointScheme))
     ) {
-      message.error('S3 credentials required to start downloads');
+      message.error(t('downloads.credsStart'));
       return;
     }
 
@@ -136,13 +138,13 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
       // Reload immediately to update UI - don't rely solely on async event
       await reloadTasksFromDatabase();
       if (resumedCount > 0) {
-        message.success(`Resumed ${resumedCount} downloads`);
+        message.success(t('downloads.resumed', { count: resumedCount }));
       } else {
-        message.success('Starting downloads');
+        message.success(t('downloads.starting'));
       }
     } catch (e) {
       console.error('Failed to start downloads:', e);
-      message.error('Failed to start downloads');
+      message.error(t('downloads.startFailed'));
     }
   };
 
@@ -155,7 +157,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
       ((storageConfig.provider === 'minio' || storageConfig.provider === 'rustfs') &&
         (!storageConfig.endpointHost || !storageConfig.endpointScheme))
     ) {
-      message.error('S3 credentials required to resume download');
+      message.error(t('downloads.credsResume'));
       return;
     }
 
@@ -180,7 +182,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
       // UI will update via download-status-changed events
     } catch (e) {
       console.error('Failed to resume download:', e);
-      message.error('Failed to resume download');
+      message.error(t('downloads.resumeFailed'));
     }
   };
 
@@ -197,7 +199,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
       await reloadTasksFromDatabase();
     } catch (e) {
       console.error('Failed to clear finished downloads:', e);
-      message.error('Failed to clear finished downloads');
+      message.error(t('downloads.clearFinishedFailed'));
     }
   };
 
@@ -215,7 +217,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
       await reloadTasksFromDatabase();
     } catch (e) {
       console.error('Failed to clear all downloads:', e);
-      message.error('Failed to clear all downloads');
+      message.error(t('downloads.clearAllFailed'));
     }
   };
 
@@ -252,7 +254,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
       key: 'pending',
       label: (
         <span>
-          Pending{' '}
+          {t('tasks.pending')}{' '}
           <Badge
             count={pendingTabCount}
             showZero
@@ -283,15 +285,13 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
             >
               {totalSpeed > 0 && <span>{formatBytes(totalSpeed)}/s</span>}
               <span>
-                {downloadingCount} downloading{pendingCount > 0 ? ` · ${pendingCount} queued` : ''}
+                {t('downloads.downloading', { count: downloadingCount })}
+                {pendingCount > 0 ? ` · ${t('transfer.queued', { count: pendingCount })}` : ''}
               </span>
               {etaSeconds > 0 && <span>{formatEta(etaSeconds)}</span>}
             </div>
           )}
-          {renderTaskList(
-            pendingTasks,
-            'No downloads queued. Select files and click Download to get started.'
-          )}
+          {renderTaskList(pendingTasks, t('downloads.emptyPending'))}
         </>
       ),
     },
@@ -299,7 +299,7 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
       key: 'finished',
       label: (
         <span>
-          Finished{' '}
+          {t('tasks.finished')}{' '}
           <Badge
             count={finishedCount}
             showZero
@@ -311,13 +311,13 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
           />
         </span>
       ),
-      children: renderTaskList(finishedTasks, 'No completed downloads'),
+      children: renderTaskList(finishedTasks, t('downloads.emptyFinished')),
     },
   ];
 
   return (
     <Modal
-      title="Downloads"
+      title={t('downloads.title')}
       open={modalOpen}
       onCancel={handleClose}
       destroyOnHidden={false}
@@ -328,37 +328,37 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
             <div style={{ display: 'flex', gap: 8 }}>
               {activeTab === 'finished' && finishedCount > 0 && (
                 <Button onClick={handleClearFinished} size="small">
-                  Clear Finished
+                  {t('common.clearFinished')}
                 </Button>
               )}
               {activeTab === 'pending' && (downloadingCount > 0 || pendingCount > 0) && (
                 <Button onClick={handlePauseAll} size="small">
-                  Pause All
+                  {t('tasks.pauseAll')}
                 </Button>
               )}
               {activeTab === 'pending' && (pausedCount > 0 || pendingCount > 0) && (
                 <Button onClick={handleStartAll} size="small" type="primary">
-                  {pausedCount > 0 ? 'Resume All' : 'Start All'}
+                  {pausedCount > 0 ? t('tasks.resumeAll') : t('tasks.startAll')}
                 </Button>
               )}
             </div>
             <div>
               {!hasActiveDownloads && tasks.length > 0 && (
                 <Popconfirm
-                  title="Clear all downloads"
-                  description="Are you sure you want to clear all download tasks?"
+                  title={t('downloads.clearAllTitle')}
+                  description={t('downloads.clearAllDesc')}
                   onConfirm={handleClearAll}
-                  okText="Clear All"
-                  cancelText="Cancel"
+                  okText={t('common.clearAll')}
+                  cancelText={t('common.cancel')}
                   okButtonProps={{ danger: true }}
                 >
                   <Button size="small" danger>
-                    Clear All
+                    {t('common.clearAll')}
                   </Button>
                 </Popconfirm>
               )}
               <Button onClick={handleClose} style={{ marginLeft: 8 }}>
-                Close
+                {t('common.close')}
               </Button>
             </div>
           </div>

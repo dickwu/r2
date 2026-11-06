@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { Modal, Button, Empty, App, Tabs, Badge, Popconfirm } from 'antd';
 import { invoke } from '@tauri-apps/api/core';
@@ -57,6 +58,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
   );
 
   const { message } = App.useApp();
+  const { t } = useTranslation();
 
   // In Progress: tasks actively transferring or waiting (excludes finishing)
   const inProgressTasks = useMemo(() => {
@@ -239,7 +241,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
     }
 
     if (pauseTargets.size === 0) {
-      message.info('No active moves to pause');
+      message.info(t('moves.noActive'));
       return;
     }
 
@@ -261,18 +263,18 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       await reloadTasksFromDatabase();
 
       if (failedQueues > 0) {
-        message.warning(`Paused ${pausedCount} moves (${failedQueues} queue(s) failed)`);
+        message.warning(t('moves.pausedPartial', { count: pausedCount, failed: failedQueues }));
         return;
       }
 
       if (pausedCount > 0) {
-        message.success(`Paused ${pausedCount} moves`);
+        message.success(t('moves.paused', { count: pausedCount }));
       } else {
-        message.info('No moves were paused');
+        message.info(t('moves.nonePaused'));
       }
     } catch (e) {
       console.error('Failed to pause moves:', e);
-      message.error('Failed to pause moves');
+      message.error(t('moves.pauseFailed'));
     }
   };
 
@@ -283,7 +285,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
         (task) => task.status === 'pending' || task.status === 'paused'
       );
       if (pendingTargets.length === 0) {
-        message.info('No queued moves to start');
+        message.info(t('moves.noQueued'));
         return;
       }
 
@@ -333,7 +335,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       }
 
       if (groups.size === 0) {
-        message.error('No source/destination credentials available. Please check your accounts.');
+        message.error(t('moves.noCreds'));
         return;
       }
 
@@ -386,19 +388,17 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
 
       if (failedGroups > 0) {
         message.warning(
-          `Started ${startedGroups} queue group(s), ${failedGroups} failed` +
-            (unresolvedTasks > 0 ? `, ${unresolvedTasks} task(s) missing credentials` : '')
+          t('moves.startedGroups', { started: startedGroups, failed: failedGroups }) +
+            (unresolvedTasks > 0 ? t('moves.missingCredsSuffix', { count: unresolvedTasks }) : '')
         );
       } else if (unresolvedTasks > 0) {
-        message.warning(
-          `Starting moves (${unresolvedTasks} task(s) skipped due to missing credentials)`
-        );
+        message.warning(t('moves.startingSkipped', { count: unresolvedTasks }));
       } else {
-        message.success('Starting moves');
+        message.success(t('moves.starting'));
       }
     } catch (e) {
       console.error('Failed to start moves:', e);
-      message.error('Failed to start moves');
+      message.error(t('moves.startFailed'));
     }
   };
 
@@ -425,16 +425,16 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       await reloadTasksFromDatabase();
 
       if (failedCount === targets.length) {
-        message.error('Failed to clear finished moves');
+        message.error(t('moves.clearFinishedFailed'));
         return;
       }
 
       if (failedCount > 0) {
-        message.warning(`Cleared finished moves (${failedCount} source queue(s) failed)`);
+        message.warning(t('moves.clearedFinishedPartial', { failed: failedCount }));
       }
     } catch (e) {
       console.error('Failed to clear finished moves:', e);
-      message.error('Failed to clear finished moves');
+      message.error(t('moves.clearFinishedFailed'));
     }
   };
 
@@ -453,22 +453,22 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       await reloadTasksFromDatabase();
 
       if (failedCount === targets.length) {
-        message.error('Failed to clear all moves');
+        message.error(t('moves.clearAllFailed'));
         return;
       }
 
       if (failedCount > 0) {
-        message.warning(`Cleared moves (${failedCount} source queue(s) failed)`);
+        message.warning(t('moves.clearedPartial', { failed: failedCount }));
       }
     } catch (e) {
       console.error('Failed to clear all moves:', e);
-      message.error('Failed to clear all moves');
+      message.error(t('moves.clearAllFailed'));
     }
   };
 
   const renderTaskList = (taskList: MoveTask[]) => {
     if (taskList.length === 0) {
-      return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No moves" />;
+      return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('moves.none')} />;
     }
     return (
       <Virtuoso
@@ -488,7 +488,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       key: 'pending',
       label: (
         <span>
-          In Progress{' '}
+          {t('tasks.inProgress')}{' '}
           <Badge
             count={inProgressTabCount}
             showZero
@@ -500,7 +500,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
           />
           {(downloadingCount > 0 || uploadingCount > 0) && (
             <span style={{ marginLeft: 6, color: 'var(--color-text-secondary)', fontSize: 12 }}>
-              ({downloadingCount} down, {uploadingCount} up)
+              ({t('transfer.downUp', { down: downloadingCount, up: uploadingCount })})
             </span>
           )}
         </span>
@@ -511,7 +511,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       key: 'finishing',
       label: (
         <span>
-          Finishing{' '}
+          {t('tasks.finishing')}{' '}
           <Badge
             count={finishingCount}
             showZero
@@ -529,7 +529,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       key: 'attention',
       label: (
         <span>
-          Needs attention <Badge count={attentionTasks.length} showZero size="small" />
+          {t('tasks.needsAttention')} <Badge count={attentionTasks.length} showZero size="small" />
         </span>
       ),
       children: renderTaskList(attentionTasks),
@@ -538,7 +538,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       key: 'finished',
       label: (
         <span>
-          Finished{' '}
+          {t('tasks.finished')}{' '}
           <Badge
             count={finishedCount}
             showZero
@@ -556,7 +556,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
 
   return (
     <Modal
-      title="Moves"
+      title={t('moves.title')}
       open={modalOpen}
       onCancel={handleClose}
       destroyOnHidden={false}
@@ -567,37 +567,37 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
             <div style={{ display: 'flex', gap: 8 }}>
               {activeTab === 'finished' && finishedCount > 0 && (
                 <Button onClick={handleClearFinished} size="small">
-                  Clear Finished
+                  {t('common.clearFinished')}
                 </Button>
               )}
               {activeTab === 'pending' && (activeCount > 0 || pendingCount > 0) && (
                 <Button onClick={handlePauseAll} size="small">
-                  Pause All
+                  {t('tasks.pauseAll')}
                 </Button>
               )}
               {activeTab === 'pending' && (pausedCount > 0 || pendingCount > 0) && (
                 <Button onClick={handleStartAll} size="small" type="primary">
-                  {pausedCount > 0 ? 'Resume All' : 'Start All'}
+                  {pausedCount > 0 ? t('tasks.resumeAll') : t('tasks.startAll')}
                 </Button>
               )}
             </div>
             <div>
               {!hasInProgressMoves && attentionTasks.length === 0 && tasks.length > 0 && (
                 <Popconfirm
-                  title="Clear all moves"
-                  description="Are you sure you want to clear all move tasks?"
+                  title={t('moves.clearAllTitle')}
+                  description={t('moves.clearAllDesc')}
                   onConfirm={handleClearAll}
-                  okText="Clear All"
-                  cancelText="Cancel"
+                  okText={t('common.clearAll')}
+                  cancelText={t('common.cancel')}
                   okButtonProps={{ danger: true }}
                 >
                   <Button size="small" danger>
-                    Clear All
+                    {t('common.clearAll')}
                   </Button>
                 </Popconfirm>
               )}
               <Button onClick={handleClose} style={{ marginLeft: 8 }}>
-                Close
+                {t('common.close')}
               </Button>
             </div>
           </div>

@@ -1,5 +1,7 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
+import { t as i18nT } from '@/i18n';
 import { useEffect, useMemo, useState } from 'react';
 import { Button, Typography } from 'antd';
 import { CloudDownloadOutlined, FileOutlined } from '@ant-design/icons';
@@ -51,6 +53,7 @@ export default function FileViewerPane({
   size,
   height,
 }: FileViewerPaneProps) {
+  const { t } = useTranslation();
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<PreviewDownloadProgress>({ loaded: 0, total: null });
@@ -79,7 +82,7 @@ export default function FileViewerPane({
       .catch((err: unknown) => {
         if (controller.signal.aborted || err instanceof PreviewFetchAbortedError) return;
         console.error('Failed to fetch preview:', err);
-        setError(err instanceof Error ? err.message : 'Failed to load file');
+        setError(err instanceof Error ? err.message : i18nT('preview.loadFailed'));
       });
 
     return () => controller.abort();
@@ -103,7 +106,7 @@ export default function FileViewerPane({
       <div className="flex flex-col items-center justify-center gap-2 py-10">
         <FileOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
         <Text type="secondary" style={{ fontSize: 12.5 }}>
-          No preview available for this file type
+          {t('preview.noPreviewType')}
         </Text>
       </div>
     );
@@ -114,10 +117,10 @@ export default function FileViewerPane({
       <div className="flex flex-col items-center justify-center gap-3 py-10">
         <FileOutlined style={{ fontSize: 40, color: 'var(--accent)' }} />
         <Text type="secondary" style={{ fontSize: 12.5 }}>
-          Previewing downloads the whole file ({formatBytes(size ?? 0)}) into memory
+          {t('preview.largeHint', { size: formatBytes(size ?? 0) })}
         </Text>
         <Button icon={<CloudDownloadOutlined />} onClick={() => setConfirmedUrl(url)}>
-          Load preview
+          {t('preview.loadPreview')}
         </Button>
       </div>
     );

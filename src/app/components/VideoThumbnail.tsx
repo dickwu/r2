@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useEffect, useState } from 'react';
 import { PlaySquareOutlined, LoadingOutlined } from '@ant-design/icons';
 import { isFfmpegMissing, useVideoThumbnail } from '@/app/hooks/useVideoThumbnail';
@@ -28,6 +29,7 @@ export default function VideoThumbnail({ src, alt, object }: VideoThumbnailProps
   });
   const [playerFailed, setPlayerFailed] = useState(false);
   const [playerReady, setPlayerReady] = useState(false);
+  const { t } = useTranslation();
 
   useEffect(() => {
     setPlayerFailed(false);
@@ -35,12 +37,12 @@ export default function VideoThumbnail({ src, alt, object }: VideoThumbnailProps
   }, [src]);
 
   if (error && playerFailed) {
-    const reason = isFfmpegMissing() ? 'ffmpeg not found' : null;
+    const reason = isFfmpegMissing() ? t('preview.ffmpegMissing') : null;
     return (
       <div
         ref={containerRef}
         className="video-thumbnail-fallback"
-        title={reason ? 'No preview: ffmpeg not found' : 'No preview available'}
+        title={reason ? t('preview.noPreviewReason', { reason }) : t('preview.noPreview')}
       >
         <PlaySquareOutlined className="video-icon" />
         {reason && <span className="video-thumbnail-note">{reason}</span>}

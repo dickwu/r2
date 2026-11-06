@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Spin, Typography } from 'antd';
 import {
@@ -39,6 +40,7 @@ interface MoveProgressProps {
 }
 
 export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProgressProps) {
+  const { t } = useTranslation();
   const tasks = useMoveStore((state) => state.tasks);
   const activeCount = useMoveStore(selectActiveCount);
   const attentionCount = useMoveStore(selectAttentionCount);
@@ -174,18 +176,18 @@ export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProg
         setModalOpen(true);
       }}
       style={{ cursor: 'pointer' }}
-      title="Click to view move details"
+      title={t('transfer.moveDetailsHint')}
     >
       {hasActiveMoves ? (
         <>
           <Spin size="small" />
           <SwapOutlined style={{ marginLeft: 4 }} />
           <Text style={{ marginLeft: 4 }}>
-            {activeCount}/{MAX_CONCURRENT_MOVES} moving
+            {t('transfer.moving', { active: activeCount, max: MAX_CONCURRENT_MOVES })}
             {(downloadingCount > 0 || uploadingCount > 0) &&
-              ` (${downloadingCount} down, ${uploadingCount} up)`}
-            {finishingCount > 0 && `, ${finishingCount} finishing`}
-            {pendingCount > 0 && ` (${pendingCount} queued)`}
+              ` (${t('transfer.downUp', { down: downloadingCount, up: uploadingCount })})`}
+            {finishingCount > 0 && `, ${t('transfer.finishing', { count: finishingCount })}`}
+            {pendingCount > 0 && ` (${t('transfer.queued', { count: pendingCount })})`}
           </Text>
           {syncSpeed > 0 && (
             <Text type="secondary" style={{ marginLeft: 4 }}>
@@ -198,29 +200,31 @@ export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProg
         <>
           <SwapOutlined style={{ color: '#52c41a' }} />
           <Text style={{ marginLeft: 4 }}>
-            {finishingCount} finishing
-            {pendingCount > 0 && ` (${pendingCount} queued)`}
+            {t('transfer.finishing', { count: finishingCount })}
+            {pendingCount > 0 && ` (${t('transfer.queued', { count: pendingCount })})`}
           </Text>
         </>
       ) : attentionCount > 0 ? (
         <>
           <PauseCircleOutlined style={{ color: '#faad14' }} />
-          <Text style={{ marginLeft: 4 }}>{attentionCount} need attention</Text>
+          <Text style={{ marginLeft: 4 }}>
+            {t('transfer.needAttention', { count: attentionCount })}
+          </Text>
         </>
       ) : pendingCount > 0 ? (
         <>
           <ClockCircleOutlined style={{ color: '#1677ff' }} />
-          <Text style={{ marginLeft: 4 }}>{pendingCount} queued</Text>
+          <Text style={{ marginLeft: 4 }}>{t('transfer.queued', { count: pendingCount })}</Text>
         </>
       ) : pausedCount > 0 ? (
         <>
           <PauseCircleOutlined style={{ color: '#faad14' }} />
-          <Text style={{ marginLeft: 4 }}>{pausedCount} paused</Text>
+          <Text style={{ marginLeft: 4 }}>{t('transfer.paused', { count: pausedCount })}</Text>
         </>
       ) : (
         <>
           <CheckCircleOutlined style={{ color: '#52c41a' }} />
-          <Text style={{ marginLeft: 4 }}>{finishedCount} moved</Text>
+          <Text style={{ marginLeft: 4 }}>{t('transfer.moved', { count: finishedCount })}</Text>
         </>
       )}
     </span>

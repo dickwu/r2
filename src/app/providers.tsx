@@ -7,11 +7,42 @@ import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { useThemeStore, initializeTheme } from '@/app/stores/themeStore';
 import { applyAccent } from '@/app/lib/accent';
 import { installSessionLog } from '@/app/lib/diagnostics/installSessionLog';
+import { useLanguageStore } from '@/app/stores/languageStore';
+import { applyLocale } from '@/i18n';
+import { systemLocale, type SupportedLocale } from '@/i18n/locales';
+import enUS from 'antd/locale/en_US';
+import zhCN from 'antd/locale/zh_CN';
+import hiIN from 'antd/locale/hi_IN';
+import esES from 'antd/locale/es_ES';
+import jaJP from 'antd/locale/ja_JP';
+import type { Locale } from 'antd/es/locale';
+
+const ANTD_LOCALES: Record<SupportedLocale, Locale> = {
+  en: enUS,
+  'zh-CN': zhCN,
+  hi: hiIN,
+  es: esES,
+  ja: jaJP,
+};
 
 export default function Providers({ children }: { children: React.ReactNode }) {
   const currentTheme = useThemeStore((s) => s.theme);
   const accent = useThemeStore((s) => s.accent);
+  const languagePref = useLanguageStore((s) => s.language);
   const [mounted, setMounted] = useState(false);
+  const [osLocale, setOsLocale] = useState<SupportedLocale>(() => systemLocale());
+  const locale: SupportedLocale = languagePref === 'system' ? osLocale : languagePref;
+
+  // Re-read the OS language when the webview reports a change.
+  useEffect(() => {
+    const onChange = () => setOsLocale(systemLocale());
+    window.addEventListener('languagechange', onChange);
+    return () => window.removeEventListener('languagechange', onChange);
+  }, []);
+
+  useEffect(() => {
+    applyLocale(locale);
+  }, [locale]);
 
   useEffect(() => {
     // Record warnings and errors from the first render on, so a problem
@@ -56,6 +87,7 @@ export default function Providers({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
       <ConfigProvider
+        locale={ANTD_LOCALES[locale]}
         theme={{
           algorithm: currentTheme === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm,
           token: {

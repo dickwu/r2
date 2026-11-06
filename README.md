@@ -1,3 +1,5 @@
+**English** | [简体中文](./README.zh-CN.md) | [हिन्दी](./README.hi.md) | [Español](./README.es.md) | [日本語](./README.ja.md)
+
 # Cloudflare R2 Client — Free, Open-Source S3 Desktop GUI for macOS, Windows, and Linux
 
 **Cloudflare R2 Client** is a free, open-source desktop application (GUI) for managing **Cloudflare R2**, **AWS S3**, **MinIO**, and **RustFS** object storage from your Mac, Windows PC, or Linux machine. Browse buckets, upload and download files with resumable multipart transfers, preview images / videos / PDFs / code, manage multiple accounts and tokens, and move files between providers — all from a fast native app built with **Tauri**, **Next.js**, and **React**.
@@ -45,7 +47,7 @@
   - Works with all providers (R2, AWS S3, MinIO, RustFS)
   - macOS mounts instantly with no extra software; Linux needs nfs-utils; Windows support is planned
   - All mounts are removed automatically when the app quits
-- Video thumbnail generation (via ffmpeg)
+- Video thumbnail generation (ffmpeg is bundled with the app — no separate install needed)
 - Copy signed or public URLs to clipboard (provider-aware link building)
 - Dark mode support
 - Auto-updates
@@ -77,20 +79,9 @@ Download the latest release for your platform from the [Releases page](https://g
 - [Bun](https://bun.sh/) - Package manager
 - [Rust](https://www.rust-lang.org/tools/install) - For Tauri backend
 
-### Optional (for video thumbnails)
+### Video thumbnails
 
-- [ffmpeg](https://ffmpeg.org/) - Required for video thumbnail generation
-
-```bash
-# macOS
-brew install ffmpeg
-
-# Ubuntu/Debian
-sudo apt install ffmpeg
-
-# Windows (via Chocolatey)
-choco install ffmpeg
-```
+No extra setup is needed: the app ships with its own bundled ffmpeg for video thumbnail generation, so you do not need to install ffmpeg on your system.
 
 ## macOS Installation
 

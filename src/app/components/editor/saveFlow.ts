@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 /**
  * Saving an edited object without clobbering someone else's write.
  *
@@ -78,15 +79,15 @@ export function classifySaveError(error: unknown): SaveErrorKind {
 export function describeSaveError(kind: SaveErrorKind, message: string): string {
   switch (kind) {
     case 'conflict':
-      return 'The file changed on the server after you opened it.';
+      return i18nT('editor.saveError.conflict');
     case 'forbidden':
-      return 'These credentials cannot write to this bucket (they may be read-only). Your changes are still in the editor.';
+      return i18nT('editor.saveError.forbidden');
     case 'too-large':
-      return 'The server refused the file as too large.';
+      return i18nT('editor.saveError.tooLarge');
     case 'condition-unsupported':
-      return 'The server does not support conditional writes.';
+      return i18nT('editor.saveError.conditionUnsupported');
     case 'timeout':
-      return 'The server did not confirm the save in time. It may still complete; saving again checks the server version first.';
+      return i18nT('editor.saveError.timeout');
     default:
       return message;
   }
@@ -119,7 +120,7 @@ export async function saveWithVersionCheck(
   const checkMs = deps.timeouts?.checkMs ?? SAVE_TIMEOUTS.checkMs;
   const uploadMs = deps.timeouts?.uploadMs ?? SAVE_TIMEOUTS.uploadMs;
   const upload = (ifMatch?: string) =>
-    withTimeout(deps.upload(ifMatch), uploadMs, 'The upload did not finish in time');
+    withTimeout(deps.upload(ifMatch), uploadMs, i18nT('editor.saveError.uploadTimeout'));
 
   if (guard) {
     let serverEtag: string | null = null;
@@ -127,7 +128,7 @@ export async function saveWithVersionCheck(
       serverEtag = await withTimeout(
         deps.currentEtag(),
         checkMs,
-        'The version check did not finish in time'
+        i18nT('editor.saveError.checkTimeout')
       );
     } catch {
       // Unknown, or too slow: the conditional PUT below still protects the write.

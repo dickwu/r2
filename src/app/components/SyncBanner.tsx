@@ -1,5 +1,7 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
+import { useTranslation } from 'react-i18next';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CloudDownloadOutlined,
@@ -57,6 +59,7 @@ function useRollingRate(counter: number, windowMs = RATE_WINDOW_MS): number {
  * sees real progress even when the total is unknown.
  */
 export default function SyncBanner({ onShowDetails }: SyncBannerProps) {
+  const { t } = useTranslation();
   // Legacy phase-based sync (blocking full sync from older code paths).
   const isSyncing = useSyncStore((s) => s.isSyncing);
   const phase = useSyncStore((s) => s.phase);
@@ -179,9 +182,9 @@ export default function SyncBanner({ onShowDetails }: SyncBannerProps) {
           type="button"
           className="sync-banner-link"
           onClick={onShowDetails}
-          title="Open full sync details"
+          title={t('syncBanner.openDetails')}
         >
-          Details
+          {t('common.details')}
         </button>
       )}
     </div>
@@ -250,8 +253,11 @@ function computeBannerView(args: {
   if (lingering) {
     const fetched = backgroundSync.objectsFetched;
     return {
-      title: 'Synced',
-      detail: fetched > 0 ? `${fetched.toLocaleString()} objects up to date` : 'Bucket up to date',
+      title: i18nT('syncBanner.synced'),
+      detail:
+        fetched > 0
+          ? i18nT('syncBanner.objectsUpToDate', { n: fetched.toLocaleString() })
+          : i18nT('syncBanner.bucketUpToDate'),
       icon: <CheckCircleOutlined />,
       tone: 'progress',
     };
@@ -261,11 +267,11 @@ function computeBannerView(args: {
   // opens the failure modal, which does.
   if (backgroundSync.error) {
     return {
-      title: 'Sync failed',
+      title: i18nT('syncBanner.failed'),
       detail: null,
       action: (
         <button type="button" className="sync-banner-link" onClick={showSyncFailure}>
-          Show error
+          {i18nT('syncBanner.showError')}
         </button>
       ),
       icon: <WarningOutlined />,
@@ -277,9 +283,11 @@ function computeBannerView(args: {
   if (legacyActive) {
     if (phase === 'fetching') {
       const label =
-        processedFiles > 0 ? `${processedFiles.toLocaleString()} found` : 'Listing bucket…';
+        processedFiles > 0
+          ? i18nT('syncBanner.found', { n: processedFiles.toLocaleString() })
+          : i18nT('syncBanner.listingBucket');
       return {
-        title: 'Fetching files',
+        title: i18nT('syncBanner.fetching'),
         detail: withRate(label, legacyRate),
         icon: <CloudDownloadOutlined />,
         tone: 'progress',
@@ -290,9 +298,9 @@ function computeBannerView(args: {
       const label =
         total > 0
           ? `${storedFiles.toLocaleString()} / ${total.toLocaleString()}`
-          : `${storedFiles.toLocaleString()} cached`;
+          : i18nT('syncBanner.cached', { n: storedFiles.toLocaleString() });
       return {
-        title: 'Caching',
+        title: i18nT('syncBanner.caching'),
         detail: withRate(label, legacyRate),
         icon: <DatabaseOutlined />,
         tone: 'progress',
@@ -302,10 +310,13 @@ function computeBannerView(args: {
       const { current, total } = indexingProgress;
       const label =
         total > 0
-          ? `${current.toLocaleString()} / ${total.toLocaleString()} folders`
-          : `${current.toLocaleString()} folders`;
+          ? i18nT('syncBanner.foldersOf', {
+              n: current.toLocaleString(),
+              total: total.toLocaleString(),
+            })
+          : i18nT('syncBanner.folders', { n: current.toLocaleString() });
       return {
-        title: 'Indexing',
+        title: i18nT('syncBanner.indexing'),
         detail: withRate(label, legacyRate),
         icon: <BuildOutlined />,
         tone: 'progress',
@@ -313,14 +324,14 @@ function computeBannerView(args: {
     }
     if (phase === 'complete') {
       return {
-        title: 'Up to date',
+        title: i18nT('syncBanner.upToDate'),
         detail: null,
         icon: <CheckCircleOutlined />,
         tone: 'progress',
       };
     }
     return {
-      title: 'Preparing sync',
+      title: i18nT('syncBanner.preparing'),
       detail: null,
       icon: <CloudDownloadOutlined />,
       tone: 'progress',
@@ -337,25 +348,31 @@ function computeBannerView(args: {
   // last fetch sample and read misleadingly.
   if (est && est > 0 && fetched >= est) {
     return {
-      title: 'Finalizing sync',
-      detail: `${fetched.toLocaleString()} objects ready`,
+      title: i18nT('syncBanner.finalizing'),
+      detail: i18nT('syncBanner.objectsReady', { n: fetched.toLocaleString() }),
       icon: <DatabaseOutlined />,
       tone: 'progress',
     };
   }
 
   if (est && est > 0) {
-    const label = `${fetched.toLocaleString()} / ~${est.toLocaleString()} objects`;
+    const label = i18nT('syncBanner.objectsOf', {
+      n: fetched.toLocaleString(),
+      total: est.toLocaleString(),
+    });
     return {
-      title: 'Syncing bucket',
+      title: i18nT('syncBanner.syncing'),
       detail: withRate(label, bgRate),
       icon: <CloudDownloadOutlined />,
       tone: 'progress',
     };
   }
-  const label = fetched > 0 ? `${fetched.toLocaleString()} objects fetched` : 'Listing objects…';
+  const label =
+    fetched > 0
+      ? i18nT('syncBanner.objectsFetched', { n: fetched.toLocaleString() })
+      : i18nT('syncBanner.listingObjects');
   return {
-    title: 'Syncing bucket',
+    title: i18nT('syncBanner.syncing'),
     detail: withRate(label, bgRate),
     icon: <CloudDownloadOutlined />,
     tone: 'progress',

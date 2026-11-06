@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { App, Button, Segmented, Spin, Tooltip } from 'antd';
@@ -107,6 +108,7 @@ export default function FileEditorModal({
   onClose,
 }: FileEditorModalProps) {
   const { message, modal } = App.useApp();
+  const { t, i18n } = useTranslation();
   const { fullscreen, toggle } = useFullscreen({ active: true, shortcut: false });
   const key = file.key;
   const configRef = useRef(config);
@@ -158,7 +160,10 @@ export default function FileEditorModal({
         if (controller.signal.aborted) return;
         if (bytes.length > editability.maxBytes) {
           setLoadError(
-            `This file is ${formatBytes(bytes.length)}. The editor opens files up to ${formatBytes(editability.maxBytes)}; download it to edit it locally.`
+            t('editor.modal.tooLargeOpen', {
+              size: formatBytes(bytes.length),
+              max: formatBytes(editability.maxBytes),
+            })
           );
           return;
         }
@@ -187,7 +192,7 @@ export default function FileEditorModal({
         setLoaded(next);
       } catch (error) {
         if (!controller.signal.aborted) {
-          setLoadError(`The file could not be downloaded for editing: ${errorMessage(error)}`);
+          setLoadError(t('editor.modal.loadFailed', { error: errorMessage(error) }));
         }
       }
     })();
@@ -239,13 +244,13 @@ export default function FileEditorModal({
     bytes: Uint8Array;
     body: string | Uint8Array;
   }> => {
-    if (!loaded) throw new Error('The file is still loading');
+    if (!loaded) throw new Error(t('editor.modal.stillLoading'));
     if (editability.mode === 'image') {
-      if (!imageRef.current) throw new Error('The image is still loading');
+      if (!imageRef.current) throw new Error(t('editor.modal.imageStillLoading'));
       const bytes = await withTimeout(
         imageRef.current.encode(),
         SAVE_TIMEOUTS.encodeMs,
-        'The image could not be encoded in time'
+        t('editor.modal.encodeTimeout')
       );
       return { bytes, body: bytes };
     }
@@ -266,10 +271,10 @@ export default function FileEditorModal({
       const { bytes } = await editedFile();
       const outcome = await downloadEditedCopy(key, bytes, tauriCopyDependencies);
       if (outcome.status === 'saved') {
-        message.success(`Saved a copy as ${localFileName(outcome.path)}`);
+        message.success(t('editor.modal.copySaved', { name: localFileName(outcome.path) }));
       }
     } catch (error) {
-      message.error(`The copy was not saved: ${errorMessage(error)}`);
+      message.error(t('editor.modal.copyFailed', { error: errorMessage(error) }));
     } finally {
       setCopying(false);
     }
@@ -294,7 +299,10 @@ export default function FileEditorModal({
         if (bytes.length > editability.maxBytes) {
           fail(
             'size',
-            `The edited file is ${formatBytes(bytes.length)}, over the ${formatBytes(editability.maxBytes)} the editor saves.`
+            t('editor.modal.tooLargeSave', {
+              size: formatBytes(bytes.length),
+              max: formatBytes(editability.maxBytes),
+            })
           );
           return;
         }
@@ -316,16 +324,15 @@ export default function FileEditorModal({
         );
 
         if (outcome.status === 'conflict') {
-          fail('conflict', 'Not saved: the file changed on the server.');
+          fail('conflict', t('editor.modal.notSavedConflict'));
           if (confirming.current) return;
           confirming.current = true;
           modal.confirm({
-            title: 'This file changed on the server',
-            content:
-              'A newer version was saved after you opened it. Overwrite it with your version, or keep editing; you can download your version as a copy first.',
-            okText: 'Overwrite',
+            title: t('editor.modal.conflictTitle'),
+            content: t('editor.modal.conflictContent'),
+            okText: t('transferAcct.overwrite'),
             okButtonProps: { danger: true },
-            cancelText: 'Keep editing',
+            cancelText: t('editor.modal.keepEditing'),
             onOk: () => {
               void save(true);
             },
@@ -346,7 +353,7 @@ export default function FileEditorModal({
           (await withTimeout(
             currentEtag(),
             SAVE_TIMEOUTS.checkMs,
-            'The new version could not be read in time'
+            t('editor.modal.readTimeout')
           ).catch(() => null));
         if (editability.mode === 'image') {
           setImageRevision((r) => r + 1);
@@ -355,7 +362,7 @@ export default function FileEditorModal({
         }
         setSavedSize(bytes.length);
         setStatus({ tone: 'saved', at: new Date() });
-        message.success('Changes saved');
+        message.success(t('editor.modal.saved'));
         onSaved(bytes.length);
       } catch (error) {
         fail('other', errorMessage(error));
@@ -398,17 +405,17 @@ export default function FileEditorModal({
     if (confirming.current) return;
     confirming.current = true;
     modal.confirm({
-      title: 'Discard unsaved changes?',
-      content: `Your changes to ${file.name} have not been saved. To keep them without saving to the bucket, use Download copy first.`,
-      okText: 'Discard changes',
+      title: t('editor.modal.discardTitle'),
+      content: t('editor.modal.discardContent', { name: file.name }),
+      okText: t('editor.modal.discardOk'),
       okButtonProps: { danger: true },
-      cancelText: 'Keep editing',
+      cancelText: t('editor.modal.keepEditing'),
       onOk: onClose,
       afterClose: () => {
         confirming.current = false;
       },
     });
-  }, [saving, onClose, modal, file.name]);
+  }, [saving, onClose, modal, file.name, t]);
 
   const formatDocument = async () => {
     if (editability.mode !== 'text') return;
@@ -417,12 +424,12 @@ export default function FileEditorModal({
         const formatted = JSON.stringify(JSON.parse(text), null, jsonIndent(text));
         setText(formatted + (text.endsWith('\n') ? '\n' : ''));
       } catch {
-        message.warning('Fix the JSON error before formatting.');
+        message.warning(t('editor.modal.fixJson'));
       }
       return;
     }
     const formatted = await codeRef.current?.format();
-    if (!formatted) message.info('There is no formatter for this language.');
+    if (!formatted) message.info(t('editor.modal.noFormatter'));
   };
 
   // Space for the document: the window, less the header, toolbar and footer.
@@ -435,10 +442,12 @@ export default function FileEditorModal({
     if (editability.mode !== 'text') return null;
     const formatButton = (
       <Tooltip
-        title={editability.flavor === 'json' ? 'Reformat with the same indent' : 'Format document'}
+        title={
+          editability.flavor === 'json' ? t('editor.modal.reformat') : t('editor.modal.formatDoc')
+        }
       >
         <Button size="small" icon={<FormatPainterOutlined />} onClick={formatDocument}>
-          Format
+          {t('editor.modal.format')}
         </Button>
       </Tooltip>
     );
@@ -450,9 +459,9 @@ export default function FileEditorModal({
             value={markdownView}
             onChange={setMarkdownView}
             options={[
-              { value: 'write', label: 'Write' },
-              { value: 'split', label: 'Side by side' },
-              { value: 'preview', label: 'Preview' },
+              { value: 'write', label: t('editor.modal.write') },
+              { value: 'split', label: t('editor.modal.split') },
+              { value: 'preview', label: t('editor.modal.preview') },
             ]}
           />
         );
@@ -465,7 +474,9 @@ export default function FileEditorModal({
               role="status"
             >
               {jsonError ? <WarningFilled /> : <CheckCircleFilled />}
-              <span className="file-editor-status-text">{jsonError ?? 'Valid JSON'}</span>
+              <span className="file-editor-status-text">
+                {jsonError ?? t('editor.modal.validJson')}
+              </span>
             </span>
           </>
         );
@@ -478,12 +489,14 @@ export default function FileEditorModal({
                 value={tableReason ? 'text' : delimitedView}
                 onChange={setDelimitedView}
                 options={[
-                  { value: 'table', label: 'Table', disabled: !!tableReason },
-                  { value: 'text', label: 'Text' },
+                  { value: 'table', label: t('editor.modal.table'), disabled: !!tableReason },
+                  { value: 'text', label: t('editor.modal.text') },
                 ]}
               />
             </Tooltip>
-            {delimiter === ';' && <span className="file-editor-hint">Separated by semicolons</span>}
+            {delimiter === ';' && (
+              <span className="file-editor-hint">{t('editor.modal.semicolons')}</span>
+            )}
           </>
         );
       default:
@@ -518,7 +531,7 @@ export default function FileEditorModal({
           }}
         >
           <Spin />
-          <span className="file-editor-status">Downloading the latest version</span>
+          <span className="file-editor-status">{t('editor.modal.downloadingLatest')}</span>
         </div>
       );
     }
@@ -566,7 +579,7 @@ export default function FileEditorModal({
     }
     return (
       <div className="file-editor">
-        <div className="file-editor-toolbar" role="toolbar" aria-label="Editor tools">
+        <div className="file-editor-toolbar" role="toolbar" aria-label={t('editor.modal.tools')}>
           {toolbar}
         </div>
         {content}
@@ -586,7 +599,7 @@ export default function FileEditorModal({
   const statusLine = (() => {
     switch (status.tone) {
       case 'saving':
-        return <span className="file-editor-status">Saving…</span>;
+        return <span className="file-editor-status">{t('accountEdit.saving')}</span>;
       case 'error':
         return (
           <span className="file-editor-status is-error" role="alert">
@@ -598,7 +611,7 @@ export default function FileEditorModal({
                 onClick={() => void downloadCopy()}
                 disabled={copying}
               >
-                Download edited copy
+                {t('editor.modal.downloadEdited')}
               </button>
             )}
           </span>
@@ -607,8 +620,12 @@ export default function FileEditorModal({
         if (!dirty) {
           return (
             <span className="file-editor-status">
-              Saved at{' '}
-              {status.at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
+              {t('editor.modal.savedAt', {
+                time: status.at.toLocaleTimeString(i18n.language, {
+                  hour: 'numeric',
+                  minute: '2-digit',
+                }),
+              })}
             </span>
           );
         }
@@ -616,7 +633,7 @@ export default function FileEditorModal({
       default:
         return dirty ? (
           <span className="file-editor-status">
-            <span className="file-editor-dirty" aria-hidden /> Unsaved changes
+            <span className="file-editor-dirty" aria-hidden /> {t('editor.modal.unsaved')}
           </span>
         ) : null;
     }
@@ -627,8 +644,8 @@ export default function FileEditorModal({
       ? '⌘S'
       : 'Ctrl+S';
 
-  const copyLabel = copying ? 'Saving copy…' : 'Download edited copy';
-  const copyHint = 'Save what you see to a file on this computer. Nothing is uploaded.';
+  const copyLabel = copying ? t('editor.modal.savingCopy') : t('editor.modal.downloadEdited');
+  const copyHint = t('editor.modal.copyHint');
   const footer = (
     <>
       <span className="left" aria-live="polite">
@@ -637,15 +654,15 @@ export default function FileEditorModal({
       {readOnly ? (
         <>
           <button className="btn" onClick={requestClose} disabled={saving}>
-            Close
+            {t('common.close')}
           </button>
-          <Tooltip title={`These credentials cannot write here. Try saving again (${saveKey})`}>
+          <Tooltip title={t('editor.modal.readOnlyHint', { key: saveKey })}>
             <button
               className="btn"
               onClick={() => void save()}
               disabled={!dirty || saving || !loaded}
             >
-              {saving ? 'Saving…' : 'Try saving again'}
+              {saving ? t('accountEdit.saving') : t('editor.modal.trySaveAgain')}
             </button>
           </Tooltip>
           <Tooltip title={copyHint}>
@@ -666,22 +683,22 @@ export default function FileEditorModal({
               className="btn"
               onClick={() => void downloadCopy()}
               disabled={!loaded || copying}
-              aria-label="Download edited copy"
+              aria-label={t('editor.modal.downloadEdited')}
             >
               <DownloadOutlined />
-              {copying ? 'Saving copy…' : 'Download copy'}
+              {copying ? t('editor.modal.savingCopy') : t('editor.modal.downloadCopy')}
             </button>
           </Tooltip>
           <button className="btn" onClick={requestClose} disabled={saving}>
-            Close
+            {t('common.close')}
           </button>
-          <Tooltip title={`Save changes (${saveKey})`}>
+          <Tooltip title={t('editor.modal.saveWithKey', { key: saveKey })}>
             <button
               className="btn btn-primary"
               onClick={() => void save()}
               disabled={!dirty || saving || !loaded}
             >
-              {saving ? 'Saving…' : 'Save changes'}
+              {saving ? t('accountEdit.saving') : t('config.saveChanges')}
             </button>
           </Tooltip>
         </>
@@ -696,7 +713,9 @@ export default function FileEditorModal({
       title={
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
           {file.name}
-          {dirty && <span className="file-editor-dirty" role="img" aria-label="Unsaved changes" />}
+          {dirty && (
+            <span className="file-editor-dirty" role="img" aria-label={t('editor.modal.unsaved')} />
+          )}
         </span>
       }
       subtitle={subtitle || undefined}

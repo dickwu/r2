@@ -1,4 +1,5 @@
 import { formatBytes } from '@/app/utils/formatBytes';
+import { t as i18nT } from '@/i18n';
 import type { DownloadProgress, UpdateInfo, UpdatePhase } from '@/app/stores/updateStore';
 import { shortFailure, type UpdateFailure } from './updateErrors';
 
@@ -36,7 +37,10 @@ export const progressPercent = (progress: DownloadProgress): number | null =>
 /** "4.2 MB of 9.8 MB", or "4.2 MB" without a size. */
 export const progressAmount = (progress: DownloadProgress): string =>
   progress.total
-    ? `${formatBytes(progress.downloaded)} of ${formatBytes(progress.total)}`
+    ? i18nT('transfer.amountOf', {
+        done: formatBytes(progress.downloaded),
+        total: formatBytes(progress.total),
+      })
     : formatBytes(progress.downloaded);
 
 export const updateStatusView = ({
@@ -54,7 +58,7 @@ export const updateStatusView = ({
     case 'checking':
       if (manualCheck) {
         return {
-          label: 'Checking for updates…',
+          label: i18nT('updates.status.checking'),
           hint: have,
           tone: 'muted',
           action: 'none',
@@ -64,8 +68,8 @@ export const updateStatusView = ({
       break;
     case 'upToDate':
       return {
-        label: "You're up to date",
-        hint: `${have} is the newest version`,
+        label: i18nT('updates.status.upToDate'),
+        hint: i18nT('updates.status.upToDateHint', { version: have }),
         tone: 'default',
         action: 'check',
         spinning: false,
@@ -73,8 +77,11 @@ export const updateStatusView = ({
     case 'downloading': {
       const percent = progressPercent(progress);
       return {
-        label: percent === null ? 'Downloading update…' : `Downloading update ${percent}%`,
-        hint: `Downloading ${offered}. Click to see progress.`,
+        label:
+          percent === null
+            ? i18nT('updates.status.downloading')
+            : i18nT('updates.status.downloadingPercent', { percent }),
+        hint: i18nT('updates.status.downloadingHint', { version: offered }),
         tone: 'accent',
         action: 'openDialog',
         spinning: false,
@@ -82,7 +89,7 @@ export const updateStatusView = ({
     }
     case 'installing':
       return {
-        label: 'Installing update…',
+        label: i18nT('updates.status.installing'),
         hint: offered,
         tone: 'accent',
         action: 'openDialog',
@@ -90,15 +97,15 @@ export const updateStatusView = ({
       };
     case 'readyToRestart':
       return {
-        label: 'Restart to update',
-        hint: `${offered} is installed. Restart R2 Client to start using it.`,
+        label: i18nT('updates.status.restartToUpdate'),
+        hint: i18nT('updates.status.restartHint', { version: offered }),
         tone: 'accent',
         action: 'openDialog',
         spinning: false,
       };
     case 'restarting':
       return {
-        label: 'Restarting…',
+        label: i18nT('updates.status.restarting'),
         hint: offered,
         tone: 'muted',
         action: 'none',
@@ -119,8 +126,8 @@ export const updateStatusView = ({
 
   if (update) {
     return {
-      label: `${offered} available`,
-      hint: `You have ${have}. See what changed and update.`,
+      label: i18nT('updates.status.available', { version: offered }),
+      hint: i18nT('updates.status.availableHint', { version: have }),
       tone: 'accent',
       action: 'openDialog',
       spinning: false,
@@ -128,7 +135,7 @@ export const updateStatusView = ({
   }
   return {
     label: currentVersion ? `v${currentVersion}` : 'v…',
-    hint: 'Check for updates',
+    hint: i18nT('settings.checkForUpdates'),
     tone: 'default',
     action: 'check',
     spinning: false,

@@ -1,5 +1,6 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
 import { useEffect, useState } from 'react';
 import { Spin, Typography } from 'antd';
 import { FileTextOutlined } from '@ant-design/icons';
@@ -91,7 +92,7 @@ export default function TextViewer({
       .catch((err: unknown) => {
         if (controller.signal.aborted || err instanceof PreviewFetchAbortedError) return;
         console.error('Failed to fetch text:', err);
-        const errorMsg = err instanceof Error ? err.message : 'Failed to load file';
+        const errorMsg = err instanceof Error ? err.message : i18nT('preview.loadFailed');
         setError(errorMsg);
         onLoadError?.(err instanceof Error ? err : new Error(errorMsg));
       })

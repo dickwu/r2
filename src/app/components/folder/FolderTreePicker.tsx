@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { Input, Tree, Space, Tag, Switch } from 'antd';
 import {
@@ -24,6 +25,7 @@ export interface FolderTreePickerProps {
 }
 
 export default function FolderTreePicker({ selectedPath, onSelect }: FolderTreePickerProps) {
+  const { t } = useTranslation();
   const [loading, setLoading] = useState(false);
   const [directoryNodes, setDirectoryNodes] = useState<DirectoryNode[]>([]);
   const [showMetadata, setShowMetadata] = useState(true);
@@ -111,13 +113,16 @@ export default function FolderTreePicker({ selectedPath, onSelect }: FolderTreeP
     const rootTitle =
       rootMetadata && showMetadata ? (
         <>
-          <span style={{ flex: 1 }}>/ (root)</span>
+          <span style={{ flex: 1 }}>{t('rename.root')}</span>
           <Tag color="blue" style={{ fontSize: 11, marginLeft: 'auto' }}>
-            {rootMetadata.totalFileCount} files · {formatBytes(rootMetadata.totalSize)}
+            {t('folderPicker.filesSize', {
+              count: rootMetadata.totalFileCount,
+              size: formatBytes(rootMetadata.totalSize),
+            })}
           </Tag>
         </>
       ) : (
-        '/ (root)'
+        t('rename.root')
       );
 
     const rootNode: DataNode = {
@@ -148,7 +153,10 @@ export default function FolderTreePicker({ selectedPath, onSelect }: FolderTreeP
           <>
             <span style={{ flex: 1, fontWeight: isMatch ? 600 : 400 }}>{folderName}</span>
             <Tag color="blue" style={{ fontSize: 11, marginLeft: 'auto' }}>
-              {metadata.totalFileCount} files · {formatBytes(metadata.totalSize)}
+              {t('folderPicker.filesSize', {
+                count: metadata.totalFileCount,
+                size: formatBytes(metadata.totalSize),
+              })}
             </Tag>
           </>
         ) : (
@@ -171,7 +179,7 @@ export default function FolderTreePicker({ selectedPath, onSelect }: FolderTreeP
     }
 
     return root;
-  }, [directoryNodes, showMetadata, searchValue]);
+  }, [directoryNodes, showMetadata, searchValue, t]);
 
   // Selected key for tree
   const selectedKey =
@@ -197,15 +205,15 @@ export default function FolderTreePicker({ selectedPath, onSelect }: FolderTreeP
       <div style={{ marginBottom: 12 }}>
         <div style={{ marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
           <FolderAddOutlined style={{ color: '#1890ff' }} />
-          <span style={{ fontSize: 14, fontWeight: 500 }}>Custom Path</span>
+          <span style={{ fontSize: 14, fontWeight: 500 }}>{t('folderPicker.customPath')}</span>
           {isCustomPath && (
             <Tag color="green" style={{ fontSize: 11, marginLeft: 4 }}>
-              New folder
+              {t('empty.newFolder')}
             </Tag>
           )}
         </div>
         <Input
-          placeholder="Enter custom path (e.g., photos/2024/january)"
+          placeholder={t('folderPicker.customPathPlaceholder')}
           value={customPath || selectedPath}
           onChange={(e) => handleCustomPathChange(e.target.value)}
           allowClear
@@ -218,7 +226,7 @@ export default function FolderTreePicker({ selectedPath, onSelect }: FolderTreeP
           }}
         />
         <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>
-          Type a path to create new folders, or select from existing folders below
+          {t('folderPicker.customPathHint')}
         </div>
       </div>
 
@@ -230,17 +238,17 @@ export default function FolderTreePicker({ selectedPath, onSelect }: FolderTreeP
           alignItems: 'center',
         }}
       >
-        <span style={{ fontSize: 14, fontWeight: 500 }}>Existing Folders</span>
+        <span style={{ fontSize: 14, fontWeight: 500 }}>{t('folderPicker.existing')}</span>
         <Space size="small">
           <InfoCircleOutlined style={{ color: '#999', fontSize: 12 }} />
-          <span style={{ fontSize: 12, color: '#666' }}>Show details</span>
+          <span style={{ fontSize: 12, color: '#666' }}>{t('folderPicker.showDetails')}</span>
           <Switch size="small" checked={showMetadata} onChange={setShowMetadata} />
         </Space>
       </div>
 
       {/* Search Input */}
       <Input
-        placeholder="Search folders..."
+        placeholder={t('folderPicker.search')}
         prefix={<SearchOutlined style={{ color: '#999' }} />}
         value={searchValue}
         onChange={(e) => setSearchValue(e.target.value)}
@@ -260,9 +268,13 @@ export default function FolderTreePicker({ selectedPath, onSelect }: FolderTreeP
         }}
       >
         {loading ? (
-          <div style={{ textAlign: 'center', padding: 20, color: '#999' }}>Loading folders...</div>
+          <div style={{ textAlign: 'center', padding: 20, color: '#999' }}>
+            {t('folderPicker.loading')}
+          </div>
         ) : treeData.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: 20, color: '#999' }}>No folders found</div>
+          <div style={{ textAlign: 'center', padding: 20, color: '#999' }}>
+            {t('folderPicker.none')}
+          </div>
         ) : (
           <Tree
             showIcon

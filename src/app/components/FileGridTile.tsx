@@ -1,4 +1,5 @@
 import { memo, useCallback, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   FolderOutlined,
   FileImageOutlined,
@@ -221,6 +222,7 @@ const FileGridTile = memo(function FileGridTile({
   onFolderRename,
   onFocus,
 }: FileGridTileProps) {
+  const { t } = useTranslation();
   const listedType = useListedObjectType(storageConfig, item);
   // An extension-less object is shown as what its Content-Type says it is.
   const ext = listedType?.extension || getExt(item.name);
@@ -262,9 +264,9 @@ const FileGridTile = memo(function FileGridTile({
   let dateText = '';
   if (item.isFolder) {
     if (folderMetadata?.size === 'loading') sizeText = '...';
-    else if (folderMetadata?.size === 'error') sizeText = 'Error';
+    else if (folderMetadata?.size === 'error') sizeText = t('common.error');
     else if (typeof folderMetadata?.size === 'number') sizeText = formatBytes(folderMetadata.size);
-    else sizeText = 'Folder';
+    else sizeText = t('files.folder');
   } else {
     sizeText = formatBytes(item.size || 0);
     if (item.lastModified) dateText = dayjs(item.lastModified).format('MM-DD');

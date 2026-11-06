@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 /** A JSON syntax error: the offset of the offending character, and what was expected there. */
 export interface JsonSyntaxError {
   offset: number;
@@ -26,7 +27,7 @@ export function findJsonSyntaxError(text: string): JsonSyntaxError | null {
     throw new Stop(at, reason);
   };
   const describe = (at: number) =>
-    at >= text.length ? 'the end of the document' : `"${text[at]}"`;
+    at >= text.length ? i18nT('editor.json.endOfDocument') : `"${text[at]}"`;
 
   const skipSpace = () => {
     while (i < text.length) {
@@ -38,7 +39,8 @@ export function findJsonSyntaxError(text: string): JsonSyntaxError | null {
 
   const literal = (word: string) => {
     for (let k = 0; k < word.length; k++) {
-      if (text[i + k] !== word[k]) fail(`Unexpected ${describe(i + k)}`, i + k);
+      if (text[i + k] !== word[k])
+        fail(i18nT('editor.json.unexpected', { found: describe(i + k) }), i + k);
     }
     i += word.length;
   };
@@ -55,33 +57,34 @@ export function findJsonSyntaxError(text: string): JsonSyntaxError | null {
         const e = text[i + 1];
         if (e === 'u') {
           for (let k = 2; k < 6; k++) {
-            if (!/[0-9a-fA-F]/.test(text[i + k] ?? '')) fail('Invalid \\u escape', i + k);
+            if (!/[0-9a-fA-F]/.test(text[i + k] ?? ''))
+              fail(i18nT('editor.json.invalidUnicodeEscape'), i + k);
           }
           i += 6;
         } else if (e !== undefined && '"\\/bfnrt'.includes(e)) {
           i += 2;
         } else {
-          fail('Invalid escape in a string', i + 1);
+          fail(i18nT('editor.json.invalidEscape'), i + 1);
         }
         continue;
       }
-      if (c.charCodeAt(0) < 0x20) fail('Line breaks and control characters must be escaped');
+      if (c.charCodeAt(0) < 0x20) fail(i18nT('editor.json.controlChars'));
       i++;
     }
-    fail('Unterminated string');
+    fail(i18nT('editor.json.unterminatedString'));
   };
 
   const digits = () => {
     const start = i;
     while (i < text.length && text[i] >= '0' && text[i] <= '9') i++;
-    if (i === start) fail(`Expected a digit, found ${describe(i)}`);
+    if (i === start) fail(i18nT('editor.json.expectedDigit', { found: describe(i) }));
   };
 
   const number = () => {
     if (text[i] === '-') i++;
     if (text[i] === '0') {
       i++;
-      if (text[i] >= '0' && text[i] <= '9') fail('Numbers cannot have leading zeros');
+      if (text[i] >= '0' && text[i] <= '9') fail(i18nT('editor.json.leadingZeros'));
     } else {
       digits();
     }
@@ -106,7 +109,7 @@ export function findJsonSyntaxError(text: string): JsonSyntaxError | null {
     if (c === 'f') return literal('false');
     if (c === 'n') return literal('null');
     if (c === '-' || (c >= '0' && c <= '9')) return number();
-    fail(`Expected a value, found ${describe(i)}`);
+    fail(i18nT('editor.json.expectedValue', { found: describe(i) }));
   };
 
   const object = () => {
@@ -121,13 +124,13 @@ export function findJsonSyntaxError(text: string): JsonSyntaxError | null {
       if (text[i] !== '"') {
         fail(
           text[i] === '}'
-            ? 'Trailing comma before "}"'
-            : `Expected a property name in double quotes, found ${describe(i)}`
+            ? i18nT('editor.json.trailingCommaObject')
+            : i18nT('editor.json.expectedPropertyName', { found: describe(i) })
         );
       }
       string();
       skipSpace();
-      if (text[i] !== ':') fail(`Expected ":", found ${describe(i)}`);
+      if (text[i] !== ':') fail(i18nT('editor.json.expectedColon', { found: describe(i) }));
       i++;
       value();
       skipSpace();
@@ -139,7 +142,7 @@ export function findJsonSyntaxError(text: string): JsonSyntaxError | null {
         i++;
         return;
       }
-      fail(`Expected "," or "}", found ${describe(i)}`);
+      fail(i18nT('editor.json.expectedCommaOrBrace', { found: describe(i) }));
     }
   };
 
@@ -152,7 +155,7 @@ export function findJsonSyntaxError(text: string): JsonSyntaxError | null {
     }
     for (;;) {
       skipSpace();
-      if (text[i] === ']') fail('Trailing comma before "]"');
+      if (text[i] === ']') fail(i18nT('editor.json.trailingCommaArray'));
       value();
       skipSpace();
       if (text[i] === ',') {
@@ -163,14 +166,14 @@ export function findJsonSyntaxError(text: string): JsonSyntaxError | null {
         i++;
         return;
       }
-      fail(`Expected "," or "]", found ${describe(i)}`);
+      fail(i18nT('editor.json.expectedCommaOrBracket', { found: describe(i) }));
     }
   };
 
   try {
     value();
     skipSpace();
-    if (i < text.length) fail(`Unexpected ${describe(i)} after the JSON value`);
+    if (i < text.length) fail(i18nT('editor.json.unexpectedAfter', { found: describe(i) }));
     return null;
   } catch (error) {
     if (error instanceof Stop)

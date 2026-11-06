@@ -1,5 +1,7 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
+import { Trans, useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App, Spin } from 'antd';
 import { EditOutlined } from '@ant-design/icons';
@@ -45,6 +47,7 @@ export default function FolderRenameModal({
   onSuccess,
 }: FolderRenameModalProps) {
   const { message } = App.useApp();
+  const { t } = useTranslation();
 
   const { parentPath, currentName } = useMemo(() => {
     if (!folder?.key) return { parentPath: '', currentName: '' };
@@ -80,12 +83,14 @@ export default function FolderRenameModal({
         const keys = objects.map((obj) => obj.key);
         setObjectKeys(keys);
         if (keys.length === 0) {
-          message.info('Folder is empty');
+          message.info(i18nT('folderRename.empty'));
           onClose();
         }
       } catch (error) {
         message.error(
-          `Failed to load folder contents: ${error instanceof Error ? error.message : 'Unknown error'}`
+          i18nT('folderRename.loadFailed', {
+            error: error instanceof Error ? error.message : i18nT('common.unknownError'),
+          })
         );
         onClose();
       } finally {
@@ -101,30 +106,30 @@ export default function FolderRenameModal({
 
     const trimmedName = newName.trim();
     if (!trimmedName) {
-      message.error('Folder name cannot be empty');
+      message.error(i18nT('folderRename.emptyName'));
       return;
     }
     if (trimmedName.includes('/')) {
-      message.error('Folder name cannot contain /');
+      message.error(i18nT('folderRename.noSlash'));
       return;
     }
 
     const oldPrefix = folder.key.endsWith('/') ? folder.key : `${folder.key}/`;
     const newPrefix = `${parentPath}${trimmedName}/`;
     if (newPrefix === oldPrefix) {
-      message.info('No changes made');
+      message.info(i18nT('rename.noChanges'));
       onClose();
       return;
     }
 
     if (objectKeys.length === 0) {
-      message.info('No files to rename');
+      message.info(t('folderRename.noFiles'));
       onClose();
       return;
     }
 
     if (confirmInput !== confirmCount.toString()) {
-      message.error('Confirmation number does not match');
+      message.error(i18nT('folderRename.confirmMismatch'));
       return;
     }
 
@@ -136,7 +141,7 @@ export default function FolderRenameModal({
       }));
 
     if (operations.length === 0) {
-      message.info('No files to rename');
+      message.info(t('folderRename.noFiles'));
       onClose();
       return;
     }
@@ -156,13 +161,13 @@ export default function FolderRenameModal({
       onClose();
 
       if (result.failed === 0) {
-        message.success(`Renamed ${result.moved} file${result.moved !== 1 ? 's' : ''}`);
+        message.success(i18nT('folderRename.renamed', { count: result.moved }));
       } else if (result.moved > 0) {
         message.warning(
-          `Renamed ${result.moved} file${result.moved !== 1 ? 's' : ''}, ${result.failed} failed`
+          i18nT('folderRename.renamedPartial', { count: result.moved, failed: result.failed })
         );
       } else {
-        message.error('Failed to rename folder');
+        message.error(i18nT('folderRename.failed'));
       }
 
       onSuccess();
@@ -171,7 +176,9 @@ export default function FolderRenameModal({
       setActiveBatchId(null);
       onClose();
       message.error(
-        `Failed to rename folder: ${error instanceof Error ? error.message : 'Unknown error'}`
+        i18nT('folderRename.failedWith', {
+          error: error instanceof Error ? error.message : i18nT('common.unknownError'),
+        })
       );
     }
   }, [
@@ -192,7 +199,7 @@ export default function FolderRenameModal({
 
   const handleContinueInBackground = useCallback(() => {
     backgroundedRef.current = true;
-    message.info('Rename continues in the transfer panel');
+    message.info(i18nT('folderRename.continues'));
     onClose();
   }, [message, onClose]);
 
@@ -205,27 +212,34 @@ export default function FolderRenameModal({
 
   const renameStats: string[] = [];
   if (batch) {
-    renameStats.push(`${completed.toLocaleString()} / ${totalOps.toLocaleString()} files`);
-    if (batch.opsPerSec > 0.1) renameStats.push(`${batch.opsPerSec.toFixed(1)} files/s`);
+    renameStats.push(
+      t('status.filesOf', {
+        count: totalOps,
+        done: completed.toLocaleString(),
+        total: totalOps.toLocaleString(),
+      })
+    );
+    if (batch.opsPerSec > 0.1)
+      renameStats.push(t('folderRename.filesPerSec', { rate: batch.opsPerSec.toFixed(1) }));
     if (batch.etaMs > 0) renameStats.push(formatEta(batch.etaMs / 1000));
-    if (batch.failed > 0) renameStats.push(`${batch.failed} failed`);
+    if (batch.failed > 0) renameStats.push(t('batchDelete.failedCount', { count: batch.failed }));
   }
 
   const footer = isRenaming ? (
     <button className="btn" onClick={handleContinueInBackground}>
-      Continue in background
+      {t('folderRename.background')}
     </button>
   ) : (
     <>
       <button className="btn" onClick={onClose} disabled={isLoading}>
-        Cancel
+        {t('common.cancel')}
       </button>
       <button
         className="btn btn-primary"
         onClick={handleRename}
         disabled={!canConfirm || !newName.trim()}
       >
-        Rename
+        {t('files.action.rename')}
       </button>
     </>
   );
@@ -234,7 +248,7 @@ export default function FolderRenameModal({
     <Modal
       open={open}
       onClose={isRenaming ? handleContinueInBackground : onClose}
-      title="Rename folder"
+      title={t('files.action.renameFolder')}
       icon={<EditOutlined style={{ fontSize: 18 }} />}
       width={480}
       footer={footer}
@@ -258,13 +272,13 @@ export default function FolderRenameModal({
         <div style={{ padding: '16px 0', textAlign: 'center' }}>
           <Spin />
           <p style={{ marginTop: 12, fontSize: 12.5, color: 'var(--text-muted)' }}>
-            Loading folder contents…
+            {t('folderRename.loading')}
           </p>
         </div>
       ) : (
         <>
           <div className="field">
-            <div className="field-label">New name</div>
+            <div className="field-label">{t('rename.newName')}</div>
             <input
               className="input mono"
               value={newName}
@@ -278,25 +292,31 @@ export default function FolderRenameModal({
                 if (e.key === 'Enter' && canConfirm && newName.trim()) handleRename();
               }}
             />
-            <div className="field-hint">Renaming triggers a copy + delete on object storage.</div>
+            <div className="field-hint">{t('rename.hint')}</div>
           </div>
 
           <div className="field" style={{ marginBottom: 0 }}>
-            <div className="field-label">Confirm ({confirmTarget} files)</div>
+            <div className="field-label">
+              {t('folderRename.confirmLabel', { count: confirmCount, files: confirmTarget })}
+            </div>
             <input
               className="input mono"
               type="number"
               value={confirmInput}
               onChange={(e) => setConfirmInput(e.target.value)}
-              placeholder={`Type ${confirmTarget} to confirm`}
+              placeholder={t('folderRename.confirmPlaceholder', { number: confirmTarget })}
               disabled={isLoading}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && canConfirm && newName.trim()) handleRename();
               }}
             />
             <div className="field-hint">
-              This folder contains <strong>{confirmTarget}</strong> file
-              {confirmCount !== 1 ? 's' : ''}. Type that number to confirm the rename.
+              <Trans
+                i18nKey="folderRename.confirmHint"
+                count={confirmCount}
+                values={{ files: confirmTarget }}
+                components={{ strong: <strong /> }}
+              />
             </div>
           </div>
         </>

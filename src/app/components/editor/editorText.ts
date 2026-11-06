@@ -1,4 +1,5 @@
 import type { Editability } from '@/app/components/editor/editability';
+import { t as i18nT } from '@/i18n';
 import { errorMessage } from '@/app/components/editor/saveFlow';
 import { findJsonSyntaxError, lineAndColumn } from '@/app/components/editor/jsonSyntax';
 
@@ -23,7 +24,7 @@ export function documentLabel(editability: EditableAs): string {
       return editability.delimiter === '\t' ? 'TSV' : 'CSV';
   }
   const names: Record<string, string> = {
-    plaintext: 'Plain text',
+    plaintext: i18nT('editor.plainText'),
     javascript: 'JavaScript',
     typescript: 'TypeScript',
     html: 'HTML',
@@ -67,13 +68,13 @@ export function jsonProblem(text: string): string | null {
     const found = findJsonSyntaxError(text);
     if (found) {
       const { line, column } = lineAndColumn(text, found.offset);
-      return `Invalid JSON at line ${line}, column ${column}: ${found.reason}`;
+      return i18nT('editor.json.invalidAt', { line, column, reason: found.reason });
     }
     // The scan accepted what the engine rejected; fall back to the engine's own words.
     const message = errorMessage(error);
     const position = /position (\d+)/.exec(message);
     if (!position) return message;
     const { line, column } = lineAndColumn(text, Number(position[1]));
-    return `Invalid JSON at line ${line}, column ${column}`;
+    return i18nT('editor.json.invalidAtNoReason', { line, column });
   }
 }

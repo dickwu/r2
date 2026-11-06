@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { DownloadOutlined, FolderOutlined, DeleteOutlined } from '@ant-design/icons';
 
 interface SelectionActionBarProps {
@@ -17,29 +18,33 @@ export default function SelectionActionBar({
   onDelete,
   onClear,
 }: SelectionActionBarProps) {
+  const { t } = useTranslation();
   const countLabel =
     fileCount != null && fileCount !== selectedCount
-      ? `${selectedCount} items (${fileCount.toLocaleString()} files)`
-      : `${selectedCount} selected`;
+      ? t('selection.itemsWithFiles', {
+          count: selectedCount,
+          files: fileCount.toLocaleString(),
+        })
+      : t('status.selected', { count: selectedCount });
 
   return (
     <div className="action-bar">
       <span className="action-bar-count">{countLabel}</span>
       <button className="btn btn-sm" onClick={onDownload}>
         <DownloadOutlined style={{ fontSize: 12 }} />
-        Download
+        {t('files.action.download')}
       </button>
       <button className="btn btn-sm" onClick={onMove}>
         <FolderOutlined style={{ fontSize: 12 }} />
-        Move
+        {t('files.action.move')}
       </button>
       <button className="btn btn-sm btn-danger" onClick={onDelete}>
         <DeleteOutlined style={{ fontSize: 12 }} />
-        Delete
+        {t('files.action.delete')}
       </button>
       <span className="spacer" />
       <button className="btn btn-sm btn-ghost" onClick={onClear}>
-        Clear
+        {t('common.clear')}
       </button>
     </div>
   );

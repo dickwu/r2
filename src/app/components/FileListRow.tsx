@@ -6,6 +6,7 @@
  * element stays in the DOM for hover/selected state styling via the
  * `.fl-row:hover > .fl-cell` and `.fl-row.selected > .fl-cell` selectors.
  */
+import { useTranslation } from 'react-i18next';
 import {
   DownloadOutlined,
   EditOutlined,
@@ -161,6 +162,7 @@ export default function FileListRow({
   onFolderDelete,
   onMove,
 }: FileListRowProps) {
+  const { t } = useTranslation();
   const { tone, Icon } = toneAndIcon(item);
   const densityClass = density !== 'default' ? density : '';
   const rowClass = ['fl-row', densityClass, isSelected ? 'selected' : ''].filter(Boolean).join(' ');
@@ -169,7 +171,7 @@ export default function FileListRow({
   let sizeDisplay: React.ReactNode = '--';
   if (item.isFolder) {
     if (folderMeta?.size === 'loading') sizeDisplay = '...';
-    else if (folderMeta?.size === 'error') sizeDisplay = 'Error';
+    else if (folderMeta?.size === 'error') sizeDisplay = t('common.error');
     else if (typeof folderMeta?.size === 'number') sizeDisplay = formatBytes(folderMeta.size);
   } else {
     sizeDisplay = formatBytes(item.size || 0);
@@ -218,7 +220,9 @@ export default function FileListRow({
         </div>
         <span className="fl-name-text">{showFullPath ? item.key : item.name}</span>
         {item.isFolder && folderCount != null && (
-          <span className="fl-name-meta">{folderCount.toLocaleString()} items</span>
+          <span className="fl-name-meta">
+            {t('status.items', { count: folderCount, formatted: folderCount.toLocaleString() })}
+          </span>
         )}
       </div>
 
@@ -240,7 +244,7 @@ export default function FileListRow({
               {onFolderDownload && (
                 <button
                   className="fl-act-btn"
-                  title="Download folder"
+                  title={t('files.action.downloadFolder')}
                   onClick={() => onFolderDownload(item)}
                 >
                   <DownloadOutlined style={{ fontSize: 12 }} />
@@ -249,7 +253,7 @@ export default function FileListRow({
               {onFolderRename && (
                 <button
                   className="fl-act-btn"
-                  title="Rename folder"
+                  title={t('files.action.renameFolder')}
                   onClick={() => onFolderRename(item)}
                 >
                   <EditOutlined style={{ fontSize: 12 }} />
@@ -258,7 +262,7 @@ export default function FileListRow({
               {onFolderDelete && (
                 <button
                   className="fl-act-btn danger"
-                  title="Delete folder"
+                  title={t('files.action.deleteFolder')}
                   onClick={() => onFolderDelete(item)}
                 >
                   <DeleteOutlined style={{ fontSize: 12 }} />
@@ -268,17 +272,33 @@ export default function FileListRow({
           ) : (
             <>
               {onDownload && (
-                <button className="fl-act-btn" title="Download" onClick={() => onDownload(item)}>
+                <button
+                  className="fl-act-btn"
+                  title={t('files.action.download')}
+                  onClick={() => onDownload(item)}
+                >
                   <DownloadOutlined style={{ fontSize: 12 }} />
                 </button>
               )}
-              <button className="fl-act-btn" title="Move" onClick={() => onMove(item)}>
+              <button
+                className="fl-act-btn"
+                title={t('files.action.move')}
+                onClick={() => onMove(item)}
+              >
                 <SwapOutlined style={{ fontSize: 12 }} />
               </button>
-              <button className="fl-act-btn" title="Rename" onClick={() => onRename(item)}>
+              <button
+                className="fl-act-btn"
+                title={t('files.action.rename')}
+                onClick={() => onRename(item)}
+              >
                 <EditOutlined style={{ fontSize: 12 }} />
               </button>
-              <button className="fl-act-btn danger" title="Delete" onClick={() => onDelete(item)}>
+              <button
+                className="fl-act-btn danger"
+                title={t('files.action.delete')}
+                onClick={() => onDelete(item)}
+              >
                 <DeleteOutlined style={{ fontSize: 12 }} />
               </button>
             </>

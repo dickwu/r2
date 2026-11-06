@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import React from 'react';
 import { SearchOutlined } from '@ant-design/icons';
 import { useAccountStore } from '@/app/stores/accountStore';
@@ -27,6 +28,7 @@ interface TitlebarProps {
  * lights are decorative-only.
  */
 export default function Titlebar({ onOpenPalette }: TitlebarProps) {
+  const { t } = useTranslation();
   const currentConfig = useAccountStore((s) => s.currentConfig);
   const currentPath = useCurrentPathStore((s) => s.currentPath);
 
@@ -77,10 +79,10 @@ export default function Titlebar({ onOpenPalette }: TitlebarProps) {
         type="button"
         className="tl-cmd"
         onClick={onOpenPalette}
-        aria-label="Open command palette"
+        aria-label={t('settings.shortcuts.commandPalette')}
       >
         <SearchOutlined style={{ fontSize: 11 }} />
-        Search anything
+        {t('titlebar.search')}
         <span className="kbd">⌘K</span>
       </button>
     </div>

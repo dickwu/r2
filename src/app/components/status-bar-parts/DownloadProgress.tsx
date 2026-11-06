@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useEffect, useMemo } from 'react';
 import { Tooltip, Typography } from 'antd';
 import {
@@ -30,6 +31,7 @@ interface DownloadProgressProps {
 }
 
 export default function DownloadProgress({ bucket, accountId }: DownloadProgressProps) {
+  const { t } = useTranslation();
   const tasks = useDownloadStore((state) => state.tasks);
   const downloadingCount = useDownloadStore(selectDownloadingCount);
   const pendingCount = useDownloadStore(selectPendingCount);
@@ -99,24 +101,30 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
     if (active.length === 0) return null;
     return (
       <div style={{ fontSize: 11, lineHeight: '18px' }}>
-        {active.slice(0, 8).map((t) => {
-          const name = t.fileName.length > 25 ? t.fileName.slice(0, 22) + '...' : t.fileName;
-          const info = t.speed > 0 ? `${formatBytes(t.speed)}/s` : t.status;
+        {active.slice(0, 8).map((task) => {
+          const name =
+            task.fileName.length > 25 ? task.fileName.slice(0, 22) + '...' : task.fileName;
+          const info =
+            task.speed > 0
+              ? `${formatBytes(task.speed)}/s`
+              : t(`transfer.taskStatus.${task.status}`);
           return (
-            <div key={t.id} style={{ display: 'flex', gap: 8, justifyContent: 'space-between' }}>
+            <div key={task.id} style={{ display: 'flex', gap: 8, justifyContent: 'space-between' }}>
               <span style={{ opacity: 0.85 }}>{name}</span>
               <span style={{ whiteSpace: 'nowrap' }}>
-                {t.progress}% · {info}
+                {task.progress}% · {info}
               </span>
             </div>
           );
         })}
         {active.length > 8 && (
-          <div style={{ opacity: 0.5, marginTop: 2 }}>+{active.length - 8} more</div>
+          <div style={{ opacity: 0.5, marginTop: 2 }}>
+            {t('common.more', { count: active.length - 8 })}
+          </div>
         )}
       </div>
     );
-  }, [tasks]);
+  }, [tasks, t]);
 
   // Don't show if no tasks (AFTER all hooks)
   if (tasks.length === 0) {
@@ -149,7 +157,7 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
         }}
         role="status"
         aria-live="polite"
-        aria-label={`Download progress: ${totalProgress}%`}
+        aria-label={t('transfer.downloadProgressAria', { percent: totalProgress })}
       >
         {hasActiveDownloads ? (
           <>
@@ -202,17 +210,19 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
         ) : pendingCount > 0 ? (
           <>
             <ClockCircleOutlined style={{ color: 'var(--color-link)' }} />
-            <Text style={{ fontSize: 12 }}>{pendingCount} queued</Text>
+            <Text style={{ fontSize: 12 }}>{t('transfer.queued', { count: pendingCount })}</Text>
           </>
         ) : pausedCount > 0 ? (
           <>
             <PauseCircleOutlined style={{ color: 'var(--color-warning, #faad14)' }} />
-            <Text style={{ fontSize: 12 }}>{pausedCount} paused</Text>
+            <Text style={{ fontSize: 12 }}>{t('transfer.paused', { count: pausedCount })}</Text>
           </>
         ) : (
           <>
             <CheckCircleOutlined style={{ color: 'var(--color-success)' }} />
-            <Text style={{ fontSize: 12 }}>{finishedCount} downloaded</Text>
+            <Text style={{ fontSize: 12 }}>
+              {t('transfer.downloaded', { count: finishedCount })}
+            </Text>
           </>
         )}
       </span>

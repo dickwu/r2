@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useState } from 'react';
 import { DownOutlined, RightOutlined } from '@ant-design/icons';
 import type { SessionLogLevel, SessionLogSnapshot } from '@/app/lib/diagnostics/sessionLog';
@@ -15,8 +16,6 @@ const LEVEL_RAIL: Record<SessionLogLevel, string> = {
   info: 'transparent',
 };
 
-const plural = (count: number, noun: string): string => `${count} ${noun}${count === 1 ? '' : 's'}`;
-
 /**
  * What the app was doing in the minutes before this report, shown before it
  * leaves the app. The dialog's rule is that nothing is sent the reporter has
@@ -24,6 +23,7 @@ const plural = (count: number, noun: string): string => `${count} ${noun}${count
  * same evidence box as the app info, unfolded whenever it has warnings or errors.
  */
 export default function SessionLogPanel({ log }: { log: SessionLogSnapshot }) {
+  const { t } = useTranslation();
   // Open by default whenever there is something to review: a warning or error
   // line can carry an object key or a path, and the reporter should see it
   // before it goes into a public issue. Our own info markers stay folded.
@@ -46,24 +46,20 @@ export default function SessionLogPanel({ log }: { log: SessionLogSnapshot }) {
         ) : (
           <RightOutlined style={{ fontSize: 10 }} />
         )}
-        <span>Recent app log · last {log.windowMinutes} min</span>
+        <span>{t('report.log.title', { minutes: log.windowMinutes })}</span>
         <span className="report-log-count">
-          {lines === 0 ? 'nothing recorded' : plural(lines, 'line')}
+          {lines === 0 ? t('report.log.nothing') : t('report.log.lines', { count: lines })}
         </span>
         {errors > 0 && (
           // The one number worth a colour here: it tells the reporter the app
           // noticed something too, before they have read a single line.
-          <span className="report-log-errors">{plural(errors, 'error')}</span>
+          <span className="report-log-errors">{t('report.log.errors', { count: errors })}</span>
         )}
       </button>
 
       {expanded && (
         <div className="report-log-body">
-          {log.truncated && (
-            <div className="report-log-note">
-              The app was busy — the oldest lines of this window were discarded.
-            </div>
-          )}
+          {log.truncated && <div className="report-log-note">{t('report.log.truncated')}</div>}
           {log.entries.map((entry, index) => (
             <div
               key={index}
@@ -76,7 +72,7 @@ export default function SessionLogPanel({ log }: { log: SessionLogSnapshot }) {
           ))}
           {lines === 0 && (
             <div className="report-log-note">
-              No warnings or errors were recorded in the last {log.windowMinutes} minutes.
+              {t('report.log.empty', { minutes: log.windowMinutes })}
             </div>
           )}
         </div>

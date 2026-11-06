@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { uploadFile, type StorageConfig } from '@/app/lib/r2cache';
@@ -84,7 +85,7 @@ async function runUpload(task: UploadTask): Promise<void> {
   };
 
   if (!config || missingCredentials(config)) {
-    fail('Storage credentials are incomplete. Check the account settings.');
+    fail(i18nT('errors.credsIncomplete'));
     return;
   }
 
@@ -100,7 +101,7 @@ async function runUpload(task: UploadTask): Promise<void> {
     } else if (result.error && isCancelled(result.error)) {
       updateTask(task.id, { status: 'cancelled', speed: 0, retry: undefined });
     } else {
-      fail(result.error || 'Upload failed');
+      fail(result.error || i18nT('transfer.kindFailed', { kind: i18nT('transfer.kind.upload') }));
     }
   } catch (e) {
     const errorMsg = e instanceof Error ? e.message : String(e);

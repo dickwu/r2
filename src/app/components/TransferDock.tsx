@@ -1,4 +1,6 @@
 'use client';
+import { t as i18nT } from '@/i18n';
+import { useTranslation } from 'react-i18next';
 import { resumeSavedMove } from '@/app/lib/moveRecovery';
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
@@ -77,6 +79,14 @@ function uploadState(status: string): TaskState {
 }
 
 // Chip for an upload waiting for a slot or for a retry
+/** Phase chips are stored as stable codes and translated when drawn. */
+function phaseLabel(phase: string): string {
+  const retry = /^RETRY (\d+)\/(\d+)$/.exec(phase);
+  if (retry) return i18nT('dock.phase.retry', { attempt: retry[1], max: retry[2] });
+  const key = phase.toLowerCase().replace(/\s+/g, '_');
+  return i18nT(`dock.phase.${key}`, { defaultValue: phase });
+}
+
 function uploadPhase(t: UploadTask): string | undefined {
   if (t.status === 'queued') return 'QUEUED';
   if (t.status === 'uploading' && t.retry) return `RETRY ${t.retry.attempt}/${t.retry.maxAttempts}`;
@@ -123,6 +133,7 @@ function showDockFailure(failure: TransferFailure): void {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function TransferDock() {
+  const { t: tr } = useTranslation();
   const uploadTasks = useUploadStore((s) => s.tasks);
   const downloadTasks = useDownloadStore((s) => s.tasks);
   const moveTasks = useMoveStore((s) => s.tasks);
@@ -348,7 +359,7 @@ export default function TransferDock() {
 
   if (collapsed) {
     return createPortal(
-      <button className="dock-pill" onClick={() => setCollapsed(false)} title="Expand transfers">
+      <button className="dock-pill" onClick={() => setCollapsed(false)} title={tr('dock.expand')}>
         <ProgressRing percent={agg.percent} active={running > 0} />
         <span className="dock-pill-count">
           {running > 0 ? running : <CheckOutlined style={{ fontSize: 11 }} />}
@@ -361,12 +372,12 @@ export default function TransferDock() {
 
   const summary =
     running > 0
-      ? `${running} active`
+      ? tr('dock.active', { count: running })
       : paused > 0
-        ? `${paused} paused`
+        ? tr('dock.paused', { count: paused })
         : failed > 0
-          ? `${total - failed} done · ${failed} failed`
-          : `${total} complete`;
+          ? tr('dock.doneFailed', { done: total - failed, failed })
+          : tr('dock.complete', { count: total });
 
   return createPortal(
     <div className="dock">
@@ -375,13 +386,15 @@ export default function TransferDock() {
         <span className="dock-title">{summary}</span>
         {/* Completed-count anchor: unlike byte %, this can only tick upward,
             so the batch always reads as moving forward. */}
-        <span className="dock-header-total">
-          {done}/{total} done
-        </span>
-        <button className="dock-close" onClick={() => setCollapsed(true)} title="Collapse">
+        <span className="dock-header-total">{tr('dock.doneOf', { done, total })}</span>
+        <button
+          className="dock-close"
+          onClick={() => setCollapsed(true)}
+          title={tr('dock.collapse')}
+        >
           <ShrinkOutlined style={{ fontSize: 11 }} />
         </button>
-        <button className="dock-close" onClick={dismissAndClear} title="Dismiss">
+        <button className="dock-close" onClick={dismissAndClear} title={tr('dock.dismiss')}>
           <CloseOutlined style={{ fontSize: 11 }} />
         </button>
       </div>
@@ -395,17 +408,17 @@ export default function TransferDock() {
 
       <div className="dock-telemetry">
         <span className="dock-telemetry-cell">
-          <span className="dock-telemetry-label">RATE</span>
+          <span className="dock-telemetry-label">{tr('dock.rate')}</span>
           {formatSpeed(agg.speed)}
         </span>
         {agg.totalBytes > 0 && (
           <span className="dock-telemetry-cell">
-            <span className="dock-telemetry-label">DATA</span>
+            <span className="dock-telemetry-label">{tr('dock.data')}</span>
             {formatBytes(agg.doneBytes)} / {formatBytes(agg.totalBytes)}
           </span>
         )}
         <span className="dock-telemetry-cell">
-          <span className="dock-telemetry-label">ETA</span>
+          <span className="dock-telemetry-label">{tr('dock.eta')}</span>
           {agg.etaSec > 0 ? formatEta(agg.etaSec).replace(' left', '') : '—'}
         </span>
       </div>
@@ -451,6 +464,7 @@ const KIND_ICON: Record<TaskKind, React.ReactNode> = {
 };
 
 function DockTaskRow({ task }: { task: DockTask }) {
+  const { t } = useTranslation();
   const removeUpload = useUploadStore((s) => s.removeTask);
   const failure = task.state === 'error' ? task.failure : undefined;
 
@@ -524,7 +538,7 @@ function DockTaskRow({ task }: { task: DockTask }) {
         <span className="dock-task-name" title={task.name}>
           {task.name}
         </span>
-        {task.phase && <span className="dock-chip">{task.phase}</span>}
+        {task.phase && <span className="dock-chip">{phaseLabel(task.phase)}</span>}
         <span className="dock-task-pct">{stateIcon ?? `${Math.round(task.progress)}%`}</span>
         <span className="dock-actions">
           {failure && (
@@ -532,14 +546,14 @@ function DockTaskRow({ task }: { task: DockTask }) {
               type="button"
               className="dock-act"
               onClick={() => showDockFailure(failure)}
-              title="Show error"
-              aria-label="Show error"
+              title={t('syncBanner.showError')}
+              aria-label={t('syncBanner.showError')}
             >
               <InfoCircleOutlined style={{ fontSize: 10 }} />
             </button>
           )}
           {task.canPause && (
-            <button className="dock-act" onClick={handlePause} title="Pause">
+            <button className="dock-act" onClick={handlePause} title={t('dock.pause')}>
               <PauseOutlined style={{ fontSize: 10 }} />
             </button>
           )}
@@ -547,18 +561,18 @@ function DockTaskRow({ task }: { task: DockTask }) {
             <button
               className="dock-act"
               onClick={() => useMoveStore.getState().setModalOpen(true)}
-              title="Review move recovery"
+              title={t('dock.reviewHint')}
             >
-              Review
+              {t('dock.review')}
             </button>
           )}
           {task.canResume && (
-            <button className="dock-act" onClick={handleResume} title="Resume">
+            <button className="dock-act" onClick={handleResume} title={t('dock.resume')}>
               <CaretRightOutlined style={{ fontSize: 10 }} />
             </button>
           )}
           {task.canCancel && (
-            <button className="dock-act" onClick={handleCancel} title="Cancel">
+            <button className="dock-act" onClick={handleCancel} title={t('common.cancel')}>
               <CloseOutlined style={{ fontSize: 10 }} />
             </button>
           )}

@@ -1,5 +1,6 @@
 'use client';
 
+import { Trans, useTranslation } from 'react-i18next';
 import { useState, useEffect, useCallback } from 'react';
 import { App } from 'antd';
 import {
@@ -42,10 +43,10 @@ interface BucketRow {
 
 /* ── Provider picker ────────────────────────────────────────────── */
 const PROVIDERS: { id: StorageProvider; label: string; desc: string; icon: string }[] = [
-  { id: 'r2', label: 'Cloudflare R2', desc: 'Zero-egress', icon: 'R2' },
-  { id: 'aws', label: 'AWS S3', desc: 'Region-based', icon: 'S3' },
-  { id: 'minio', label: 'MinIO', desc: 'Self-hosted', icon: 'M' },
-  { id: 'rustfs', label: 'RustFS', desc: 'Path-style', icon: 'RF' },
+  { id: 'r2', label: 'Cloudflare R2', desc: 'zeroEgress', icon: 'R2' },
+  { id: 'aws', label: 'AWS S3', desc: 'regionBased', icon: 'S3' },
+  { id: 'minio', label: 'MinIO', desc: 'selfHosted', icon: 'M' },
+  { id: 'rustfs', label: 'RustFS', desc: 'pathStyle', icon: 'RF' },
 ];
 
 /* ── Domain helpers ──────────────────────────────────────────────── */
@@ -95,6 +96,7 @@ function BucketListRow({
   onSchemeChange: (name: string, scheme: string) => void;
   onPrefixChange: (name: string, value: string) => void;
 }) {
+  const { t } = useTranslation();
   const isR2 = provider === 'r2';
   const isPublic = bucket.isPublic;
   const base = buildDomainPreview(bucket.publicDomainScheme, bucket.publicDomainHost);
@@ -110,23 +112,23 @@ function BucketListRow({
         </span>
         <label
           className="bkt-public-toggle"
-          title="When public, files are served via direct URLs. When private, previews use temporary signed URLs."
+          title={t('accountEdit.publicToggleTitle')}
           style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
         >
           <input
             type="checkbox"
             checked={isPublic}
             onChange={(e) => onTogglePublic(bucket.name, e.target.checked)}
-            aria-label={`Public access for ${bucket.name}`}
+            aria-label={t('accountEdit.publicAccessFor', { name: bucket.name })}
           />
           <span className={['bkt-pill', isPublic ? 'public' : 'private'].join(' ')}>
-            {isPublic ? 'Public' : 'Private'}
+            {isPublic ? t('config.public') : t('config.private')}
           </span>
         </label>
         <button
           className="fl-act-btn danger"
           onClick={() => onDelete(bucket.name)}
-          title="Remove bucket"
+          title={t('accountEdit.removeBucket')}
           type="button"
         >
           <DeleteOutlined style={{ fontSize: 12 }} />
@@ -139,7 +141,7 @@ function BucketListRow({
           className="select bkt-scheme"
           value={bucket.publicDomainScheme || 'https'}
           onChange={(e) => onSchemeChange(bucket.name, e.target.value)}
-          aria-label={`Public domain scheme for ${bucket.name}`}
+          aria-label={t('accountEdit.schemeFor', { name: bucket.name })}
         >
           <option value="https">https://</option>
           <option value="http">http://</option>
@@ -148,30 +150,30 @@ function BucketListRow({
           className="input mono bkt-host"
           value={bucket.publicDomainHost}
           onChange={(e) => onHostChange(bucket.name, e.target.value)}
-          placeholder="pub-….r2.dev or cdn.example.com"
+          placeholder={t('accountEdit.domainPh')}
           autoComplete="off"
           autoCorrect="off"
           autoCapitalize="off"
           spellCheck={false}
-          aria-label={`Public domain for ${bucket.name}`}
+          aria-label={t('accountEdit.domainFor', { name: bucket.name })}
         />
         <input
           className="input mono bkt-host"
           style={{ maxWidth: 140 }}
           value={bucket.publicPathPrefix}
           onChange={(e) => onPrefixChange(bucket.name, e.target.value)}
-          placeholder="prefix (optional)"
+          placeholder={t('config.prefixPh')}
           autoComplete="off"
           autoCorrect="off"
           autoCapitalize="off"
           spellCheck={false}
-          aria-label={`Public path prefix for ${bucket.name}`}
+          aria-label={t('accountEdit.prefixFor', { name: bucket.name })}
         />
       </div>
 
       <div className={['bkt-preview', isPublic ? 'is-public' : ''].filter(Boolean).join(' ')}>
         {!isPublic ? (
-          <span className="bkt-preview-hint">Private — files open via temporary signed URLs.</span>
+          <span className="bkt-preview-hint">{t('accountEdit.privateHint')}</span>
         ) : previewUrl ? (
           <>
             <span className="bkt-preview-arrow">↳</span>
@@ -181,13 +183,9 @@ function BucketListRow({
             </span>
           </>
         ) : isR2 ? (
-          <span className="bkt-preview-hint">
-            Add a public domain (r2.dev subdomain or custom domain) to serve files publicly.
-          </span>
+          <span className="bkt-preview-hint">{t('accountEdit.r2DomainHint')}</span>
         ) : (
-          <span className="bkt-preview-hint">
-            Served directly from the bucket endpoint — add a custom domain above to override.
-          </span>
+          <span className="bkt-preview-hint">{t('accountEdit.endpointHint')}</span>
         )}
       </div>
     </div>
@@ -203,6 +201,7 @@ export default function AccountEditModal({
   onChanged,
 }: AccountEditModalProps) {
   const { message, modal } = App.useApp();
+  const { t } = useTranslation();
 
   const accounts = useAccountStore((s) => s.accounts);
   const createAccount = useAccountStore((s) => s.createAccount);
@@ -379,18 +378,18 @@ export default function AccountEditModal({
 
   const handleLoadBuckets = useCallback(async () => {
     if (provider === 'r2' && (!accountIdField || !accessKeyId || !secretAccessKey)) {
-      message.warning('Please enter Account ID, Access Key ID, and Secret Access Key first');
+      message.warning(t('config.needR2Creds'));
       return;
     }
     if (provider === 'aws' && (!accessKeyId || !secretAccessKey || !region)) {
-      message.warning('Please enter Region, Access Key ID, and Secret Access Key first');
+      message.warning(t('config.needAwsCreds'));
       return;
     }
     if (
       (provider === 'minio' || provider === 'rustfs') &&
       (!accessKeyId || !secretAccessKey || !endpointHost)
     ) {
-      message.warning('Please enter Endpoint, Access Key ID, and Secret Access Key first');
+      message.warning(t('config.needS3Creds'));
       return;
     }
 
@@ -464,9 +463,9 @@ export default function AccountEditModal({
         );
       });
       setBuckets(merged);
-      message.success(`Found ${merged.length} bucket(s)`);
+      message.success(t('config.foundBuckets', { count: merged.length }));
     } catch (e) {
-      message.error(e instanceof Error ? e.message : 'Failed to load buckets');
+      message.error(e instanceof Error ? e.message : t('config.loadBucketsFailed'));
     } finally {
       setLoadingBuckets(false);
     }
@@ -513,13 +512,13 @@ export default function AccountEditModal({
     try {
       if (isNew) {
         if (buckets.length === 0) {
-          message.warning('Add at least one bucket before saving');
+          message.warning(t('accountEdit.needBucket'));
           setSaving(false);
           return;
         }
         if (provider === 'r2') {
           if (!accountIdField.trim()) {
-            message.warning('Account ID is required');
+            message.warning(t('accountEdit.accountIdRequired'));
             setSaving(false);
             return;
           }
@@ -534,7 +533,7 @@ export default function AccountEditModal({
           await saveBuckets(token.id, buckets.map(r2BucketPayload));
         } else if (provider === 'aws') {
           if (!region.trim()) {
-            message.warning('Region is required');
+            message.warning(t('accountEdit.regionRequired'));
             setSaving(false);
             return;
           }
@@ -550,7 +549,7 @@ export default function AccountEditModal({
           await saveAwsBuckets(acct.id, buckets.map(s3BucketPayload));
         } else if (provider === 'minio') {
           if (!endpointHost.trim()) {
-            message.warning('Endpoint host is required');
+            message.warning(t('accountEdit.hostRequired'));
             setSaving(false);
             return;
           }
@@ -565,7 +564,7 @@ export default function AccountEditModal({
           await saveMinioBuckets(acct.id, buckets.map(s3BucketPayload));
         } else if (provider === 'rustfs') {
           if (!endpointHost.trim()) {
-            message.warning('Endpoint host is required');
+            message.warning(t('accountEdit.hostRequired'));
             setSaving(false);
             return;
           }
@@ -578,7 +577,7 @@ export default function AccountEditModal({
           });
           await saveRustfsBuckets(acct.id, buckets.map(s3BucketPayload));
         }
-        message.success('Account created');
+        message.success(t('accountEdit.created'));
         onChanged?.();
         onClose();
       } else {
@@ -633,12 +632,12 @@ export default function AccountEditModal({
           });
           await saveRustfsBuckets(acct.account.id, buckets.map(s3BucketPayload));
         }
-        message.success('Account updated');
+        message.success(t('config.accountUpdated'));
         onChanged?.();
         onClose();
       }
     } catch (e) {
-      message.error(e instanceof Error ? e.message : 'Save failed');
+      message.error(e instanceof Error ? e.message : t('config.saveFailed'));
     } finally {
       setSaving(false);
     }
@@ -649,9 +648,10 @@ export default function AccountEditModal({
     const acct = accounts.find((a) => a.account.id === accountId);
     if (!acct) return;
     modal.confirm({
-      title: 'Delete Account',
-      content: 'Delete this account and all its tokens and bucket configurations?',
-      okText: 'Delete',
+      title: t('accountEdit.deleteTitle'),
+      content: t('accountEdit.deleteContent'),
+      okText: t('accountEdit.delete'),
+      cancelText: t('common.cancel'),
       okButtonProps: { danger: true },
       onOk: async () => {
         try {
@@ -659,11 +659,11 @@ export default function AccountEditModal({
           else if (acct.provider === 'aws') await deleteAwsAccount(acct.account.id);
           else if (acct.provider === 'minio') await deleteMinioAccount(acct.account.id);
           else await deleteRustfsAccount(acct.account.id);
-          message.success('Account deleted');
+          message.success(t('accountEdit.deleted'));
           onChanged?.();
           onClose();
         } catch (e) {
-          message.error(e instanceof Error ? e.message : 'Delete failed');
+          message.error(e instanceof Error ? e.message : t('accountEdit.deleteFailed'));
         }
       },
     });
@@ -680,14 +680,18 @@ export default function AccountEditModal({
           onClick={handleDelete}
         >
           <DeleteOutlined style={{ fontSize: 12 }} />
-          Delete account
+          {t('accountEdit.deleteAccount')}
         </button>
       )}
       <button className="btn" onClick={onClose}>
-        Cancel
+        {t('common.cancel')}
       </button>
       <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-        {saving ? 'Saving…' : isNew ? 'Create account' : 'Save changes'}
+        {saving
+          ? t('accountEdit.saving')
+          : isNew
+            ? t('accountEdit.createAccount')
+            : t('config.saveChanges')}
       </button>
     </>
   );
@@ -696,12 +700,8 @@ export default function AccountEditModal({
     <Modal
       open={open}
       onClose={onClose}
-      title={isNew ? 'New account' : 'Edit account'}
-      subtitle={
-        isNew
-          ? 'Add a new storage provider connection'
-          : 'Update credentials, buckets, or remove this account'
-      }
+      title={isNew ? t('accountEdit.newAccount') : t('accountEdit.editAccount')}
+      subtitle={isNew ? t('accountEdit.newSubtitle') : t('accountEdit.editSubtitle')}
       icon={<UserOutlined style={{ fontSize: 18 }} />}
       width={640}
       footer={footer}
@@ -710,7 +710,7 @@ export default function AccountEditModal({
         {/* Provider picker (only for new account) */}
         {isNew && (
           <div className="field">
-            <div className="field-label">Provider</div>
+            <div className="field-label">{t('accountEdit.provider')}</div>
             <div className="provider-tags">
               {PROVIDERS.map((p) => (
                 <div
@@ -723,7 +723,7 @@ export default function AccountEditModal({
                   <div className={`pi pi-${p.id}`}>{p.icon}</div>
                   <div>
                     <div className="pt-name">{p.label}</div>
-                    <div className="pt-desc">{p.desc}</div>
+                    <div className="pt-desc">{t(`accountEdit.providerDesc.${p.desc}`)}</div>
                   </div>
                 </div>
               ))}
@@ -734,14 +734,14 @@ export default function AccountEditModal({
         {/* Provider badge when editing */}
         {!isNew && (
           <div className="field">
-            <div className="field-label">Provider</div>
+            <div className="field-label">{t('accountEdit.provider')}</div>
             <div className="provider-tags">
               {PROVIDERS.filter((p) => p.id === provider).map((p) => (
                 <div key={p.id} className="provider-tag active" style={{ cursor: 'default' }}>
                   <div className={`pi pi-${p.id}`}>{p.icon}</div>
                   <div>
                     <div className="pt-name">{p.label}</div>
-                    <div className="pt-desc">{p.desc}</div>
+                    <div className="pt-desc">{t(`accountEdit.providerDesc.${p.desc}`)}</div>
                   </div>
                 </div>
               ))}
@@ -752,17 +752,17 @@ export default function AccountEditModal({
         {/* Account name + provider-specific ID field */}
         <div className="field-row">
           <div className="field">
-            <div className="field-label">Account name</div>
+            <div className="field-label">{t('config.accountName')}</div>
             <input
               className="input"
               value={accountName}
               onChange={(e) => setAccountName(e.target.value)}
-              placeholder="My account (optional)"
+              placeholder={t('config.accountNamePh')}
             />
           </div>
           {provider === 'r2' && isNew && (
             <div className="field">
-              <div className="field-label field-required">Account ID</div>
+              <div className="field-label field-required">{t('config.accountId')}</div>
               <input
                 className="input mono"
                 value={accountIdField}
@@ -773,7 +773,7 @@ export default function AccountEditModal({
           )}
           {provider === 'aws' && (
             <div className="field">
-              <div className="field-label field-required">Region</div>
+              <div className="field-label field-required">{t('config.region')}</div>
               <input
                 className="input mono"
                 value={region}
@@ -788,7 +788,7 @@ export default function AccountEditModal({
         {(provider === 'minio' || provider === 'rustfs') && (
           <div className="field-row">
             <div className="field">
-              <div className="field-label">Endpoint scheme</div>
+              <div className="field-label">{t('accountEdit.endpointScheme')}</div>
               <select
                 className="select"
                 value={endpointScheme}
@@ -799,7 +799,7 @@ export default function AccountEditModal({
               </select>
             </div>
             <div className="field" style={{ flex: 2 }}>
-              <div className="field-label field-required">Endpoint host</div>
+              <div className="field-label field-required">{t('accountEdit.endpointHost')}</div>
               <input
                 className="input mono"
                 value={endpointHost}
@@ -814,16 +814,16 @@ export default function AccountEditModal({
         {provider === 'r2' && isNew && (
           <div className="field-row">
             <div className="field">
-              <div className="field-label">Token name</div>
+              <div className="field-label">{t('config.tokenName')}</div>
               <input
                 className="input"
                 value={tokenName}
                 onChange={(e) => setTokenName(e.target.value)}
-                placeholder="My token"
+                placeholder={t('accountEdit.tokenPh')}
               />
             </div>
             <div className="field">
-              <div className="field-label field-required">API Token</div>
+              <div className="field-label field-required">{t('config.apiToken')}</div>
               <input
                 className="input mono"
                 value={apiToken}
@@ -860,7 +860,7 @@ export default function AccountEditModal({
                 className="fl-act-btn"
                 style={{ position: 'absolute', right: 6 }}
                 onClick={() => setShowSecret((s) => !s)}
-                title={showSecret ? 'Hide' : 'Show'}
+                title={showSecret ? t('accountEdit.hide') : t('accountEdit.show')}
                 type="button"
               >
                 {showSecret ? (
@@ -877,22 +877,21 @@ export default function AccountEditModal({
         <div className="field" style={{ marginTop: 6, marginBottom: 0 }}>
           <div className="bkt-section-head">
             <div className="field-label" style={{ margin: 0 }}>
-              Buckets &amp; public access
+              {t('accountEdit.bucketsHead')}
             </div>
             {buckets.length > 0 && (
               <span className="bkt-section-count">
                 {publicCount > 0
-                  ? `${publicCount} of ${buckets.length} public`
-                  : `${buckets.length} bucket${buckets.length !== 1 ? 's' : ''}`}
+                  ? t('accountEdit.publicOf', { count: publicCount, total: buckets.length })
+                  : t('accountEdit.bucketCount', { count: buckets.length })}
               </span>
             )}
           </div>
           <div className="field-hint" style={{ marginBottom: 10 }}>
-            Toggle a bucket <strong>Public</strong> to serve its files via direct URLs without
-            signing, and optionally attach a custom domain (an <span className="mono">r2.dev</span>{' '}
-            subdomain or your own) plus a path prefix. R2 needs a domain to be public; S3-compatible
-            providers can also serve straight from their endpoint. Private buckets open via
-            temporary signed links.
+            <Trans
+              i18nKey="accountEdit.bucketsHint"
+              components={{ strong: <strong />, mono: <span className="mono" /> }}
+            />
           </div>
 
           <div className="bkt-list">
@@ -914,7 +913,7 @@ export default function AccountEditModal({
               disabled={loadingBuckets}
             >
               <ReloadOutlined spin={loadingBuckets} style={{ fontSize: 11 }} />
-              {buckets.length > 0 ? 'Reload buckets from API' : 'Load buckets from API'}
+              {buckets.length > 0 ? t('accountEdit.reloadBuckets') : t('accountEdit.loadBuckets')}
             </button>
           </div>
         </div>

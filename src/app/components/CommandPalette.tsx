@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -51,57 +52,57 @@ interface CommandPaletteProps {
 
 const STATIC_ACTIONS: Omit<PaletteItem, 'id'>[] = [
   {
-    label: 'Upload files',
+    label: 'upload',
     meta: '⌘U',
     icon: <UploadOutlined />,
     action: { type: 'open', value: 'upload' },
-    section: 'Actions',
+    section: 'actions',
   },
   {
-    label: 'Refresh files',
+    label: 'refresh',
     meta: '⌘R',
     icon: <ReloadOutlined />,
     action: { type: 'refresh' },
-    section: 'Actions',
+    section: 'actions',
   },
   {
-    label: 'Toggle theme',
+    label: 'theme',
     meta: '⌘⇧T',
     icon: <BgColorsOutlined />,
     action: { type: 'theme' },
-    section: 'Actions',
+    section: 'actions',
   },
   {
-    label: 'Toggle list / grid',
+    label: 'view',
     meta: '⌘L',
     icon: <UnorderedListOutlined />,
     action: { type: 'view' },
-    section: 'Actions',
+    section: 'actions',
   },
   {
-    label: 'Open settings',
+    label: 'settings',
     meta: '⌘,',
     icon: <SettingOutlined />,
     action: { type: 'open', value: 'settings' },
-    section: 'Actions',
+    section: 'actions',
   },
   {
-    label: 'Show transfer dock',
+    label: 'dock',
     icon: <DownloadOutlined />,
     action: { type: 'open', value: 'dock' },
-    section: 'Actions',
+    section: 'actions',
   },
   {
-    label: 'Report a problem',
+    label: 'report',
     icon: <BugOutlined />,
     action: { type: 'open', value: 'report' },
-    section: 'Actions',
+    section: 'actions',
   },
   {
-    label: 'Show transfer failures',
+    label: 'failures',
     icon: <CloseCircleOutlined />,
     action: { type: 'open', value: 'failures' },
-    section: 'Actions',
+    section: 'actions',
   },
 ];
 
@@ -112,6 +113,7 @@ const showsFailures = (item: Omit<PaletteItem, 'id'>): boolean =>
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function CommandPalette({ open, onClose, onAction }: CommandPaletteProps) {
+  const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -149,7 +151,7 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
                 bucket: bucket.name,
                 tokenId: twb.token.id,
               },
-              section: 'Buckets',
+              section: 'buckets',
             });
           }
         }
@@ -166,7 +168,7 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
               accountId: acct.account.id,
               bucket: bucket.name,
             },
-            section: 'Buckets',
+            section: 'buckets',
           });
         }
       } else if (acct.provider === 'minio') {
@@ -182,7 +184,7 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
               accountId: acct.account.id,
               bucket: bucket.name,
             },
-            section: 'Buckets',
+            section: 'buckets',
           });
         }
       } else if (acct.provider === 'rustfs') {
@@ -198,7 +200,7 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
               accountId: acct.account.id,
               bucket: bucket.name,
             },
-            section: 'Buckets',
+            section: 'buckets',
           });
         }
       }
@@ -221,17 +223,17 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
         meta: path,
         icon: <FolderOutlined />,
         action: { type: 'path', value: path },
-        section: 'Navigate',
+        section: 'navigate',
       });
     }
     // Also add root
     items.unshift({
       id: 'nav-root',
-      label: 'Root',
+      label: '/',
       meta: '/',
       icon: <SwitcherOutlined />,
       action: { type: 'path', value: '' },
-      section: 'Navigate',
+      section: 'navigate',
     });
     return items;
   }, [currentPath]);
@@ -240,10 +242,17 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
   const allItems = useMemo<PaletteItem[]>(() => {
     const actions = STATIC_ACTIONS.filter((a) => hasFailures || !showsFailures(a)).map((a, i) => ({
       ...a,
+      label: t(`palette.action.${a.label}`),
       id: `action-${i}`,
     }));
-    return [...bucketItems, ...actions, ...navigateItems];
-  }, [bucketItems, navigateItems, hasFailures]);
+    const navigate = navigateItems.map((item) =>
+      item.id === 'nav-root' ? { ...item, label: t('palette.root') } : item
+    );
+    return [...bucketItems, ...actions, ...navigate].map((item) => ({
+      ...item,
+      section: t(`palette.section.${item.section}`),
+    }));
+  }, [bucketItems, navigateItems, hasFailures, t]);
 
   // Filtered items
   const filtered = useMemo(() => {
@@ -325,7 +334,7 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search buckets, actions, paths…"
+            placeholder={t('palette.placeholder')}
           />
           <span className="kbd">Esc</span>
         </div>
@@ -341,7 +350,7 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
                 fontSize: 13,
               }}
             >
-              No results
+              {t('palette.noResults')}
             </div>
           )}
           {sections.map(([section, items]) => (

@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useState } from 'react';
 import {
   PlusOutlined,
@@ -43,6 +44,7 @@ function AccountCard({
   onClick: () => void;
 }) {
   const meta = PROVIDER_META[accountData.provider];
+  const { t } = useTranslation();
   const name = accountData.account.name ?? accountData.account.id;
   const count = bucketCount(accountData);
 
@@ -56,7 +58,7 @@ function AccountCard({
           <span className="settings-account-card-dot" />
           <span>
             <DatabaseOutlined style={{ fontSize: 10, marginRight: 4 }} />
-            {count} {count === 1 ? 'bucket' : 'buckets'}
+            {t('accounts.bucketCount', { count })}
           </span>
         </div>
       </div>
@@ -67,6 +69,7 @@ function AccountCard({
 
 /* ── SettingsAccountPanel ────────────────────────────────────────── */
 export default function SettingsAccountPanel({ initialAccountId }: SettingsAccountPanelProps) {
+  const { t } = useTranslation();
   const accounts = useAccountStore((s) => s.accounts);
 
   // Edit-modal state
@@ -86,27 +89,27 @@ export default function SettingsAccountPanel({ initialAccountId }: SettingsAccou
         <section className="settings-section">
           <div className="settings-section-head">
             <div>
-              <h3>Connected accounts</h3>
-              <p>Click an account to edit credentials, buckets, or remove it.</p>
+              <h3>{t('accounts.connected')}</h3>
+              <p>{t('accounts.connectedDesc')}</p>
             </div>
             <button className="btn btn-primary btn-sm" onClick={() => setEditing(null)}>
               <PlusOutlined style={{ fontSize: 11 }} />
-              New account
+              {t('accounts.newAccount')}
             </button>
           </div>
 
           {accounts.length === 0 ? (
             <div className="settings-account-empty">
               <DatabaseOutlined style={{ fontSize: 22, color: 'var(--text-subtle)' }} />
-              <strong>No accounts yet</strong>
-              <span>Add your first storage provider to get started.</span>
+              <strong>{t('accounts.noAccounts')}</strong>
+              <span>{t('accounts.noAccountsDesc')}</span>
               <button
                 className="btn btn-primary"
                 style={{ marginTop: 10 }}
                 onClick={() => setEditing(null)}
               >
                 <PlusOutlined style={{ fontSize: 11 }} />
-                Add account
+                {t('accounts.addAccount')}
               </button>
             </div>
           ) : (
@@ -125,8 +128,8 @@ export default function SettingsAccountPanel({ initialAccountId }: SettingsAccou
         <section className="settings-section">
           <div className="settings-section-head">
             <div>
-              <h3>Backup &amp; transfer</h3>
-              <p>Save your accounts to a JSON file, or restore them on another machine.</p>
+              <h3>{t('accounts.transfer.title')}</h3>
+              <p>{t('accounts.backupDesc')}</p>
             </div>
           </div>
           <div className="tx-backup">
@@ -136,11 +139,11 @@ export default function SettingsAccountPanel({ initialAccountId }: SettingsAccou
               disabled={accounts.length === 0}
             >
               <DownloadOutlined style={{ fontSize: 12 }} />
-              Export accounts…
+              {t('accounts.exportAccounts')}
             </button>
             <button className="btn" onClick={() => setTransfer('import')}>
               <UploadOutlined style={{ fontSize: 12 }} />
-              Import accounts…
+              {t('accounts.importAccounts')}
             </button>
           </div>
         </section>

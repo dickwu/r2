@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useEffect, useMemo, useState } from 'react';
 import { marked } from 'marked';
 import { useThemeStore } from '@/app/stores/themeStore';
@@ -50,6 +51,7 @@ function styleFor(theme: 'light' | 'dark'): string {
  * reaches the app, so a document's raw HTML is shown without sanitizing it.
  */
 export default function MarkdownPreview({ source, height }: { source: string; height: number }) {
+  const { t } = useTranslation();
   const theme = useThemeStore((s) => s.theme);
   // Rendering a long document on every keystroke would stall typing.
   const [debounced, setDebounced] = useState(source);
@@ -68,7 +70,7 @@ export default function MarkdownPreview({ source, height }: { source: string; he
   return (
     <iframe
       className="file-editor-markdown"
-      title="Markdown preview"
+      title={t('editor.markdownPreview')}
       sandbox=""
       srcDoc={html}
       style={{ height }}

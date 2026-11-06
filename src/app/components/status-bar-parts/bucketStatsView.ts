@@ -1,4 +1,5 @@
 import { formatBytes } from '@/app/utils/formatBytes';
+import { t as i18nT } from '@/i18n';
 import type { BucketSummary } from '@/app/lib/r2cache';
 
 export interface BucketStatsView {
@@ -27,7 +28,11 @@ export function computeBucketStatsView(args: {
   if (isSyncRunning) {
     if (objectsFetched <= 0) return null;
     return {
-      text: `Bucket: ${objectsFetched.toLocaleString()} files · ${formatBytes(bytesFetched)}…`,
+      text: i18nT('status.bucketLive', {
+        count: objectsFetched,
+        files: objectsFetched.toLocaleString(),
+        size: formatBytes(bytesFetched),
+      }),
       live: true,
     };
   }
@@ -39,7 +44,11 @@ export function computeBucketStatsView(args: {
 
   const prefix = summary.isComplete ? '' : '~';
   return {
-    text: `Bucket: ${prefix}${summary.totalFiles.toLocaleString()} files · ${formatBytes(summary.totalSize)}`,
+    text: i18nT('status.bucket', {
+      count: summary.totalFiles,
+      files: `${prefix}${summary.totalFiles.toLocaleString()}`,
+      size: formatBytes(summary.totalSize),
+    }),
     live: false,
   };
 }

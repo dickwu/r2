@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
@@ -53,17 +54,17 @@ export interface MountRecoveryFile {
 }
 
 export function recoveryStateLabel(state: string): string {
-  const labels: Record<string, string> = {
-    waiting: 'Waiting to upload',
-    uploading: 'Upload interrupted',
-    failed: 'Upload failed',
-    paused: 'Needs attention',
-    replay_pending: 'Restore interrupted write',
-    rename_recovery: 'Finish rename',
-    namespace_recovery: 'Finish saved change',
-    unreadable: 'Needs manual recovery',
-  };
-  return labels[state] ?? 'Needs attention';
+  const known = [
+    'waiting',
+    'uploading',
+    'failed',
+    'paused',
+    'replay_pending',
+    'rename_recovery',
+    'namespace_recovery',
+    'unreadable',
+  ];
+  return i18nT(`mount.recoveryState.${known.includes(state) ? state : 'paused'}`);
 }
 
 export interface MountRecoveryPayload {
@@ -682,7 +683,7 @@ export function flushErrorKey(event: MountFlushErrorEvent): string {
 }
 
 export function flushErrorMessage(event: MountFlushErrorEvent): string {
-  return `Upload of "${event.key}" to ${event.bucket} failed: ${event.error}`;
+  return i18nT('mount.flushError', { key: event.key, bucket: event.bucket, error: event.error });
 }
 
 /**

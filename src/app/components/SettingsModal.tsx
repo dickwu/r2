@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useState, useEffect } from 'react';
 import {
   SunOutlined,
@@ -19,6 +20,8 @@ import SettingsStoragePanel from '@/app/components/SettingsStoragePanel';
 import { useShallow } from 'zustand/react/shallow';
 import { useUpdateStore } from '@/app/stores/updateStore';
 import { updateStatusView } from '@/app/lib/updates/updateStatus';
+import { useLanguageStore, type LanguagePreference } from '@/app/stores/languageStore';
+import { LOCALE_NATIVE_NAMES, SUPPORTED_LOCALES, systemLocale } from '@/i18n/locales';
 
 export type SettingsTab = 'appearance' | 'layout' | 'account' | 'mounts' | 'storage' | 'shortcuts';
 
@@ -39,16 +42,29 @@ function AppearancePanel() {
   const setAccent = useThemeStore((s) => s.setAccent);
   const emptyStyle = useThemeStore((s) => s.emptyStyle);
   const setEmptyStyle = useThemeStore((s) => s.setEmptyStyle);
+  const { t } = useTranslation();
 
   const themes = [
-    { id: 'light' as const, label: 'Light', sub: 'Crisp & bright' },
-    { id: 'dark' as const, label: 'Dark', sub: 'Easy on the eyes' },
+    { id: 'light' as const, label: t('settings.theme.light'), sub: t('settings.theme.lightSub') },
+    { id: 'dark' as const, label: t('settings.theme.dark'), sub: t('settings.theme.darkSub') },
   ];
 
   const emptyStyles = [
-    { id: 'blueprint' as const, label: 'Blueprint grid', sub: 'Technical, dotted backdrop' },
-    { id: 'illustrated' as const, label: 'Soft illustration', sub: 'Friendly empty box' },
-    { id: 'minimal' as const, label: 'Minimal', sub: 'Just the essentials' },
+    {
+      id: 'blueprint' as const,
+      label: t('settings.empty.blueprint'),
+      sub: t('settings.empty.blueprintSub'),
+    },
+    {
+      id: 'illustrated' as const,
+      label: t('settings.empty.illustrated'),
+      sub: t('settings.empty.illustratedSub'),
+    },
+    {
+      id: 'minimal' as const,
+      label: t('settings.empty.minimal'),
+      sub: t('settings.empty.minimalSub'),
+    },
   ];
 
   const handleSetAccent = (hex: string) => {
@@ -57,24 +73,26 @@ function AppearancePanel() {
 
   return (
     <div className="settings-section-stack">
+      <LanguageSection />
+
       {/* Theme */}
       <section className="settings-section">
         <div className="settings-section-head">
           <div>
-            <h3>Theme</h3>
-            <p>Pick a base palette. Switches the entire app.</p>
+            <h3>{t('settings.theme.title')}</h3>
+            <p>{t('settings.theme.desc')}</p>
           </div>
         </div>
         <div className="theme-cards">
-          {themes.map((t) => (
+          {themes.map((th) => (
             <button
-              key={t.id}
-              className={['theme-card', `theme-${t.id}`, theme === t.id && 'active']
+              key={th.id}
+              className={['theme-card', `theme-${th.id}`, theme === th.id && 'active']
                 .filter(Boolean)
                 .join(' ')}
-              onClick={() => setTheme(t.id)}
+              onClick={() => setTheme(th.id)}
             >
-              <div className="theme-card-art" data-theme={t.id}>
+              <div className="theme-card-art" data-theme={th.id}>
                 <div className="tc-titlebar">
                   <span />
                   <span />
@@ -107,10 +125,10 @@ function AppearancePanel() {
                 </div>
               </div>
               <div className="theme-card-meta">
-                <strong>{t.label}</strong>
-                <span>{t.sub}</span>
+                <strong>{th.label}</strong>
+                <span>{th.sub}</span>
               </div>
-              {theme === t.id && (
+              {theme === th.id && (
                 <div className="theme-card-check">
                   <CheckOutlined style={{ fontSize: 11 }} />
                 </div>
@@ -124,8 +142,8 @@ function AppearancePanel() {
       <section className="settings-section">
         <div className="settings-section-head">
           <div>
-            <h3>Accent color</h3>
-            <p>Used for primary buttons, selection state, and focus rings.</p>
+            <h3>{t('settings.accent.title')}</h3>
+            <p>{t('settings.accent.desc')}</p>
           </div>
           <span className="settings-pill mono">{accent}</span>
         </div>
@@ -135,13 +153,15 @@ function AppearancePanel() {
               key={hex}
               className={['accent-chip', accent === hex && 'active'].filter(Boolean).join(' ')}
               onClick={() => handleSetAccent(hex)}
-              title={meta.name}
+              title={t(`settings.accent.names.${hex.slice(1)}`, { defaultValue: meta.name })}
             >
               <span className="accent-swatch" style={{ background: hex }}>
                 {accent === hex && <CheckOutlined style={{ fontSize: 12, color: 'white' }} />}
               </span>
               <span className="accent-meta">
-                <strong>{meta.name}</strong>
+                <strong>
+                  {t(`settings.accent.names.${hex.slice(1)}`, { defaultValue: meta.name })}
+                </strong>
                 <span className="mono">{hex}</span>
               </span>
             </button>
@@ -153,8 +173,8 @@ function AppearancePanel() {
       <section className="settings-section">
         <div className="settings-section-head">
           <div>
-            <h3>Empty state</h3>
-            <p>What you see when a folder has no files yet.</p>
+            <h3>{t('settings.empty.title')}</h3>
+            <p>{t('settings.empty.desc')}</p>
           </div>
         </div>
         <div className="option-row-list">
@@ -177,6 +197,55 @@ function AppearancePanel() {
   );
 }
 
+/* ── Language section ───────────────────────────────────────────── */
+function LanguageSection() {
+  const { t } = useTranslation();
+  const language = useLanguageStore((s) => s.language);
+  const setLanguage = useLanguageStore((s) => s.setLanguage);
+  const detected = LOCALE_NATIVE_NAMES[systemLocale()];
+
+  const options: Array<{ id: LanguagePreference; label: string; sub: string }> = [
+    {
+      id: 'system',
+      label: t('settings.language.system'),
+      sub: t('settings.language.systemSub', { language: detected }),
+    },
+    ...SUPPORTED_LOCALES.map((id) => ({
+      id,
+      label: LOCALE_NATIVE_NAMES[id],
+      sub: t(`settings.language.names.${id}`),
+    })),
+  ];
+
+  return (
+    <section className="settings-section">
+      <div className="settings-section-head">
+        <div>
+          <h3>{t('settings.language.title')}</h3>
+          <p>{t('settings.language.desc')}</p>
+        </div>
+      </div>
+      <div className="option-row-list" role="radiogroup" aria-label={t('settings.language.title')}>
+        {options.map((o) => (
+          <button
+            key={o.id}
+            role="radio"
+            aria-checked={language === o.id}
+            className={['option-row', language === o.id && 'active'].filter(Boolean).join(' ')}
+            onClick={() => setLanguage(o.id)}
+          >
+            <span className="option-row-text">
+              <strong>{o.label}</strong>
+              <span>{o.sub}</span>
+            </span>
+            <span className="option-row-radio" />
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 /* ── Layout panel ────────────────────────────────────────────────── */
 function LayoutPanel() {
   const sidebarStyle = useThemeStore((s) => s.sidebarStyle);
@@ -189,27 +258,52 @@ function LayoutPanel() {
   const setToolbarVariant = useThemeStore((s) => s.setToolbarVariant);
   const showInspector = useThemeStore((s) => s.showInspector);
   const setShowInspector = useThemeStore((s) => s.setShowInspector);
+  const { t } = useTranslation();
 
   const sidebars = [
-    { id: 'full' as const, label: 'Full', sub: '240px tree' },
-    { id: 'collapsed' as const, label: 'Collapsed', sub: '60px icons' },
+    { id: 'full' as const, label: t('settings.sidebar.full'), sub: t('settings.sidebar.fullSub') },
+    {
+      id: 'collapsed' as const,
+      label: t('settings.sidebar.collapsed'),
+      sub: t('settings.sidebar.collapsedSub'),
+    },
   ];
 
   const densities = [
-    { id: 'compact' as const, label: 'Compact', sub: 'Linear / Notion-like' },
-    { id: 'default' as const, label: 'Default', sub: 'Balanced' },
-    { id: 'cozy' as const, label: 'Cozy', sub: 'Finder-like, generous' },
+    {
+      id: 'compact' as const,
+      label: t('settings.density.compact'),
+      sub: t('settings.density.compactSub'),
+    },
+    {
+      id: 'default' as const,
+      label: t('settings.density.default'),
+      sub: t('settings.density.defaultSub'),
+    },
+    { id: 'cozy' as const, label: t('settings.density.cozy'), sub: t('settings.density.cozySub') },
   ];
 
   const toolbars = [
-    { id: 'compact' as const, label: 'Compact', sub: 'Crumbs + actions in one row' },
-    { id: 'stacked' as const, label: 'Stacked title', sub: 'Bucket name above breadcrumbs' },
-    { id: 'minimal' as const, label: 'Minimal', sub: 'Crumbs only, hide secondary actions' },
+    {
+      id: 'compact' as const,
+      label: t('settings.toolbar.compact'),
+      sub: t('settings.toolbar.compactSub'),
+    },
+    {
+      id: 'stacked' as const,
+      label: t('settings.toolbar.stacked'),
+      sub: t('settings.toolbar.stackedSub'),
+    },
+    {
+      id: 'minimal' as const,
+      label: t('settings.toolbar.minimal'),
+      sub: t('settings.toolbar.minimalSub'),
+    },
   ];
 
   const views = [
-    { id: 'list' as const, label: 'List', sub: 'Table with sortable columns' },
-    { id: 'grid' as const, label: 'Grid', sub: 'Card thumbnails' },
+    { id: 'list' as const, label: t('settings.view.list'), sub: t('settings.view.listSub') },
+    { id: 'grid' as const, label: t('settings.view.grid'), sub: t('settings.view.gridSub') },
   ];
 
   return (
@@ -218,8 +312,8 @@ function LayoutPanel() {
       <section className="settings-section">
         <div className="settings-section-head">
           <div>
-            <h3>Sidebar</h3>
-            <p>How the navigation rail behaves.</p>
+            <h3>{t('settings.sidebar.title')}</h3>
+            <p>{t('settings.sidebar.desc')}</p>
           </div>
         </div>
         <div className="visual-cards two">
@@ -253,8 +347,8 @@ function LayoutPanel() {
       <section className="settings-section">
         <div className="settings-section-head">
           <div>
-            <h3>Density</h3>
-            <p>Row height and spacing in the file list.</p>
+            <h3>{t('settings.density.title')}</h3>
+            <p>{t('settings.density.desc')}</p>
           </div>
         </div>
         <div className="visual-cards three">
@@ -284,8 +378,8 @@ function LayoutPanel() {
       <section className="settings-section">
         <div className="settings-section-head">
           <div>
-            <h3>Default view</h3>
-            <p>What loads when you open a bucket.</p>
+            <h3>{t('settings.view.title')}</h3>
+            <p>{t('settings.view.desc')}</p>
           </div>
         </div>
         <div className="visual-cards two">
@@ -315,22 +409,22 @@ function LayoutPanel() {
       <section className="settings-section">
         <div className="settings-section-head">
           <div>
-            <h3>Toolbar</h3>
-            <p>How the top action bar lays out.</p>
+            <h3>{t('settings.toolbar.title')}</h3>
+            <p>{t('settings.toolbar.desc')}</p>
           </div>
         </div>
         <div className="option-row-list">
-          {toolbars.map((t) => (
+          {toolbars.map((tb) => (
             <button
-              key={t.id}
-              className={['option-row', toolbarVariant === t.id && 'active']
+              key={tb.id}
+              className={['option-row', toolbarVariant === tb.id && 'active']
                 .filter(Boolean)
                 .join(' ')}
-              onClick={() => setToolbarVariant(t.id)}
+              onClick={() => setToolbarVariant(tb.id)}
             >
               <span className="option-row-text">
-                <strong>{t.label}</strong>
-                <span>{t.sub}</span>
+                <strong>{tb.label}</strong>
+                <span>{tb.sub}</span>
               </span>
               <span className="option-row-radio" />
             </button>
@@ -342,8 +436,8 @@ function LayoutPanel() {
       <section className="settings-section">
         <div className="settings-section-head">
           <div>
-            <h3>Inspector</h3>
-            <p>Side drawer with metadata when a file is focused.</p>
+            <h3>{t('settings.inspector.title')}</h3>
+            <p>{t('settings.inspector.desc')}</p>
           </div>
         </div>
         <button
@@ -351,8 +445,8 @@ function LayoutPanel() {
           onClick={() => setShowInspector(!showInspector)}
         >
           <span className="option-row-text">
-            <strong>Show inspector</strong>
-            <span>Slides in from the right when you focus a file.</span>
+            <strong>{t('settings.inspector.show')}</strong>
+            <span>{t('settings.inspector.showSub')}</span>
           </span>
           <span className="toggle-switch">
             <span className="toggle-knob" />
@@ -365,33 +459,35 @@ function LayoutPanel() {
 
 /* ── Shortcuts panel ─────────────────────────────────────────────── */
 function ShortcutsPanel() {
+  const { t } = useTranslation();
+  const click = t('settings.shortcuts.keyClick');
   const groups = [
     {
-      title: 'Navigation',
+      title: t('settings.shortcuts.navigation'),
       items: [
-        ['Open command palette', '⌘ K'],
-        ['Toggle theme', '⌘ ⇧ T'],
-        ['Toggle list / grid', '⌘ L'],
-        ['Open settings', '⌘ ,'],
+        [t('settings.shortcuts.commandPalette'), '⌘ K'],
+        [t('settings.shortcuts.toggleTheme'), '⌘ ⇧ T'],
+        [t('settings.shortcuts.toggleView'), '⌘ L'],
+        [t('settings.shortcuts.openSettings'), '⌘ ,'],
       ],
     },
     {
-      title: 'Files',
+      title: t('settings.shortcuts.files'),
       items: [
-        ['Upload', '⌘ U'],
-        ['Refresh', '⌘ R'],
-        ['Select all', '⌘ A'],
-        ['Delete selected', '⌫'],
-        ['Rename', 'Enter'],
-        ['Preview', 'Space'],
+        [t('settings.shortcuts.upload'), '⌘ U'],
+        [t('settings.shortcuts.refresh'), '⌘ R'],
+        [t('settings.shortcuts.selectAll'), '⌘ A'],
+        [t('settings.shortcuts.deleteSelected'), '⌫'],
+        [t('settings.shortcuts.rename'), 'Enter'],
+        [t('settings.shortcuts.preview'), t('settings.shortcuts.keySpace')],
       ],
     },
     {
-      title: 'Selection',
+      title: t('settings.shortcuts.selection'),
       items: [
-        ['Range select', '⇧ Click'],
-        ['Toggle one', '⌘ Click'],
-        ['Clear selection', 'Esc'],
+        [t('settings.shortcuts.rangeSelect'), `⇧ ${click}`],
+        [t('settings.shortcuts.toggleOne'), `⌘ ${click}`],
+        [t('settings.shortcuts.clearSelection'), 'Esc'],
       ],
     },
   ];
@@ -441,10 +537,11 @@ function SettingsVersionFoot() {
       openReleaseNotes: state.openReleaseNotes,
     }))
   );
+  const { t } = useTranslation();
   const view = updateStatusView(s);
   // At rest the status bar shows the version; here the link names its action.
   const label =
-    view.action === 'check' && s.phase !== 'upToDate' ? 'Check for updates' : view.label;
+    view.action === 'check' && s.phase !== 'upToDate' ? t('settings.checkForUpdates') : view.label;
 
   const onUpdateClick = () => {
     if (view.action === 'check') void s.checkForUpdates({ manual: true });
@@ -458,7 +555,7 @@ function SettingsVersionFoot() {
         R2 Client{s.currentVersion ? ` ${s.currentVersion}` : ''}
       </div>
       <button type="button" className="settings-nav-link" onClick={s.openReleaseNotes}>
-        Release notes
+        {t('settings.releaseNotes')}
       </button>
       <button
         type="button"
@@ -487,18 +584,19 @@ export default function SettingsModal({
   onOpenAccountSettings: _onOpenAccountSettings,
 }: SettingsModalProps) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
+  const { t } = useTranslation();
 
   useEffect(() => {
     if (open) setTab(initialTab);
   }, [open, initialTab]);
 
   const tabs: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
-    { id: 'appearance', label: 'Appearance', icon: <SunOutlined /> },
-    { id: 'layout', label: 'Layout', icon: <AppstoreOutlined /> },
-    { id: 'account', label: 'Account', icon: <SettingOutlined /> },
-    { id: 'mounts', label: 'Mounts', icon: <LinkOutlined /> },
-    { id: 'storage', label: 'Storage', icon: <DatabaseOutlined /> },
-    { id: 'shortcuts', label: 'Shortcuts', icon: <UnorderedListOutlined /> },
+    { id: 'appearance', label: t('settings.tabs.appearance'), icon: <SunOutlined /> },
+    { id: 'layout', label: t('settings.tabs.layout'), icon: <AppstoreOutlined /> },
+    { id: 'account', label: t('settings.tabs.account'), icon: <SettingOutlined /> },
+    { id: 'mounts', label: t('settings.tabs.mounts'), icon: <LinkOutlined /> },
+    { id: 'storage', label: t('settings.tabs.storage'), icon: <DatabaseOutlined /> },
+    { id: 'shortcuts', label: t('settings.tabs.shortcuts'), icon: <UnorderedListOutlined /> },
   ];
 
   // Only the preference panels save as you go; accounts, mounts and storage act on click.
@@ -506,16 +604,16 @@ export default function SettingsModal({
     tab === 'account' || tab === 'mounts' || tab === 'storage' ? (
       <>
         <button className="btn btn-primary" onClick={onClose}>
-          Done
+          {t('common.done')}
         </button>
       </>
     ) : (
       <>
         <span style={{ marginRight: 'auto', fontSize: 11.5, color: 'var(--text-subtle)' }}>
-          Changes save automatically
+          {t('settings.autoSave')}
         </span>
         <button className="btn btn-primary" onClick={onClose}>
-          Done
+          {t('common.done')}
         </button>
       </>
     );
@@ -524,8 +622,8 @@ export default function SettingsModal({
     <Modal
       open={open}
       onClose={onClose}
-      title="Settings"
-      subtitle="Personalize the workspace, theme, and connected accounts"
+      title={t('settings.title')}
+      subtitle={t('settings.subtitle')}
       icon={<SettingOutlined style={{ fontSize: 18 }} />}
       width={780}
       bodyPadding={0}
@@ -534,14 +632,14 @@ export default function SettingsModal({
       <div className="settings-shell">
         {/* Side nav */}
         <nav className="settings-nav">
-          {tabs.map((t) => (
+          {tabs.map((tb) => (
             <button
-              key={t.id}
-              className={['settings-nav-item', tab === t.id && 'active'].filter(Boolean).join(' ')}
-              onClick={() => setTab(t.id)}
+              key={tb.id}
+              className={['settings-nav-item', tab === tb.id && 'active'].filter(Boolean).join(' ')}
+              onClick={() => setTab(tb.id)}
             >
-              <span className="settings-nav-icon">{t.icon}</span>
-              <span>{t.label}</span>
+              <span className="settings-nav-icon">{tb.icon}</span>
+              <span>{tb.label}</span>
             </button>
           ))}
           <div className="settings-nav-spacer" />
@@ -553,7 +651,7 @@ export default function SettingsModal({
               target="_blank"
               rel="noreferrer"
             >
-              Documentation ↗
+              {t('settings.documentation')} ↗
             </a>
           </div>
         </nav>

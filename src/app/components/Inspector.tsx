@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import {
   CloseOutlined,
   DownloadOutlined,
@@ -140,6 +141,7 @@ export default function Inspector({
   onDownload,
 }: InspectorProps) {
   const { message } = App.useApp();
+  const { t } = useTranslation();
   const listedType = useListedObjectType(storageConfig, item);
   // An extension-less object is shown as what its Content-Type says it is.
   const type =
@@ -163,15 +165,13 @@ export default function Inspector({
     try {
       const url = publicUrl ?? (await generateSignedUrl(storageConfig, item.key));
       if (!url) {
-        message.warning('No public domain or credentials available for this bucket');
+        message.warning(t('inspector.noUrl'));
         return;
       }
       await navigator.clipboard.writeText(url);
-      message.success(
-        publicUrl ? 'Public URL copied to clipboard' : 'Signed URL copied to clipboard'
-      );
+      message.success(publicUrl ? t('inspector.publicCopied') : t('inspector.signedCopied'));
     } catch {
-      message.error('Failed to copy URL');
+      message.error(t('inspector.copyFailed'));
     }
   }
 
@@ -181,7 +181,7 @@ export default function Inspector({
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
           <button
             className="fl-act-btn"
-            title="Close inspector"
+            title={t('inspector.close')}
             onClick={onClose}
             style={{ width: 24, height: 24 }}
           >
@@ -205,16 +205,17 @@ export default function Inspector({
         <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
           {onDownload && !item.isFolder && (
             <button className="btn btn-sm" onClick={() => onDownload(item)}>
-              <DownloadOutlined style={{ fontSize: 12 }} /> Download
+              <DownloadOutlined style={{ fontSize: 12 }} /> {t('files.action.download')}
             </button>
           )}
           {!item.isFolder && (
             <button
               className="btn btn-sm"
               onClick={handleCopyUrl}
-              title={isPublic ? 'Copy public URL' : 'Copy temporary signed URL'}
+              title={isPublic ? t('inspector.copyPublicUrl') : t('inspector.copySignedUrl')}
             >
-              <LinkOutlined style={{ fontSize: 12 }} /> {isPublic ? 'Copy link' : 'Copy URL'}
+              <LinkOutlined style={{ fontSize: 12 }} />{' '}
+              {isPublic ? t('inspector.copyLink') : t('inspector.copyUrl')}
             </button>
           )}
           <button className="btn btn-sm" style={{ padding: '0 8px' }}>
@@ -223,22 +224,27 @@ export default function Inspector({
         </div>
 
         {/* KV pairs */}
-        <KV label="Size" value={sizeLabel} />
-        <KV label="Modified" value={modLabel} />
-        <KV label="Type" value={type} />
-        {item.isFolder && <KV label="Items" value="—" />}
+        <KV label={t('files.col.size')} value={sizeLabel} />
+        <KV label={t('files.col.modified')} value={modLabel} />
+        <KV
+          label={t('inspector.type')}
+          value={t(`inspector.types.${type}`, { defaultValue: type })}
+        />
+        {item.isFolder && <KV label={t('inspector.items')} value="—" />}
         {!item.isFolder && (
           <>
             <KV label="ETag" value="—" />
-            <KV label="Storage class" value="STANDARD" />
-            <KV label="Encryption" value="AES-256" />
+            <KV label={t('inspector.storageClass')} value="STANDARD" />
+            <KV label={t('inspector.encryption')} value="AES-256" />
             <KV
-              label="Visibility"
+              label={t('inspector.visibility')}
               value={
                 isPublic ? (
-                  <span style={{ color: 'var(--accent)', fontWeight: 600 }}>public</span>
+                  <span style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                    {t('inspector.public')}
+                  </span>
                 ) : (
-                  'private'
+                  t('inspector.private')
                 )
               }
             />

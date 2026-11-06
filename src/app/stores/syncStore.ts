@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 import { create } from 'zustand';
 import type { TransferFailure } from '@/app/lib/transferFailure';
 import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
@@ -78,8 +79,8 @@ export function syncFailureRecord(
   return {
     id: syncFailureId(source.currentBucketKey),
     kind: 'sync',
-    name: scope?.bucket ?? 'Bucket sync',
-    message: error.trim() === '' ? 'Sync failed' : error,
+    name: scope?.bucket ?? i18nT('syncBanner.bucketSync'),
+    message: error.trim() === '' ? i18nT('syncBanner.failed') : error,
     occurredAt: now,
     bucket: scope?.bucket,
   };

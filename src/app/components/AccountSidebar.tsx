@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useState, useMemo } from 'react';
 import { Dropdown, App } from 'antd';
 import type { MenuProps } from 'antd';
@@ -69,6 +70,7 @@ export default function AccountSidebar({
   const [transferModalOpen, setTransferModalOpen] = useState(false);
 
   const { message, modal } = App.useApp();
+  const { t } = useTranslation();
 
   const os = useMemo(() => detectOs(), []);
 
@@ -117,7 +119,7 @@ export default function AccountSidebar({
       setCurrentPath('');
       await selectR2Bucket(tokenId, bucketName);
     } catch {
-      message.error('Failed to switch bucket');
+      message.error(t('sidebar.switchFailed'));
     }
   }
 
@@ -135,16 +137,16 @@ export default function AccountSidebar({
         await selectRustfsBucket(accountData.account.id, bucketName);
       }
     } catch {
-      message.error('Failed to switch bucket');
+      message.error(t('sidebar.switchFailed'));
     }
   }
 
   async function handleDeleteAccount(accountData: ProviderAccount) {
     modal.confirm({
-      title: 'Delete Account',
-      content:
-        'Are you sure you want to delete this account? All tokens and bucket configurations will be removed.',
-      okText: 'Delete',
+      title: t('sidebar.deleteAccount'),
+      content: t('sidebar.deleteAccountConfirm'),
+      okText: t('files.action.delete'),
+      cancelText: t('common.cancel'),
       okButtonProps: { danger: true },
       onOk: async () => {
         try {
@@ -157,9 +159,9 @@ export default function AccountSidebar({
           } else {
             await deleteRustfsAccount(accountData.account.id);
           }
-          message.success('Account deleted');
+          message.success(t('sidebar.accountDeleted'));
         } catch {
-          message.error('Failed to delete account');
+          message.error(t('sidebar.accountDeleteFailed'));
         }
       },
     });
@@ -167,17 +169,17 @@ export default function AccountSidebar({
 
   async function handleDeleteToken(tokenId: number) {
     modal.confirm({
-      title: 'Delete Token',
-      content:
-        'Are you sure you want to delete this token? All bucket configurations will be removed.',
-      okText: 'Delete',
+      title: t('sidebar.deleteToken'),
+      content: t('sidebar.deleteTokenConfirm'),
+      okText: t('files.action.delete'),
+      cancelText: t('common.cancel'),
       okButtonProps: { danger: true },
       onOk: async () => {
         try {
           await deleteToken(tokenId);
-          message.success('Token deleted');
+          message.success(t('sidebar.tokenDeleted'));
         } catch {
-          message.error('Failed to delete token');
+          message.error(t('sidebar.tokenDeleteFailed'));
         }
       },
     });
@@ -187,7 +189,7 @@ export default function AccountSidebar({
     const items: MenuProps['items'] = [
       {
         key: 'edit',
-        label: 'Edit Account',
+        label: t('sidebar.editAccount'),
         icon: <EditOutlined />,
         onClick: (e) => {
           e.domEvent.stopPropagation();
@@ -199,7 +201,7 @@ export default function AccountSidebar({
     if (accountData.provider === 'r2') {
       items.push({
         key: 'add-token',
-        label: 'Add Token',
+        label: t('sidebar.addToken'),
         icon: <PlusOutlined />,
         onClick: (e) => {
           e.domEvent.stopPropagation();
@@ -210,7 +212,7 @@ export default function AccountSidebar({
 
     items.push({
       key: 'transfer',
-      label: 'Transfer accounts…',
+      label: t('sidebar.transferAccounts'),
       icon: <SwapOutlined />,
       onClick: (e) => {
         e.domEvent.stopPropagation();
@@ -221,7 +223,7 @@ export default function AccountSidebar({
     items.push({ type: 'divider' });
     items.push({
       key: 'delete',
-      label: 'Delete Account',
+      label: t('sidebar.deleteAccount'),
       icon: <DeleteOutlined />,
       danger: true,
       onClick: (e) => {
@@ -304,7 +306,7 @@ export default function AccountSidebar({
         await openPath(localPath);
       } catch (e) {
         console.error('Failed to open mount folder:', e);
-        message.error('Could not open the folder');
+        message.error(t('sidebar.openFolderFailed'));
       }
     }
   }
@@ -312,9 +314,11 @@ export default function AccountSidebar({
   async function handleUnmountBucket(mountId: string, bucketName: string) {
     const ok = await unmountBucket(mountId);
     if (ok) {
-      message.success(`${bucketName} unmounted`);
+      message.success(t('sidebar.unmounted', { bucket: bucketName }));
     } else {
-      message.error(useMountStore.getState().error || `Could not unmount ${bucketName}`);
+      message.error(
+        useMountStore.getState().error || t('sidebar.unmountFailed', { bucket: bucketName })
+      );
     }
   }
 
@@ -339,7 +343,7 @@ export default function AccountSidebar({
         { type: 'divider' },
         {
           key: 'unmount',
-          label: 'Unmount',
+          label: t('sidebar.unmount'),
           icon: <DisconnectOutlined />,
           onClick: (e) => {
             e.domEvent.stopPropagation();
@@ -352,7 +356,7 @@ export default function AccountSidebar({
     return [
       {
         key: 'mount',
-        label: 'Mount as local drive',
+        label: t('sidebar.mountAsDrive'),
         icon: <LinkOutlined />,
         onClick: (e) => {
           e.domEvent.stopPropagation();
@@ -372,14 +376,14 @@ export default function AccountSidebar({
     return [
       {
         key: 'edit',
-        label: 'Edit Token',
+        label: t('sidebar.editToken'),
         icon: <EditOutlined />,
         onClick: () => onEditToken(token),
       },
       { type: 'divider' },
       {
         key: 'delete',
-        label: 'Delete Token',
+        label: t('sidebar.deleteToken'),
         icon: <DeleteOutlined />,
         danger: true,
         onClick: () => handleDeleteToken(token.id),
@@ -394,7 +398,11 @@ export default function AccountSidebar({
             sits between the brand and the account list */}
         {collapsed && (
           <div className="sb-collapse-rail">
-            <button className="sb-icon-btn" title="Cycle sidebar style" onClick={cycleSidebarStyle}>
+            <button
+              className="sb-icon-btn"
+              title={t('sidebar.cycleStyle')}
+              onClick={cycleSidebarStyle}
+            >
               <MenuFoldOutlined style={{ fontSize: 14 }} />
             </button>
           </div>
@@ -406,19 +414,23 @@ export default function AccountSidebar({
             <div className="sb-search">
               <SearchOutlined className="search-icon" style={{ fontSize: 13 }} />
               <input
-                placeholder="Filter accounts & buckets"
+                placeholder={t('sidebar.filter')}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
             </div>
-            <button className="sb-icon-btn" title="Cycle sidebar style" onClick={cycleSidebarStyle}>
+            <button
+              className="sb-icon-btn"
+              title={t('sidebar.cycleStyle')}
+              onClick={cycleSidebarStyle}
+            >
               <MenuFoldOutlined style={{ fontSize: 14 }} />
             </button>
           </div>
         )}
 
         {/* Section label */}
-        {!collapsed && <div className="sb-section-label">Accounts</div>}
+        {!collapsed && <div className="sb-section-label">{t('sidebar.accounts')}</div>}
 
         {/* Account tree */}
         <div className="sb-scroll">
@@ -492,7 +504,7 @@ export default function AccountSidebar({
                 textAlign: 'center',
               }}
             >
-              {searchLower ? 'No matching accounts' : 'No accounts yet'}
+              {searchLower ? t('sidebar.noMatching') : t('accounts.noAccounts')}
             </div>
           )}
         </div>
@@ -502,15 +514,15 @@ export default function AccountSidebar({
           <button
             className="sb-footer-btn"
             onClick={() => onOpenSettings?.('account') ?? onAddAccount()}
-            title={collapsed ? 'Add account' : undefined}
+            title={collapsed ? t('accounts.addAccount') : undefined}
           >
             <PlusOutlined style={{ fontSize: collapsed ? 15 : 11 }} />
-            {!collapsed && <span>Add account</span>}
+            {!collapsed && <span>{t('accounts.addAccount')}</span>}
           </button>
           <button
             className="sb-icon-btn"
             onClick={() => onOpenSettings?.('account')}
-            title="Settings"
+            title={t('settings.title')}
             style={collapsed ? undefined : { width: 30, height: 30 }}
           >
             <SettingOutlined style={{ fontSize: collapsed ? 16 : 14 }} />

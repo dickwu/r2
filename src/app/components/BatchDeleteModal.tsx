@@ -1,5 +1,7 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
+import { Trans, useTranslation } from 'react-i18next';
 import { useState, useEffect, useCallback } from 'react';
 import { App } from 'antd';
 import { ExclamationCircleOutlined } from '@ant-design/icons';
@@ -15,8 +17,6 @@ interface BatchDeleteProgress {
   failed: number;
 }
 
-const plural = (n: number, noun: string) => `${noun}${n === 1 ? '' : 's'}`;
-
 /**
  * The failure record for a delete that left objects behind. The backend sends
  * one reason per failed sub-batch, and every one of them reaches the modal.
@@ -31,11 +31,11 @@ function deleteFailureRecord(
   return {
     id: `delete:${now}`,
     kind: 'delete',
-    name: `${result.failed} of ${total} ${plural(total, 'object')}`,
+    name: i18nT('batchDelete.failedOfTotal', { count: total, failed: result.failed }),
     message:
       reasons.trim() !== ''
         ? reasons
-        : `${result.failed} ${plural(result.failed, 'object')} could not be deleted`,
+        : i18nT('batchDelete.objectsNotDeleted', { count: result.failed }),
     occurredAt: now,
     bucket,
     progress: { done: result.deleted, total },
@@ -44,7 +44,8 @@ function deleteFailureRecord(
 
 /** The strip's "N failed" count. Once the delete has finished it reopens the reasons. */
 function FailedCount({ count, failure }: { count: number; failure: TransferFailure | null }) {
-  const label = `${count.toLocaleString()} failed`;
+  const { t } = useTranslation();
+  const label = t('batchDelete.failedCount', { count: count.toLocaleString() });
   return (
     <span className="bp-failed">
       {' · '}
@@ -52,8 +53,8 @@ function FailedCount({ count, failure }: { count: number; failure: TransferFailu
         <button
           type="button"
           className="bp-failed-btn"
-          title="Show errors"
-          aria-label={`${label}. Show errors`}
+          title={t('batchDelete.showErrors')}
+          aria-label={`${label}. ${t('batchDelete.showErrors')}`}
           onClick={() => useTransferErrorStore.getState().show(failure)}
         >
           {label}
@@ -88,6 +89,7 @@ export default function BatchDeleteModal({
   // strip, whose failed count reopens this record.
   const [failure, setFailure] = useState<TransferFailure | null>(null);
   const { message } = App.useApp();
+  const { t } = useTranslation();
 
   const selectedCount = selectedKeys.size;
 
@@ -122,7 +124,7 @@ export default function BatchDeleteModal({
 
       if (result.failed === 0) {
         onClose();
-        message.success(`Deleted ${result.deleted} file${result.deleted > 1 ? 's' : ''}`);
+        message.success(i18nT('batchDelete.deletedFiles', { count: result.deleted }));
       } else {
         // Stay open on the final counts; the failure modal opens over this one
         // with the reasons, and the failed count reopens it after it closes.
@@ -137,7 +139,11 @@ export default function BatchDeleteModal({
       setIsDeleting(false);
       onDeletingChange?.(false);
       onClose();
-      message.error(`Failed to delete files: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      message.error(
+        i18nT('batchDelete.deleteFailed', {
+          error: e instanceof Error ? e.message : i18nT('common.unknownError'),
+        })
+      );
     }
   }, [config, selectedKeys, message, onClose, onSuccess, onDeletingChange]);
 
@@ -146,15 +152,15 @@ export default function BatchDeleteModal({
 
   const footer = isDeleting ? null : failure ? (
     <button className="btn btn-primary" onClick={onClose}>
-      Close
+      {t('common.close')}
     </button>
   ) : (
     <>
       <button className="btn" onClick={onClose}>
-        Cancel
+        {t('common.cancel')}
       </button>
       <button className="btn btn-danger" onClick={handleDelete}>
-        Delete permanently
+        {t('batchDelete.deletePermanently')}
       </button>
     </>
   );
@@ -165,13 +171,17 @@ export default function BatchDeleteModal({
       onClose={isDeleting ? () => undefined : onClose}
       title={
         failure
-          ? `Deleted ${progress.completed.toLocaleString()} of ${progress.total.toLocaleString()} ${plural(progress.total, 'item')}`
-          : `Delete ${selectedCount} item${selectedCount !== 1 ? 's' : ''}?`
+          ? t('batchDelete.deletedOf', {
+              count: progress.total,
+              done: progress.completed.toLocaleString(),
+              total: progress.total.toLocaleString(),
+            })
+          : t('batchDelete.title', { count: selectedCount })
       }
       subtitle={
         failure
-          ? `${progress.failed.toLocaleString()} could not be deleted.`
-          : 'This action cannot be undone.'
+          ? t('batchDelete.couldNotDelete', { count: progress.failed.toLocaleString() })
+          : t('batchDelete.cannotUndo')
       }
       icon={<ExclamationCircleOutlined style={{ fontSize: 18, color: '#d4493a' }} />}
       width={480}
@@ -193,7 +203,10 @@ export default function BatchDeleteModal({
           </div>
           <div className="batch-progress-stats">
             <span>
-              {progress.completed.toLocaleString()} / {progress.total.toLocaleString()} deleted
+              {t('batchDelete.progress', {
+                done: progress.completed.toLocaleString(),
+                total: progress.total.toLocaleString(),
+              })}
               {progress.failed > 0 && <FailedCount count={progress.failed} failure={failure} />}
             </span>
             <span>{percent}%</span>
@@ -218,20 +231,22 @@ export default function BatchDeleteModal({
               style={{ fontSize: 16, color: '#d4493a', marginTop: 1, flexShrink: 0 }}
             />
             <div style={{ fontSize: 12.5, color: 'var(--text)', lineHeight: 1.55 }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                Files in object storage are deleted immediately.
-              </div>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>{t('batchDelete.immediate')}</div>
               <div style={{ color: 'var(--text-muted)' }}>
-                R2 / S3 do not have a recycle bin. Once deleted, these{' '}
-                <strong>{selectedCount}</strong> file{selectedCount !== 1 ? 's' : ''} cannot be
-                recovered.
+                <Trans
+                  i18nKey="batchDelete.noRecycleBin"
+                  count={selectedCount}
+                  components={{ strong: <strong /> }}
+                />
               </div>
             </div>
           </div>
 
           <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: 0 }}>
-            Confirm by clicking <strong style={{ color: '#d4493a' }}>Delete permanently</strong>{' '}
-            below.
+            <Trans
+              i18nKey="batchDelete.confirmHint"
+              components={{ strong: <strong style={{ color: '#d4493a' }} /> }}
+            />
           </p>
         </>
       )}

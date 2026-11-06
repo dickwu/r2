@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useEffect, useState } from 'react';
 import { App, Spin } from 'antd';
 import { EditOutlined, FolderOutlined, SwapOutlined } from '@ant-design/icons';
@@ -27,6 +28,7 @@ export default function FileRenameModal({
   const [elapsedSec, setElapsedSec] = useState(0);
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   const { message } = App.useApp();
+  const { t } = useTranslation();
 
   // Elapsed-time ticker while the remote copy + delete runs (no byte-level
   // progress exists for a server-side CopyObject, so show time instead).
@@ -50,11 +52,11 @@ export default function FileRenameModal({
   const handleOk = async () => {
     const trimmedFilename = filename.trim();
     if (!trimmedFilename) {
-      message.error('File name cannot be empty');
+      message.error(t('rename.emptyName'));
       return;
     }
     if (trimmedFilename.includes('/')) {
-      message.error('File name cannot contain /');
+      message.error(t('rename.noSlash'));
       return;
     }
 
@@ -63,7 +65,7 @@ export default function FileRenameModal({
 
     const newPath = dir ? `${dir}${trimmedFilename}` : trimmedFilename;
     if (newPath === file.key) {
-      message.info('No changes made');
+      message.info(t('rename.noChanges'));
       onClose();
       return;
     }
@@ -71,12 +73,12 @@ export default function FileRenameModal({
     setLoading(true);
     try {
       await renameObject(config, file.key, newPath);
-      message.success('File renamed/moved successfully');
+      message.success(t('rename.fileSuccess'));
       onSuccess?.();
       onClose();
     } catch (error) {
       if (error instanceof Error) {
-        message.error(`Failed to rename/move: ${error.message}`);
+        message.error(t('rename.fileFailed', { error: error.message }));
       }
     } finally {
       setLoading(false);
@@ -86,10 +88,10 @@ export default function FileRenameModal({
   const footer = (
     <>
       <button className="btn" onClick={onClose} disabled={loading}>
-        Cancel
+        {t('common.cancel')}
       </button>
       <button className="btn btn-primary" onClick={handleOk} disabled={loading || !filename.trim()}>
-        {loading ? 'Renaming…' : 'Rename'}
+        {loading ? t('rename.renaming') : t('files.menu.rename')}
       </button>
     </>
   );
@@ -99,13 +101,13 @@ export default function FileRenameModal({
       <Modal
         open={open}
         onClose={loading ? () => undefined : onClose}
-        title="Rename file"
+        title={t('rename.fileTitle')}
         icon={<EditOutlined style={{ fontSize: 18 }} />}
         width={480}
         footer={footer}
       >
         <div className="field">
-          <div className="field-label">New name</div>
+          <div className="field-label">{t('rename.newName')}</div>
           <input
             className="input mono"
             value={filename}
@@ -119,11 +121,11 @@ export default function FileRenameModal({
             }}
             disabled={loading}
           />
-          <div className="field-hint">Renaming triggers a copy + delete on object storage.</div>
+          <div className="field-hint">{t('rename.hint')}</div>
         </div>
 
         <div className="field" style={{ marginBottom: 0 }}>
-          <div className="field-label">Location</div>
+          <div className="field-label">{t('rename.location')}</div>
           <div
             style={{
               padding: '8px 12px',
@@ -147,7 +149,7 @@ export default function FileRenameModal({
                   color: 'var(--text)',
                 }}
               >
-                {directory ? `/${directory}/` : '/ (root)'}
+                {directory ? `/${directory}/` : t('rename.root')}
               </span>
             </div>
             <button
@@ -156,7 +158,7 @@ export default function FileRenameModal({
               onClick={() => setFolderPickerOpen(true)}
               disabled={loading}
             >
-              <SwapOutlined /> Move to…
+              <SwapOutlined /> {t('rename.moveTo')}
             </button>
           </div>
         </div>
@@ -164,7 +166,7 @@ export default function FileRenameModal({
         {loading && (
           <div className="rename-busy">
             <Spin size="small" />
-            <span>Copying on remote storage…</span>
+            <span>{t('rename.copyingRemote')}</span>
             {elapsedSec > 0 && <span className="rename-busy-elapsed">{elapsedSec}s</span>}
           </div>
         )}
@@ -176,7 +178,7 @@ export default function FileRenameModal({
           onClose={() => setFolderPickerOpen(false)}
           selectedPath={directory}
           onConfirm={(path: string) => setDirectory(path)}
-          title="Move to Folder"
+          title={t('rename.moveToFolder')}
         />
       )}
     </>

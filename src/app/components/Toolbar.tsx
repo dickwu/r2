@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import {
   SearchOutlined,
   UploadOutlined,
@@ -51,6 +52,7 @@ export default function Toolbar({
   bucketCount,
   onNavigate,
 }: ToolbarProps) {
+  const { t } = useTranslation();
   const toolbarVariant = useThemeStore((s) => s.toolbarVariant);
   const density = useThemeStore((s) => s.density);
   const setDensity = useThemeStore((s) => s.setDensity);
@@ -72,7 +74,7 @@ export default function Toolbar({
             <h1>{bucketName}</h1>
             {(bucketSize || bucketCount) && (
               <span className="tb-meta">
-                {[bucketSize, bucketCount ? `${bucketCount} objects` : null]
+                {[bucketSize, bucketCount ? t('toolbar.objects', { count: bucketCount }) : null]
                   .filter(Boolean)
                   .join(' · ')}
               </span>
@@ -87,7 +89,7 @@ export default function Toolbar({
         <div className="search">
           <SearchOutlined className="search-icon" style={{ fontSize: 13 }} />
           <input
-            placeholder="Search all files in bucket…"
+            placeholder={t('toolbar.searchPlaceholder')}
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
             autoComplete="off"
@@ -102,27 +104,27 @@ export default function Toolbar({
           <button
             className={viewMode === 'list' ? 'active' : ''}
             onClick={() => onViewModeChange('list')}
-            title="List view"
+            title={t('toolbar.listView')}
           >
             <BarsOutlined style={{ fontSize: 13 }} />
           </button>
           <button
             className={viewMode === 'grid' ? 'active' : ''}
             onClick={() => onViewModeChange('grid')}
-            title="Grid view"
+            title={t('toolbar.gridView')}
           >
             <AppstoreOutlined style={{ fontSize: 13 }} />
           </button>
         </div>
 
         {/* Density segmented */}
-        <div className="segmented" title="Density">
+        <div className="segmented" title={t('settings.density.title')}>
           {DENSITY_OPTIONS.map((d) => (
             <button
               key={d.id}
               className={density === d.id ? 'active' : ''}
               onClick={() => setDensity(d.id)}
-              title={d.id}
+              title={t(`settings.density.${d.id}`)}
             >
               <svg
                 width="14"
@@ -144,16 +146,20 @@ export default function Toolbar({
         {/* Upload */}
         <button className="btn btn-primary" onClick={onUploadOpen}>
           <UploadOutlined style={{ fontSize: 13 }} />
-          Upload
+          {t('toolbar.upload')}
         </button>
 
         {/* Refresh */}
-        <button className="btn btn-icon" title="Refresh" onClick={onRefresh}>
+        <button className="btn btn-icon" title={t('common.refresh')} onClick={onRefresh}>
           <ReloadOutlined spin={isRefreshing} style={{ fontSize: 14 }} />
         </button>
 
         {/* Theme toggle */}
-        <button className="btn btn-icon" title="Toggle theme" onClick={toggleTheme}>
+        <button
+          className="btn btn-icon"
+          title={t('settings.shortcuts.toggleTheme')}
+          onClick={toggleTheme}
+        >
           {theme === 'dark' ? (
             <SunOutlined style={{ fontSize: 14 }} />
           ) : (
@@ -162,12 +168,16 @@ export default function Toolbar({
         </button>
 
         {/* Appearance */}
-        <button className="btn btn-icon" title="Customize appearance" onClick={onAppearanceOpen}>
+        <button
+          className="btn btn-icon"
+          title={t('toolbar.customizeAppearance')}
+          onClick={onAppearanceOpen}
+        >
           <StarOutlined style={{ fontSize: 14 }} />
         </button>
 
         {/* Settings */}
-        <button className="btn btn-icon" title="Settings" onClick={onSettingsOpen}>
+        <button className="btn btn-icon" title={t('settings.title')} onClick={onSettingsOpen}>
           <SettingOutlined style={{ fontSize: 14 }} />
         </button>
       </div>

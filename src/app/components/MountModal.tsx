@@ -1,5 +1,7 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
+import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { App } from 'antd';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -43,17 +45,18 @@ const PROVIDER_NAME: Record<MountProvider, string> = {
 };
 
 function MountedBucketDetails({ mount }: { mount: MountInfo }) {
+  const { t } = useTranslation();
   return (
     <>
       <div className="field">
         <div className="field-label">
           {mount.health === 'mounted'
-            ? 'Mounted at'
+            ? t('mount.mountedAtLabel')
             : mount.health === 'degraded'
-              ? 'Degraded mount'
+              ? t('mount.degradedMount')
               : mount.health === 'offline'
-                ? 'Mount offline'
-                : 'Unmounting…'}
+                ? t('mount.mountOffline')
+                : t('mount.unmounting')}
         </div>
         <div className="mount-path-readout">
           {mount.health === 'mounted' && <span className="mount-live-dot" aria-hidden="true" />}
@@ -66,13 +69,10 @@ function MountedBucketDetails({ mount }: { mount: MountInfo }) {
         )}
         {mount.pendingUploads > 0 && (
           <div className="field-hint">
-            {mount.pendingUploads} pending {mount.pendingUploads === 1 ? 'upload' : 'uploads'}.
-            Saved writes remain on this computer until uploaded.
+            {t('mount.pendingUploads', { count: mount.pendingUploads })}. {t('mount.savedRemain')}
           </div>
         )}
-        <div className="field-hint">
-          Open it like any folder. Unmount before deleting or moving it.
-        </div>
+        <div className="field-hint">{t('mount.openLikeFolder')}</div>
       </div>
 
       <div className="mount-notes">
@@ -92,9 +92,7 @@ function MountedBucketDetails({ mount }: { mount: MountInfo }) {
           <span>{mountModeHint(mount.readOnly)}</span>
         </div>
         {!mount.readOnly && (
-          <div className="mount-note mount-note-quiet">
-            Files you drop here upload in the background — keep the app running until they finish.
-          </div>
+          <div className="mount-note mount-note-quiet">{t('mount.dropHint')}</div>
         )}
       </div>
     </>
@@ -112,11 +110,12 @@ function SavedWritesSelector({
   busy: boolean;
   onSelect: (id: string | null) => void;
 }) {
+  const { t } = useTranslation();
   if (recoveries.length === 0) return null;
   return (
     <div className="field">
       <label className="field-label" htmlFor="mount-recovery">
-        Saved writes
+        {t('mount.savedWrites')}
       </label>
       <select
         id="mount-recovery"
@@ -125,18 +124,14 @@ function SavedWritesSelector({
         disabled={busy}
         onChange={(event) => onSelect(event.target.value || null)}
       >
-        <option value="">Start a new mount</option>
+        <option value="">{t('mount.startNew')}</option>
         {recoveries.map((recovery) => (
           <option key={recovery.recoveryId} value={recovery.recoveryId}>
-            {recovery.files.length} saved {recovery.files.length === 1 ? 'file' : 'files'} ·{' '}
-            {recovery.recoveryId}
+            {t('mount.savedFileCount', { count: recovery.files.length })} · {recovery.recoveryId}
           </option>
         ))}
       </select>
-      <div className="field-hint">
-        Resume uploads using this account. The saved files remain available if you start a new
-        mount.
-      </div>
+      <div className="field-hint">{t('mount.resumeHint')}</div>
     </div>
   );
 }
@@ -161,6 +156,7 @@ export default function MountModal() {
   );
 
   const { message } = App.useApp();
+  const { t } = useTranslation();
   const os = useMemo(() => detectOs(), []);
   const [localPath, setLocalPath] = useState('');
   const [readOnly, setReadOnly] = useState(false);
@@ -232,15 +228,15 @@ export default function MountModal() {
     if (info)
       message.success(
         selectedRecoveryId
-          ? `Resumed saved writes for ${target.bucket} at ${info.localPath}`
-          : `${target.bucket} mounted at ${info.localPath}`
+          ? i18nT('mount.resumed', { bucket: target.bucket, path: info.localPath })
+          : i18nT('mount.mountedToast', { bucket: target.bucket, path: info.localPath })
       );
   }, [target, localPath, readOnly, selectedRecoveryId, mountBucket, message]);
 
   const handleUnmount = useCallback(async () => {
     if (!mount) return;
     const ok = await unmountBucket(mount.mountId);
-    if (ok) message.success(`${mount.bucket} unmounted`);
+    if (ok) message.success(i18nT('sidebar.unmounted', { bucket: mount.bucket }));
   }, [mount, unmountBucket, message]);
 
   const handleReveal = useCallback(async () => {
@@ -254,7 +250,7 @@ export default function MountModal() {
         await openPath(mount.localPath);
       } catch (e) {
         console.error('Failed to open mount folder:', e);
-        message.error('Could not open the folder');
+        message.error(i18nT('sidebar.openFolderFailed'));
       }
     }
   }, [mount, message]);
@@ -270,7 +266,7 @@ export default function MountModal() {
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     } catch {
-      message.error('Could not copy the command');
+      message.error(i18nT('mount.copyCommandFailed'));
     }
   }, [sudoCommand, message]);
 
@@ -290,7 +286,9 @@ export default function MountModal() {
         onClick={handleUnmount}
         disabled={isUnmounting || mount.health === 'unmounting'}
       >
-        {isUnmounting || mount.health === 'unmounting' ? 'Unmounting…' : 'Unmount'}
+        {isUnmounting || mount.health === 'unmounting'
+          ? t('mount.unmounting')
+          : t('sidebar.unmount')}
       </button>
       <button className="btn btn-primary" onClick={handleReveal}>
         <FolderOpenOutlined /> {revealActionLabel(os)}
@@ -299,14 +297,18 @@ export default function MountModal() {
   ) : (
     <>
       <button className="btn" onClick={closeMountModal} disabled={isMounting}>
-        Cancel
+        {t('common.cancel')}
       </button>
       <button
         className="btn btn-primary"
         onClick={handleMount}
         disabled={isMounting || !localPath.trim()}
       >
-        {isMounting ? 'Mounting…' : selectedRecoveryId ? 'Resume uploads' : 'Mount'}
+        {isMounting
+          ? t('mount.mounting')
+          : selectedRecoveryId
+            ? t('mount.resumeUploads')
+            : t('mount.mount')}
       </button>
     </>
   );
@@ -315,7 +317,7 @@ export default function MountModal() {
     <Modal
       open={true}
       onClose={closeMountModal}
-      title="Mount bucket"
+      title={t('mount.title')}
       subtitle={`${PROVIDER_NAME[target.provider]} · ${target.accountLabel}`}
       icon={<LinkOutlined style={{ fontSize: 18 }} />}
       width={560}
@@ -331,7 +333,7 @@ export default function MountModal() {
         <div className="mount-link-node">
           <FolderOpenOutlined className="mount-link-icon" />
           <span className="mount-link-text">
-            {localPath ? pathLeaf(localPath) : 'Local folder'}
+            {localPath ? pathLeaf(localPath) : t('mount.localFolder')}
           </span>
         </div>
       </div>
@@ -351,24 +353,24 @@ export default function MountModal() {
           />
           {recoveryError && (
             <div className="field-hint" role="status">
-              Could not check saved writes: {recoveryError}
+              {t('mount.checkFailedWith', { error: recoveryError })}
             </div>
           )}
           <div className="field">
-            <div className="field-label">Local path</div>
+            <div className="field-label">{t('mount.localPath')}</div>
             <div className="mount-path-row">
               <input
                 className="input mono"
                 value={localPath}
                 onChange={(e) => setLocalPath(e.target.value)}
-                placeholder="Where the bucket should appear"
-                aria-label="Local path"
+                placeholder={t('mount.localPathPlaceholder')}
+                aria-label={t('mount.localPath')}
               />
               <button className="btn" onClick={handleChooseFolder} disabled={isMounting}>
-                Choose folder…
+                {t('mount.chooseFolder')}
               </button>
             </div>
-            <div className="field-hint">Choosing a folder adds the bucket name to the end.</div>
+            <div className="field-hint">{t('mount.chooseFolderHint')}</div>
           </div>
 
           <div className="field">
@@ -379,7 +381,7 @@ export default function MountModal() {
               aria-pressed={!readOnly}
             >
               <span className="option-row-text">
-                <strong>Allow changes</strong>
+                <strong>{t('mount.allowChanges')}</strong>
                 <span>{mountModeHint(readOnly)}</span>
               </span>
               <span className="toggle-switch">
@@ -404,13 +406,13 @@ export default function MountModal() {
                 <button
                   className="btn btn-sm"
                   onClick={handleCopyCommand}
-                  aria-label="Copy command"
+                  aria-label={t('mount.copyCommand')}
                 >
                   {copied ? <CheckOutlined /> : <CopyOutlined />}
-                  {copied ? 'Copied' : 'Copy'}
+                  {copied ? t('common.copied') : t('common.copy')}
                 </button>
               </div>
-              <div className="field-hint">Run this in a terminal, then retry.</div>
+              <div className="field-hint">{t('mount.runInTerminal')}</div>
             </>
           )}
         </div>

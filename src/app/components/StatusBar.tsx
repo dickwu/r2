@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useMemo, useState } from 'react';
 import { Modal } from 'antd';
 import { useAntdModalFocusable } from '@/app/hooks/useAntdModalFocusable';
@@ -26,15 +27,14 @@ interface StatusBarProps {
 }
 
 function useRelativeTime(timestamp: number | null): string {
+  const { t } = useTranslation();
   if (!timestamp) return '';
   const diffMs = Date.now() - timestamp;
   const diffMin = Math.floor(diffMs / 60_000);
-  if (diffMin < 1) return 'just now';
-  if (diffMin === 1) return '1 min ago';
-  if (diffMin < 60) return `${diffMin} min ago`;
+  if (diffMin < 1) return t('time.justNow');
+  if (diffMin < 60) return t('time.minAgo', { count: diffMin });
   const diffHr = Math.floor(diffMin / 60);
-  if (diffHr === 1) return '1 hr ago';
-  return `${diffHr} hr ago`;
+  return t('time.hrAgo', { count: diffHr });
 }
 
 export default function StatusBar({
@@ -46,6 +46,7 @@ export default function StatusBar({
   storageConfig,
   selectedCount = 0,
 }: StatusBarProps) {
+  const { t } = useTranslation();
   const [syncDetailsOpen, setSyncDetailsOpen] = useState(false);
   const focusable = useAntdModalFocusable();
 
@@ -90,19 +91,25 @@ export default function StatusBar({
 
   const syncLabel =
     syncClass === 'syncing'
-      ? 'Syncing…'
+      ? t('status.syncingShort')
       : syncClass === 'synced'
-        ? `Synced ${relativeTime}`
-        : 'Idle';
+        ? t('status.synced', { time: relativeTime })
+        : t('status.idle');
 
   // Item count label
   const itemLabel = useMemo(() => {
     if (!hasConfig) return '';
     if (searchQuery.trim()) {
-      return `${searchTotalCount.toLocaleString()} results`;
+      return t('status.results', {
+        count: searchTotalCount,
+        formatted: searchTotalCount.toLocaleString(),
+      });
     }
-    return `${totalItemsCount.toLocaleString()} items`;
-  }, [hasConfig, searchQuery, searchTotalCount, totalItemsCount]);
+    return t('status.items', {
+      count: totalItemsCount,
+      formatted: totalItemsCount.toLocaleString(),
+    });
+  }, [hasConfig, searchQuery, searchTotalCount, totalItemsCount, t]);
 
   return (
     <>
@@ -123,7 +130,7 @@ export default function StatusBar({
         {itemLabel && (
           <span className="sb-stat">
             {itemLabel}
-            {selectedCount > 0 && <span> · {selectedCount} selected</span>}
+            {selectedCount > 0 && <span> · {t('status.selected', { count: selectedCount })}</span>}
           </span>
         )}
 
@@ -147,7 +154,7 @@ export default function StatusBar({
 
         {moveAttentionCount > 0 && (
           <button className="sb-stat" onClick={() => useMoveStore.getState().setModalOpen(true)}>
-            {moveAttentionCount} move{moveAttentionCount > 1 ? 's' : ''} need attention
+            {t('status.movesNeedAttention', { count: moveAttentionCount })}
           </button>
         )}
 
@@ -155,7 +162,7 @@ export default function StatusBar({
         {transferCount > 0 && !isLoadingFiles && (
           <span className="sb-stat" style={{ color: 'var(--accent)' }}>
             <SwapOutlined style={{ fontSize: 11 }} />
-            {transferCount} transfer{transferCount > 1 ? 's' : ''} active
+            {t('status.transfersActive', { count: transferCount })}
           </span>
         )}
 
@@ -167,7 +174,7 @@ export default function StatusBar({
       </div>
 
       <Modal
-        title="Sync Progress"
+        title={t('status.syncProgress')}
         open={syncDetailsOpen}
         onCancel={() => setSyncDetailsOpen(false)}
         footer={null}

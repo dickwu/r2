@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 /**
  * Decoding a stored object into editable text and encoding it back to the same
  * bytes layout: the encoding, byte-order mark and line endings the object had
@@ -77,7 +78,7 @@ export function decodeText(bytes: Uint8Array): DecodeResult {
     bom = true;
     start = 2;
   } else if (looksBinary(bytes)) {
-    return { ok: false, reason: 'The file contains binary data, so it cannot be edited as text.' };
+    return { ok: false, reason: i18nT('editor.viewOnly.binaryData') };
   }
 
   let text: string;
@@ -86,8 +87,7 @@ export function decodeText(bytes: Uint8Array): DecodeResult {
   } catch {
     return {
       ok: false,
-      reason:
-        'The file is not valid UTF-8 (or UTF-16 with a byte-order mark). Editing it would corrupt characters, so it stays view-only.',
+      reason: i18nT('editor.viewOnly.notUtf8'),
     };
   }
   const eol = detectLineEnding(text);

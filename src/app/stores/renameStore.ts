@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 import { create } from 'zustand';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { batchMoveObjects, BatchMoveResult, MoveOperation, StorageConfig } from '@/app/lib/r2cache';
@@ -79,7 +80,9 @@ export function renameFailureRecord(
     id: `rename:${batch.id}`,
     kind: 'rename',
     name: batch.label,
-    message: batch.error?.trim() ? batch.error : 'Rename failed',
+    message: batch.error?.trim()
+      ? batch.error
+      : i18nT('transfer.kindFailed', { kind: i18nT('transfer.kind.rename') }),
     occurredAt: now,
     // Files renamed, not files attempted: `completed` counts the failures too.
     progress: { done: Math.max(0, batch.completed - batch.failed), total: batch.total },

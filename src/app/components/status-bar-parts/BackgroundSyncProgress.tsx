@@ -1,5 +1,6 @@
 'use client';
 
+import { useTranslation } from 'react-i18next';
 import { useEffect, useState } from 'react';
 import { Progress } from 'antd';
 import { SyncOutlined, CheckCircleOutlined } from '@ant-design/icons';
@@ -12,6 +13,7 @@ interface BackgroundSyncProgressProps {
 export default function BackgroundSyncProgress({ onClick }: BackgroundSyncProgressProps) {
   const backgroundSync = useSyncStore((state) => state.backgroundSync);
   const [showComplete, setShowComplete] = useState(false);
+  const { t } = useTranslation();
 
   // Auto-dismiss "Complete" message after 5 seconds
   useEffect(() => {
@@ -36,7 +38,9 @@ export default function BackgroundSyncProgress({ onClick }: BackgroundSyncProgre
     return (
       <span className="sync-progress" style={{ color: 'var(--ant-color-success)' }}>
         <CheckCircleOutlined />
-        <span className="sync-phase">Synced {fmt(objectsFetched)} objects</span>
+        <span className="sync-phase">
+          {t('status.syncedObjects', { count: objectsFetched, formatted: fmt(objectsFetched) })}
+        </span>
       </span>
     );
   }
@@ -58,10 +62,10 @@ export default function BackgroundSyncProgress({ onClick }: BackgroundSyncProgre
       className="sync-progress"
       onClick={onClick}
       style={onClick ? { cursor: 'pointer' } : undefined}
-      title="Background sync in progress — click for details"
+      title={t('status.backgroundSyncHint')}
     >
       <SyncOutlined spin style={{ fontSize: 12 }} />
-      <span className="sync-phase">Syncing {countText}</span>
+      <span className="sync-phase">{t('status.syncing', { progress: countText })}</span>
       {percent !== undefined && (
         <Progress
           percent={percent}

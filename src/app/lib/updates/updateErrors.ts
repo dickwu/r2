@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 /**
  * Updater errors arrive as raw plugin strings ("error sending request for url
  * (…)", "signature verification failed", "Permission denied (os error 13)").
@@ -55,38 +56,32 @@ const PATTERNS: Array<{ kind: UpdateErrorKind; re: RegExp }> = [
 export const classifyUpdateError = (detail: string): UpdateErrorKind =>
   PATTERNS.find(({ re }) => re.test(detail))?.kind ?? 'unknown';
 
-const STEP_FAILED: Record<UpdateStep, string> = {
-  check: "Couldn't check for updates.",
-  download: "The update didn't finish downloading.",
-  install: "The update didn't install.",
-  restart: "The update is installed, but R2 Client couldn't restart.",
-};
+const stepFailed = (step: UpdateStep): string => i18nT(`updates.error.step.${step}`);
 
 const messageFor = (step: UpdateStep, kind: UpdateErrorKind): string => {
-  if (step === 'restart')
-    return `${STEP_FAILED.restart} Quit and open it again to finish updating.`;
+  if (step === 'restart') return i18nT('updates.error.restart', { step: stepFailed('restart') });
   switch (kind) {
     case 'network':
       return step === 'check'
-        ? "Couldn't reach the update server. Check your internet connection, then try again."
-        : `${STEP_FAILED[step]} The connection dropped. Check your internet connection, then try again.`;
+        ? i18nT('updates.error.networkCheck')
+        : i18nT('updates.error.network', { step: stepFailed(step) });
     case 'signature':
-      return "The downloaded update didn't pass its signature check, so nothing was installed. Download the new version from GitHub instead.";
+      return i18nT('updates.error.signature');
     case 'permission':
-      return "R2 Client doesn't have permission to replace itself where it's installed. Download the new version from GitHub and install it by hand, or move the app to your Applications folder and try again.";
+      return i18nT('updates.error.permission');
     case 'disk':
-      return "There isn't enough free disk space for the update. Free up some space, then try again.";
+      return i18nT('updates.error.disk');
     case 'server':
       return step === 'check'
-        ? "The update server didn't return a usable answer. Try again in a few minutes, or download the new version from GitHub."
-        : `${STEP_FAILED[step]} The update server didn't return the file. Try again in a few minutes, or download it from GitHub.`;
+        ? i18nT('updates.error.serverCheck')
+        : i18nT('updates.error.server', { step: stepFailed(step) });
     default:
-      return `${STEP_FAILED[step]} Try again, or download the new version from GitHub.`;
+      return i18nT('updates.error.unknown', { step: stepFailed(step) });
   }
 };
 
 export const describeUpdateError = (step: UpdateStep, error: unknown): UpdateFailure => {
-  const detail = errorText(error).trim() || 'No details were given.';
+  const detail = errorText(error).trim() || i18nT('updates.error.noDetails');
   const kind = classifyUpdateError(detail);
   return {
     step,
@@ -99,4 +94,4 @@ export const describeUpdateError = (step: UpdateStep, error: unknown): UpdateFai
 
 /** The few words the status bar has room for. */
 export const shortFailure = (failure: UpdateFailure): string =>
-  failure.step === 'check' ? "Couldn't check for updates" : 'Update failed';
+  failure.step === 'check' ? i18nT('updates.error.shortCheck') : i18nT('updates.error.shortFailed');

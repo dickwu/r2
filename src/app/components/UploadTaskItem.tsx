@@ -1,5 +1,7 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
+import { useTranslation } from 'react-i18next';
 import { Button, Progress, Typography } from 'antd';
 import {
   CheckCircleOutlined,
@@ -20,6 +22,7 @@ interface UploadTaskItemProps {
 // One row of the upload list. Starting, progress and retries are driven by the
 // upload queue (uploadStore + uploadRunner); the row only shows them.
 export default function UploadTaskItem({ task }: UploadTaskItemProps) {
+  const { t } = useTranslation();
   const removeTask = useUploadStore((s) => s.removeTask);
   const cancelTask = useUploadStore((s) => s.cancelTask);
 
@@ -35,7 +38,7 @@ export default function UploadTaskItem({ task }: UploadTaskItemProps) {
     task.status === 'pending'
       ? [
           <Button key="remove" type="text" size="small" danger onClick={handleRemove}>
-            Remove
+            {t('tasks.remove')}
           </Button>,
         ]
       : task.status === 'uploading' || task.status === 'queued'
@@ -89,6 +92,7 @@ function StatusIcon({ status }: { status: UploadTask['status'] }) {
 }
 
 function TaskDescription({ task }: { task: UploadTask }) {
+  const { t } = useTranslation();
   switch (task.status) {
     case 'uploading': {
       const uploadedBytes = (task.progress / 100) * task.fileSize;
@@ -101,7 +105,7 @@ function TaskDescription({ task }: { task: UploadTask }) {
           <Text type="secondary" style={{ fontSize: 11 }}>
             {task.retry ? (
               <span title={task.retry.error}>
-                Retrying ({task.retry.attempt}/{task.retry.maxAttempts})…
+                {t('tasks.retrying', { attempt: task.retry.attempt, max: task.retry.maxAttempts })}
               </span>
             ) : task.speed > 0 ? (
               <>
@@ -109,7 +113,7 @@ function TaskDescription({ task }: { task: UploadTask }) {
                 <span style={{ marginLeft: 8, color: '#999' }}>{formatTimeLeft(eta)}</span>
               </>
             ) : (
-              'Initializing...'
+              t('tasks.initializing')
             )}
           </Text>
         </div>
@@ -118,32 +122,32 @@ function TaskDescription({ task }: { task: UploadTask }) {
     case 'queued':
       return (
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Queued · {formatFileSize(task.fileSize)}
+          {t('tasks.queued')} · {formatFileSize(task.fileSize)}
         </Text>
       );
     case 'error':
       return (
         <span className="task-failed">
-          Failed
+          {t('tasks.failed')}
           <button
             type="button"
             className="btn btn-sm btn-danger-ghost"
             onClick={() => showUploadFailure(task)}
           >
-            Show error
+            {t('syncBanner.showError')}
           </button>
         </span>
       );
     case 'success':
       return (
         <Text type="success" style={{ fontSize: 12 }}>
-          Uploaded
+          {t('tasks.uploaded')}
         </Text>
       );
     case 'cancelled':
       return (
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Cancelled
+          {t('tasks.cancelled')}
         </Text>
       );
     default:
@@ -173,13 +177,14 @@ function formatSpeed(bytesPerSecond: number): string {
 
 function formatTimeLeft(seconds: number): string {
   if (seconds <= 0) return '';
-  if (seconds < 60) return `${Math.ceil(seconds)}s left`;
+  const left = (duration: string) => i18nT('time.left', { duration });
+  if (seconds < 60) return left(`${Math.ceil(seconds)}s`);
   if (seconds < 3600) {
     const mins = Math.floor(seconds / 60);
     const secs = Math.ceil(seconds % 60);
-    return secs > 0 ? `${mins}m ${secs}s left` : `${mins}m left`;
+    return left(secs > 0 ? `${mins}m ${secs}s` : `${mins}m`);
   }
   const hours = Math.floor(seconds / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
-  return mins > 0 ? `${hours}h ${mins}m left` : `${hours}h left`;
+  return left(mins > 0 ? `${hours}h ${mins}m` : `${hours}h`);
 }

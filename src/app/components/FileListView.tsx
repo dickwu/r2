@@ -14,6 +14,7 @@
  * GRID_COLS string and live inside the same width-constrained parent, so the
  * columns line up visually without needing subgrid.
  */
+import { useTranslation } from 'react-i18next';
 import { forwardRef } from 'react';
 import { Virtuoso, Components } from 'react-virtuoso';
 import { useThemeStore } from '@/app/stores/themeStore';
@@ -127,6 +128,7 @@ export default function FileListView({
   onMove,
   onFocus,
 }: FileListViewProps) {
+  const { t } = useTranslation();
   const density = useThemeStore((s) => s.density);
 
   const allSelected = items.length > 0 && selectedKeys.size === items.length;
@@ -168,16 +170,16 @@ export default function FileListView({
           />
         </div>
         <div className="col-h" onClick={onToggleNameSort}>
-          Name <SortArrow order={nameSort} />
+          {t('files.col.name')} <SortArrow order={nameSort} />
         </div>
         <div className="col-h" onClick={onToggleSizeSort}>
-          Size <SortArrow order={sizeSort} />
+          {t('files.col.size')} <SortArrow order={sizeSort} />
         </div>
         <div className="col-h" onClick={onToggleModifiedSort}>
-          Modified <SortArrow order={modifiedSort} />
+          {t('files.col.modified')} <SortArrow order={modifiedSort} />
         </div>
         <div className="col-h" style={{ justifyContent: 'flex-end' }}>
-          Actions
+          {t('files.col.actions')}
         </div>
       </div>
 

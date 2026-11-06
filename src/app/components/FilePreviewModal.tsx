@@ -1,5 +1,7 @@
 'use client';
 
+import { t as i18nT } from '@/i18n';
+import { useTranslation } from 'react-i18next';
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Image, Segmented, Spin, App, Tooltip } from 'antd';
 import {
@@ -76,16 +78,16 @@ function placeholderIcon(target: PreviewTarget) {
 }
 
 const KIND_LABELS: Record<PreviewTarget['kind'], string> = {
-  image: 'Image',
-  video: 'Video',
-  audio: 'Audio',
-  text: 'Text',
-  viewer: 'File',
+  image: 'image',
+  video: 'video',
+  audio: 'audio',
+  text: 'text',
+  viewer: 'file',
 };
 
 /** Short name of the format a preview renders, e.g. "PDF". */
 function formatLabel({ kind, extension }: PreviewTarget): string {
-  return extension ? extension.toUpperCase() : KIND_LABELS[kind];
+  return extension ? extension.toUpperCase() : i18nT(`preview.kind.${KIND_LABELS[kind]}`);
 }
 
 interface FilePreviewModalProps {
@@ -96,6 +98,7 @@ interface FilePreviewModalProps {
 
 export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewModalProps) {
   const { message } = App.useApp();
+  const { t } = useTranslation();
   const { file, files, close, navigate, editing, startEditing, stopEditing, markSaved, revision } =
     usePreviewStore();
   const isOpen = !!file;
@@ -267,26 +270,26 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
 
   async function handleCopyUrl() {
     if (!fileUrl) {
-      message.warning('No public domain configured');
+      message.warning(t('preview.noDomain'));
       return;
     }
     try {
       await navigator.clipboard.writeText(fileUrl);
-      message.success('URL copied to clipboard');
+      message.success(t('preview.urlCopied'));
     } catch {
-      message.error('Failed to copy URL');
+      message.error(t('preview.copyUrlFailed'));
     }
   }
 
   async function handleOpenUrl() {
     if (!fileUrl) {
-      message.warning('No public domain configured');
+      message.warning(t('preview.noDomain'));
       return;
     }
     try {
       await openUrl(fileUrl);
     } catch {
-      message.error('Failed to open URL');
+      message.error(t('preview.openUrlFailed'));
     }
   }
 
@@ -323,10 +326,10 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
       {/* Left: copy URL */}
       <span className="left" style={{ display: 'flex', gap: 6 }}>
         <button className="btn" onClick={handleOpenUrl} disabled={!fileUrl}>
-          <LinkOutlined /> Open URL
+          <LinkOutlined /> {t('preview.openUrl')}
         </button>
         <button className="btn" onClick={handleCopyUrl} disabled={!fileUrl}>
-          <CopyOutlined /> Copy URL
+          <CopyOutlined /> {t('preview.copyUrl')}
         </button>
       </span>
 
@@ -352,10 +355,10 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
           title={
             !canEdit
               ? needsCredentials || !hasCredentials
-                ? 'Editing needs access keys for this bucket. Add them in Account Settings.'
-                : 'Choose a bucket to edit its files.'
+                ? t('preview.editNeedsKeys')
+                : t('preview.chooseBucket')
               : editability.editable
-                ? 'Edit this file'
+                ? t('preview.editThis')
                 : editability.reason
           }
         >
@@ -368,13 +371,13 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
             }}
             disabled={!canEdit || !editability.editable}
           >
-            <EditOutlined /> Edit
+            <EditOutlined /> {t('preview.edit')}
           </button>
         </Tooltip>
       )}
 
       <button className="btn btn-primary" onClick={close}>
-        Close
+        {t('common.close')}
       </button>
     </>
   );
@@ -411,16 +414,24 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
             }}
           >
             <span>
-              The content is {preview.choices.contentName}, but the name says{' '}
-              {formatLabel(preview.choices.name)}. Render as
+              {t('preview.mismatch', {
+                content: preview.choices.contentName,
+                name: formatLabel(preview.choices.name),
+              })}
             </span>
             <Segmented<PreviewSource>
               size="small"
               value={preview.source}
               onChange={preview.setSource}
               options={[
-                { value: 'name', label: `${formatLabel(preview.choices.name)} · name` },
-                { value: 'content', label: `${formatLabel(preview.choices.content)} · content` },
+                {
+                  value: 'name',
+                  label: t('preview.byName', { format: formatLabel(preview.choices.name) }),
+                },
+                {
+                  value: 'content',
+                  label: t('preview.byContent', { format: formatLabel(preview.choices.content) }),
+                },
               ]}
             />
           </div>
@@ -500,11 +511,11 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
           </div>
         ) : needsCredentials ? (
           <p style={{ textAlign: 'center', fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
-            S3 credentials required for signed URL. Configure in Account Settings.
+            {t('preview.needCreds')}
           </p>
         ) : (
           <p style={{ textAlign: 'center', fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
-            Unable to generate file URL
+            {t('preview.noUrl')}
           </p>
         )}
       </Modal>

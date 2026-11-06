@@ -1,3 +1,4 @@
+import { t as i18nT } from '@/i18n';
 import { invoke } from '@tauri-apps/api/core';
 import { encodeObjectKeyForUrl } from '@/app/utils/objectKeyUrl';
 import type {
@@ -18,7 +19,7 @@ import { contentArgs } from '../contentBody';
 
 function requireAwsFields(config: AwsStorageConfig) {
   if (!config.accessKeyId || !config.secretAccessKey || !config.region) {
-    throw new Error('Missing AWS credentials or region');
+    throw new Error(i18nT('errors.awsCreds'));
   }
 }
 
