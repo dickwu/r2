@@ -14,6 +14,7 @@ import type { ModalMode } from '@/app/components/ConfigModal';
 import type { SettingsTab } from '@/app/components/SettingsModal';
 import FileGridView from '@/app/components/FileGridView';
 import FileListView from '@/app/components/FileListView';
+import FileColumnView from '@/app/components/FileColumnView';
 import AccountSidebar from '@/app/components/AccountSidebar';
 import Toolbar from '@/app/components/Toolbar';
 import StatusBar from '@/app/components/StatusBar';
@@ -51,6 +52,7 @@ import { useTransferErrorStore } from '@/app/stores/transferErrorStore';
 import TransferDock from '@/app/components/TransferDock';
 import Toast from '@/app/components/Toast';
 import { useToastStore } from '@/app/stores/toastStore';
+import { useViewModeStore } from '@/app/stores/viewModeStore';
 
 const ConfigModal = dynamic(() => import('@/app/components/ConfigModal'), { ssr: false });
 const SettingsModal = dynamic(() => import('@/app/components/SettingsModal'), { ssr: false });
@@ -75,7 +77,6 @@ const TransferErrorModal = dynamic(() => import('@/app/components/TransferErrorM
   ssr: false,
 });
 
-type ViewMode = 'list' | 'grid';
 type SortOrder = 'asc' | 'desc' | null;
 
 const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
@@ -109,7 +110,9 @@ export default function Home() {
   const currentPath = useCurrentPathStore((state) => state.currentPath);
   const setCurrentPath = useCurrentPathStore((state) => state.setCurrentPath);
   const resetCurrentPath = useCurrentPathStore((state) => state.reset);
-  const [viewMode, setViewMode] = useState<ViewMode>('list');
+  const viewMode = useViewModeStore((s) => s.viewMode);
+  const setViewMode = useViewModeStore((s) => s.setViewMode);
+  const cycleViewMode = useViewModeStore((s) => s.cycleViewMode);
   const [searchQuery, setSearchQuery] = useState('');
   const [nameSort, setNameSort] = useState<SortOrder>(null);
   const [sizeSort, setSizeSort] = useState<SortOrder>(null);
@@ -608,6 +611,14 @@ export default function Home() {
     [clearSelection, openPreview, filteredItems]
   );
 
+  const handleColumnNavigate = useCallback(
+    (path: string) => {
+      setCurrentPath(path);
+      clearSelection();
+    },
+    [setCurrentPath, clearSelection]
+  );
+
   const selectAll = useCallback(() => {
     const allKeys = filteredItems.map((item) => item.key);
     selectAllKeys(allKeys);
@@ -1007,12 +1018,12 @@ export default function Home() {
       } else if (action.type === 'theme') {
         toggleTheme();
       } else if (action.type === 'view') {
-        setViewMode((v) => (v === 'list' ? 'grid' : 'list'));
+        cycleViewMode();
       } else if (action.type === 'path') {
         setCurrentPath(action.value);
       }
     },
-    [handleRefresh, pushToast, toggleTheme, setCurrentPath]
+    [handleRefresh, pushToast, toggleTheme, setCurrentPath, cycleViewMode]
   );
 
   // Global keyboard shortcuts (new shortcuts not covered by useKeyboardShortcuts)
@@ -1026,7 +1037,7 @@ export default function Home() {
       setSettingsTab('appearance');
       setSettingsOpen(true);
     },
-    toggleView: () => setViewMode((v) => (v === 'list' ? 'grid' : 'list')),
+    toggleView: cycleViewMode,
     viewMode,
   });
 
@@ -1150,7 +1161,7 @@ export default function Home() {
               searchQuery={searchQuery}
               onSearchChange={setSearchQuery}
               viewMode={viewMode}
-              onViewModeChange={(v) => setViewMode(v as ViewMode)}
+              onViewModeChange={setViewMode}
               onRefresh={handleRefresh}
               isRefreshing={isFetching}
               onUploadOpen={() => setUploadModalOpen(true)}
@@ -1241,6 +1252,26 @@ export default function Home() {
                   description={error.message}
                   action={<Button onClick={() => void refresh()}>{t('page.retry')}</Button>}
                 />
+              ) : viewMode === 'column' && !searchQuery.trim() ? (
+                // Column view shows the folder trail even while the current
+                // folder loads or is empty; search results stay a flat list.
+                <FileColumnView
+                  key={`${config.provider}:${config.accountId}:${config.bucket}`}
+                  config={config}
+                  currentPath={currentPath}
+                  currentItems={items}
+                  currentLoading={isLoading}
+                  selectedKeys={selectedKeys}
+                  onNavigate={handleColumnNavigate}
+                  onOpen={openPreview}
+                  onToggleSelection={toggleSelection}
+                  onDelete={handleDelete}
+                  onRename={handleRenameClick}
+                  onDownload={handleDownload}
+                  onFolderDelete={handleFolderDelete}
+                  onFolderDownload={handleFolderDownload}
+                  onFolderRename={handleFolderRenameClick}
+                />
               ) : isLoading || isSearching ? (
                 <div className="file-list-loading">
                   <Spin description={isSearching ? t('page.searching') : undefined} fullscreen />
@@ -1250,7 +1281,7 @@ export default function Home() {
                   search={searchQuery || undefined}
                   onUpload={() => setUploadModalOpen(true)}
                 />
-              ) : viewMode === 'list' ? (
+              ) : viewMode !== 'grid' ? (
                 <FileListView
                   items={filteredItems}
                   selectedKeys={selectedKeys}

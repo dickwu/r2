@@ -842,7 +842,7 @@
       "upload": "ファイルをアップロード",
       "refresh": "ファイルを更新",
       "theme": "テーマを切り替え",
-      "view": "リスト／グリッドを切り替え",
+      "view": "表示を切り替え：リスト / グリッド / カラム",
       "settings": "設定を開く",
       "dock": "転送パネルを表示",
       "report": "問題を報告",
@@ -1037,8 +1037,14 @@
     "searchPlaceholder": "バケット内のすべてのファイルを検索…",
     "listView": "リスト表示",
     "gridView": "グリッド表示",
+    "columnView": "カラム表示",
     "upload": "アップロード",
     "customizeAppearance": "外観をカスタマイズ"
+  },
+  "columns": {
+    "empty": "このフォルダは空です",
+    "loadFailed": "このフォルダを読み込めませんでした",
+    "open": "開く"
   },
   "rename": {
     "emptyName": "ファイル名を入力してください",
@@ -1187,7 +1193,7 @@
       "navigation": "ナビゲーション",
       "commandPalette": "コマンドパレットを開く",
       "toggleTheme": "テーマを切り替え",
-      "toggleView": "リスト / グリッドを切り替え",
+      "toggleView": "表示を切り替え：リスト / グリッド / カラム",
       "openSettings": "設定を開く",
       "files": "ファイル",
       "upload": "アップロード",

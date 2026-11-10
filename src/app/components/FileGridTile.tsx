@@ -161,7 +161,7 @@ function ThumbImage({
  * cannot be made (too large, unknown format, offline) the tile loads the
  * original as before.
  */
-function ImageThumbnail({
+export function ImageThumbnail({
   src,
   alt,
   object,

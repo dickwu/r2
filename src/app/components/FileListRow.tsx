@@ -62,7 +62,7 @@ function formatDateTime(date: string): string {
 }
 
 /** Returns design tone class and antd icon for a file name */
-function toneAndIcon(item: FileItem): {
+export function toneAndIcon(item: FileItem): {
   tone: string;
   Icon: React.ComponentType<{ style?: React.CSSProperties }>;
 } {

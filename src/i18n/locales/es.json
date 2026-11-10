@@ -944,7 +944,7 @@
       "upload": "Subir archivos",
       "refresh": "Actualizar archivos",
       "theme": "Cambiar tema",
-      "view": "Cambiar lista / cuadrícula",
+      "view": "Cambiar vista: lista / cuadrícula / columnas",
       "settings": "Abrir ajustes",
       "dock": "Mostrar panel de transferencias",
       "report": "Informar de un problema",
@@ -1149,8 +1149,14 @@
     "searchPlaceholder": "Buscar en todos los archivos del bucket…",
     "listView": "Vista de lista",
     "gridView": "Vista de cuadrícula",
+    "columnView": "Vista de columnas",
     "upload": "Subir",
     "customizeAppearance": "Personalizar apariencia"
+  },
+  "columns": {
+    "empty": "Esta carpeta está vacía",
+    "loadFailed": "No se pudo cargar esta carpeta",
+    "open": "Abrir"
   },
   "rename": {
     "emptyName": "El nombre del archivo no puede estar vacío",
@@ -1313,7 +1319,7 @@
       "navigation": "Navegación",
       "commandPalette": "Abrir paleta de comandos",
       "toggleTheme": "Cambiar tema",
-      "toggleView": "Alternar lista / cuadrícula",
+      "toggleView": "Cambiar vista: lista / cuadrícula / columnas",
       "openSettings": "Abrir ajustes",
       "files": "Archivos",
       "upload": "Subir",

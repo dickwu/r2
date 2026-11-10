@@ -893,7 +893,7 @@
       "upload": "Upload files",
       "refresh": "Refresh files",
       "theme": "Toggle theme",
-      "view": "Toggle list / grid",
+      "view": "Switch view: list / grid / columns",
       "settings": "Open settings",
       "dock": "Show transfer dock",
       "report": "Report a problem",
@@ -1093,8 +1093,14 @@
     "searchPlaceholder": "Search all files in bucket…",
     "listView": "List view",
     "gridView": "Grid view",
+    "columnView": "Column view",
     "upload": "Upload",
     "customizeAppearance": "Customize appearance"
+  },
+  "columns": {
+    "empty": "This folder is empty",
+    "loadFailed": "Couldn't load this folder",
+    "open": "Open"
   },
   "rename": {
     "emptyName": "File name cannot be empty",
@@ -1250,7 +1256,7 @@
       "navigation": "Navigation",
       "commandPalette": "Open command palette",
       "toggleTheme": "Toggle theme",
-      "toggleView": "Toggle list / grid",
+      "toggleView": "Switch view: list / grid / columns",
       "openSettings": "Open settings",
       "files": "Files",
       "upload": "Upload",

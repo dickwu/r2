@@ -14,12 +14,13 @@ import {
 } from '@ant-design/icons';
 import { useThemeStore } from '@/app/stores/themeStore';
 import { ConnectedCrumbs } from '@/app/components/Crumbs';
+import type { ViewMode } from '@/app/stores/viewModeStore';
 
 interface ToolbarProps {
   searchQuery: string;
   onSearchChange: (v: string) => void;
-  viewMode: 'list' | 'grid';
-  onViewModeChange: (v: 'list' | 'grid') => void;
+  viewMode: ViewMode;
+  onViewModeChange: (v: ViewMode) => void;
   onRefresh: () => void;
   isRefreshing?: boolean;
   onUploadOpen: () => void;
@@ -100,11 +101,13 @@ export default function Toolbar({
         </div>
 
         {/* View mode segmented */}
-        <div className="segmented">
+        <div className="segmented" role="group" aria-label={t('settings.view.title')}>
           <button
             className={viewMode === 'list' ? 'active' : ''}
             onClick={() => onViewModeChange('list')}
             title={t('toolbar.listView')}
+            aria-label={t('toolbar.listView')}
+            aria-pressed={viewMode === 'list'}
           >
             <BarsOutlined style={{ fontSize: 13 }} />
           </button>
@@ -112,8 +115,33 @@ export default function Toolbar({
             className={viewMode === 'grid' ? 'active' : ''}
             onClick={() => onViewModeChange('grid')}
             title={t('toolbar.gridView')}
+            aria-label={t('toolbar.gridView')}
+            aria-pressed={viewMode === 'grid'}
           >
             <AppstoreOutlined style={{ fontSize: 13 }} />
+          </button>
+          <button
+            className={viewMode === 'column' ? 'active' : ''}
+            onClick={() => onViewModeChange('column')}
+            title={t('toolbar.columnView')}
+            aria-label={t('toolbar.columnView')}
+            aria-pressed={viewMode === 'column'}
+          >
+            {/* Three side-by-side panes, the Finder column-view glyph */}
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.9"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="2.5" y="4" width="19" height="16" rx="2.5" />
+              <line x1="9" y1="4" x2="9" y2="20" />
+              <line x1="15" y1="4" x2="15" y2="20" />
+            </svg>
           </button>
         </div>
 

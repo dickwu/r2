@@ -842,7 +842,7 @@
       "upload": "上传文件",
       "refresh": "刷新文件",
       "theme": "切换主题",
-      "view": "切换列表 / 网格",
+      "view": "切换视图：列表 / 网格 / 分栏",
       "settings": "打开设置",
       "dock": "显示传输面板",
       "report": "报告问题",
@@ -1037,8 +1037,14 @@
     "searchPlaceholder": "搜索存储桶中的所有文件…",
     "listView": "列表视图",
     "gridView": "网格视图",
+    "columnView": "分栏视图",
     "upload": "上传",
     "customizeAppearance": "自定义外观"
+  },
+  "columns": {
+    "empty": "此文件夹为空",
+    "loadFailed": "无法加载此文件夹",
+    "open": "打开"
   },
   "rename": {
     "emptyName": "文件名不能为空",
@@ -1187,7 +1193,7 @@
       "navigation": "导航",
       "commandPalette": "打开命令面板",
       "toggleTheme": "切换主题",
-      "toggleView": "切换列表 / 网格",
+      "toggleView": "切换视图：列表 / 网格 / 分栏",
       "openSettings": "打开设置",
       "files": "文件",
       "upload": "上传",
