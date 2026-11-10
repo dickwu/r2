@@ -77,8 +77,11 @@ export function useFilesSync(config: StorageConfig | null) {
     }
   }, []);
 
+  const bucket = config?.bucket ?? null;
+  const sessionIdentity = `${storeAccountId}\0${namespace ?? ''}\0${JSON.stringify(config ?? null)}`;
+
   useEffect(() => {
-    useSyncStore.getState().setCurrentBucket(storeAccountId, config?.bucket ?? null);
+    useSyncStore.getState().setCurrentBucket(storeAccountId, bucket);
     useSyncStore.getState().resetBackgroundSync();
     if (!config || !namespace || !hasSigningCredentials(config)) return;
     const session: SyncSession = {
@@ -162,7 +165,7 @@ export function useFilesSync(config: StorageConfig | null) {
       unlisteners.forEach((unlisten) => unlisten());
       if (session.run) void cancelBackgroundSync(session.run.run_id).catch(() => {});
     };
-  }, [config, namespace, queryClient, startRun, storeAccountId]);
+  }, [bucket, config, namespace, queryClient, sessionIdentity, startRun, storeAccountId]);
 
   const refresh = useCallback(async () => {
     const session = sessionRef.current;

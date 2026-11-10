@@ -162,7 +162,12 @@ export default function Home() {
   const reportOpen = useReportStore((s) => s.isOpen);
   const transferErrorOpen = useTransferErrorStore((s) => s.isOpen);
 
-  const config = toStorageConfig();
+  // toStorageConfig() returns a new object each call; memoize on currentConfig
+  // so effects that depend on `config` (especially useFilesSync) do not loop.
+  const config = useMemo(() => {
+    if (!currentConfig) return null;
+    return toStorageConfig();
+  }, [currentConfig, toStorageConfig]);
   const isConfigReady = useMemo(() => {
     if (!config?.accountId || !config?.bucket) return false;
     if (config.provider === 'r2') {

@@ -172,6 +172,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
 
   setCurrentBucket: (accountId, bucket) => {
     const key = accountId && bucket ? makeBucketKey(accountId, bucket) : null;
+    if (get().currentBucketKey === key) return;
     set({ currentBucketKey: key });
   },
 

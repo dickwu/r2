@@ -154,3 +154,17 @@ describe('syncFailureRecord', () => {
     expect(record?.message).toBe('Sync failed');
   });
 });
+
+describe('setCurrentBucket', () => {
+  test('does not notify when the bucket key is unchanged', () => {
+    sync().setCurrentBucket('r2:acct-1:ns', 'photos');
+    let notifications = 0;
+    const stop = useSyncStore.subscribe(() => {
+      notifications += 1;
+    });
+    sync().setCurrentBucket('r2:acct-1:ns', 'photos');
+    stop();
+    expect(notifications).toBe(0);
+    expect(sync().currentBucketKey).toBe('r2:acct-1:ns:photos');
+  });
+});
