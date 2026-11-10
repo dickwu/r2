@@ -572,7 +572,7 @@ async function probeProtocol(client) {
   const listedParts = [];
   const markers = new Set();
   let marker;
-  do {
+  for (;;) {
     const page = await send(
       client,
       new ListPartsCommand({
@@ -591,7 +591,7 @@ async function probeProtocol(client) {
     );
     marker = page.NextPartNumberMarker;
     markers.add(marker);
-  } while (true);
+  }
   assert.deepEqual(listedParts, parts);
   await send(
     client,

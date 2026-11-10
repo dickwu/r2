@@ -250,7 +250,7 @@ export async function getBucketSummary(): Promise<BucketSummary> {
 }
 
 /** @deprecated Use syncBucket() instead - directory tree is now built during sync */
-export async function buildDirectoryTree(files: StoredFile[]): Promise<void> {
+export async function buildDirectoryTree(_files: StoredFile[]): Promise<void> {
   // Files are already in DB, just need to build the tree
   return invoke('build_directory_tree');
 }

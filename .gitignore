@@ -78,3 +78,6 @@ public/file-viewer/
 # Monaco AMD build staged by scripts/copy-monaco-assets.mjs (bun run assets:monaco)
 public/monaco-editor/
 .build/
+
+# Local scratch
+.tmp/

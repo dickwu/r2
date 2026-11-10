@@ -90,7 +90,7 @@ const parseEntry = (raw: unknown): ReleaseEntry | null => {
       fixed: stringList(notes.fixed),
     },
     url:
-      typeof entry.url === 'string' && /^https:\/\//.test(entry.url)
+      typeof entry.url === 'string' && entry.url.startsWith('https://')
         ? entry.url
         : githubReleaseUrl(version),
   };

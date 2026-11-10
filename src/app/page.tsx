@@ -573,31 +573,6 @@ export default function Home() {
     setConfigModalOpen(true);
   }
 
-  function handleSettingsClick() {
-    const accounts = useAccountStore.getState().accounts;
-    if (!currentConfig) {
-      openAddAccountModal();
-      return;
-    }
-    const accountData = accounts.find(
-      (a) => a.account.id === currentConfig.account_id && a.provider === currentConfig.provider
-    );
-    if (!accountData) {
-      openAddAccountModal();
-      return;
-    }
-
-    if (currentConfig.provider === 'r2' && accountData.provider === 'r2') {
-      const tokenData = accountData.tokens.find((t) => t.token.id === currentConfig.token_id);
-      if (tokenData) {
-        handleEditToken(tokenData.token);
-        return;
-      }
-    }
-
-    handleEditAccount(accountData);
-  }
-
   const handleItemClick = useCallback(
     (item: FileItem) => {
       if (item.isFolder) {

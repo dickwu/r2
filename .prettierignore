@@ -17,3 +17,6 @@ docs/engineering/r2-audit/**/*.json
 public/file-viewer
 # Monaco AMD build staged by scripts/copy-monaco-assets.mjs
 public/monaco-editor
+
+# Local scratch; never formatted or committed.
+.tmp

@@ -253,7 +253,7 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
           }}
         >
           {task.chunks.map((chunk) => (
-            <ChunkRow key={chunk.chunkId} chunk={chunk} fileSize={task.fileSize} />
+            <ChunkRow key={chunk.chunkId} chunk={chunk} />
           ))}
           {task.speedHistory.length > 1 && (
             <div style={{ marginTop: 8 }}>
@@ -279,10 +279,9 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
   );
 }
 
-function ChunkRow({ chunk, fileSize }: { chunk: DownloadChunk; fileSize: number }) {
+function ChunkRow({ chunk }: { chunk: DownloadChunk }) {
   const totalBytes = chunk.endByte - chunk.startByte;
   const pct = totalBytes > 0 ? Math.round((chunk.downloadedBytes / totalBytes) * 100) : 0;
-  const rangeLabel = `${formatBytes(chunk.startByte)}–${formatBytes(chunk.endByte)}`;
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>

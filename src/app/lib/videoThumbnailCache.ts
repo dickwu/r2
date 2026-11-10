@@ -69,7 +69,7 @@ export class VideoThumbnailCache {
   /** Drop the entries whose key passes `matches`; returns how many went. */
   deleteWhere(matches: (key: string) => boolean): number {
     let removed = 0;
-    for (const key of [...this.entries.keys()]) {
+    for (const key of this.entries.keys()) {
       if (matches(key)) {
         this.entries.delete(key);
         removed += 1;

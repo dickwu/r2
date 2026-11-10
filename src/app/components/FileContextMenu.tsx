@@ -1,13 +1,7 @@
 import { Dropdown } from 'antd';
 import { useTranslation } from 'react-i18next';
 import type { MenuProps } from 'antd';
-import {
-  DownloadOutlined,
-  EditOutlined,
-  DeleteOutlined,
-  CopyOutlined,
-  FolderOutlined,
-} from '@ant-design/icons';
+import { DownloadOutlined, EditOutlined, DeleteOutlined, CopyOutlined } from '@ant-design/icons';
 import { FileItem } from '@/app/hooks/useR2Files';
 
 interface FileContextMenuProps {

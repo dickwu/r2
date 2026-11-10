@@ -13,7 +13,7 @@ import {
   GlobalOutlined,
 } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
-import { useAccountStore, type ProviderAccount } from '@/app/stores/accountStore';
+import { useAccountStore } from '@/app/stores/accountStore';
 import { publicAfterDomainEdit } from '@/app/lib/bucketDomain';
 import { listBuckets, type StorageProvider } from '@/app/lib/r2cache';
 import Modal from '@/app/components/ui/Modal';

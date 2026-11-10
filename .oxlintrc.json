@@ -1,0 +1,54 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["eslint", "typescript", "unicorn", "oxc", "react", "nextjs", "import"],
+  "categories": {
+    "correctness": "error"
+  },
+  "env": {
+    "browser": true,
+    "node": true
+  },
+  "settings": {
+    "react": {
+      "version": "19.3.1"
+    },
+    "next": {
+      "rootDir": "."
+    }
+  },
+  "ignorePatterns": [
+    "node_modules/**",
+    ".next/**",
+    "out/**",
+    "dist/**",
+    "build/**",
+    ".build/**",
+    "src-tauri/**",
+    "public/file-viewer/**",
+    "public/monaco-editor/**",
+    "public/**/*.min.js",
+    "public/**/*.min.css",
+    ".tmp/**",
+    "next-env.d.ts",
+    "**/*.min.js",
+    "**/*.min.css"
+  ],
+  "overrides": [
+    {
+      "files": ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/*.spec.tsx"],
+      "env": {
+        "jest": true
+      }
+    }
+  ],
+  "rules": {
+    "react/set-state-in-effect": "off",
+    "react/refs": "off",
+    "react/preserve-manual-memoization": "off",
+    "react/purity": "off",
+    "react/immutability": "off",
+    "react-hooks/exhaustive-deps": "off",
+    "nextjs/no-img-element": "off",
+    "unicorn/no-new-array": "off"
+  }
+}

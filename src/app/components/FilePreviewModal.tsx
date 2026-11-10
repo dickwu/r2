@@ -28,11 +28,7 @@ import {
 } from '@/app/lib/r2cache';
 import { TEXT_EXTENSIONS } from '@/app/components/preview/TextViewer';
 import BlobImage from '@/app/components/preview/BlobImage';
-import {
-  getFileExtension,
-  getImageBlobType,
-  type PreviewTarget,
-} from '@/app/components/preview/previewKind';
+import { getImageBlobType, type PreviewTarget } from '@/app/components/preview/previewKind';
 import { usePreviewTarget, type PreviewSource } from '@/app/components/preview/usePreviewTarget';
 import { useVideoThumbnail } from '@/app/hooks/useVideoThumbnail';
 import { usePreviewStore } from '@/app/stores/previewStore';

@@ -11,7 +11,6 @@ import {
 } from '@ant-design/icons';
 import {
   useDownloadStore,
-  selectDownloadingCount,
   selectPendingCount,
   selectPausedCount,
   selectFinishedCount,
@@ -33,7 +32,6 @@ interface DownloadProgressProps {
 export default function DownloadProgress({ bucket, accountId }: DownloadProgressProps) {
   const { t } = useTranslation();
   const tasks = useDownloadStore((state) => state.tasks);
-  const downloadingCount = useDownloadStore(selectDownloadingCount);
   const pendingCount = useDownloadStore(selectPendingCount);
   const pausedCount = useDownloadStore(selectPausedCount);
   const finishedCount = useDownloadStore(selectFinishedCount);

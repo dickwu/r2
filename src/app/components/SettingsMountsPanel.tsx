@@ -362,7 +362,7 @@ export default function SettingsMountsPanel() {
 
   const handleUnmountAll = useCallback(async () => {
     let done = 0;
-    for (const mount of [...mounts]) {
+    for (const mount of mounts) {
       const ok = await unmountOne(mount);
       if (!ok) {
         message.error(

@@ -16,7 +16,7 @@ const RULES: ReadonlyArray<readonly [RegExp, string]> = [
   // AWS-style access key IDs (AKIA…, ASIA…).
   [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[redacted-key-id]'],
   // Authorization header values.
-  [/\b(Bearer|Basic)\s+[A-Za-z0-9\-._~+\/=]{8,}/g, '$1 [redacted]'],
+  [/\b(Bearer|Basic)\s+[A-Za-z0-9\-._~+/=]{8,}/g, '$1 [redacted]'],
   // Presigned-URL credential and signature parameters.
   [/([?&](?:X-Amz-Credential|X-Amz-Signature|X-Amz-Security-Token)=)[^&\s]+/gi, '$1[redacted]'],
   // Scalar values of secret-shaped keys, in JSON or key=value form —

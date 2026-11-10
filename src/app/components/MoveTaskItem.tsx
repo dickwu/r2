@@ -59,8 +59,6 @@ function MoveTaskItem({ task, onResume }: MoveTaskItemProps) {
 
   // Upload at 100% = finishing (post-sync)
   const isUploadFinishing = task.status === 'uploading' && task.progress >= 100;
-  const isFinishing =
-    task.status === 'finishing' || task.status === 'deleting' || isUploadFinishing;
 
   const getActions = () => {
     if (isMoveAwaitingAction(task.status)) {

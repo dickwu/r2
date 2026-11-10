@@ -197,7 +197,7 @@ export default function UploadModal({
                 filePath,
               });
               tasks.push({ filePath, fileName, fileSize, contentType: getContentType(fileName) });
-            } catch (fileError) {
+            } catch {
               message.error(t('uploadModal.readFileFailed', { path: filePath }));
             }
           } else {
@@ -245,7 +245,7 @@ export default function UploadModal({
         );
         addUniqueTasks(tasks);
       }
-    } catch (e) {
+    } catch {
       /* dialog cancelled */
     }
   }, [hasS3Credentials, addUniqueTasks, message]);
@@ -272,7 +272,7 @@ export default function UploadModal({
           addUniqueTasks(tasks);
         }
       }
-    } catch (e) {
+    } catch {
       /* dialog cancelled */
     }
   }, [hasS3Credentials, addUniqueTasks, message]);

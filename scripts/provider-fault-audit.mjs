@@ -378,7 +378,7 @@ async function loadBuildSnapshot(appBinary) {
 function redactRequestUrl(url) {
   try {
     const parsed = new URL(url, 'http://127.0.0.1');
-    for (const key of [...parsed.searchParams.keys()]) {
+    for (const key of parsed.searchParams.keys()) {
       if (/signature|credential|security-token|access-key|x-amz/i.test(key)) {
         parsed.searchParams.set(key, '[redacted]');
       }

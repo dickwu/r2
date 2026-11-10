@@ -550,7 +550,6 @@ function StatusPill({ row }: { row: PreviewRow }) {
 }
 
 function SecurityNote() {
-  const { t } = useTranslation();
   return (
     <div className="tx-note">
       <KeyOutlined className="tx-note-icon" />

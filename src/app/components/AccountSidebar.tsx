@@ -2,7 +2,7 @@
 
 import { useTranslation } from 'react-i18next';
 import { useState, useMemo } from 'react';
-import { Dropdown, App } from 'antd';
+import { App } from 'antd';
 import type { MenuProps } from 'antd';
 import {
   PlusOutlined,
