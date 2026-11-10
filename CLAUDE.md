@@ -13,7 +13,9 @@ bun run ffmpeg:fetch     # ffmpeg sidecar for src-tauri/binaries — once per ch
 bun run dev              # Next.js dev server (port 3000, turbopack)
 bun run tauri dev        # Full Tauri desktop app in dev mode
 bun run tauri build      # Production build
-bun run check            # format:check + typecheck + bun test — the frontend CI gate
+bun run check            # format:check + typecheck + lint (oxlint) + bun test — the frontend CI gate
+bun run lint             # oxlint
+bun run lint:fix         # oxlint --fix
 ```
 
 Rust backend (from `src-tauri/`):
