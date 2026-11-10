@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { resumeSavedMove } from '@/app/lib/moveRecovery';
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useRenderNow } from '@/app/hooks/useRenderNow';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import {
@@ -150,10 +151,10 @@ export default function TransferDock() {
   const [dismissed, setDismissed] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [prevTotal, setPrevTotal] = useState(0);
+  const now = useRenderNow();
 
   const dockTasks = useMemo<DockTask[]>(() => {
     const out: DockTask[] = [];
-    const now = Date.now();
 
     for (const t of uploadTasks) {
       const state = uploadState(t.status);
@@ -268,9 +269,14 @@ export default function TransferDock() {
     }
 
     return out;
-  }, [uploadTasks, downloadTasks, moveTasks, renameBatches, mountTransfers]);
+  }, [uploadTasks, downloadTasks, moveTasks, renameBatches, mountTransfers, now]);
 
   const total = dockTasks.length;
+  if (total !== prevTotal) {
+    if (total > prevTotal) setDismissed(false);
+    setPrevTotal(total);
+  }
+
   const running = dockTasks.filter((t) => t.state === 'active').length;
   const paused = dockTasks.filter((t) => t.state === 'paused').length;
   const failed = dockTasks.filter((t) => t.state === 'error').length;
@@ -334,14 +340,6 @@ export default function TransferDock() {
     clearFinishedRenames,
     clearFinishedMountTransfers,
   ]);
-
-  // Reset dismissed flag whenever a new task arrives
-  useEffect(() => {
-    if (total > prevTotal) {
-      setDismissed(false);
-    }
-    setPrevTotal(total);
-  }, [total, prevTotal]);
 
   // Auto-dismiss once every task has reached a terminal state. The brief
   // delay lets the user see the completion state before the dock disappears.

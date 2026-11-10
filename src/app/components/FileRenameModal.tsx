@@ -32,11 +32,12 @@ export default function FileRenameModal({
 
   // Elapsed-time ticker while the remote copy + delete runs (no byte-level
   // progress exists for a server-side CopyObject, so show time instead).
+  if (!loading && elapsedSec !== 0) {
+    setElapsedSec(0);
+  }
+
   useEffect(() => {
-    if (!loading) {
-      setElapsedSec(0);
-      return;
-    }
+    if (!loading) return;
     const startedAt = Date.now();
     const timer = setInterval(() => {
       setElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
@@ -112,6 +113,7 @@ export default function FileRenameModal({
             className="input mono"
             value={filename}
             onChange={(e) => setFilename(e.target.value)}
+            // oxlint-disable-next-line jsx-a11y/no-autofocus -- Dialog initial focus; ARIA APG asks that focus move into the dialog on open.
             autoFocus
             autoComplete="off"
             autoCorrect="off"

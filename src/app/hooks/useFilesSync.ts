@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
@@ -46,13 +46,10 @@ export function useFilesSync(config: StorageConfig | null) {
   // Providers may use the same account label; keep their sync histories separate.
   const storeAccountId =
     config && namespace ? `${config.provider}:${config.accountId}:${namespace}` : null;
-  const lastSyncTime = useMemo(
-    () =>
-      storeAccountId && config?.bucket
-        ? useSyncStore.getState().getLastSyncTime(storeAccountId, config.bucket)
-        : null,
-    [storeAccountId, config?.bucket, bucketSyncTimes]
-  );
+  const lastSyncTime =
+    storeAccountId && config?.bucket
+      ? (bucketSyncTimes[`${storeAccountId}:${config.bucket}`] ?? null)
+      : null;
 
   const startRun = useCallback(async (session: SyncSession) => {
     const previousRun = session.run;
@@ -184,13 +181,15 @@ export function useFilesSync(config: StorageConfig | null) {
   }, [queryClient, startRun]);
 
   const backgroundSync = useSyncStore((state) => state.backgroundSync);
+  const currentBucketKey = useSyncStore((state) => state.currentBucketKey);
+  const thisBucketKey =
+    storeAccountId && config?.bucket ? `${storeAccountId}:${config.bucket}` : null;
+  const sessionMatches = thisBucketKey !== null && currentBucketKey === thisBucketKey;
   return {
-    isSyncing:
-      namespace !== null && sessionRef.current?.namespace === namespace && backgroundSync.isRunning,
+    isSyncing: sessionMatches && backgroundSync.isRunning,
     isSynced:
       namespace !== null &&
-      (lastSyncTime !== null ||
-        (sessionRef.current?.namespace === namespace && backgroundSync.objectsFetched > 0)),
+      (lastSyncTime !== null || (sessionMatches && backgroundSync.objectsFetched > 0)),
     syncError: backgroundSync.error ? new Error(backgroundSync.error) : null,
     lastSyncTime,
     refresh,

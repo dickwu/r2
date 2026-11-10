@@ -112,6 +112,8 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
   // Count for In Progress tab (excludes finishing)
   const inProgressTabCount = pendingCount + activeCount + pausedCount;
 
+  const moveBucket = storageConfig?.bucket;
+  const moveAccountId = storageConfig?.accountId;
   const reloadTasksFromDatabase = useCallback(async () => {
     try {
       // Load global active tasks and merge source history for all known source queues.
@@ -119,10 +121,10 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
       const currentTasksSnapshot = useMoveStore.getState().tasks;
       const targets = new Map<string, { sourceBucket: string; sourceAccountId: string }>();
 
-      if (storageConfig?.bucket && storageConfig?.accountId) {
-        targets.set(`${storageConfig.accountId}:${storageConfig.bucket}`, {
-          sourceBucket: storageConfig.bucket,
-          sourceAccountId: storageConfig.accountId,
+      if (moveBucket && moveAccountId) {
+        targets.set(`${moveAccountId}:${moveBucket}`, {
+          sourceBucket: moveBucket,
+          sourceAccountId: moveAccountId,
         });
       }
 
@@ -193,7 +195,7 @@ export default function MoveTaskModal({ storageConfig }: MoveTaskModalProps) {
     } catch (e) {
       console.error('Failed to reload move tasks:', e);
     }
-  }, [storageConfig?.bucket, storageConfig?.accountId, loadFromDatabase]);
+  }, [moveBucket, moveAccountId, loadFromDatabase]);
 
   // Load accounts and refresh tasks in background when modal opens (no loading spinner)
   useEffect(() => {

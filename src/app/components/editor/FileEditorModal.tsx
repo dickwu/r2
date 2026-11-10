@@ -197,7 +197,7 @@ export default function FileEditorModal({
       }
     })();
     return () => controller.abort();
-  }, [key]);
+  }, [key, t]);
 
   const isText = editability.mode === 'text';
   const dirty = isText ? loaded !== null && text !== savedText : imageEdits > 0;
@@ -255,7 +255,7 @@ export default function FileEditorModal({
       return { bytes, body: bytes };
     }
     return editedText(text, loaded.text!.format);
-  }, [loaded, editability, text]);
+  }, [loaded, editability, text, t]);
 
   const fail = useCallback((kind: SaveFailureKind, text: string) => {
     const failure = saveFailure(kind, text);
@@ -278,7 +278,7 @@ export default function FileEditorModal({
     } finally {
       setCopying(false);
     }
-  }, [loaded, copying, editedFile, key, message]);
+  }, [loaded, copying, editedFile, key, message, t]);
 
   const save = useCallback(
     async (force = false) => {
@@ -380,6 +380,7 @@ export default function FileEditorModal({
       modal,
       message,
       onSaved,
+      t,
     ]
   );
 
@@ -469,15 +470,12 @@ export default function FileEditorModal({
         return (
           <>
             {formatButton}
-            <span
-              className={`file-editor-status ${jsonError ? 'is-error' : 'is-ok'}`}
-              role="status"
-            >
+            <output className={`file-editor-status ${jsonError ? 'is-error' : 'is-ok'}`}>
               {jsonError ? <WarningFilled /> : <CheckCircleFilled />}
               <span className="file-editor-status-text">
                 {jsonError ?? t('editor.modal.validJson')}
               </span>
-            </span>
+            </output>
           </>
         );
       case 'delimited':
@@ -714,7 +712,9 @@ export default function FileEditorModal({
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
           {file.name}
           {dirty && (
-            <span className="file-editor-dirty" role="img" aria-label={t('editor.modal.unsaved')} />
+            <span className="file-editor-dirty">
+              <span className="sr-only">{t('editor.modal.unsaved')}</span>
+            </span>
           )}
         </span>
       }

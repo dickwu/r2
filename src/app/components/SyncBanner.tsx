@@ -2,7 +2,8 @@
 
 import { t as i18nT } from '@/i18n';
 import { useTranslation } from 'react-i18next';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useRenderNow } from '@/app/hooks/useRenderNow';
 import {
   CloudDownloadOutlined,
   DatabaseOutlined,
@@ -31,22 +32,22 @@ interface SyncBannerProps {
  * has accumulated enough delta to be meaningful.
  */
 function useRollingRate(counter: number, windowMs = RATE_WINDOW_MS): number {
-  const samplesRef = useRef<{ value: number; time: number }[]>([]);
-  const now = Date.now();
-  const samples = samplesRef.current;
-
+  const now = useRenderNow();
+  const [samples, setSamples] = useState<{ value: number; time: number }[]>([]);
   if (samples.length === 0 || samples[samples.length - 1].value !== counter) {
-    samples.push({ value: counter, time: now });
-  }
-  // Trim samples outside the window — keep at least the most recent one.
-  const cutoff = now - windowMs;
-  while (samples.length > 1 && samples[0].time < cutoff) {
-    samples.shift();
+    setSamples([...samples, { value: counter, time: now }]);
   }
 
-  if (samples.length < 2) return 0;
-  const oldest = samples[0];
-  const newest = samples[samples.length - 1];
+  const cutoff = now - windowMs;
+  let start = 0;
+  while (start < samples.length - 1 && samples[start].time < cutoff) {
+    start += 1;
+  }
+  const window = samples.slice(start);
+
+  if (window.length < 2) return 0;
+  const oldest = window[0];
+  const newest = window[window.length - 1];
   const dt = (newest.time - oldest.time) / 1000;
   if (dt <= 0) return 0;
   return Math.max(0, (newest.value - oldest.value) / dt);
@@ -95,34 +96,17 @@ export default function SyncBanner({ onShowDetails }: SyncBannerProps) {
   // before the banner auto-hides. Restarts the linger window each time a new
   // sync run finishes.
   const [lingering, setLingering] = useState(false);
-  const wasActiveRef = useRef(false);
-  const lingerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [wasActive, setWasActive] = useState(active);
+  if (active !== wasActive) {
+    setWasActive(active);
+    setLingering(!active);
+  }
 
   useEffect(() => {
-    if (active) {
-      wasActiveRef.current = true;
-      if (lingerTimerRef.current) {
-        clearTimeout(lingerTimerRef.current);
-        lingerTimerRef.current = null;
-      }
-      setLingering(false);
-      return;
-    }
-    if (wasActiveRef.current) {
-      wasActiveRef.current = false;
-      setLingering(true);
-      lingerTimerRef.current = setTimeout(() => {
-        setLingering(false);
-        lingerTimerRef.current = null;
-      }, COMPLETION_LINGER_MS);
-    }
-  }, [active]);
-
-  useEffect(() => {
-    return () => {
-      if (lingerTimerRef.current) clearTimeout(lingerTimerRef.current);
-    };
-  }, []);
+    if (!lingering || active) return;
+    const timer = setTimeout(() => setLingering(false), COMPLETION_LINGER_MS);
+    return () => clearTimeout(timer);
+  }, [lingering, active]);
 
   const visible = active || lingering;
 
@@ -168,7 +152,7 @@ export default function SyncBanner({ onShowDetails }: SyncBannerProps) {
   // the backend reports `estimatedTotal` late and then jumps once fetch
   // completes.
   return (
-    <div className={bannerClass} role="status" aria-live="polite">
+    <output className={bannerClass}>
       <span className="sync-banner-dot" />
       <span className="sync-banner-icon">{view.icon}</span>
       <span className="sync-banner-text">
@@ -187,7 +171,7 @@ export default function SyncBanner({ onShowDetails }: SyncBannerProps) {
           {t('common.details')}
         </button>
       )}
-    </div>
+    </output>
   );
 }
 

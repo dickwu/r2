@@ -49,10 +49,9 @@ export default function FolderRenameModal({
   const { message } = App.useApp();
   const { t } = useTranslation();
 
-  const { parentPath, currentName } = useMemo(() => {
-    if (!folder?.key) return { parentPath: '', currentName: '' };
-    return splitFolderKey(folder.key);
-  }, [folder?.key]);
+  const { parentPath, currentName } = folder?.key
+    ? splitFolderKey(folder.key)
+    : { parentPath: '', currentName: '' };
 
   const [newName, setNewName] = useState(currentName);
   const [confirmInput, setConfirmInput] = useState('');
@@ -101,7 +100,7 @@ export default function FolderRenameModal({
     loadObjects();
   }, [config, folder?.key, message, onClose]);
 
-  const handleRename = useCallback(async () => {
+  const handleRename = async () => {
     if (!config || !folder?.key || isRenaming || isLoading) return;
 
     const trimmedName = newName.trim();
@@ -181,21 +180,7 @@ export default function FolderRenameModal({
         })
       );
     }
-  }, [
-    config,
-    folder?.key,
-    isRenaming,
-    isLoading,
-    newName,
-    parentPath,
-    currentName,
-    objectKeys,
-    confirmInput,
-    confirmCount,
-    message,
-    onClose,
-    onSuccess,
-  ]);
+  };
 
   const handleContinueInBackground = useCallback(() => {
     backgroundedRef.current = true;
@@ -283,6 +268,7 @@ export default function FolderRenameModal({
               className="input mono"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
+              // oxlint-disable-next-line jsx-a11y/no-autofocus -- Dialog initial focus; ARIA APG asks that focus move into the dialog on open.
               autoFocus
               autoComplete="off"
               autoCorrect="off"

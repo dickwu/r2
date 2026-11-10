@@ -188,14 +188,9 @@ export default function BatchDeleteModal({
       footer={footer}
     >
       {showProgress ? (
-        <div className="batch-progress" role="status" aria-live="polite">
-          <div
-            className="batch-progress-track"
-            role="progressbar"
-            aria-valuenow={percent}
-            aria-valuemin={0}
-            aria-valuemax={100}
-          >
+        <output className="batch-progress">
+          <progress className="sr-only" value={percent} max={100} />
+          <div className="batch-progress-track" aria-hidden="true">
             <div
               className={isDeleting ? 'batch-progress-fill active' : 'batch-progress-fill'}
               style={{ width: `${percent}%` }}
@@ -211,7 +206,7 @@ export default function BatchDeleteModal({
             </span>
             <span>{percent}%</span>
           </div>
-        </div>
+        </output>
       ) : (
         <>
           {/* Warning panel */}

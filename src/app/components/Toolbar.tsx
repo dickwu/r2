@@ -101,7 +101,8 @@ export default function Toolbar({
         </div>
 
         {/* View mode segmented */}
-        <div className="segmented" role="group" aria-label={t('settings.view.title')}>
+        <fieldset className="segmented">
+          <legend className="sr-only">{t('settings.view.title')}</legend>
           <button
             className={viewMode === 'list' ? 'active' : ''}
             onClick={() => onViewModeChange('list')}
@@ -143,7 +144,7 @@ export default function Toolbar({
               <line x1="15" y1="4" x2="15" y2="20" />
             </svg>
           </button>
-        </div>
+        </fieldset>
 
         {/* Density segmented */}
         <div className="segmented" title={t('settings.density.title')}>

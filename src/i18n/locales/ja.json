@@ -1209,5 +1209,11 @@
       "keyClick": "クリック",
       "keySpace": "Space"
     }
+  },
+  "a11y": {
+    "selectItem": "{{name}} を選択",
+    "showDetails": "詳細を表示",
+    "hideDetails": "詳細を隠す",
+    "dismissNotification": "通知を閉じる"
   }
 }

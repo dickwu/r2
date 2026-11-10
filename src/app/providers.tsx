@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useSyncExternalStore } from 'react';
 import { App, ConfigProvider, theme } from 'antd';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
@@ -29,7 +29,11 @@ export default function Providers({ children }: { children: React.ReactNode }) {
   const currentTheme = useThemeStore((s) => s.theme);
   const accent = useThemeStore((s) => s.accent);
   const languagePref = useLanguageStore((s) => s.language);
-  const [mounted, setMounted] = useState(false);
+  const mounted = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false
+  );
   const [osLocale, setOsLocale] = useState<SupportedLocale>(() => systemLocale());
   const locale: SupportedLocale = languagePref === 'system' ? osLocale : languagePref;
 
@@ -49,7 +53,6 @@ export default function Providers({ children }: { children: React.ReactNode }) {
     // report can carry what the app was doing before it went wrong.
     installSessionLog();
     initializeTheme();
-    setMounted(true);
   }, []);
 
   // Theme: keep `html.dark` (legacy) and `[data-theme="dark|light"]`

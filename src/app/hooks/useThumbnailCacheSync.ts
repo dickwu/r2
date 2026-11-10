@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useEffectEvent } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   buildPublicUrl,
@@ -34,8 +34,7 @@ async function sourceUrl(config: StorageConfig, key: string): Promise<string | n
  * picture without waiting for a miss.
  */
 export function useThumbnailCacheSync(config: StorageConfig | null | undefined) {
-  const configRef = useRef(config);
-  configRef.current = config;
+  const getConfig = useEffectEvent(() => config);
 
   useEffect(() => {
     let disposed = false;
@@ -57,7 +56,7 @@ export function useThumbnailCacheSync(config: StorageConfig | null | undefined) 
           ...(event.removed ?? []),
         ]);
       }
-      const current = configRef.current;
+      const current = getConfig();
       const plan = planThumbnailRefresh(event, current);
       if (!current || plan.regenerate.length === 0) return;
       const queue = [...plan.regenerate];

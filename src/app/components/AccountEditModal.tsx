@@ -1,7 +1,7 @@
 'use client';
 
 import { Trans, useTranslation } from 'react-i18next';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { App } from 'antd';
 import {
   DeleteOutlined,
@@ -241,10 +241,18 @@ export default function AccountEditModal({
   const [loadingBuckets, setLoadingBuckets] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // Reset and populate form whenever the modal opens or the target account changes
-  useEffect(() => {
-    if (!open) return;
-    if (isNew) {
+  // Reset and populate the form when the modal opens or the target account changes.
+  const targetAccount =
+    !isNew && accountId ? accounts.find((a) => a.account.id === accountId) : undefined;
+  const formKey = open
+    ? isNew
+      ? `new:${initialProvider ?? 'r2'}`
+      : `edit:${accountId}:${targetAccount ? targetAccount.provider : 'missing'}`
+    : 'closed';
+  const [seenFormKey, setSeenFormKey] = useState(formKey);
+  if (formKey !== seenFormKey) {
+    setSeenFormKey(formKey);
+    if (open && isNew) {
       setProvider(initialProvider ?? 'r2');
       setAccountName('');
       setAccountIdField('');
@@ -257,88 +265,87 @@ export default function AccountEditModal({
       setTokenName('');
       setBuckets([]);
       setShowSecret(false);
-      return;
-    }
-    const acct = accounts.find((a) => a.account.id === accountId);
-    if (!acct) return;
-    setProvider(acct.provider);
-    setAccountName(acct.account.name ?? '');
-    setAccountIdField(acct.account.id);
-    setShowSecret(false);
+    } else if (open && targetAccount) {
+      const acct = targetAccount;
+      setProvider(acct.provider);
+      setAccountName(acct.account.name ?? '');
+      setAccountIdField(acct.account.id);
+      setShowSecret(false);
 
-    if (acct.provider === 'r2') {
-      const firstToken = acct.tokens[0];
-      if (firstToken) {
-        setAccessKeyId(firstToken.token.access_key_id);
-        setSecretAccessKey(firstToken.token.secret_access_key);
-        setApiToken(firstToken.token.api_token);
-        setTokenName(firstToken.token.name ?? '');
+      if (acct.provider === 'r2') {
+        const firstToken = acct.tokens[0];
+        if (firstToken) {
+          setAccessKeyId(firstToken.token.access_key_id);
+          setSecretAccessKey(firstToken.token.secret_access_key);
+          setApiToken(firstToken.token.api_token);
+          setTokenName(firstToken.token.name ?? '');
+          setBuckets(
+            firstToken.buckets.map((b) => ({
+              name: b.name,
+              isPublic: b.is_public ?? false,
+              publicDomainHost: b.public_domain ?? '',
+              publicDomainScheme: b.public_domain_scheme ?? 'https',
+              publicPathPrefix: b.public_path_prefix ?? '',
+            }))
+          );
+        } else {
+          setAccessKeyId('');
+          setSecretAccessKey('');
+          setApiToken('');
+          setTokenName('');
+          setBuckets([]);
+        }
+        setRegion('');
+        setEndpointScheme('https');
+        setEndpointHost('');
+      } else if (acct.provider === 'aws') {
+        setAccessKeyId(acct.account.access_key_id);
+        setSecretAccessKey(acct.account.secret_access_key);
+        setRegion(acct.account.region);
+        setEndpointScheme(acct.account.endpoint_scheme);
+        setEndpointHost(acct.account.endpoint_host ?? '');
         setBuckets(
-          firstToken.buckets.map((b) => ({
+          acct.buckets.map((b) => ({
             name: b.name,
             isPublic: b.is_public ?? false,
-            publicDomainHost: b.public_domain ?? '',
+            publicDomainHost: b.public_domain_host ?? '',
             publicDomainScheme: b.public_domain_scheme ?? 'https',
             publicPathPrefix: b.public_path_prefix ?? '',
           }))
         );
-      } else {
-        setAccessKeyId('');
-        setSecretAccessKey('');
-        setApiToken('');
-        setTokenName('');
-        setBuckets([]);
+      } else if (acct.provider === 'minio') {
+        setAccessKeyId(acct.account.access_key_id);
+        setSecretAccessKey(acct.account.secret_access_key);
+        setEndpointScheme(acct.account.endpoint_scheme);
+        setEndpointHost(acct.account.endpoint_host);
+        setBuckets(
+          acct.buckets.map((b) => ({
+            name: b.name,
+            isPublic: b.is_public ?? false,
+            publicDomainHost: b.public_domain_host ?? '',
+            publicDomainScheme: b.public_domain_scheme ?? 'https',
+            publicPathPrefix: b.public_path_prefix ?? '',
+          }))
+        );
+        setRegion('');
+      } else if (acct.provider === 'rustfs') {
+        setAccessKeyId(acct.account.access_key_id);
+        setSecretAccessKey(acct.account.secret_access_key);
+        setEndpointScheme(acct.account.endpoint_scheme);
+        setEndpointHost(acct.account.endpoint_host);
+        setBuckets(
+          acct.buckets.map((b) => ({
+            name: b.name,
+            isPublic: b.is_public ?? false,
+            publicDomainHost: b.public_domain_host ?? '',
+            publicDomainScheme: b.public_domain_scheme ?? 'https',
+            publicPathPrefix: b.public_path_prefix ?? '',
+          }))
+        );
+        setRegion('');
       }
-      setRegion('');
-      setEndpointScheme('https');
-      setEndpointHost('');
-    } else if (acct.provider === 'aws') {
-      setAccessKeyId(acct.account.access_key_id);
-      setSecretAccessKey(acct.account.secret_access_key);
-      setRegion(acct.account.region);
-      setEndpointScheme(acct.account.endpoint_scheme);
-      setEndpointHost(acct.account.endpoint_host ?? '');
-      setBuckets(
-        acct.buckets.map((b) => ({
-          name: b.name,
-          isPublic: b.is_public ?? false,
-          publicDomainHost: b.public_domain_host ?? '',
-          publicDomainScheme: b.public_domain_scheme ?? 'https',
-          publicPathPrefix: b.public_path_prefix ?? '',
-        }))
-      );
-    } else if (acct.provider === 'minio') {
-      setAccessKeyId(acct.account.access_key_id);
-      setSecretAccessKey(acct.account.secret_access_key);
-      setEndpointScheme(acct.account.endpoint_scheme);
-      setEndpointHost(acct.account.endpoint_host);
-      setBuckets(
-        acct.buckets.map((b) => ({
-          name: b.name,
-          isPublic: b.is_public ?? false,
-          publicDomainHost: b.public_domain_host ?? '',
-          publicDomainScheme: b.public_domain_scheme ?? 'https',
-          publicPathPrefix: b.public_path_prefix ?? '',
-        }))
-      );
-      setRegion('');
-    } else if (acct.provider === 'rustfs') {
-      setAccessKeyId(acct.account.access_key_id);
-      setSecretAccessKey(acct.account.secret_access_key);
-      setEndpointScheme(acct.account.endpoint_scheme);
-      setEndpointHost(acct.account.endpoint_host);
-      setBuckets(
-        acct.buckets.map((b) => ({
-          name: b.name,
-          isPublic: b.is_public ?? false,
-          publicDomainHost: b.public_domain_host ?? '',
-          publicDomainScheme: b.public_domain_scheme ?? 'https',
-          publicPathPrefix: b.public_path_prefix ?? '',
-        }))
-      );
-      setRegion('');
     }
-  }, [open, accountId, accounts, isNew, initialProvider]);
+  }
 
   function removeBucket(name: string) {
     setBuckets((prev) => prev.filter((b) => b.name !== name));
@@ -481,6 +488,7 @@ export default function AccountEditModal({
     accountId,
     buckets,
     message,
+    t,
   ]);
 
   /** R2 stores domain in `public_domain`; S3-family stores it in `public_domain_host`. */
@@ -713,7 +721,8 @@ export default function AccountEditModal({
             <div className="field-label">{t('accountEdit.provider')}</div>
             <div className="provider-tags">
               {PROVIDERS.map((p) => (
-                <div
+                <button
+                  type="button"
                   key={p.id}
                   className={['provider-tag', provider === p.id ? 'active' : '']
                     .filter(Boolean)
@@ -725,7 +734,7 @@ export default function AccountEditModal({
                     <div className="pt-name">{p.label}</div>
                     <div className="pt-desc">{t(`accountEdit.providerDesc.${p.desc}`)}</div>
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           </div>

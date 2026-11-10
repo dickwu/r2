@@ -220,14 +220,24 @@ function DownloadTaskItem({ task, onResume }: DownloadTaskItemProps) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             {canExpand && (
-              <span
+              <button
+                type="button"
                 onClick={() => setExpanded(!expanded)}
-                style={{ cursor: 'pointer', fontSize: 10, color: 'var(--color-text-secondary)' }}
+                style={{
+                  cursor: 'pointer',
+                  fontSize: 10,
+                  color: 'var(--color-text-secondary)',
+                  appearance: 'none',
+                  background: 'transparent',
+                  border: 0,
+                  padding: 0,
+                }}
                 aria-expanded={expanded}
                 aria-controls={`chunk-detail-${task.id}`}
+                aria-label={expanded ? t('a11y.hideDetails') : t('a11y.showDetails')}
               >
                 {expanded ? <DownOutlined /> : <RightOutlined />}
-              </span>
+              </button>
             )}
             <Text ellipsis style={{ maxWidth: 320, display: 'block' }}>
               {task.fileName}

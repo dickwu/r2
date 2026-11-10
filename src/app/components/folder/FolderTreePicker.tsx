@@ -24,10 +24,13 @@ export interface FolderTreePickerProps {
   onSelect: (path: string) => void;
 }
 
+const EMPTY_NODES: DirectoryNode[] = [];
+
 export default function FolderTreePicker({ selectedPath, onSelect }: FolderTreePickerProps) {
   const { t } = useTranslation();
-  const [loading, setLoading] = useState(false);
-  const [directoryNodes, setDirectoryNodes] = useState<DirectoryNode[]>([]);
+  const [directoryNodes, setDirectoryNodes] = useState<DirectoryNode[] | null>(null);
+  const loading = directoryNodes === null;
+  const nodes = directoryNodes ?? EMPTY_NODES;
   const [showMetadata, setShowMetadata] = useState(true);
   const [searchValue, setSearchValue] = useState('');
   const [customPath, setCustomPath] = useState('');
@@ -37,23 +40,33 @@ export default function FolderTreePicker({ selectedPath, onSelect }: FolderTreeP
   const existingPaths = useMemo(() => {
     const paths = new Set<string>();
     paths.add(''); // root
-    for (const node of directoryNodes) {
+    for (const node of nodes) {
       const normalized = node.path.endsWith('/') ? node.path.slice(0, -1) : node.path;
       paths.add(normalized);
     }
     return paths;
-  }, [directoryNodes]);
+  }, [nodes]);
 
   const isCustomPath = customPath && !existingPaths.has(customPath.replace(/\/$/, ''));
 
-  // Load folders on mount
   useEffect(() => {
-    loadFolders();
+    let cancelled = false;
+    getAllDirectoryNodes()
+      .then((loaded) => {
+        if (!cancelled) setDirectoryNodes(loaded);
+      })
+      .catch((error) => {
+        console.error('Failed to load folders:', error);
+        if (!cancelled) setDirectoryNodes([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Auto-scroll to selected node after tree loads
   useEffect(() => {
-    if (directoryNodes.length > 0 && treeContainerRef.current) {
+    if (nodes.length > 0 && treeContainerRef.current) {
       setTimeout(() => {
         const selectedNode = treeContainerRef.current?.querySelector('.ant-tree-node-selected');
         if (selectedNode) {
@@ -65,26 +78,14 @@ export default function FolderTreePicker({ selectedPath, onSelect }: FolderTreeP
         }
       }, 100);
     }
-  }, [directoryNodes]);
-
-  const loadFolders = async () => {
-    setLoading(true);
-    try {
-      const nodes = await getAllDirectoryNodes();
-      setDirectoryNodes(nodes);
-    } catch (error) {
-      console.error('Failed to load folders:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [nodes]);
 
   // Build tree data with search filtering
   const treeData = useMemo(() => {
-    if (directoryNodes.length === 0) return [];
+    if (nodes.length === 0) return [];
 
-    const metadataMap = new Map(directoryNodes.map((node) => [node.path, node]));
-    const folderPaths = directoryNodes.map((node) => node.path).sort();
+    const metadataMap = new Map(nodes.map((node) => [node.path, node]));
+    const folderPaths = nodes.map((node) => node.path).sort();
 
     // Filter paths by search
     const searchLower = searchValue.toLowerCase();
@@ -179,7 +180,7 @@ export default function FolderTreePicker({ selectedPath, onSelect }: FolderTreeP
     }
 
     return root;
-  }, [directoryNodes, showMetadata, searchValue, t]);
+  }, [nodes, showMetadata, searchValue, t]);
 
   // Selected key for tree
   const selectedKey =

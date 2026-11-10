@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["eslint", "typescript", "unicorn", "oxc", "react", "nextjs", "import"],
+  "plugins": ["eslint", "typescript", "unicorn", "oxc", "react", "nextjs", "import", "jsx-a11y"],
   "categories": {
     "correctness": "error"
   },
@@ -41,14 +41,5 @@
       }
     }
   ],
-  "rules": {
-    "react/set-state-in-effect": "off",
-    "react/refs": "off",
-    "react/preserve-manual-memoization": "off",
-    "react/purity": "off",
-    "react/immutability": "off",
-    "react-hooks/exhaustive-deps": "off",
-    "nextjs/no-img-element": "off",
-    "unicorn/no-new-array": "off"
-  }
+  "rules": {}
 }

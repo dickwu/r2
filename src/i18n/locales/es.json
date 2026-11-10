@@ -1335,5 +1335,11 @@
       "keyClick": "Clic",
       "keySpace": "Espacio"
     }
+  },
+  "a11y": {
+    "selectItem": "Seleccionar {{name}}",
+    "showDetails": "Mostrar detalles",
+    "hideDetails": "Ocultar detalles",
+    "dismissNotification": "Descartar notificación"
   }
 }

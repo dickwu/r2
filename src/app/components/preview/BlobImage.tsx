@@ -30,10 +30,15 @@ export default function BlobImage({ url, type, filename, style }: BlobImageProps
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<PreviewDownloadProgress>({ loaded: 0, total: null });
 
-  useEffect(() => {
+  const [seenUrl, setSeenUrl] = useState(`${url}:${type}`);
+  if (`${url}:${type}` !== seenUrl) {
+    setSeenUrl(`${url}:${type}`);
     setSrc(null);
     setError(null);
     setProgress({ loaded: 0, total: null });
+  }
+
+  useEffect(() => {
     const controller = new AbortController();
     let objectUrl: string | null = null;
 

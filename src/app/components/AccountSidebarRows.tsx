@@ -59,10 +59,8 @@ export function BucketRow({
 }: BucketRowProps) {
   const { t } = useTranslation();
   return (
-    <div
-      className={['sb-bucket-row', active ? 'active' : ''].filter(Boolean).join(' ')}
-      onClick={onClick}
-    >
+    <div className={['sb-bucket-row', active ? 'active' : ''].filter(Boolean).join(' ')}>
+      <button type="button" className="hit-target" onClick={onClick} aria-label={bucketName} />
       <DatabaseOutlined className="sb-bucket-icon" style={{ fontSize: 12 }} />
       <span className="sb-bucket-name">{bucketName}</span>
       {mountedPath ? (
@@ -81,11 +79,9 @@ export function BucketRow({
           </Tooltip>
         ) : (
           <Tooltip title={t('sidebar.mountedAt', { path: mountedPath })} placement="right">
-            <span
-              className="sb-bucket-mounted"
-              role="img"
-              aria-label={t('sidebar.mountedAt', { path: mountedPath })}
-            />
+            <span className="sb-bucket-mounted">
+              <span className="sr-only">{t('sidebar.mountedAt', { path: mountedPath })}</span>
+            </span>
           </Tooltip>
         )
       ) : null}
@@ -313,7 +309,8 @@ export function AccountRow({
       : accountData.buckets.length;
 
   const row = (
-    <div className="sb-account-row" onClick={onToggle}>
+    <div className="sb-account-row">
+      <button type="button" className="hit-target" onClick={onToggle} aria-label={displayName} />
       {!collapsed && (
         <span className={['sb-chev', expanded ? 'open' : ''].filter(Boolean).join(' ')}>
           <RightOutlined style={{ fontSize: 9 }} />

@@ -37,8 +37,20 @@ export default function SettingsStoragePanel() {
   }, []);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    let cancelled = false;
+    getThumbnailCacheStats()
+      .then((next) => {
+        if (cancelled) return;
+        setStats(next);
+        setError(null);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const changeLimit = async (bytes: number) => {
     if (busy || stats?.maxBytes === bytes) return;
@@ -119,16 +131,12 @@ export default function SettingsStoragePanel() {
               <span>{t('storage.thumbnailsNoun', { count: stats?.count ?? 0 })}</span>
             </div>
           </div>
-          <div
-            className="thumb-cache-meter"
-            role="meter"
-            aria-label={t('storage.usageAria')}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={Math.round(percent)}
-          >
+          <div className="thumb-cache-meter" aria-hidden="true">
             <span style={{ width: `${percent}%` }} />
           </div>
+          <meter className="sr-only" min={0} max={100} value={Math.round(percent)}>
+            {t('storage.usageAria')}
+          </meter>
           <div className="thumb-cache-foot">
             <span>{t('storage.evictionNote')}</span>
             <button
@@ -158,12 +166,14 @@ export default function SettingsStoragePanel() {
         <div className="option-row-list">
           {THUMBNAIL_LIMIT_OPTIONS.map((option, index) => (
             <button
+              type="button"
               key={option.bytes}
               className={['option-row', stats?.maxBytes === option.bytes && 'active']
                 .filter(Boolean)
                 .join(' ')}
               onClick={() => void changeLimit(option.bytes)}
               disabled={busy}
+              aria-label={option.label}
             >
               <span className="option-row-text">
                 <strong>{option.label}</strong>

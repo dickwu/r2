@@ -1,7 +1,7 @@
 'use client';
 
 import { useTranslation } from 'react-i18next';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { PlaySquareOutlined, LoadingOutlined } from '@ant-design/icons';
 import { isFfmpegMissing, useVideoThumbnail } from '@/app/hooks/useVideoThumbnail';
 import { mediaFragmentUrl } from '@/app/lib/videoThumbnailCache';
@@ -29,12 +29,14 @@ export default function VideoThumbnail({ src, alt, object }: VideoThumbnailProps
   });
   const [playerFailed, setPlayerFailed] = useState(false);
   const [playerReady, setPlayerReady] = useState(false);
+  const [playerSrc, setPlayerSrc] = useState(src);
   const { t } = useTranslation();
 
-  useEffect(() => {
+  if (src !== playerSrc) {
+    setPlayerSrc(src);
     setPlayerFailed(false);
     setPlayerReady(false);
-  }, [src]);
+  }
 
   if (error && playerFailed) {
     const reason = isFfmpegMissing() ? t('preview.ffmpegMissing') : null;
@@ -78,6 +80,7 @@ export default function VideoThumbnail({ src, alt, object }: VideoThumbnailProps
   return (
     <div ref={containerRef} className="video-thumbnail">
       {thumbnailSrc && (
+        // oxlint-disable-next-line nextjs/no-img-element -- Tauri static export; video thumbs are blob/data URLs that next/image cannot load.
         <img
           src={thumbnailSrc}
           alt={alt}

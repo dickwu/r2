@@ -14,16 +14,23 @@ export default function BackgroundSyncProgress({ onClick }: BackgroundSyncProgre
   const backgroundSync = useSyncStore((state) => state.backgroundSync);
   const [showComplete, setShowComplete] = useState(false);
   const { t } = useTranslation();
+  const completeToken = backgroundSync.isRunning
+    ? 'running'
+    : backgroundSync.completedAt
+      ? `done:${backgroundSync.completedAt}`
+      : 'idle';
+  const [seenCompleteToken, setSeenCompleteToken] = useState(completeToken);
+  if (completeToken !== seenCompleteToken) {
+    setSeenCompleteToken(completeToken);
+    setShowComplete(completeToken.startsWith('done:'));
+  }
 
   // Auto-dismiss "Complete" message after 5 seconds
   useEffect(() => {
-    if (backgroundSync.completedAt && !backgroundSync.isRunning) {
-      setShowComplete(true);
-      const timer = setTimeout(() => setShowComplete(false), 5000);
-      return () => clearTimeout(timer);
-    }
-    setShowComplete(false);
-  }, [backgroundSync.completedAt, backgroundSync.isRunning]);
+    if (!showComplete) return;
+    const timer = setTimeout(() => setShowComplete(false), 5000);
+    return () => clearTimeout(timer);
+  }, [showComplete, completeToken]);
 
   if (!backgroundSync.isRunning && !showComplete) {
     return null;
@@ -58,7 +65,8 @@ export default function BackgroundSyncProgress({ onClick }: BackgroundSyncProgre
   const speedText = speed > 0 ? `${Math.round(speed)}/s` : '';
 
   return (
-    <span
+    <button
+      type="button"
       className="sync-progress"
       onClick={onClick}
       style={onClick ? { cursor: 'pointer' } : undefined}
@@ -75,6 +83,6 @@ export default function BackgroundSyncProgress({ onClick }: BackgroundSyncProgre
         />
       )}
       {speedText && <span className="sync-count">{speedText}</span>}
-    </span>
+    </button>
   );
 }

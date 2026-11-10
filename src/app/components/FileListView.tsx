@@ -167,17 +167,18 @@ export default function FileListView({
             checked={allSelected}
             indeterminate={someSelected}
             onClick={handleMasterCheckbox}
+            aria-label={t('settings.shortcuts.selectAll')}
           />
         </div>
-        <div className="col-h" onClick={onToggleNameSort}>
+        <button type="button" className="col-h" onClick={onToggleNameSort}>
           {t('files.col.name')} <SortArrow order={nameSort} />
-        </div>
-        <div className="col-h" onClick={onToggleSizeSort}>
+        </button>
+        <button type="button" className="col-h" onClick={onToggleSizeSort}>
           {t('files.col.size')} <SortArrow order={sizeSort} />
-        </div>
-        <div className="col-h" onClick={onToggleModifiedSort}>
+        </button>
+        <button type="button" className="col-h" onClick={onToggleModifiedSort}>
           {t('files.col.modified')} <SortArrow order={modifiedSort} />
-        </div>
+        </button>
         <div className="col-h" style={{ justifyContent: 'flex-end' }}>
           {t('files.col.actions')}
         </div>

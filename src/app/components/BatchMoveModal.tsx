@@ -131,16 +131,19 @@ export default function BatchMoveModal({
       });
     });
     return options;
-  }, [accounts]);
+  }, [accounts, t]);
 
   const selectedDestination = useMemo(
     () => destinationOptions.find((option) => option.id === selectedDestinationId) || null,
     [destinationOptions, selectedDestinationId]
   );
 
-  useEffect(() => {
-    if (!open || !config || destinationOptions.length === 0) return;
-
+  const initKey =
+    open && config
+      ? `${config.provider}:${config.accountId}:${config.accessKeyId}:${destinationOptions.length}`
+      : '';
+  const [seenInitKey, setSeenInitKey] = useState(initKey);
+  if (open && config && destinationOptions.length > 0 && initKey !== seenInitKey) {
     const initialOption =
       destinationOptions.find((option) => {
         if (option.provider !== config.provider) return false;
@@ -148,19 +151,19 @@ export default function BatchMoveModal({
         if (option.provider === 'r2') return option.accessKeyId === config.accessKeyId;
         return true;
       }) || null;
-
+    setSeenInitKey(initKey);
     if (initialOption) {
       setSelectedDestinationId(initialOption.id);
       setSelectedBucket(config.bucket);
     }
-  }, [open, config, destinationOptions]);
+  }
 
-  useEffect(() => {
-    if (!selectedDestination) return;
-    if (!selectedBucket || !selectedDestination.buckets.some((b) => b.name === selectedBucket)) {
-      setSelectedBucket(selectedDestination.buckets[0]?.name || '');
-    }
-  }, [selectedDestination, selectedBucket]);
+  if (
+    selectedDestination &&
+    (!selectedBucket || !selectedDestination.buckets.some((b) => b.name === selectedBucket))
+  ) {
+    setSelectedBucket(selectedDestination.buckets[0]?.name || '');
+  }
 
   const isSameDestination =
     !!config &&
@@ -265,6 +268,7 @@ export default function BatchMoveModal({
     message,
     onClose,
     onSuccess,
+    t,
   ]);
 
   const footer = (
@@ -273,21 +277,16 @@ export default function BatchMoveModal({
         className="left"
         style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}
       >
-        <button
-          type="button"
-          role="switch"
-          aria-checked={deleteOriginal}
-          aria-labelledby="batch-move-delete-original-label"
-          className={deleteOriginal ? 'switch on' : 'switch'}
-          onClick={() => setDeleteOriginal((v) => !v)}
-        />
-        <span
-          id="batch-move-delete-original-label"
-          style={{ cursor: 'pointer' }}
-          onClick={() => setDeleteOriginal((v) => !v)}
-        >
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            className="sr-only"
+            checked={deleteOriginal}
+            onChange={(e) => setDeleteOriginal(e.target.checked)}
+          />
+          <span className={deleteOriginal ? 'switch on' : 'switch'} aria-hidden="true" />
           {t('batchMove.deleteOriginal')}
-        </span>
+        </label>
       </span>
       <button className="btn" onClick={onClose} disabled={isStartingQueue}>
         {t('common.cancel')}

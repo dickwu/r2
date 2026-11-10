@@ -71,17 +71,19 @@ export default function TextViewer({
   const appTheme = useThemeStore((s) => s.theme);
   const monacoTheme = appTheme === 'dark' ? 'vs-dark' : 'light';
 
+  const [seenUrl, setSeenUrl] = useState(url);
+  if (url !== seenUrl) {
+    setSeenUrl(url);
+    setContent(null);
+    setError(null);
+    setDownloadProgress({ loaded: 0, total: null });
+    setLoading(Boolean(url));
+  }
+
   useEffect(() => {
-    if (!url) {
-      setContent(null);
-      return;
-    }
+    if (!url) return;
 
     const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    setContent(null);
-    setDownloadProgress({ loaded: 0, total: null });
 
     fetchPreviewBytes(url, { signal: controller.signal, onProgress: setDownloadProgress })
       .then((bytes) => {

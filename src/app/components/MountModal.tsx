@@ -62,11 +62,7 @@ function MountedBucketDetails({ mount }: { mount: MountInfo }) {
           {mount.health === 'mounted' && <span className="mount-live-dot" aria-hidden="true" />}
           <code>{mount.localPath}</code>
         </div>
-        {mount.healthError && (
-          <div className="mount-error" role="status">
-            {mount.healthError}
-          </div>
-        )}
+        {mount.healthError && <output className="mount-error">{mount.healthError}</output>}
         {mount.pendingUploads > 0 && (
           <div className="field-hint">
             {t('mount.pendingUploads', { count: mount.pendingUploads })}. {t('mount.savedRemain')}
@@ -174,19 +170,17 @@ export default function MountModal() {
     void refreshRecoveries();
   }, [refreshRecoveries, bucket, targetProvider, targetAccountId]);
 
-  // The mode belongs to the mount, not to the dialog: a different bucket starts
-  // from the writable default rather than inheriting the last choice.
-  useEffect(() => {
+  const mountTargetKey = `${bucket}:${targetProvider ?? ''}:${targetAccountId ?? ''}:${mount?.localPath ?? ''}`;
+  const [seenMountTarget, setSeenMountTarget] = useState(mountTargetKey);
+  if (mountTargetKey !== seenMountTarget) {
+    setSeenMountTarget(mountTargetKey);
     setReadOnly(false);
-  }, [bucket, targetProvider, targetAccountId]);
+    setLocalPath(mount?.localPath ?? '');
+  }
 
   // Prefill the path: an existing mount's own path, otherwise the backend's default.
   useEffect(() => {
-    if (!bucket) return;
-    if (mount) {
-      setLocalPath(mount.localPath);
-      return;
-    }
+    if (!bucket || mount) return;
     let cancelled = false;
     defaultMountPath(bucket)
       .then((path) => {
@@ -352,9 +346,9 @@ export default function MountModal() {
             }}
           />
           {recoveryError && (
-            <div className="field-hint" role="status">
+            <output className="field-hint">
               {t('mount.checkFailedWith', { error: recoveryError })}
-            </div>
+            </output>
           )}
           <div className="field">
             <div className="field-label">{t('mount.localPath')}</div>
@@ -375,10 +369,12 @@ export default function MountModal() {
 
           <div className="field">
             <button
+              type="button"
               className={['toggle-row', !readOnly && 'on'].filter(Boolean).join(' ')}
               onClick={() => setReadOnly((v) => !v)}
               disabled={isMounting || !!selectedRecoveryId}
               aria-pressed={!readOnly}
+              aria-label={t('mount.allowChanges')}
             >
               <span className="option-row-text">
                 <strong>{t('mount.allowChanges')}</strong>

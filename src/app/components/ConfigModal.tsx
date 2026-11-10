@@ -110,25 +110,42 @@ export default function ConfigModal({
   const showDomainSettings = true;
   const showImportOption = mode === 'add-account' && accounts.length === 0;
 
+  const bucketLoadKey =
+    open && mode === 'edit-token' && editToken
+      ? `token:${editToken.id}`
+      : open && mode === 'edit-account' && editAccount && editAccount.provider !== 'r2'
+        ? `${editAccount.provider}:${editAccount.account.id}`
+        : null;
+
+  const formSessionKey = open
+    ? `${mode}:${editAccount?.provider ?? ''}:${editAccount?.account.id ?? ''}:${editToken?.id ?? ''}:${parentAccountId ?? ''}`
+    : 'closed';
+  const [seenFormSessionKey, setSeenFormSessionKey] = useState(formSessionKey);
+  if (formSessionKey !== seenFormSessionKey) {
+    setSeenFormSessionKey(formSessionKey);
+    setBuckets([]);
+    if (open && mode === 'edit-account' && editAccount) {
+      setProvider(editAccount.provider);
+    } else if (open && (mode === 'edit-token' || mode === 'add-token')) {
+      setProvider('r2');
+    }
+  }
+
   useEffect(() => {
     if (!open) {
       form.resetFields();
-      setBuckets([]);
       return;
     }
 
     form.resetFields();
-    setBuckets([]);
 
     if (mode === 'edit-account' && editAccount) {
-      setProvider(editAccount.provider);
       if (editAccount.provider === 'r2') {
         form.setFieldsValue({
           accountId: editAccount.account.id,
           accountName: editAccount.account.name || '',
         });
       } else if (editAccount.provider === 'aws') {
-        loadAwsBuckets(editAccount.account.id);
         form.setFieldsValue({
           accountName: editAccount.account.name || '',
           accessKeyId: editAccount.account.access_key_id,
@@ -139,7 +156,6 @@ export default function ConfigModal({
           forcePathStyle: editAccount.account.force_path_style,
         });
       } else if (editAccount.provider === 'minio') {
-        loadMinioBuckets(editAccount.account.id);
         form.setFieldsValue({
           accountName: editAccount.account.name || '',
           accessKeyId: editAccount.account.access_key_id,
@@ -149,7 +165,6 @@ export default function ConfigModal({
           forcePathStyle: editAccount.account.force_path_style,
         });
       } else if (editAccount.provider === 'rustfs') {
-        loadRustfsBuckets(editAccount.account.id);
         form.setFieldsValue({
           accountName: editAccount.account.name || '',
           accessKeyId: editAccount.account.access_key_id,
@@ -160,9 +175,6 @@ export default function ConfigModal({
         });
       }
     } else if (mode === 'edit-token' && editToken) {
-      setProvider('r2');
-      // Load existing buckets for this token
-      loadExistingBuckets(editToken.id);
       const account = accounts.find(
         (a) => a.provider === 'r2' && a.account.id === editToken.account_id
       );
@@ -175,7 +187,6 @@ export default function ConfigModal({
         secretAccessKey: editToken.secret_access_key,
       });
     } else if (mode === 'add-token' && parentAccountId) {
-      setProvider('r2');
       const account = accounts.find((a) => a.provider === 'r2' && a.account.id === parentAccountId);
       form.setFieldsValue({
         accountId: parentAccountId,
@@ -184,85 +195,50 @@ export default function ConfigModal({
     }
   }, [open, mode, editAccount, editToken, parentAccountId, form, accounts]);
 
-  async function loadExistingBuckets(tokenId: number) {
-    try {
-      const existingBuckets = await invoke<Bucket[]>('list_buckets', { tokenId });
-      const bucketConfigs = existingBuckets.map((b) => ({
-        name: b.name,
-        publicDomainHost: b.public_domain || undefined,
-        publicDomainScheme: b.public_domain_scheme || undefined,
-        isPublic: b.is_public ?? false,
-        publicPathPrefix: b.public_path_prefix || undefined,
-      }));
-      setBuckets(bucketConfigs);
-      if (bucketConfigs.length > 0) {
-        form.setFieldValue('selectedBucket', bucketConfigs[0].name);
-      }
-    } catch (e) {
-      console.error('Failed to load existing buckets:', e);
-    }
-  }
-
-  async function loadAwsBuckets(accountId: string) {
-    try {
-      const existingBuckets = await invoke<AwsBucket[]>('list_aws_bucket_configs', { accountId });
-      const bucketConfigs = existingBuckets.map((b) => ({
-        name: b.name,
-        publicDomainHost: b.public_domain_host || undefined,
-        publicDomainScheme: b.public_domain_scheme || undefined,
-        isPublic: b.is_public ?? false,
-        publicPathPrefix: b.public_path_prefix || undefined,
-      }));
-      setBuckets(bucketConfigs);
-      if (bucketConfigs.length > 0) {
-        form.setFieldValue('selectedBucket', bucketConfigs[0].name);
-      }
-    } catch (e) {
-      console.error('Failed to load AWS bucket configs:', e);
-    }
-  }
-
-  async function loadMinioBuckets(accountId: string) {
-    try {
-      const existingBuckets = await invoke<MinioBucket[]>('list_minio_bucket_configs', {
-        accountId,
+  useEffect(() => {
+    if (!bucketLoadKey) return;
+    const sep = bucketLoadKey.indexOf(':');
+    const kind = bucketLoadKey.slice(0, sep);
+    const id = bucketLoadKey.slice(sep + 1);
+    let cancelled = false;
+    const command =
+      kind === 'token'
+        ? 'list_buckets'
+        : kind === 'aws'
+          ? 'list_aws_bucket_configs'
+          : kind === 'minio'
+            ? 'list_minio_bucket_configs'
+            : 'list_rustfs_bucket_configs';
+    const payload = kind === 'token' ? { tokenId: Number(id) } : { accountId: id };
+    const isR2Token = kind === 'token';
+    void invoke<Array<Bucket | AwsBucket | MinioBucket | RustfsBucket>>(command, payload)
+      .then((existingBuckets) => {
+        if (cancelled) return;
+        const bucketConfigs = existingBuckets.map((b) => {
+          const host =
+            'public_domain' in b && isR2Token
+              ? (b as Bucket).public_domain
+              : (b as AwsBucket | MinioBucket | RustfsBucket).public_domain_host;
+          return {
+            name: b.name,
+            publicDomainHost: host || undefined,
+            publicDomainScheme: b.public_domain_scheme || undefined,
+            isPublic: b.is_public ?? false,
+            publicPathPrefix: b.public_path_prefix || undefined,
+          };
+        });
+        setBuckets(bucketConfigs);
+        if (bucketConfigs.length > 0) {
+          form.setFieldValue('selectedBucket', bucketConfigs[0].name);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) console.error('Failed to load existing buckets:', e);
       });
-      const bucketConfigs = existingBuckets.map((b) => ({
-        name: b.name,
-        publicDomainHost: b.public_domain_host || undefined,
-        publicDomainScheme: b.public_domain_scheme || undefined,
-        isPublic: b.is_public ?? false,
-        publicPathPrefix: b.public_path_prefix || undefined,
-      }));
-      setBuckets(bucketConfigs);
-      if (bucketConfigs.length > 0) {
-        form.setFieldValue('selectedBucket', bucketConfigs[0].name);
-      }
-    } catch (e) {
-      console.error('Failed to load MinIO bucket configs:', e);
-    }
-  }
-
-  async function loadRustfsBuckets(accountId: string) {
-    try {
-      const existingBuckets = await invoke<RustfsBucket[]>('list_rustfs_bucket_configs', {
-        accountId,
-      });
-      const bucketConfigs = existingBuckets.map((b) => ({
-        name: b.name,
-        publicDomainHost: b.public_domain_host || undefined,
-        publicDomainScheme: b.public_domain_scheme || undefined,
-        isPublic: b.is_public ?? false,
-        publicPathPrefix: b.public_path_prefix || undefined,
-      }));
-      setBuckets(bucketConfigs);
-      if (bucketConfigs.length > 0) {
-        form.setFieldValue('selectedBucket', bucketConfigs[0].name);
-      }
-    } catch (e) {
-      console.error('Failed to load RustFS bucket configs:', e);
-    }
-  }
+    return () => {
+      cancelled = true;
+    };
+  }, [bucketLoadKey, form]);
 
   function handleAddBucket() {
     const name = newBucketName.trim();
@@ -1209,6 +1185,7 @@ export default function ConfigModal({
                   <div
                     key={bucket.name}
                     style={{
+                      position: 'relative',
                       display: 'flex',
                       alignItems: 'center',
                       gap: 6,
@@ -1219,10 +1196,15 @@ export default function ConfigModal({
                         ? '1px solid var(--ant-color-primary)'
                         : '1px solid var(--ant-color-border)',
                       background: isSelected ? 'var(--ant-color-primary-bg)' : undefined,
-                      cursor: 'pointer',
                     }}
-                    onClick={() => form.setFieldValue('selectedBucket', bucket.name)}
                   >
+                    <button
+                      type="button"
+                      className="hit-target"
+                      aria-pressed={isSelected}
+                      aria-label={bucket.name}
+                      onClick={() => form.setFieldValue('selectedBucket', bucket.name)}
+                    />
                     {isSelected && (
                       <CheckOutlined
                         style={{ color: 'var(--ant-color-primary)', flexShrink: 0, fontSize: 12 }}
@@ -1244,8 +1226,14 @@ export default function ConfigModal({
                       {bucket.name}
                     </span>
                     <div
-                      style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}
-                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        flex: 1,
+                        position: 'relative',
+                        zIndex: 1,
+                      }}
                     >
                       <Switch
                         size="small"
@@ -1310,6 +1298,7 @@ export default function ConfigModal({
                       else setAddingBucket(false);
                     }}
                     onPressEnter={handleAddBucket}
+                    // oxlint-disable-next-line jsx-a11y/no-autofocus -- Dialog initial focus; ARIA APG asks that focus move into the dialog on open.
                     autoFocus
                     placeholder={t('config.bucketNamePh')}
                     style={{ flex: 1, fontSize: 12 }}

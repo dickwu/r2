@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { VideoThumbnailCache } from '@/app/lib/videoThumbnailCache';
 import {
@@ -120,37 +120,56 @@ export function useThumbnail(
   { lazy = false, rootMargin = '200px', object = null }: UseThumbnailOptions = {}
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [thumbnailSrc, setThumbnailSrc] = useState<string | null>(null);
-  const [shouldLoad, setShouldLoad] = useState(!lazy);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
+  const getSrc = useEffectEvent(() => src);
+  const getObject = useEffectEvent(() => object);
   // Re-run on a new identity, not on a new object literal per render.
   const memoryKey = src ? thumbnailMemoryKey(kind, src, object) : null;
-  const objectRef = useRef(object);
-  objectRef.current = object;
+  const cached = memoryKey ? memory.get(memoryKey) : undefined;
 
-  useEffect(() => {
-    if (!memoryKey) {
-      setThumbnailSrc(null);
-      setError(false);
-      setLoading(false);
-      setShouldLoad(!lazy);
-      return;
-    }
-    const cached = memory.get(memoryKey);
-    setThumbnailSrc(cached && cached.length > 0 ? cached : null);
-    setError(cached === null);
-    setLoading(false);
+  const [shouldLoad, setShouldLoad] = useState(!lazy);
+  const [loadKey, setLoadKey] = useState(memoryKey);
+  if (memoryKey !== loadKey) {
+    setLoadKey(memoryKey);
     setShouldLoad(!lazy || cached !== undefined);
-  }, [lazy, memoryKey]);
+  }
+
+  const [fetch, setFetch] = useState<{
+    key: string | null;
+    src: string | null;
+    error: boolean;
+    loading: boolean;
+  }>({
+    key: memoryKey,
+    src: cached && cached.length > 0 ? cached : null,
+    error: cached === null,
+    loading: false,
+  });
+
+  if (fetch.key !== memoryKey) {
+    setFetch({
+      key: memoryKey,
+      src: cached && cached.length > 0 ? cached : null,
+      error: cached === null,
+      loading: false,
+    });
+  } else if (
+    shouldLoad &&
+    memoryKey &&
+    cached === undefined &&
+    !fetch.loading &&
+    fetch.src === null &&
+    !fetch.error
+  ) {
+    setFetch({ key: memoryKey, src: null, error: false, loading: true });
+  }
 
   useEffect(() => {
     if (!lazy || shouldLoad || !memoryKey) return;
     const node = containerRef.current;
     if (!node) return;
     if (typeof window === 'undefined' || !('IntersectionObserver' in window)) {
-      setShouldLoad(true);
-      return;
+      const frame = requestAnimationFrame(() => setShouldLoad(true));
+      return () => cancelAnimationFrame(frame);
     }
     const observer = new IntersectionObserver(
       ([entry]) => {
@@ -166,28 +185,30 @@ export function useThumbnail(
   }, [lazy, rootMargin, shouldLoad, memoryKey]);
 
   useEffect(() => {
-    if (!src || !memoryKey || !shouldLoad) return;
-    const cached = memory.get(memoryKey);
-    if (cached !== undefined) {
-      setThumbnailSrc(cached && cached.length > 0 ? cached : null);
-      setError(cached === null);
-      setLoading(false);
-      return;
-    }
+    if (!memoryKey || !shouldLoad || !fetch.loading) return;
+    if (memory.get(memoryKey) !== undefined) return;
     let cancelled = false;
-    setLoading(true);
-    setError(false);
-    void getThumbnailSrc(kind, src, objectRef.current).then((thumbnail) => {
+    const key = memoryKey;
+    void getThumbnailSrc(kind, getSrc() ?? '', getObject()).then((thumbnail) => {
       if (cancelled) return;
-      setThumbnailSrc(thumbnail);
-      setError(thumbnail === null);
-      setLoading(false);
+      setFetch({
+        key,
+        src: thumbnail,
+        error: thumbnail === null,
+        loading: false,
+      });
     });
     return () => {
       cancelled = true;
     };
-    // `src` changes with every re-signed URL; the identity is what matters.
-  }, [kind, shouldLoad, memoryKey]);
+    // `src` is read via getSrc because re-signed URLs must not retrigger the load;
+    // memoryKey is the identity that matters.
+  }, [kind, shouldLoad, memoryKey, fetch.loading]);
+
+  const thumbnailSrc =
+    cached !== undefined ? (cached && cached.length > 0 ? cached : null) : fetch.src;
+  const error = cached === null ? true : fetch.key === memoryKey && fetch.error;
+  const loading = shouldLoad && cached === undefined && fetch.key === memoryKey && fetch.loading;
 
   return { containerRef, error, loading, shouldLoad, thumbnailSrc };
 }

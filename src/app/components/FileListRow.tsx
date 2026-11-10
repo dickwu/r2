@@ -130,19 +130,27 @@ export function FlCheckbox({
   checked,
   indeterminate,
   onClick,
+  'aria-label': ariaLabel,
 }: {
   checked: boolean;
   indeterminate?: boolean;
   onClick: (e: React.MouseEvent) => void;
+  'aria-label'?: string;
 }) {
   const cls = ['fl-checkbox', checked ? 'checked' : '', indeterminate ? 'indeterminate' : '']
     .filter(Boolean)
     .join(' ');
   return (
-    <div className={cls} onClick={onClick}>
+    <button
+      type="button"
+      className={cls}
+      onClick={onClick}
+      aria-pressed={indeterminate ? undefined : checked}
+      aria-label={ariaLabel}
+    >
       {indeterminate && !checked ? <MinusOutlined style={{ fontSize: 8 }} /> : null}
       {checked ? <CheckOutlined style={{ fontSize: 8 }} /> : null}
-    </div>
+    </button>
   );
 }
 
@@ -201,11 +209,12 @@ export default function FileListRow({
   const iconSize = density === 'compact' ? 11 : density === 'cozy' ? 15 : 13;
 
   return (
-    <div className={rowClass} onClick={() => onItemClick(item)}>
+    <div className={rowClass}>
       {/* Checkbox cell */}
-      <div className="fl-cell" onClick={(e) => e.stopPropagation()}>
+      <div className="fl-cell">
         <FlCheckbox
           checked={isSelected}
+          aria-label={t('a11y.selectItem', { name: item.name })}
           onClick={(e) => {
             e.stopPropagation();
             onToggleSelection(item.key);
@@ -214,7 +223,7 @@ export default function FileListRow({
       </div>
 
       {/* Name cell */}
-      <div className="fl-cell fl-name">
+      <button type="button" className="fl-cell fl-name" onClick={() => onItemClick(item)}>
         <div className={`fl-icon ${tone}`}>
           <Icon style={{ fontSize: iconSize }} />
         </div>
@@ -224,20 +233,30 @@ export default function FileListRow({
             {t('status.items', { count: folderCount, formatted: folderCount.toLocaleString() })}
           </span>
         )}
-      </div>
+      </button>
 
       {/* Size cell */}
-      <div className="fl-cell fl-mono">{sizeDisplay}</div>
+      <button
+        type="button"
+        className="fl-cell fl-mono"
+        tabIndex={-1}
+        onClick={() => onItemClick(item)}
+      >
+        {sizeDisplay}
+      </button>
 
       {/* Modified cell */}
-      <div className="fl-cell fl-mono">{modDisplay}</div>
+      <button
+        type="button"
+        className="fl-cell fl-mono"
+        tabIndex={-1}
+        onClick={() => onItemClick(item)}
+      >
+        {modDisplay}
+      </button>
 
       {/* Actions cell */}
-      <div
-        className="fl-cell"
-        style={{ justifyContent: 'flex-end' }}
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div className="fl-cell" style={{ justifyContent: 'flex-end' }}>
         <div className="fl-actions">
           {item.isFolder ? (
             <>

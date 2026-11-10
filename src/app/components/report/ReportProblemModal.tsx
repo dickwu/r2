@@ -2,7 +2,7 @@
 
 import { t as i18nT } from '@/i18n';
 import { useTranslation } from 'react-i18next';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { App } from 'antd';
 import { BugOutlined } from '@ant-design/icons';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -80,27 +80,25 @@ function ReportProblemDialog() {
   );
   const [includeLog, setIncludeLog] = useState(true);
   const [info, setInfo] = useState<AppReportInfo | null>(null);
-  const [log, setLog] = useState<SessionLogSnapshot | null>(null);
+  const [log] = useState<SessionLogSnapshot | null>(() => recentSessionLog());
   const [opening, setOpening] = useState(false);
 
   // A prefill that arrives while the dialog is already open (Report a problem
   // on a failed transfer): a blank title takes it, and the details land below
   // whatever the reporter has written — a draft is never replaced.
-  const seededPrefill = useRef(prefill);
-  useEffect(() => {
-    if (!prefill || prefill === seededPrefill.current) return;
-    seededPrefill.current = prefill;
+  const [appliedPrefill, setAppliedPrefill] = useState(prefill);
+  if (prefill && prefill !== appliedPrefill) {
+    setAppliedPrefill(prefill);
     setTitle((current) =>
       current.trim() === '' ? clampPrefillText(prefill.title, TITLE_MAX) : current
     );
     setDescription((current) => appendPrefillText(current, prefill.description, DESCRIPTION_MAX));
-  }, [prefill]);
+  }
 
   // Evidence is captured the moment the dialog opens, not when the reporter
   // finishes typing. Snapshotting is pure, so StrictMode's double effect is harmless.
   useEffect(() => {
     let cancelled = false;
-    setLog(recentSessionLog());
     buildReportInfo(currentContext()).then((next) => {
       if (!cancelled) setInfo(next);
     });
@@ -187,6 +185,7 @@ function ReportProblemDialog() {
             maxLength={TITLE_MAX}
             placeholder={t('report.titlePlaceholder')}
             onChange={(e) => setTitle(e.target.value)}
+            // oxlint-disable-next-line jsx-a11y/no-autofocus -- Dialog initial focus; ARIA APG asks that focus move into the dialog on open.
             autoFocus
           />
         </div>
@@ -214,6 +213,7 @@ function ReportProblemDialog() {
           className={['toggle-row', 'report-toggle', includeLog && 'on'].filter(Boolean).join(' ')}
           onClick={() => setIncludeLog((on) => !on)}
           aria-pressed={includeLog}
+          aria-label={t('report.includeLog')}
         >
           <span className="option-row-text">
             <strong>{t('report.includeLog')}</strong>

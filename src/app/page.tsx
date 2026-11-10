@@ -3,7 +3,7 @@
 import { t as i18nT } from '@/i18n';
 import { useTranslation } from 'react-i18next';
 import dynamic from 'next/dynamic';
-import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import React, { useEffect, useEffectEvent, useState, useCallback, useMemo, useRef } from 'react';
 import { Alert, App, Button, Spin, type InputRef } from 'antd';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
@@ -26,12 +26,7 @@ import EmptyState from '@/app/components/EmptyState';
 import { useAccountStore, ProviderAccount, Token } from '@/app/stores/accountStore';
 import { useR2Files, FileItem } from '@/app/hooks/useR2Files';
 import { useFilesSync } from '@/app/hooks/useFilesSync';
-import {
-  deleteObject,
-  searchFiles,
-  listAllObjectsUnderPrefix,
-  StorageConfig,
-} from '@/app/lib/r2cache';
+import { deleteObject, searchFiles, listAllObjectsUnderPrefix } from '@/app/lib/r2cache';
 import { useFolderSizeStore } from '@/app/stores/folderSizeStore';
 import { useCurrentPathStore } from '@/app/stores/currentPathStore';
 import { useSyncStore } from '@/app/stores/syncStore';
@@ -167,10 +162,7 @@ export default function Home() {
   const reportOpen = useReportStore((s) => s.isOpen);
   const transferErrorOpen = useTransferErrorStore((s) => s.isOpen);
 
-  const config = useMemo<StorageConfig | null>(
-    () => toStorageConfig(),
-    [currentConfig, toStorageConfig]
-  );
+  const config = toStorageConfig();
   const isConfigReady = useMemo(() => {
     if (!config?.accountId || !config?.bucket) return false;
     if (config.provider === 'r2') {
@@ -187,18 +179,18 @@ export default function Home() {
     );
   }, [config]);
 
+  const bucketIdentity = `${currentConfig?.provider}:${currentConfig?.account_id}:${currentConfig?.bucket}`;
+  const [seenBucketIdentity, setSeenBucketIdentity] = useState(bucketIdentity);
+  if (bucketIdentity !== seenBucketIdentity) {
+    setSeenBucketIdentity(bucketIdentity);
+    setSearchQuery('');
+  }
+
   // Reset path to root when bucket changes
   useEffect(() => {
     resetCurrentPath();
-    setSearchQuery('');
     resetBatchOperation();
-  }, [
-    currentConfig?.bucket,
-    currentConfig?.account_id,
-    currentConfig?.provider,
-    resetBatchOperation,
-    resetCurrentPath,
-  ]);
+  }, [bucketIdentity, resetBatchOperation, resetCurrentPath]);
 
   // Load download tasks from database when bucket changes
   useEffect(() => {
@@ -240,24 +232,21 @@ export default function Home() {
   );
   const { isSyncing, isSynced, lastSyncTime, refresh: refreshSync } = useFilesSync(config);
 
-  useEffect(() => {
-    clearSelection();
+  const selectionScope = `${config?.provider}:${config?.accountId}:${config?.bucket}:${currentPath}`;
+  const [seenSelectionScope, setSeenSelectionScope] = useState(selectionScope);
+  if (selectionScope !== seenSelectionScope) {
+    setSeenSelectionScope(selectionScope);
     setFocusedItem(null);
     setRenameFile(null);
     setRenameFolder(null);
+  }
+
+  useEffect(() => {
+    clearSelection();
     closePreview();
     closeDeleteModal();
     closeMoveModal();
-  }, [
-    config?.provider,
-    config?.accountId,
-    config?.bucket,
-    currentPath,
-    clearSelection,
-    closePreview,
-    closeDeleteModal,
-    closeMoveModal,
-  ]);
+  }, [selectionScope, clearSelection, closePreview, closeDeleteModal, closeMoveModal]);
 
   const backgroundSync = useSyncStore((state) => state.backgroundSync);
 
@@ -273,17 +262,20 @@ export default function Home() {
 
   // Debounced bucket-wide search
   // lastSyncTime is included so search refreshes after file operations (delete/move/rename)
+  const canSearch = Boolean(searchQuery.trim() && isSynced);
+  const searchEpoch = `${searchQuery}:${isSynced}:${lastSyncTime}:${config?.provider}:${config?.accountId}:${config?.bucket}`;
+  const [seenSearchEpoch, setSeenSearchEpoch] = useState(searchEpoch);
+  if (searchEpoch !== seenSearchEpoch) {
+    setSeenSearchEpoch(searchEpoch);
+    setSearchResults([]);
+    setSearchTotalCount(0);
+    setIsSearching(canSearch);
+  }
+
   useEffect(() => {
-    if (!searchQuery.trim() || !isSynced) {
-      setSearchResults([]);
-      setSearchTotalCount(0);
-      setIsSearching(false);
-      return;
-    }
+    if (!canSearch) return;
 
     let cancelled = false;
-    setSearchResults([]);
-    setIsSearching(true);
     const timer = setTimeout(async () => {
       try {
         const result = await searchFiles(searchQuery);
@@ -315,7 +307,15 @@ export default function Home() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [searchQuery, isSynced, lastSyncTime, config?.provider, config?.accountId, config?.bucket]);
+  }, [
+    canSearch,
+    searchQuery,
+    isSynced,
+    lastSyncTime,
+    config?.provider,
+    config?.accountId,
+    config?.bucket,
+  ]);
 
   // Filter and sort items - use search results when searching
   const filteredItems = useMemo(() => {
@@ -408,7 +408,7 @@ export default function Home() {
   // Initialize store on mount
   useEffect(() => {
     initialize();
-  }, []);
+  }, [initialize]);
 
   useEffect(() => {
     let unlistenDragDrop: UnlistenFn | undefined;
@@ -486,9 +486,9 @@ export default function Home() {
     }
   }, [config, isConfigReady]);
 
-  // Keep refs in sync so event listeners always call the latest versions
-  const startDownloadQueueRef = useRef(startDownloadQueue);
-  startDownloadQueueRef.current = startDownloadQueue;
+  const runDownloadQueue = useEffectEvent(() => {
+    void startDownloadQueue();
+  });
 
   // Ensure the download store owns the real-time task state even before the modal opens.
   useEffect(() => {
@@ -510,7 +510,7 @@ export default function Home() {
         const { status } = event.payload;
         if (status === 'completed' || status === 'failed' || status === 'cancelled') {
           setTimeout(() => {
-            startDownloadQueueRef.current();
+            runDownloadQueue();
           }, 100);
         }
       });
@@ -523,26 +523,24 @@ export default function Home() {
     };
   }, []); // Empty deps - only run once on mount
 
-  // Open add account modal if no accounts exist after initialization
-  useEffect(() => {
-    if (initialized && !loading && !hasAccounts()) {
-      openAddAccountModal();
-    }
-  }, [initialized, loading]);
-
-  // Open add account modal if no current config after initialization
-  useEffect(() => {
-    if (initialized && !loading && hasAccounts() && !currentConfig) {
-      openAddAccountModal();
-    }
-  }, [initialized, loading, currentConfig]);
-
-  function openAddAccountModal() {
+  const openAddAccountModal = useCallback(() => {
     setConfigModalMode('add-account');
     setEditAccount(null);
     setEditToken(null);
     setParentAccountId(undefined);
     setConfigModalOpen(true);
+  }, []);
+
+  const [didAutoOpenAccount, setDidAutoOpenAccount] = useState(false);
+  if (initialized && !loading && !didAutoOpenAccount) {
+    if (!hasAccounts() || !currentConfig) {
+      setDidAutoOpenAccount(true);
+      setConfigModalMode('add-account');
+      setEditAccount(null);
+      setEditToken(null);
+      setParentAccountId(undefined);
+      setConfigModalOpen(true);
+    }
   }
 
   function handleAddAccount() {
@@ -583,7 +581,7 @@ export default function Home() {
         openPreview(item, filteredItems);
       }
     },
-    [clearSelection, openPreview, filteredItems]
+    [clearSelection, openPreview, filteredItems, setCurrentPath]
   );
 
   const handleColumnNavigate = useCallback(

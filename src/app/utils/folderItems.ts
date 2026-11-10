@@ -313,7 +313,7 @@ export function createFolderPageAccumulator(scope: FolderRequestScope) {
         for (const key of newKeys) additions.push(files.get(key)!);
         additions.sort(compareFileItems);
         if (additions.length > 0 || replacements.size > 0) {
-          const merged = new Array<FileItem>(sorted.length + additions.length);
+          const merged = Array.from({ length: sorted.length + additions.length }) as FileItem[];
           let oldIndex = 0;
           let writeIndex = 0;
           const copyExisting = (end: number) => {

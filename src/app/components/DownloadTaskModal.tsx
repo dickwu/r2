@@ -66,18 +66,20 @@ export default function DownloadTaskModal({ storageConfig }: DownloadTaskModalPr
   const pendingTabCount = pendingCount + downloadingCount + pausedCount;
 
   // Refresh tasks from database (background, no loading spinner)
+  const downloadBucket = storageConfig?.bucket;
+  const downloadAccountId = storageConfig?.accountId;
   const reloadTasksFromDatabase = useCallback(async () => {
-    if (!storageConfig?.bucket || !storageConfig?.accountId) return;
+    if (!downloadBucket || !downloadAccountId) return;
     try {
       const sessions = await invoke<DownloadSession[]>('get_download_tasks', {
-        bucket: storageConfig.bucket,
-        accountId: storageConfig.accountId,
+        bucket: downloadBucket,
+        accountId: downloadAccountId,
       });
       loadFromDatabase(sessions);
     } catch (e) {
       console.error('Failed to reload download tasks:', e);
     }
-  }, [storageConfig?.bucket, storageConfig?.accountId, loadFromDatabase]);
+  }, [downloadBucket, downloadAccountId, loadFromDatabase]);
 
   // Refresh tasks in background when modal opens (no loading spinner - show existing data immediately)
   useEffect(() => {

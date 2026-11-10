@@ -183,43 +183,47 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
     [markSaved, onFileUpdated]
   );
 
-  useEffect(() => {
-    if (!isOpen || !file) {
-      setObjectUrl(null);
-      return;
-    }
-    const { key } = file;
-
-    if (isPublic && config) {
-      // Public bucket: reuse the provider's URL builder so the object key is
-      // encoded consistently (spaces, unicode, reserved characters) — no signing.
-      setObjectUrl({ key, url: buildPublicUrl(config, key) });
-      return;
-    }
-
-    if (config && hasCredentials) {
-      // Private bucket: auto-sign the URL for the preview. A signature that
-      // lands after the user moved on is dropped.
-      let stale = false;
-      setLoading(true);
-      generateSignedUrl(config, key)
-        .then((url) => {
-          if (!stale) setObjectUrl({ key, url });
-        })
-        .catch(() => {
-          if (!stale) setObjectUrl({ key, url: null });
-        })
-        .finally(() => {
-          if (!stale) setLoading(false);
-        });
-      return () => {
-        stale = true;
-        setLoading(false);
-      };
-    }
-
+  const previewKey = isOpen && file ? file.key : null;
+  if (!previewKey && objectUrl !== null) {
     setObjectUrl(null);
-  }, [isOpen, file, config, hasCredentials, isPublic]);
+  }
+  if (previewKey && isPublic && config) {
+    const url = buildPublicUrl(config, previewKey);
+    if (objectUrl?.key !== previewKey || objectUrl.url !== url) {
+      setObjectUrl({ key: previewKey, url });
+    }
+  } else if (previewKey && (!config || (!isPublic && !hasCredentials))) {
+    if (objectUrl !== null && objectUrl.key !== previewKey) {
+      setObjectUrl(null);
+    }
+  }
+
+  const needsSignature = Boolean(previewKey && config && hasCredentials && !isPublic);
+  const [signKey, setSignKey] = useState<string | null>(null);
+  if (needsSignature && previewKey && signKey !== previewKey) {
+    setSignKey(previewKey);
+    setLoading(true);
+  } else if (!needsSignature && signKey !== null) {
+    setSignKey(null);
+  }
+
+  useEffect(() => {
+    if (!needsSignature || !previewKey || !config) return;
+    let stale = false;
+    generateSignedUrl(config, previewKey)
+      .then((url) => {
+        if (!stale) setObjectUrl({ key: previewKey, url });
+      })
+      .catch(() => {
+        if (!stale) setObjectUrl({ key: previewKey, url: null });
+      })
+      .finally(() => {
+        if (!stale) setLoading(false);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [needsSignature, previewKey, config]);
 
   // The same identity as the grid tile, so the poster comes from the disk cache.
   const posterObject = useMemo(
@@ -453,6 +457,7 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
               <Image src={fileUrl} alt={file.name} style={imageStyle} />
             )
           ) : isVideo && fileUrl ? (
+            // oxlint-disable-next-line jsx-a11y/media-has-caption -- Object preview of the user's own file; no caption track exists.
             <video
               src={fileUrl}
               controls
@@ -468,6 +473,7 @@ export default function FilePreviewModal({ config, onFileUpdated }: FilePreviewM
               }}
             />
           ) : isAudio && fileUrl ? (
+            // oxlint-disable-next-line jsx-a11y/media-has-caption -- Object preview of the user's own file; no caption track exists.
             <audio src={fileUrl} controls style={{ width: '100%' }} />
           ) : isText && fileUrl ? (
             <TextViewer

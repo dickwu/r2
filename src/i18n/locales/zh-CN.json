@@ -1209,5 +1209,11 @@
       "keyClick": "点击",
       "keySpace": "空格"
     }
+  },
+  "a11y": {
+    "selectItem": "选择 {{name}}",
+    "showDetails": "显示详情",
+    "hideDetails": "隐藏详情",
+    "dismissNotification": "关闭通知"
   }
 }

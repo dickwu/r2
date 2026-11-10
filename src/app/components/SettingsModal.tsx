@@ -1,7 +1,7 @@
 'use client';
 
 import { useTranslation } from 'react-i18next';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import {
   SunOutlined,
   AppstoreOutlined,
@@ -180,9 +180,11 @@ function AppearancePanel() {
         <div className="option-row-list">
           {emptyStyles.map((s) => (
             <button
+              type="button"
               key={s.id}
               className={['option-row', emptyStyle === s.id && 'active'].filter(Boolean).join(' ')}
               onClick={() => setEmptyStyle(s.id)}
+              aria-label={s.label}
             >
               <span className="option-row-text">
                 <strong>{s.label}</strong>
@@ -227,19 +229,25 @@ function LanguageSection() {
       </div>
       <div className="option-row-list" role="radiogroup" aria-label={t('settings.language.title')}>
         {options.map((o) => (
-          <button
+          <label
             key={o.id}
-            role="radio"
-            aria-checked={language === o.id}
             className={['option-row', language === o.id && 'active'].filter(Boolean).join(' ')}
-            onClick={() => setLanguage(o.id)}
+            aria-label={o.label}
           >
+            <input
+              type="radio"
+              className="sr-only"
+              name="settings-language"
+              value={o.id}
+              checked={language === o.id}
+              onChange={() => setLanguage(o.id)}
+            />
             <span className="option-row-text">
               <strong>{o.label}</strong>
               <span>{o.sub}</span>
             </span>
-            <span className="option-row-radio" />
-          </button>
+            <span className="option-row-radio" aria-hidden="true" />
+          </label>
         ))}
       </div>
     </section>
@@ -319,11 +327,13 @@ function LayoutPanel() {
         <div className="visual-cards two">
           {sidebars.map((s) => (
             <button
+              type="button"
               key={s.id}
               className={['visual-card', sidebarStyle === s.id && 'active']
                 .filter(Boolean)
                 .join(' ')}
               onClick={() => setSidebarStyle(s.id)}
+              aria-label={s.label}
             >
               <div className={`vc-art vc-sidebar vc-sidebar-${s.id}`}>
                 <div className="vc-rail" />
@@ -416,11 +426,13 @@ function LayoutPanel() {
         <div className="option-row-list">
           {toolbars.map((tb) => (
             <button
+              type="button"
               key={tb.id}
               className={['option-row', toolbarVariant === tb.id && 'active']
                 .filter(Boolean)
                 .join(' ')}
               onClick={() => setToolbarVariant(tb.id)}
+              aria-label={tb.label}
             >
               <span className="option-row-text">
                 <strong>{tb.label}</strong>
@@ -441,8 +453,11 @@ function LayoutPanel() {
           </div>
         </div>
         <button
+          type="button"
           className={['toggle-row', showInspector && 'on'].filter(Boolean).join(' ')}
           onClick={() => setShowInspector(!showInspector)}
+          aria-pressed={showInspector}
+          aria-label={t('settings.inspector.show')}
         >
           <span className="option-row-text">
             <strong>{t('settings.inspector.show')}</strong>
@@ -584,11 +599,13 @@ export default function SettingsModal({
   onOpenAccountSettings: _onOpenAccountSettings,
 }: SettingsModalProps) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
+  const [wasOpen, setWasOpen] = useState(open);
   const { t } = useTranslation();
 
-  useEffect(() => {
+  if (open !== wasOpen) {
+    setWasOpen(open);
     if (open) setTab(initialTab);
-  }, [open, initialTab]);
+  }
 
   const tabs: Array<{ id: SettingsTab; label: string; icon: React.ReactNode }> = [
     { id: 'appearance', label: t('settings.tabs.appearance'), icon: <SunOutlined /> },

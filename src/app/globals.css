@@ -6433,3 +6433,124 @@ button.settings-nav-link:disabled {
 .settings-nav-link.settings-nav-link-accent {
   color: var(--accent);
 }
+
+/* ── A11y helpers (oxlint jsx-a11y) ─────────────────────────────── */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.hit-target {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+}
+fieldset.segmented {
+  margin: 0;
+  min-inline-size: 0;
+}
+ul.fault-list,
+ol.fault-list {
+  list-style: none;
+  padding: 0;
+}
+ul.fault-list > li {
+  margin: 0;
+  padding: 0;
+}
+button.col-h,
+button.cv-row,
+button.cmdk-item,
+button.provider-tag,
+button.fl-checkbox,
+button.sb-stat,
+button.sync-progress,
+button.move-progress,
+button.download-progress,
+button.fl-cell {
+  appearance: none;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+}
+button.cv-row,
+button.cmdk-item,
+button.provider-tag,
+button.fl-cell {
+  width: 100%;
+}
+button.cv-row,
+button.sb-stat,
+button.sync-progress,
+button.move-progress,
+button.download-progress,
+button.col-h,
+button.fl-checkbox,
+button.fl-cell {
+  background: transparent;
+}
+button.cv-row,
+button.col-h,
+button.sb-stat,
+button.sync-progress,
+button.move-progress,
+button.download-progress,
+button.fl-checkbox {
+  border: 0;
+}
+.sb-bucket-row,
+.sb-account-row,
+.fg-tile,
+.drop-zone,
+.toast {
+  position: relative;
+}
+.sb-bucket-row > :not(.hit-target),
+.sb-account-row > :not(.hit-target),
+.fg-tile > :not(.hit-target),
+.drop-zone > :not(.hit-target) {
+  position: relative;
+  z-index: 1;
+}
+.fg-tile-check {
+  z-index: 2;
+}
+button.move-progress,
+button.download-progress,
+button.sync-progress,
+button.sb-stat {
+  display: inline-flex;
+  align-items: center;
+}
+.toast .hit-target {
+  z-index: 1;
+}
+output.field-hint,
+output.mount-error {
+  display: block;
+}
+label.tx-group-head,
+label.tx-acct {
+  display: flex;
+  cursor: pointer;
+}
+.cv-row .hit-target {
+  z-index: 1;
+}
+.cv-row > :not(.hit-target) {
+  pointer-events: none;
+  position: relative;
+  z-index: 1;
+}

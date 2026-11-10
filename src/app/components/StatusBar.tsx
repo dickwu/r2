@@ -2,6 +2,7 @@
 
 import { useTranslation } from 'react-i18next';
 import { useMemo, useState } from 'react';
+import { useRenderNow } from '@/app/hooks/useRenderNow';
 import { Modal } from 'antd';
 import { useAntdModalFocusable } from '@/app/hooks/useAntdModalFocusable';
 import { DatabaseOutlined, SwapOutlined } from '@ant-design/icons';
@@ -28,8 +29,9 @@ interface StatusBarProps {
 
 function useRelativeTime(timestamp: number | null): string {
   const { t } = useTranslation();
+  const now = useRenderNow();
   if (!timestamp) return '';
-  const diffMs = Date.now() - timestamp;
+  const diffMs = now - timestamp;
   const diffMin = Math.floor(diffMs / 60_000);
   if (diffMin < 1) return t('time.justNow');
   if (diffMin < 60) return t('time.minAgo', { count: diffMin });
@@ -53,20 +55,13 @@ export default function StatusBar({
   // Sync state
   const isSyncing = useSyncStore((s) => s.isSyncing);
   const phase = useSyncStore((s) => s.phase);
-  const currentBucketKey = useSyncStore((s) => s.currentBucketKey);
   const bucketSyncTimes = useSyncStore((s) => s.bucketSyncTimes);
 
   const lastSyncTime = useMemo(() => {
     if (!storageConfig?.accountId || !storageConfig?.bucket) return null;
     const key = `${storageConfig.provider}:${storageConfig.accountId}:${storageConfig.bucket}`;
     return bucketSyncTimes[key] ?? null;
-  }, [
-    storageConfig?.provider,
-    storageConfig?.accountId,
-    storageConfig?.bucket,
-    bucketSyncTimes,
-    currentBucketKey,
-  ]);
+  }, [storageConfig?.provider, storageConfig?.accountId, storageConfig?.bucket, bucketSyncTimes]);
 
   const relativeTime = useRelativeTime(lastSyncTime);
 
@@ -115,16 +110,22 @@ export default function StatusBar({
     <>
       <div className="statusbar">
         {/* Sync state */}
-        {hasConfig && (
-          <span
-            className={`sb-stat${syncClass ? ` ${syncClass}` : ''}`}
-            style={{ cursor: syncClass === 'syncing' ? 'pointer' : undefined }}
-            onClick={syncClass === 'syncing' ? () => setSyncDetailsOpen(true) : undefined}
-          >
-            <span className="dot" />
-            {syncLabel}
-          </span>
-        )}
+        {hasConfig &&
+          (syncClass === 'syncing' ? (
+            <button
+              type="button"
+              className={`sb-stat${syncClass ? ` ${syncClass}` : ''}`}
+              onClick={() => setSyncDetailsOpen(true)}
+            >
+              <span className="dot" />
+              {syncLabel}
+            </button>
+          ) : (
+            <span className={`sb-stat${syncClass ? ` ${syncClass}` : ''}`}>
+              <span className="dot" />
+              {syncLabel}
+            </span>
+          ))}
 
         {/* Item count + selection */}
         {itemLabel && (

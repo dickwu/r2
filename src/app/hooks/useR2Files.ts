@@ -21,32 +21,28 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
   const queryClient = useQueryClient();
   const forceNextRefresh = useRef(false);
   const namespace = useStorageNamespace(config);
+  const provider = config?.provider;
+  const accountId = config?.accountId;
+  const bucket = config?.bucket;
   const queryKey = useMemo(
-    () => [
-      'folder-contents',
-      config?.provider,
-      config?.accountId,
-      config?.bucket,
-      prefix,
-      namespace,
-    ],
-    [config?.provider, config?.accountId, config?.bucket, prefix, namespace]
+    () => ['folder-contents', provider, accountId, bucket, prefix, namespace],
+    [provider, accountId, bucket, prefix, namespace]
   );
 
   useEffect(() => {
-    if (!namespace || !config) return;
-    const provider = config.provider;
-    const account = config.accountId;
+    if (!namespace || provider === undefined || accountId === undefined) return;
+    const effectProvider = provider;
+    const effectAccount = accountId;
     return () => {
       const predicate = (query: { queryKey: readonly unknown[] }) =>
         query.queryKey[0] === 'folder-contents' &&
-        query.queryKey[1] === provider &&
-        query.queryKey[2] === account &&
+        query.queryKey[1] === effectProvider &&
+        query.queryKey[2] === effectAccount &&
         query.queryKey[5] === namespace;
       void queryClient.cancelQueries({ predicate });
       queryClient.removeQueries({ predicate });
     };
-  }, [namespace, config?.provider, config?.accountId, queryClient]);
+  }, [namespace, provider, accountId, queryClient]);
 
   const query = useQuery({
     queryKey,
@@ -96,30 +92,16 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
   useEffect(() => () => invalidator.dispose(), [invalidator]);
 
   useEffect(() => {
-    if (!config) return;
+    if (provider === undefined || accountId === undefined || bucket === undefined) return;
     const prefixes = new Set([
       ...cacheUpdatedPaths,
       ...removedPaths.map(parentPrefix),
       ...createdPaths.map(parentPrefix),
     ]);
     invalidator.add(
-      Array.from(prefixes, (path) => [
-        'folder-contents',
-        config.provider,
-        config.accountId,
-        config.bucket,
-        path,
-      ])
+      Array.from(prefixes, (path) => ['folder-contents', provider, accountId, bucket, path])
     );
-  }, [
-    config?.provider,
-    config?.accountId,
-    config?.bucket,
-    cacheUpdatedPaths,
-    removedPaths,
-    createdPaths,
-    invalidator,
-  ]);
+  }, [provider, accountId, bucket, cacheUpdatedPaths, removedPaths, createdPaths, invalidator]);
 
   useEffect(() => {
     let disposed = false;

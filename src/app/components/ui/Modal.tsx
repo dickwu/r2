@@ -104,6 +104,7 @@ export default function Modal({
   if (!open) return null;
 
   const content = (
+    // oxlint-disable-next-line jsx-a11y/no-static-element-interactions -- Backdrop dismiss; the dialog is the interactive surface.
     <div
       className={fullscreen ? 'modal-backdrop modal-backdrop-fullscreen' : 'modal-backdrop'}
       style={zIndex != null ? { zIndex } : undefined}

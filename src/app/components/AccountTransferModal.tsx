@@ -503,10 +503,6 @@ function CheckBox({
 }) {
   return (
     <span
-      role="checkbox"
-      aria-checked={indeterminate ? 'mixed' : checked}
-      aria-disabled={disabled || undefined}
-      tabIndex={disabled ? -1 : 0}
       className={[
         'tx-check',
         (checked || indeterminate) && 'on',
@@ -515,18 +511,17 @@ function CheckBox({
       ]
         .filter(Boolean)
         .join(' ')}
-      onClick={(e) => {
-        e.stopPropagation();
-        if (!disabled) onChange(!checked);
-      }}
-      onKeyDown={(e) => {
-        if (disabled) return;
-        if (e.key === ' ' || e.key === 'Enter') {
-          e.preventDefault();
-          onChange(!checked);
-        }
-      }}
     >
+      <input
+        type="checkbox"
+        className="sr-only"
+        checked={checked}
+        disabled={disabled}
+        ref={(el) => {
+          if (el) el.indeterminate = !!indeterminate;
+        }}
+        onChange={(e) => onChange(e.target.checked)}
+      />
       {indeterminate ? (
         <span className="tx-check-dash" />
       ) : checked ? (
@@ -684,10 +679,7 @@ function ExportPanel() {
           const groupSome = selectedCount > 0 && !groupAll;
           return (
             <section className="tx-group" key={provider}>
-              <header
-                className="tx-group-head"
-                onClick={() => setProviderSelection(provider, !groupAll)}
-              >
+              <label className="tx-group-head">
                 <CheckBox
                   checked={groupAll}
                   indeterminate={groupSome}
@@ -698,16 +690,16 @@ function ExportPanel() {
                 <span className="tx-group-count">
                   {selectedCount}/{list.length}
                 </span>
-              </header>
+              </label>
               <div className="tx-group-body">
                 {list.map((acc) => {
                   const id = accountIdentity(acc);
                   return (
-                    <div className="tx-acct" key={id} onClick={() => toggle(id)}>
+                    <label className="tx-acct" key={id}>
                       <CheckBox checked={selected.has(id)} onChange={() => toggle(id)} />
                       <span className="tx-acct-name">{accountDisplayName(acc)}</span>
                       <span className="tx-acct-id">{accountIdentifierPreview(acc)}</span>
-                    </div>
+                    </label>
                   );
                 })}
               </div>

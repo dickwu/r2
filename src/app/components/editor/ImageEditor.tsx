@@ -2,7 +2,14 @@
 
 import { t as i18nT } from '@/i18n';
 import { useTranslation } from 'react-i18next';
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type PointerEvent,
+} from 'react';
 import { Button, Spin, Tooltip } from 'antd';
 import { imageEncodingProblem } from '@/app/components/editor/editedContent';
 import {
@@ -126,11 +133,14 @@ export default function ImageEditor({
   }, [bytes, mime]);
 
   // A save makes the current state the clean one.
-  useEffect(() => {
-    if (savedRevision === 0) return;
-    setHistory((h) => (h.length ? [h[h.length - 1]] : h));
-    setBaseline(0);
-  }, [savedRevision]);
+  const [appliedRevision, setAppliedRevision] = useState(savedRevision);
+  if (savedRevision !== appliedRevision) {
+    setAppliedRevision(savedRevision);
+    if (savedRevision !== 0) {
+      setHistory((h) => (h.length ? [h[h.length - 1]] : h));
+      setBaseline(0);
+    }
+  }
 
   const edits = Math.max(history.length - 1 - baseline, 0);
   useEffect(() => onEditsChange(edits), [edits, onEditsChange]);
@@ -199,21 +209,26 @@ export default function ImageEditor({
       ? selectionRect(drag.start, drag.end, { width: current.width, height: current.height })
       : null;
 
-  // The selection, drawn over the scaled canvas.
-  const overlay = (() => {
+  // Position the crop overlay from layout measurements, not during render.
+  const cropRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = cropRef.current;
     const view = viewRef.current;
     const stage = stageRef.current;
-    if (!selection || !view || !stage || !current) return null;
+    if (!el) return;
+    if (!selection || !view || !stage || !current) {
+      el.hidden = true;
+      return;
+    }
     const box = view.getBoundingClientRect();
     const stageBox = stage.getBoundingClientRect();
     const scale = box.width / current.width;
-    return {
-      left: box.left - stageBox.left + selection.x * scale,
-      top: box.top - stageBox.top + selection.y * scale,
-      width: selection.width * scale,
-      height: selection.height * scale,
-    };
-  })();
+    el.hidden = false;
+    el.style.left = `${box.left - stageBox.left + selection.x * scale}px`;
+    el.style.top = `${box.top - stageBox.top + selection.y * scale}px`;
+    el.style.width = `${selection.width * scale}px`;
+    el.style.height = `${selection.height * scale}px`;
+  }, [selection, current]);
 
   const finishCrop = () => {
     if (selection) run({ type: 'crop', rect: selection });
@@ -348,7 +363,7 @@ export default function ImageEditor({
       >
         {!current && <Spin />}
         <canvas ref={viewRef} aria-label={t('editor.image.canvas')} hidden={!current} />
-        {overlay && <div className="file-editor-crop" style={overlay} />}
+        <div ref={cropRef} className="file-editor-crop" hidden />
       </div>
     </div>
   );

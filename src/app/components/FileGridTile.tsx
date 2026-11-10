@@ -142,14 +142,17 @@ function ThumbImage({
   return (
     <>
       {!loaded && fallback}
-      <img
-        className={['fg-thumb-img', loaded ? 'is-loaded' : ''].filter(Boolean).join(' ')}
-        src={src}
-        alt={alt}
-        loading="lazy"
-        onLoad={() => setLoaded(true)}
-        onError={() => setFailed(true)}
-      />
+      {
+        // oxlint-disable-next-line nextjs/no-img-element -- Tauri static export; grid thumbs are blob/data URLs that next/image cannot load.
+        <img
+          className={['fg-thumb-img', loaded ? 'is-loaded' : ''].filter(Boolean).join(' ')}
+          src={src}
+          alt={alt}
+          loading="lazy"
+          onLoad={() => setLoaded(true)}
+          onError={() => setFailed(true)}
+        />
+      }
     </>
   );
 }
@@ -282,15 +285,19 @@ const FileGridTile = memo(function FileGridTile({
       onFolderRename={onFolderRename}
       onFolderDelete={onFolderDelete}
     >
-      <div
-        className={['fg-tile', isSelected ? 'selected' : ''].filter(Boolean).join(' ')}
-        onClick={handleClick}
-      >
+      <div className={['fg-tile', isSelected ? 'selected' : ''].filter(Boolean).join(' ')}>
+        <button type="button" className="hit-target" onClick={handleClick} aria-label={item.name} />
         {/* Checkbox overlay */}
-        <div className="fg-tile-check" onClick={handleCheckClick}>
-          <div className={['fl-checkbox', isSelected ? 'checked' : ''].filter(Boolean).join(' ')}>
+        <div className="fg-tile-check">
+          <button
+            type="button"
+            className={['fl-checkbox', isSelected ? 'checked' : ''].filter(Boolean).join(' ')}
+            onClick={handleCheckClick}
+            aria-pressed={isSelected}
+            aria-label={t('a11y.selectItem', { name: item.name })}
+          >
             {isSelected && <CheckOutlined style={{ fontSize: 8 }} />}
-          </div>
+          </button>
         </div>
 
         {/* Thumbnail / preview */}

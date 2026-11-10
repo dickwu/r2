@@ -110,11 +110,7 @@ function MountRow({
             </button>
           </div>
         </div>
-        {mount.healthError && (
-          <div className="field-hint" role="status">
-            {mount.healthError}
-          </div>
-        )}
+        {mount.healthError && <output className="field-hint">{mount.healthError}</output>}
       </div>
     </div>
   );
@@ -233,9 +229,9 @@ function PendingMountUploads() {
                   {middleTruncate(recovery.path)}
                 </code>
                 {recovery.error && (
-                  <div className="field-hint" role="status">
+                  <output className="field-hint">
                     {recovery.error} {t('mount.exportToRecover')}
-                  </div>
+                  </output>
                 )}
                 {recovery.active && <div className="field-hint">{t('mount.activeHint')}</div>}
                 <details>
@@ -302,10 +298,10 @@ export default function SettingsMountsPanel() {
   }, [refreshMounts]);
 
   const { message } = App.useApp();
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const os = useMemo(() => detectOs(), []);
   // Recomputed per language so the label follows the UI language.
-  const revealLabel = useMemo(() => revealActionLabel(os), [os, i18n.language]);
+  const revealLabel = revealActionLabel(os);
   const now = useClock();
 
   // Busy is per row: unmounting one bucket must not freeze the others.

@@ -1,7 +1,6 @@
 'use client';
 
 import { useTranslation } from 'react-i18next';
-import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getBucketSummary } from '@/app/lib/r2cache';
 import { useSyncStore } from '@/app/stores/syncStore';
@@ -30,10 +29,8 @@ export default function BucketStats({ hasConfig, provider, accountId, bucket }: 
 
   // Per-bucket sync time — bumps after lazy loads, full syncs and file ops,
   // so the summary refetches whenever the cache may have changed.
-  const lastSyncTime = useMemo(() => {
-    if (!accountId || !bucket) return null;
-    return useSyncStore.getState().getLastSyncTime(`${provider}:${accountId}`, bucket);
-  }, [provider, accountId, bucket, bucketSyncTimes]);
+  const lastSyncTime =
+    accountId && bucket ? (bucketSyncTimes[`${provider}:${accountId}:${bucket}`] ?? null) : null;
 
   // Key params are cache keys only — the backend resolves the active bucket
   // from app_state, like get_folder_contents and friends.

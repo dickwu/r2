@@ -93,9 +93,13 @@ export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProg
     [tasks]
   );
 
+  const hasActiveTransfers = activeTransferTasks.length > 0;
+  if (!hasActiveTransfers && syncSpeed !== 0) {
+    setSyncSpeed(0);
+  }
+
   useEffect(() => {
-    if (activeTransferTasks.length === 0) {
-      setSyncSpeed(0);
+    if (!hasActiveTransfers) {
       lastUpdateRef.current = 0;
       speedSamplesRef.current = [];
       smoothedSpeedRef.current = 0;
@@ -153,7 +157,7 @@ export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProg
     smoothedSpeedRef.current = nextSpeed;
     setSyncSpeed(nextSpeed);
     lastUpdateRef.current = now;
-  }, [activeTransferTasks]);
+  }, [activeTransferTasks, hasActiveTransfers]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -169,7 +173,8 @@ export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProg
   }
 
   return (
-    <span
+    <button
+      type="button"
       className="move-progress"
       onClick={() => {
         void loadAllActiveMoves();
@@ -227,6 +232,6 @@ export default function MoveProgress({ sourceBucket, sourceAccountId }: MoveProg
           <Text style={{ marginLeft: 4 }}>{t('transfer.moved', { count: finishedCount })}</Text>
         </>
       )}
-    </span>
+    </button>
   );
 }

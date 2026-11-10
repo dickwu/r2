@@ -68,7 +68,8 @@ export default function SyncProgress({ onClick }: SyncProgressProps) {
   }
 
   return (
-    <span
+    <button
+      type="button"
       className="sync-progress"
       onClick={onClick}
       style={onClick ? { cursor: 'pointer' } : undefined}
@@ -79,6 +80,6 @@ export default function SyncProgress({ onClick }: SyncProgressProps) {
         {icon} {t(label)}
       </span>
       {progressText && <span className="sync-count">{progressText}</span>}
-    </span>
+    </button>
   );
 }

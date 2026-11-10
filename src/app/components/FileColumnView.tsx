@@ -8,7 +8,7 @@
  * column. Double-click or Enter opens the file preview, ⌘/Ctrl-click toggles a
  * row in the batch selection, and the arrow keys walk the columns.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Spin } from 'antd';
 import { RightOutlined } from '@ant-design/icons';
@@ -97,28 +97,25 @@ export default function FileColumnView({
   const selection =
     visible && lastItems.some((item) => item.key === visible.file.key) ? visible : null;
 
-  const apply = useCallback(
-    (action: ColumnKeyAction | null, siblings: FileItem[] = lastItems) => {
-      if (!action) return;
-      switch (action.type) {
-        case 'navigate':
-          setFileSelection(null);
-          if (action.path !== currentPath) onNavigate(action.path);
-          break;
-        case 'selectFile':
-          setFileSelection(action.selection);
-          if (action.selection.parent !== currentPath) onNavigate(action.selection.parent);
-          break;
-        case 'clearFile':
-          setFileSelection(null);
-          break;
-        case 'open':
-          onOpen(action.file, siblings);
-          break;
-      }
-    },
-    [currentPath, lastItems, onNavigate, onOpen]
-  );
+  const apply = (action: ColumnKeyAction | null, siblings: FileItem[] = lastItems) => {
+    if (!action) return;
+    switch (action.type) {
+      case 'navigate':
+        setFileSelection(null);
+        if (action.path !== currentPath) onNavigate(action.path);
+        break;
+      case 'selectFile':
+        setFileSelection(action.selection);
+        if (action.selection.parent !== currentPath) onNavigate(action.selection.parent);
+        break;
+      case 'clearFile':
+        setFileSelection(null);
+        break;
+      case 'open':
+        onOpen(action.file, siblings);
+        break;
+    }
+  };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (!COLUMN_KEYS.has(e.key) || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -145,6 +142,7 @@ export default function FileColumnView({
     <div
       ref={scrollerRef}
       className={['cv-scroller', density !== 'default' ? density : ''].filter(Boolean).join(' ')}
+      role="tree"
       tabIndex={0}
       aria-label={t('toolbar.columnView')}
       onKeyDown={handleKeyDown}
@@ -277,6 +275,7 @@ function ColumnRow({
   onPick,
   onOpen,
   className: injectedClassName,
+  onContextMenu,
   ...rest
 }: ColumnRowProps) {
   const { tone, Icon } = toneAndIcon(item);
@@ -291,11 +290,23 @@ function ColumnRow({
   return (
     <div
       {...rest}
+      onContextMenu={onContextMenu}
       className={className}
       title={item.name}
-      onClick={(e) => onPick(item, e)}
-      onDoubleClick={() => onOpen(item)}
+      style={{ position: 'relative' }}
     >
+      <button
+        type="button"
+        className="hit-target"
+        onClick={(e) => onPick(item, e)}
+        onDoubleClick={() => onOpen(item)}
+        onContextMenu={
+          onContextMenu
+            ? (event) => onContextMenu(event as unknown as React.MouseEvent<HTMLDivElement>)
+            : undefined
+        }
+        aria-label={item.name}
+      />
       <span className={`fl-icon ${tone}`}>
         <Icon style={{ fontSize: 12 }} />
       </span>

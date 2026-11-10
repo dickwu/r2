@@ -1272,5 +1272,11 @@
       "keyClick": "Click",
       "keySpace": "Space"
     }
+  },
+  "a11y": {
+    "selectItem": "Select {{name}}",
+    "showDetails": "Show details",
+    "hideDetails": "Hide details",
+    "dismissNotification": "Dismiss notification"
   }
 }

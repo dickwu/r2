@@ -1272,5 +1272,11 @@
       "keyClick": "क्लिक",
       "keySpace": "Space"
     }
+  },
+  "a11y": {
+    "selectItem": "{{name}} चुनें",
+    "showDetails": "विवरण दिखाएँ",
+    "hideDetails": "विवरण छिपाएँ",
+    "dismissNotification": "सूचना खारिज करें"
   }
 }

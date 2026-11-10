@@ -123,13 +123,19 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
   const currentPath = useCurrentPathStore((s) => s.currentPath);
   const hasFailures = useTransferErrorStore((s) => s.failures.length > 0);
 
-  // Reset state when palette opens
-  useEffect(() => {
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
     if (open) {
       setQuery('');
       setActiveIdx(0);
-      setTimeout(() => inputRef.current?.focus(), 30);
     }
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    const timer = setTimeout(() => inputRef.current?.focus(), 30);
+    return () => clearTimeout(timer);
   }, [open]);
 
   // Build bucket items from accounts
@@ -279,10 +285,11 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
   // Flat list for keyboard navigation
   const flatItems = useMemo(() => filtered, [filtered]);
 
-  // Reset active index on query change
-  useEffect(() => {
+  const [indexQuery, setIndexQuery] = useState(query);
+  if (query !== indexQuery) {
+    setIndexQuery(query);
     setActiveIdx(0);
-  }, [query]);
+  }
 
   // Scroll active item into view
   useEffect(() => {
@@ -325,8 +332,14 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
   let globalIdx = 0;
 
   return createPortal(
-    <div className="cmdk-backdrop" onClick={onClose}>
-      <div className="cmdk" onClick={(e) => e.stopPropagation()} onKeyDown={handleKeyDown}>
+    // oxlint-disable-next-line jsx-a11y/no-static-element-interactions -- Backdrop dismiss; the dialog is the interactive surface.
+    <div
+      className="cmdk-backdrop"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="cmdk">
         {/* Input */}
         <div className="cmdk-input">
           <SearchOutlined style={{ color: 'var(--text-muted)', fontSize: 16 }} />
@@ -334,6 +347,7 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={handleKeyDown}
             placeholder={t('palette.placeholder')}
           />
           <span className="kbd">Esc</span>
@@ -360,7 +374,8 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
                 const idx = globalIdx++;
                 const isActive = idx === activeIdx;
                 return (
-                  <div
+                  <button
+                    type="button"
                     key={item.id}
                     className={['cmdk-item', isActive && 'active'].filter(Boolean).join(' ')}
                     onClick={() => handleSelect(item)}
@@ -369,7 +384,7 @@ export default function CommandPalette({ open, onClose, onAction }: CommandPalet
                     <span className="cmdk-item-icon">{item.icon}</span>
                     <span className="cmdk-item-label">{item.label}</span>
                     {item.meta && <span className="cmdk-item-meta">{item.meta}</span>}
-                  </div>
+                  </button>
                 );
               })}
             </div>

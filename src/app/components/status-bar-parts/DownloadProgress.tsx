@@ -141,7 +141,8 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
 
   return (
     <Tooltip title={tooltipContent} placement="top" styles={{ root: { maxWidth: 360 } }}>
-      <span
+      <button
+        type="button"
         className="download-progress"
         onClick={handleClick}
         style={{
@@ -153,10 +154,9 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
           overflow: 'hidden',
           flexShrink: 1,
         }}
-        role="status"
-        aria-live="polite"
         aria-label={t('transfer.downloadProgressAria', { percent: totalProgress })}
       >
+        <progress className="sr-only" value={totalProgress} max={100} />
         {hasActiveDownloads ? (
           <>
             {/* Mini aggregate progress bar */}
@@ -170,10 +170,7 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
                 overflow: 'hidden',
                 verticalAlign: 'middle',
               }}
-              role="progressbar"
-              aria-valuenow={totalProgress}
-              aria-valuemin={0}
-              aria-valuemax={100}
+              aria-hidden="true"
             >
               <span
                 style={{
@@ -223,7 +220,7 @@ export default function DownloadProgress({ bucket, accountId }: DownloadProgress
             </Text>
           </>
         )}
-      </span>
+      </button>
     </Tooltip>
   );
 }

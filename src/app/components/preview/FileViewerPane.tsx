@@ -65,12 +65,16 @@ export default function FileViewerPane({
   const isLarge = (size ?? 0) > AUTO_LOAD_LIMIT_BYTES;
   const shouldLoad = supported && (!isLarge || confirmedUrl === url);
 
-  useEffect(() => {
-    // Drop the previous object's bytes even when this one is not loaded, so a
-    // prompt or placeholder never sits on top of stale state.
+  const loadKey = `${url}:${filename}:${format}:${shouldLoad}`;
+  const [seenLoadKey, setSeenLoadKey] = useState(loadKey);
+  if (loadKey !== seenLoadKey) {
+    setSeenLoadKey(loadKey);
     setFile(null);
     setError(null);
     setProgress({ loaded: 0, total: null });
+  }
+
+  useEffect(() => {
     if (!shouldLoad) return;
     const controller = new AbortController();
 

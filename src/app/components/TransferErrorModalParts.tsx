@@ -28,43 +28,42 @@ export function FaultList({ failures, focusedId, onSelect }: FaultListProps) {
   const { t } = useTranslation();
   const rows = [...failures].reverse();
 
-  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
     if (step === 0) return;
     event.preventDefault();
     const current = rows.findIndex((failure) => failure.id === focusedId);
     const next = Math.min(rows.length - 1, Math.max(0, current + step));
     onSelect(rows[next].id);
-    event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="option"]')[next]?.focus();
+    event.currentTarget
+      .closest('.fault-list')
+      ?.querySelectorAll<HTMLButtonElement>('.fault-row')
+      [next]?.focus();
   };
 
   return (
-    <div
-      className="fault-list"
-      role="listbox"
-      aria-label={t('transfer.failures')}
-      onKeyDown={handleKeyDown}
-    >
+    <ul className="fault-list" aria-label={t('transfer.failures')}>
       {rows.map((failure) => {
         const selected = failure.id === focusedId;
         return (
-          <button
-            key={failure.id}
-            type="button"
-            role="option"
-            aria-selected={selected}
-            tabIndex={selected ? 0 : -1}
-            className={selected ? 'fault-row selected' : 'fault-row'}
-            onClick={() => onSelect(failure.id)}
-          >
-            <span className="fault-row-kind">{KIND_LABEL[failure.kind]}</span>
-            <span className="fault-row-name">{failure.name}</span>
-            <span className="fault-row-msg">{firstLine(failure.message)}</span>
-            <span className="fault-row-time">{formatFailureClock(failure.occurredAt)}</span>
-          </button>
+          <li key={failure.id}>
+            <button
+              type="button"
+              aria-current={selected ? 'true' : undefined}
+              tabIndex={selected ? 0 : -1}
+              className={selected ? 'fault-row selected' : 'fault-row'}
+              onClick={() => onSelect(failure.id)}
+              onKeyDown={handleKeyDown}
+            >
+              <span className="fault-row-kind">{KIND_LABEL[failure.kind]}</span>
+              <span className="fault-row-name">{failure.name}</span>
+              <span className="fault-row-msg">{firstLine(failure.message)}</span>
+              <span className="fault-row-time">{formatFailureClock(failure.occurredAt)}</span>
+            </button>
+          </li>
         );
       })}
-    </div>
+    </ul>
   );
 }
 
@@ -86,7 +85,8 @@ export function FaultLine({ failure, format }: FaultLineProps) {
   if (pct === null || amount === null || isCountKind(failure.kind)) return null;
 
   return (
-    <div className="fault-line" role="img" aria-label={t('transfer.stoppedAtPct', { pct })}>
+    <div className="fault-line">
+      <span className="sr-only">{t('transfer.stoppedAtPct', { pct })}</span>
       <div className="fault-line-track">
         <div className="fault-line-fill" style={{ width: `${pct}%` }} />
       </div>

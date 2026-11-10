@@ -225,6 +225,7 @@ export default function UploadModal({
     isOpen,
     message,
     onDropHandled,
+    t,
   ]);
 
   const handleSelectFiles = useCallback(async () => {
@@ -248,7 +249,7 @@ export default function UploadModal({
     } catch {
       /* dialog cancelled */
     }
-  }, [hasS3Credentials, addUniqueTasks, message]);
+  }, [hasS3Credentials, addUniqueTasks, message, t]);
 
   const handleSelectFolder = useCallback(async () => {
     if (!hasS3Credentials) {
@@ -275,7 +276,7 @@ export default function UploadModal({
     } catch {
       /* dialog cancelled */
     }
-  }, [hasS3Credentials, addUniqueTasks, message]);
+  }, [hasS3Credentials, addUniqueTasks, message, t]);
 
   function handleClose() {
     if (!hasActiveUploads) {
@@ -399,12 +400,19 @@ export default function UploadModal({
             e.preventDefault();
             setOver(false);
           }}
-          onClick={hasActiveUploads ? undefined : handleSelectFiles}
           style={{
             cursor: hasActiveUploads ? 'not-allowed' : 'pointer',
             opacity: hasActiveUploads ? 0.6 : 1,
           }}
         >
+          {!hasActiveUploads && (
+            <button
+              type="button"
+              className="hit-target"
+              onClick={handleSelectFiles}
+              aria-label={t('uploadModal.drop')}
+            />
+          )}
           <FileAddOutlined style={{ fontSize: 28, color: 'var(--accent)' }} />
           <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text)' }}>
             {t('uploadModal.drop')}
