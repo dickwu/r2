@@ -6527,6 +6527,14 @@ button.fl-checkbox {
   position: relative;
   z-index: 1;
 }
+/* The hit-target button sits under these siblings (z-index 0). Without
+   pointer-events:none, clicks on the visible name/icon never reach it, so
+   bucket (and account) switches only work on the thin row padding.
+   Keep the overflow menu and mount marker clickable. */
+.sb-bucket-row > :not(.hit-target):not(.sb-icon-btn):not(.sb-bucket-mounted-btn),
+.sb-account-row > :not(.hit-target):not(.sb-icon-btn) {
+  pointer-events: none;
+}
 .fg-tile-check {
   z-index: 2;
 }
