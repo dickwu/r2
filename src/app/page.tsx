@@ -1252,7 +1252,7 @@ export default function Home() {
                 />
               ) : isLoading || isSearching ? (
                 <div className="file-list-loading">
-                  <Spin description={isSearching ? t('page.searching') : undefined} fullscreen />
+                  <Spin description={isSearching ? t('page.searching') : undefined} />
                 </div>
               ) : filteredItems.length === 0 ? (
                 <EmptyState

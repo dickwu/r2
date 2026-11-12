@@ -378,7 +378,10 @@ body {
   display: flex;
   justify-content: center;
   align-items: center;
-  height: 200px;
+  height: 100%;
+  min-height: 200px;
+  /* Stay inside the file pane. Antd Spin's `fullscreen` flag is position:fixed
+     with pointer-events:auto and covers the sidebar, so bucket clicks do nothing. */
 }
 
 .file-list-header {

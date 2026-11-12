@@ -29,6 +29,16 @@ export function useR2Files(config: StorageConfig | null, prefix: string = '') {
     [provider, accountId, bucket, prefix, namespace]
   );
 
+  // Abort the in-flight listing when the observed folder changes (bucket or
+  // prefix). Without this, a finished request for bucket A can still settle
+  // after the user has switched to B; the query key keeps that result off the
+  // screen, but the leftover work and events should not keep running.
+  useEffect(() => {
+    return () => {
+      void queryClient.cancelQueries({ queryKey });
+    };
+  }, [queryClient, queryKey]);
+
   useEffect(() => {
     if (!namespace || provider === undefined || accountId === undefined) return;
     const effectProvider = provider;
